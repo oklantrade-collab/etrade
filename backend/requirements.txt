@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+supabase
+requests
+pandas
+ta
+google-generativeai
+httpx
+apscheduler
+pydantic
+python-dotenv
+python-binance>=1.0.19
+anthropic
+python-jose[cryptography]
+passlib[bcrypt]
+sendgrid

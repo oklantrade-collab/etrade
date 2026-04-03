@@ -1,0 +1,18 @@
+{
+  "symbols_active": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"],
+  "timeframes": ["5m", "15m", "30m", "45m", "4h", "1d", "1w"],
+  "mode": "paper",
+  "market_type": "futures",
+  "leverage": 5,
+  "capital_total": 500,
+  "pct_trading": 10,
+  "regime_override": null,
+  "max_trades_override": 1,
+  "rr_min_override": 3.0,
+  "signal_age_bars": 2,
+  "ai_candles_enabled": true,
+  "ai_candles_mode": "informative",
+  "paper_trading": true,
+  "log_level": "DEBUG",
+  "observe_only": false
+}

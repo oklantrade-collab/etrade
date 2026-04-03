@@ -1,0 +1,19 @@
+# AUDIT DE HARDCODES — eTrade Backend
+
+CATEGORÍA A (Constantes de Diseño - Mantener en código):
+- Rounding precision: round(pnl, 4) en unified_trading_worker.py, backtester.py, etc.
+- Batch sizes: batch_size = 50 en backtester.py, seed_rules.py.
+- IDs de singletons: .eq('id', 1) en supabase_client.py, config_manager.py.
+- Lógica de escala: (1.5 - vol_ratio) * 67 en market_regime.py (fórmula matemática).
+- Tiempos de timeout: timeout=10.0 en alerts_service.py y sentiment_ai.py.
+- Model names: "gemini-1.5-flash" en sentiment_ai.py.
+
+CATEGORÍA B (Valores de Negocio - MIGRACION COMPLETA):
+[OK] fee_pct: 0.001 -> Migrado a parameter_bounds ('fee_pct').
+[OK] capital_t1: 18.0 -> Migrado a trading_config ('capital_total', 'pct_for_trading', 'trade_distribution').
+[OK] sl_atr_mult: 2.0 -> Migrado a parameter_bounds per régimen ('atr_mult_alto_riesgo', etc.).
+[OK] rr_min: 2.0 -> Migrado a parameter_bounds per régimen.
+[OK] leverage: 5 -> Migrado a trading_config ('leverage').
+[OK] max_trade_loss_pct: 2.0 -> Migrado a trading_config ('max_trade_loss_pct').
+
+TODO: Confirmar que estos campos son editables desde el Front en el siguiente Sprint.

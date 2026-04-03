@@ -1,0 +1,12 @@
+-- Migration 017: Expand market_snapshot with full Fibonacci bands
+-- Added upper_1..4 and lower_1..4 for dynamic TP logic
+
+ALTER TABLE market_snapshot
+ADD COLUMN IF NOT EXISTS upper_1 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS upper_2 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS upper_3 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS upper_4 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS lower_1 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS lower_2 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS lower_3 NUMERIC(20,8),
+ADD COLUMN IF NOT EXISTS lower_4 NUMERIC(20,8);

@@ -1,0 +1,3 @@
+"""
+eTrader — Config Package
+"""
