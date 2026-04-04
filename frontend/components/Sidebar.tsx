@@ -6,7 +6,7 @@ import toast from 'react-hot-toast'
 import { useState, useEffect } from 'react'
 
 
-export default function Sidebar() {
+export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose?: () => void }) {
   const pathname = usePathname()
   const [forexConnected, setForexConnected] = useState(false)
 
@@ -66,10 +66,17 @@ export default function Sidebar() {
   ]
 
   return (
-    <aside className="sidebar overflow-y-auto">
-      <div className="sidebar-logo">
-        <h1 className="text-xl font-black italic tracking-tighter">eTrader</h1>
-        <span className="text-[0.6rem] uppercase tracking-widest font-bold text-slate-500">Multimarket v4.0</span>
+    <aside className={`sidebar overflow-y-auto ${isOpen ? 'mobile-open' : ''}`}>
+      <div className="sidebar-logo flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-black italic tracking-tighter">eTrader</h1>
+          <span className="text-[0.6rem] uppercase tracking-widest font-bold text-slate-500">Multimarket v4.0</span>
+        </div>
+        {onClose && (
+          <button onClick={onClose} className="md:hidden p-2 text-slate-400 hover:text-white">
+            ✕
+          </button>
+        )}
       </div>
       
       <nav className="sidebar-nav pt-4 pb-10">
@@ -85,6 +92,7 @@ export default function Sidebar() {
                   <Link
                     key={item.href}
                     href={isDisabled ? '#' : item.href}
+                    onClick={() => { if (onClose) onClose(); }}
                     title={section.disabled ? section.tooltip : (item.disabled ? 'Conectar IC Markets para activar' : '')}
                     className={`nav-link ${pathname === item.href ? 'active' : ''} ${isDisabled ? 'pointer-events-none opacity-50 grayscale' : ''}`}
                   >
