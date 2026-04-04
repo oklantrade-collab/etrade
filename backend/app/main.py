@@ -14,16 +14,15 @@ app = FastAPI(
 
 # CORS config
 origins = [
-    os.getenv("FRONTEND_URL", "http://localhost:3000"),
-    os.getenv("NEXT_PUBLIC_URL", "http://localhost:3000"),
     "http://localhost:3000",
     "http://localhost:3001",
-    "https://e-trade.vercel.app",  # placeholder for Vercel
+    "https://etrade-flame.vercel.app",
+    "https://etrade-backend.onrender.com", # Self
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"], # Temporalmente permitir todo para diagnosticar si es un problema de la lista o de los headers
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
