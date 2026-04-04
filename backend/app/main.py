@@ -17,12 +17,11 @@ origins = [
     "http://localhost:3000",
     "http://localhost:3001",
     "https://etrade-flame.vercel.app",
-    "https://etrade-backend.onrender.com", # Self
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Temporalmente permitir todo para diagnosticar si es un problema de la lista o de los headers
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
