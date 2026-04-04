@@ -2,6 +2,7 @@ import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
   // Permitir imágenes de dominios externos
+
   images: {
     remotePatterns: [
       {
@@ -18,16 +19,31 @@ const nextConfig: NextConfig = {
   // Variables de entorno públicas
   env: {
     NEXT_PUBLIC_APP_VERSION: '4.5.0',
-    NEXT_PUBLIC_APP_NAME:    'eTrader v4',
+    NEXT_PUBLIC_APP_NAME: 'eTrader v4',
+  },
+
+  // Rewrites para proxy al backend
+  async rewrites() {
+    return [
+      {
+        source: '/api/v1/:path*',
+        destination: 'http://localhost:8080/api/v1/:path*',
+      },
+      // Soporte para forex
+      {
+        source: '/api/v1/forex/:path*',
+        destination: 'http://localhost:8080/api/v1/forex/:path*',
+      }
+    ]
   },
 
   // Redirect de / a /dashboard y manejo de portafolio
   async redirects() {
     return [
       {
-        source:      '/',
+        source: '/',
         destination: '/dashboard',
-        permanent:   false,
+        permanent: false,
       },
       {
         source: '/portafolio',
@@ -44,11 +60,11 @@ const nextConfig: NextConfig = {
         source: '/(.*)',
         headers: [
           {
-            key:   'X-Frame-Options',
+            key: 'X-Frame-Options',
             value: 'DENY',
           },
           {
-            key:   'X-Content-Type-Options',
+            key: 'X-Content-Type-Options',
             value: 'nosniff',
           },
         ],
