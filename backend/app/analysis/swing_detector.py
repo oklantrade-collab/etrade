@@ -100,7 +100,7 @@ def calculate_fall_maturity(
 def detect_basis_horizontal(
     df:              pd.DataFrame,
     lookback:        int   = 10,
-    slope_threshold: float = 0.8  # 0.8%
+    slope_threshold: float = 0.5  # Reducido de 0.8% a 0.5% para mayor exigencia
 ) -> dict:
     """
     Detecta si el BASIS está horizontal.
@@ -146,10 +146,11 @@ def detect_basis_horizontal(
         'basis_prev': basis_prev
     }
 
-def find_current_band_zone(df: pd.DataFrame, direction: str, lookback: int = 20) -> dict | None:
+def find_current_band_zone(df: pd.DataFrame, direction: str, lookback: int = 5) -> dict | None:
     """
     Busca si en las últimas N velas el precio ha tocado una banda extrema de Fibonacci Bollinger.
     Retorna información de la banda si fue tocada.
+    Reduced lookback to 5 to avoid "ghost" triggers from old signals.
     """
     if len(df) < lookback:
         return None
@@ -157,8 +158,8 @@ def find_current_band_zone(df: pd.DataFrame, direction: str, lookback: int = 20)
     subset = df.iloc[-lookback:]
     
     if direction == 'long':
-        # Buscamos toques en niveles 6, 5 o 4 (prioridad extrema primero)
-        for level in [6, 5, 4]:
+        # Buscamos toques en niveles 6 o 5 (Nivel 4 eliminado por ser demasiado laxo)
+        for level in [6, 5]:
             col_name = f'lower_{level}'
             if col_name in subset.columns:
                 # Si algún low es <= a la banda
@@ -170,8 +171,8 @@ def find_current_band_zone(df: pd.DataFrame, direction: str, lookback: int = 20)
                         'band_value': float(df[col_name].iloc[-1]) # devolvemos el valor ACTUAL de la banda
                     }
     elif direction == 'short':
-        # Buscamos toques en niveles 6, 5 o 4
-        for level in [6, 5, 4]:
+        # Buscamos toques en niveles 6 o 5
+        for level in [6, 5]:
             col_name = f'upper_{level}'
             if col_name in subset.columns:
                 # Si algún high es >= a la banda

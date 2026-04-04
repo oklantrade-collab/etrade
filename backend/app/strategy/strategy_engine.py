@@ -207,8 +207,8 @@ class StrategyEngine:
 
         # Basis Horizontal
         from app.analysis.swing_detector import detect_basis_horizontal
-        basis_info = detect_basis_horizontal(df_15m, lookback=10, slope_threshold=0.8)
-        basis_info_4h = detect_basis_horizontal(df_4h, lookback=10, slope_threshold=0.8) if df_4h is not None else {}
+        basis_info = detect_basis_horizontal(df_15m, lookback=10, slope_threshold=0.5)
+        basis_info_4h = detect_basis_horizontal(df_4h, lookback=10, slope_threshold=0.5) if df_4h is not None else {}
 
         return {
             # Precio

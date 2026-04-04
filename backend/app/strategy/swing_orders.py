@@ -47,8 +47,8 @@ async def process_swing_orders(symbol: str, timeframe: str, df: pd.DataFrame, sn
     cfg = SWING_CONFIG.get(timeframe)
     if not cfg: return
 
-    # 1. Detectar Régimen Lateral (Rango Plano) - Umbral 0.8% (Estrategia Dd61/Dd51)
-    horizontal = detect_basis_horizontal(df, lookback=10, slope_threshold=0.8)
+    # 1. Detectar Régimen Lateral (Rango Plano) - Umbral 0.5% (Estrategia Dd61/Dd51)
+    horizontal = detect_basis_horizontal(df, lookback=10, slope_threshold=0.5)
     is_flat = horizontal['is_flat']
     log_info('SWING', f"{symbol}/{timeframe}: is_flat={is_flat} (slope={horizontal['slope_pct']:.4f}%)")
 
@@ -97,6 +97,28 @@ async def process_swing_orders(symbol: str, timeframe: str, df: pd.DataFrame, sn
             if not band:
                 continue
             
+            # --- VALIDACIÓN DINÁMICA POR SCORE (Requirement: Sync with UI Rules) ---
+            # Si la regla Dd51/Dd61 existe en el motor, validamos el score (ej: 0.75)
+            from app.strategy.strategy_engine import StrategyEngine
+            engine = StrategyEngine.get_instance(sb)
+            if engine and engine.rules:
+                # El usuario puede usar Dd51 o Dd51_15m
+                possible_codes = [rule_code, f"{rule_code}_{timeframe}"]
+                match_rule = next((engine.rules.get(c) for c in possible_codes if c in engine.rules), None)
+                
+                if match_rule:
+                    from app.core.memory_store import get_memory_df
+                    df_15m_ctx = get_memory_df(symbol, "15m") if timeframe != "15m" else df
+                    df_4h_ctx = get_memory_df(symbol, "4h") if timeframe != "4h" else df
+                    context = engine.build_context(snap=snap, df_15m=df_15m_ctx, df_4h=df_4h_ctx)
+                    
+                    eval_res = engine.evaluate_rule(match_rule, context)
+                    if not eval_res['triggered']:
+                        log_info('SWING', f"{symbol}/{timeframe}: {rule_code} rechazada por SCORE ({eval_res['score']:.2f} < {eval_res['min_score']})")
+                        continue
+                    else:
+                        log_info('SWING', f"{symbol}/{timeframe}: {rule_code} aprobada por SCORE ({eval_res['score']:.2f} >= {eval_res['min_score']})")
+
             band_val = band['band_value']
 
             # ── NUEVO: BUFFER DE SL DINÁMICO (PATRONES DE VOLATILIDAD) ──
