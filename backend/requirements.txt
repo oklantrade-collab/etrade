@@ -13,5 +13,6 @@ python-binance>=1.0.19
 anthropic
 python-jose[cryptography]
 passlib[bcrypt]
+bcrypt==4.0.1
 sendgrid
 email-validator
