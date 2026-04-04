@@ -3,8 +3,9 @@ import React, { useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { resetPassword } from '@/lib/api-client'
 import Link from 'next/link'
+import { Suspense } from 'react'
 
-export default function ResetPasswordPage() {
+function ResetPasswordContent() {
   const searchParams = useSearchParams()
   const token = searchParams.get('token')
   const [newPassword, setNewPassword] = useState('')
@@ -97,3 +98,16 @@ export default function ResetPasswordPage() {
     </div>
   )
 }
+
+export default function ResetPasswordPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#05070a] flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+      </div>
+    }>
+      <ResetPasswordContent />
+    </Suspense>
+  )
+}
+

@@ -3,8 +3,9 @@ import React, { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { verifyEmail } from '@/lib/api-client'
 import Link from 'next/link'
+import { Suspense } from 'react'
 
-export default function VerifyPage() {
+function VerifyContent() {
   const searchParams = useSearchParams()
   const token = searchParams.get('token')
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading')
@@ -74,5 +75,17 @@ export default function VerifyPage() {
         <p className="mt-10 text-[0.6rem] text-slate-700 tracking-[0.4em] uppercase font-bold">eTrade Platform Security</p>
       </div>
     </div>
+  )
+}
+
+export default function VerifyPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#05070a] flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+      </div>
+    }>
+      <VerifyContent />
+    </Suspense>
   )
 }
