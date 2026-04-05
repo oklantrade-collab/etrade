@@ -232,7 +232,7 @@ async def get_performance_summary():
         
         # BUG 2 Fix: Use recommended filters for metrics
         res = supabase.table('paper_trades') \
-            .select('total_pnl_usd, closed_at, rule_code, mode') \
+            .select('id, total_pnl_usd, closed_at, rule_code, mode') \
             .eq('mode', 'paper') \
             .not_.is_('closed_at', 'null') \
             .execute()
@@ -250,12 +250,28 @@ async def get_performance_summary():
         for t in (res.data or []):
             if is_real_trade(t):
                 try:
-                    # Robust parsing
-                    dt_str = t['closed_at'].replace('Z', '+00:00')
-                    t['dt_object'] = datetime.fromisoformat(dt_str)
+                    # Robust parsing for ISO8601 (handles Z and variable micros)
+                    ts = t['closed_at'].replace('Z', '+00:00')
+                    # Python < 3.11 fromisoformat is strict (requires 3 or 6 digits)
+                    if '.' in ts:
+                        prefix, rest = ts.split('.', 1)
+                        # Identify timezone split
+                        sep = '+' if '+' in rest else ('-' if '-' in rest else None)
+                        if sep:
+                            micro_part, tz_part = rest.split(sep, 1)
+                            # Ensure exactly 6 digits
+                            micro_part = micro_part.ljust(6, '0')[:6]
+                            ts = f"{prefix}.{micro_part}{sep}{tz_part}"
+                        else:
+                            # No timezone, just micros
+                            micro_part = rest.ljust(6, '0')[:6]
+                            ts = f"{prefix}.{micro_part}"
+                    
+                    t['dt_object'] = datetime.fromisoformat(ts)
                     all_closed.append(t)
                 except Exception as date_e:
-                    log_error("portfolio", f"Date parsing error for trade {t.get('id')}: {date_e}")
+                    # Last resort fallback if above logic fails
+                    log_error("portfolio", f"Date parsing error for trade {t.get('id', 'unknown')}: {date_e}")
 
         import pytz
         lima_tz = pytz.timezone('America/Lima')

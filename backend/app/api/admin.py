@@ -93,3 +93,87 @@ def update_user(user_id: str, data: UserUpdate):
         raise HTTPException(status_code=404, detail="Usuario no encontrado.")
     
     return res.data[0]
+
+
+# ════════════════════════════════════════════════
+# DATABASE MAINTENANCE ENDPOINTS
+# ════════════════════════════════════════════════
+
+@router.post("/cleanup")
+async def run_cleanup():
+    """
+    Ejecuta limpieza manual de la base de datos.
+    Retorna el resumen de filas eliminadas por tabla.
+    """
+    from app.workers.data_cleanup import cleanup_database
+    try:
+        result = await cleanup_database()
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/db-size")
+async def get_db_size():
+    """
+    Reporte de tamaño de cada tabla en la BD.
+    Retorna tabla, filas, tamaño legible y bytes.
+    """
+    try:
+        # Intentar vía RPC (función SQL nativa)
+        result = sb.rpc("get_db_size_report").execute()
+        
+        if result.data:
+            # Calcular totales
+            total_bytes = sum(row.get("tamanio_bytes", 0) for row in result.data)
+            total_rows = sum(row.get("filas", 0) for row in result.data)
+            
+            return {
+                "tables": result.data,
+                "summary": {
+                    "total_size_mb": round(total_bytes / 1024 / 1024, 2),
+                    "total_rows": total_rows,
+                    "free_tier_limit_mb": 500,
+                    "usage_pct": round(total_bytes / 1024 / 1024 / 500 * 100, 1),
+                    "mb_available": round(500 - total_bytes / 1024 / 1024, 2),
+                }
+            }
+        
+        return {"tables": [], "summary": {"error": "No data returned from RPC"}}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {e}")
+
+
+@router.get("/cleanup-history")
+async def get_cleanup_history():
+    """
+    Historial de las últimas 20 limpiezas ejecutadas.
+    """
+    try:
+        result = sb.table("db_cleanup_log") \
+            .select("*") \
+            .order("executed_at", desc=True) \
+            .limit(20) \
+            .execute()
+
+        return result.data or []
+    except Exception as e:
+        # Tabla puede no existir aún
+        return []
+
+
+@router.get("/retention-config")
+async def get_retention_config():
+    """
+    Configuración actual de retención por tabla.
+    """
+    try:
+        result = sb.table("retention_config") \
+            .select("*") \
+            .order("table_name") \
+            .execute()
+
+        return result.data or []
+    except Exception as e:
+        return []

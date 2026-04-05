@@ -1910,6 +1910,19 @@ async def main():
     scheduler.add_job(cycle_5m, CronTrigger(minute='*/5', second='10'), id='2a', replace_existing=True)
     scheduler.add_job(cycle_15m, CronTrigger(minute='*/15', second='30'), id='2b', replace_existing=True)
     
+    # 6. Daily DB Cleanup (03:00 UTC = 22:00 Lima)
+    #    Triple redundancia: pg_cron + Vercel Cron + APScheduler
+    async def daily_cleanup_job():
+        from app.workers.data_cleanup import cleanup_database
+        log_info(MODULE, "Ejecutando limpieza diaria de BD...")
+        try:
+            result = await cleanup_database()
+            log_info(MODULE, f"Limpieza diaria completada: {result.get('total_deleted', 0)} filas eliminadas")
+        except Exception as e:
+            log_error(MODULE, f"Error en limpieza diaria: {e}")
+    
+    scheduler.add_job(daily_cleanup_job, CronTrigger(hour=3, minute=0), id='daily_cleanup', replace_existing=True)
+    
     log_info(MODULE, "v4 Scheduler Started. Running initial cycles...")
     
     # Run once at startup to populate dashboard immediately

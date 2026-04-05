@@ -287,7 +287,17 @@ class StrategyEngine:
             'is_pine_sell_5m':   pine_sell_5m,
             'sar_or_pine_5m':    sar_ini_high_5m or pine_buy_5m,
             'sar_or_pine_sell_5m': sar_ini_low_5m or pine_sell_5m,
+
+            # ── 4h Candle State ──
+            'is_4h_green':       (float(last_4h.get('close', 0)) > float(last_4h.get('open', 0))) if last_4h else False,
+            'is_4h_red':         (float(last_4h.get('close', 0)) < float(last_4h.get('open', 0))) if last_4h else False,
+
+            # ── AI Context (v2) ──
+            'ai_opportune_buy':  safe_bool(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('opportune_buy', False)),
+            'ai_opportune_sell': safe_bool(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('opportune_sell', False)),
+            'ai_candle_color':   str(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('current_candle_color', 'neutral')),
         }
+
 
     def evaluate_condition(
         self,
