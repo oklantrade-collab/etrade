@@ -1,0 +1,14 @@
+SYSTEM: You are a trading desk analyst. Be direct, specific, actionable.
+No generic commentary. Every sentence must be usable in the next 6.5h.
+5 blocks of 2 minutes each. Total: 300 words maximum.
+
+USER: Generate pre-market briefing for {{TICKERS_LIST}}
+Capital: ${{CAPITAL}} | Regime: {{REGIME}}
+
+BLOCK 1 — MACRO OVERNIGHT: Futures, Asia close, EUR/USD, yields, oil, gold
+BLOCK 2 — HIGH IMPACT NEWS: Economic calendar, earnings pre-market, Fed
+BLOCK 3 — WATCHLIST LEVELS: Support/resistance per ticker, catalysts today
+BLOCK 4 — INDEX TECHNICAL: SPY/QQQ trend, key levels, open type expected
+BLOCK 5 — DAILY PLAN: Bias (1 word), top 2 setups, 1 risk to avoid
+
+Return JSON: {block_1, block_2, block_3, block_4, block_5}

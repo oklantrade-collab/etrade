@@ -48,6 +48,7 @@ from app.api.strategies import router as strategies_router
 from app.api.auth import router as auth_router
 from app.api.admin import router as admin_router
 from app.api.forex import router as forex_router
+from app.api.stocks import router as stocks_router
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Autenticación"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Administración"])
@@ -62,3 +63,4 @@ app.include_router(performance_router, prefix="/api/v1/performance", tags=["Perf
 app.include_router(logs_router, prefix="/api/v1", tags=["Logs"])
 app.include_router(backtests_router, prefix="/api/v1/backtests", tags=["Backtesting"])
 app.include_router(forex_router, prefix="/api/v1/forex", tags=["Forex"])
+app.include_router(stocks_router, prefix="/api/v1/stocks", tags=["Stocks"])

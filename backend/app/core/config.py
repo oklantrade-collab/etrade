@@ -26,6 +26,12 @@ class Settings(BaseModel):
     # Anthropic
     anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
 
+    # Qwen (Alibaba) 
+    qwen_api_key: str = os.getenv("QWEN_API_KEY", "")
+
+    # Alpha Vantage
+    alphavantage_api_key: str = os.getenv("ALPHAVANTAGE_API_KEY", "")
+
     # Telegram
     telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")

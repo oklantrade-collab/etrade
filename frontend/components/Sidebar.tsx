@@ -49,11 +49,21 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       ],
     },
     {
-      title: 'BOLSA (Sprint 4)',
-      disabled: true,
-      tooltip: 'Disponible en Sprint 4',
+      title: 'BOLSA (Sprint 5)',
       items: [
-        { href: '#', icon: '⚫', label: 'Bolsa' },
+        { href: '/stocks/dashboard',   icon: '📊', label: 'Command Center' },
+        { href: '/stocks/universe',    icon: '🔍', label: 'Universe' },
+        { href: '/stocks/opportunities', icon: '💡', label: 'Opportunities' },
+        { href: '/stocks/positions',   icon: '📋', label: 'Positions' },
+        { href: '/stocks/journal',     icon: '📓', label: 'Journal' },
+        { href: '/stocks/performance', icon: '📈', label: 'Performance' },
+        { href: '/stocks/backtesting', icon: '🔬', label: 'Backtesting' },
+      ],
+    },
+    {
+      title: 'OPCIONES (Sprint 10+)',
+      items: [
+        { href: '/options', icon: '🎯', label: 'Options Dashboard' },
       ],
     },
     {
@@ -70,7 +80,7 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       <div className="sidebar-logo flex items-center justify-between">
         <div>
           <h1 className="text-xl font-black italic tracking-tighter">eTrader</h1>
-          <span className="text-[0.6rem] uppercase tracking-widest font-bold text-slate-500">Multimarket v4.0</span>
+          <span className="text-[0.6rem] uppercase tracking-widest font-bold text-slate-500">Multimarket v4.5</span>
         </div>
         {onClose && (
           <button onClick={onClose} className="md:hidden p-2 text-slate-400 hover:text-white">

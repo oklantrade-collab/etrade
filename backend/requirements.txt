@@ -16,3 +16,5 @@ passlib[bcrypt]
 bcrypt==4.0.1
 sendgrid
 email-validator
+yfinance>=0.2.36
+numpy>=1.24.0

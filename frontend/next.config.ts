@@ -34,6 +34,11 @@ const nextConfig: NextConfig = {
       {
         source: '/api/v1/forex/:path*',
         destination: `${apiUrl}/api/v1/forex/:path*`,
+      },
+      // Soporte para stocks (bolsa)
+      {
+        source: '/api/v1/stocks/:path*',
+        destination: `${apiUrl}/api/v1/stocks/:path*`,
       }
     ]
   },

@@ -1,0 +1,190 @@
+"""
+eTrader v4.5 — Position Monitor (Capa 7)
+Monitors active trades and manages exits.
+
+Responsibilities:
+  1. Update unrealized P&L using real-time prices
+  2. Check stop-loss / take-profit hits
+  3. Apply trailing stops when in profit
+  4. Close positions and move to trades_journal
+  5. Alert via Telegram on significant events
+"""
+import asyncio
+import os
+import sys
+from datetime import datetime, timezone
+from typing import Optional
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from app.core.logger import log_info, log_error, log_warning
+from app.core.supabase_client import get_supabase
+
+MODULE = "position_monitor"
+
+
+class PositionMonitor:
+    """Monitors active stock positions and manages exits."""
+
+    async def check_all_positions(self):
+        """Main cycle: check every active position."""
+        sb = get_supabase()
+        
+        active = sb.table("trades_active")\
+            .select("*")\
+            .eq("status", "active")\
+            .execute()
+
+        if not active.data:
+            return
+
+        log_info(MODULE, f"Monitoring {len(active.data)} active positions...")
+
+        for trade in active.data:
+            await self._check_position(trade)
+
+    async def _check_position(self, trade: dict):
+        """Check a single position for exit conditions."""
+        ticker = trade["ticker"]
+        
+        try:
+            # Get current price
+            from app.data.yfinance_provider import YFinanceProvider
+            provider = YFinanceProvider()
+            info = await provider.get_ticker_info(ticker)
+            
+            if not info:
+                log_warning(MODULE, f"Cannot get price for {ticker}")
+                return
+
+            current_price = float(info.get("current_price", 0))
+            if current_price <= 0:
+                return
+
+            entry_price = float(trade.get("entry_price", 0))
+            stop_loss = float(trade.get("stop_loss", 0))
+            target_price = float(trade.get("target_1", 0))
+            shares = int(trade.get("shares", 0))
+
+            if entry_price <= 0 or shares <= 0:
+                return
+
+            # Calculate unrealized P&L
+            pnl_usd = (current_price - entry_price) * shares
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+
+            # Update unrealized P&L in DB
+            sb = get_supabase()
+            sb.table("trades_active").update({
+                "unrealized_pnl": round(pnl_usd, 2),
+                "current_price": current_price,
+            }).eq("id", trade["id"]).execute()
+
+            # Check STOP LOSS
+            if current_price <= stop_loss and stop_loss > 0:
+                log_warning(MODULE, f"🔴 STOP HIT: {ticker} @ ${current_price:.2f} (SL=${stop_loss:.2f})")
+                await self._close_position(trade, current_price, "stop_loss")
+                return
+
+            # Check TARGET
+            if current_price >= target_price and target_price > 0:
+                log_info(MODULE, f"🟢 TARGET HIT: {ticker} @ ${current_price:.2f} (TP=${target_price:.2f})")
+                await self._close_position(trade, current_price, "target_hit")
+                return
+
+            # TRAILING STOP: if trade is >1.5% in profit, tighten stop
+            if pnl_pct >= 1.5 and stop_loss < entry_price:
+                new_stop = round(entry_price + (current_price - entry_price) * 0.3, 2)
+                if new_stop > stop_loss:
+                    sb.table("trades_active").update({
+                        "stop_loss": new_stop,
+                    }).eq("id", trade["id"]).execute()
+                    log_info(MODULE, f"📈 TRAILING STOP: {ticker} SL moved ${stop_loss:.2f} → ${new_stop:.2f}")
+
+            log_info(MODULE, f"  {ticker}: ${current_price:.2f} | P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
+
+        except Exception as e:
+            log_error(MODULE, f"Error monitoring {ticker}: {e}")
+
+    async def _close_position(self, trade: dict, exit_price: float, exit_reason: str):
+        """Close a position and record in journal."""
+        sb = get_supabase()
+        now = datetime.now(timezone.utc).isoformat()
+        ticker = trade["ticker"]
+        entry_price = float(trade.get("entry_price", 0))
+        shares = int(trade.get("shares", 0))
+
+        pnl_usd = round((exit_price - entry_price) * shares, 2)
+        pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
+        result = "win" if pnl_usd > 0 else "loss"
+
+        try:
+            # 1. Insert into trades_journal
+            journal_entry = {
+                "ticker": ticker,
+                "shares": shares,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "entry_date": trade.get("entry_time"),
+                "exit_date": now,
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "result": result,
+                "exit_reason": exit_reason,
+            }
+            sb.table("trades_journal").insert(journal_entry).execute()
+
+            # 2. Mark trade as closed (only update columns that exist in schema)
+            sb.table("trades_active").update({
+                "status": "closed",
+            }).eq("id", trade["id"]).execute()
+
+            emoji = "🟢" if result == "win" else "🔴"
+            log_info(MODULE, f"{emoji} CLOSED: {ticker} | {exit_reason} | "
+                             f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
+
+            # 3. Send Telegram notification
+            await self._notify_close(ticker, result, pnl_usd, pnl_pct, exit_reason)
+
+        except Exception as e:
+            log_error(MODULE, f"Error closing position {ticker}: {e}")
+
+    async def _notify_close(self, ticker, result, pnl_usd, pnl_pct, reason):
+        """Send Telegram notification for trade closure."""
+        try:
+            from app.core.telegram_notifier import send_telegram
+            emoji = "🟢" if result == "win" else "🔴"
+            msg = (f"{emoji} *STOCK TRADE CLOSED*\n"
+                   f"Ticker: `{ticker}`\n"
+                   f"Result: {result.upper()}\n"
+                   f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)\n"
+                   f"Reason: {reason}")
+            await send_telegram(msg)
+        except:
+            pass  # Non-critical
+
+    async def force_close_all(self, reason: str = "manual_close"):
+        """Emergency: close all active positions at market price."""
+        sb = get_supabase()
+        active = sb.table("trades_active")\
+            .select("*")\
+            .eq("status", "active")\
+            .execute()
+
+        if not active.data:
+            log_info(MODULE, "No active positions to close")
+            return []
+
+        results = []
+        for trade in active.data:
+            try:
+                from app.data.yfinance_provider import YFinanceProvider
+                provider = YFinanceProvider()
+                info = await provider.get_ticker_info(trade["ticker"])
+                price = float(info.get("current_price", trade.get("entry_price", 0)))
+                await self._close_position(trade, price, reason)
+                results.append({"ticker": trade["ticker"], "status": "closed"})
+            except Exception as e:
+                results.append({"ticker": trade["ticker"], "status": "error", "error": str(e)})
+
+        return results
