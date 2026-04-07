@@ -205,9 +205,9 @@ async def get_stocks_opportunities(
 
                 "catalyst_score": w.get("catalyst_score", 5),
                 "market_regime": w.get("market_regime", "sideways"),
-                # Technical status
                 "technical_score": t.get("technical_score", 0),
                 "pro_score": t.get("signals_json", {}).get("pro_score", 0) if t.get("signals_json") else 0,
+                "change_pct": t.get("signals_json", {}).get("change_pct", 0) if t.get("signals_json") else 0,
                 "mtf_confirmed": t.get("mtf_confirmed", False),
                 "ema_alignment": t.get("ema_alignment", "unknown"),
                 "rsi": t.get("rsi_14"),

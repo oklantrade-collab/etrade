@@ -100,7 +100,7 @@ export default function OpportunitiesIntelligence() {
 
       <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '80px 100px 75px 75px 90px 90px 140px 130px 60px 85px', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' }}>
-          <span>Ticker</span><span>Status</span><span>Precio</span><span>Volumen</span><span>A. Técnico</span><span>A. Fund.</span><span>Clasificación</span><span>Valoración</span><span>IA</span><span>Acción</span>
+          <span>Ticker</span><span>% Inc Dia</span><span>Precio</span><span>Volumen</span><span>A. Técnico</span><span>A. Fund.</span><span>Clasificación</span><span>Valoración</span><span>IA</span><span>Acción</span>
         </div>
         {!loading && displayList.map((opp, i) => ( <ScannerRow key={opp.ticker} index={i} opp={opp} isPro={activeTab === 'VALUE'} onOpenDetails={() => setSelectedStock({ ...opp, isPro: activeTab === 'VALUE' })} /> ))}
         {!loading && displayList.length === 0 && <div style={{ padding: '60px', textAlign: 'center', color: '#444' }}>Sin activos bajo este criterio.</div>}
@@ -130,7 +130,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '80px 100px 75px 75px 90px 90px 140px 130px 60px 85px', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
       <span style={{ fontWeight: 900, color: '#FFF' }}>{opp.ticker}</span>
-      <span style={{ fontSize: '9px', fontWeight: 800, color: '#22C55E' }}>• ANALIZADO</span>
+      <span style={{ fontSize: '11px', fontWeight: 950, color: (opp.change_pct || 0) >= 0 ? '#22C55E' : '#EF4444' }}>{(opp.change_pct || 0) > 0 ? '+' : ''}{(opp.change_pct || 0).toFixed(2)}%</span>
       <span>${opp.price.toFixed(2)}</span><span style={{ color: '#444' }}>{formatVol(opp.volume)}</span>
       <span style={{ color: score >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 900 }}>{score.toFixed(0)}</span><span>88</span>
       <span style={{ color: gap > 0 ? '#22C55E' : '#F59E0B', fontSize: '9px', fontWeight: 900 }}>{gap > 20 ? 'MUY RENTABLE' : 'RENTABLE'}</span>

@@ -214,6 +214,9 @@ async def process_ticker(ticker: str, config: dict) -> dict | None:
         # 5. CAPTURE LIVE PRICE & VOLUME
         current_price = float(df_15m["close"].iloc[-1])
         
+        # Inject daily change pct to the 15m dict so it gets saved to DB
+        ind_15m["change_pct"] = ind_1d.get("change_pct", 0.0)
+        
         # 6. SAVE TO DB
         from app.analysis.stocks_indicators import upsert_technical_score
         is_acceptable = sar_1d > 0 and candle_4h > 0 and ind_15m.get("ema_alignment") == "bullish"

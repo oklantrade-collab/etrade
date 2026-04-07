@@ -116,7 +116,14 @@ def calculate_stock_indicators(
     ema_alignment = _classify_ema_alignment(last)
     df["ema_alignment"] = ema_alignment
 
+    # ── Daily/Period Change ──
+    if len(df) > 1:
+        df["change_pct"] = ((df["close"] - df["close"].shift(1)) / df["close"].shift(1)) * 100
+    else:
+        df["change_pct"] = 0.0
+
     # ── Extract last candle values ──
+    last = df.iloc[-1]
     indicator_fields = [
         "ema_9", "ema_20", "ema_50", "ema_200",
         "rsi_14",
@@ -127,6 +134,7 @@ def calculate_stock_indicators(
         "stoch_k", "stoch_d",
         "volume_sma_20", "rvol",
         "psar", "psar_direction",
+        "change_pct"
     ]
 
     result = {}
