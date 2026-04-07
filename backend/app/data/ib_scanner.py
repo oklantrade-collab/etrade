@@ -121,7 +121,7 @@ async def scan_hot_by_volume(
         log_info(MODULE, "Connecting to IB TWS for scanner...")
         connected = ib.connect_tws()
         if not connected:
-            log_error(MODULE, "Failed to connect to IB TWS")
+            log_warning(MODULE, "IB TWS not available — using fallback")
             return []
 
     # Patch scanner callbacks if not already done
@@ -167,7 +167,7 @@ async def scan_hot_by_volume(
             filter_options,
         )
     except Exception as e:
-        log_error(MODULE, f"Failed to request scanner: {e}")
+        log_warning(MODULE, f"Scanner request skipped (IB not connected): {e}")
         return []
 
     # Wait for results

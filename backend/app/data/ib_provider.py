@@ -96,11 +96,11 @@ class IBConnection(EWrapper, EClient):
                                  f"(client_id={client_id})")
                 return True
             else:
-                log_error(MODULE, f"Connection timeout to IB TWS at {host}:{port}")
+                log_warning(MODULE, f"IB TWS not running at {host}:{port} (expected)")
                 return False
 
         except Exception as e:
-            log_error(MODULE, f"Failed to connect to IB TWS: {e}")
+            log_warning(MODULE, f"IB TWS not available: {e}")
             return False
 
     def disconnect_tws(self) -> None:

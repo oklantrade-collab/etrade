@@ -151,72 +151,44 @@ async def get_watchlist(config: dict) -> list[str]:
 async def process_ticker(ticker: str, config: dict) -> dict | None:
     from app.data.yfinance_provider import YFinanceProvider
     from app.analysis.stocks_indicators import calculate_stock_indicators
-    from app.analysis.rvol import get_rvol_for_ticker
-    from app.analysis.slippage_estimator import estimate_slippage
 
     try:
         provider = YFinanceProvider()
         
-        # 1. DOWNLOAD MULTI-TIMEFRAME DATA (yfinance + in-memory indicators)
+        # 1. DOWNLOAD MULTI-TIMEFRAME DATA
         df_15m = await provider.get_ohlcv(ticker, interval="15m", period="60d")
         df_4h = await provider.get_ohlcv(ticker, interval="1h", period="60d") 
         df_1d = await provider.get_ohlcv(ticker, interval="1d", period="300d")
 
-        # Relaxed requirements for new IPOs and volatile tickers: 10 candles minimum
-        if df_15m is None or df_1d is None or len(df_15m) < 10 or len(df_1d) < 10:
-            log_warning(MODULE, f"Insufficient data for {ticker}: 15m={len(df_15m) if df_15m is not None else 0}, 1d={len(df_1d) if df_1d is not None else 0}")
+        # ROBUST NULL CHECK — skip ticker entirely if any timeframe fails
+        if df_15m is None or df_15m.empty or len(df_15m) < 10:
+            log_warning(MODULE, f"Skipping {ticker}: no 15m data")
+            return None
+        if df_1d is None or df_1d.empty or len(df_1d) < 10:
+            log_warning(MODULE, f"Skipping {ticker}: no 1d data")
+            return None
+        if df_4h is None or df_4h.empty or len(df_4h) < 2:
+            log_warning(MODULE, f"Skipping {ticker}: no 4h/1h data")
             return None
 
         # 2. CALCULATE INDICATORS
         ind_15m = calculate_stock_indicators(df_15m, "15m", ticker)
         ind_1d = calculate_stock_indicators(df_1d, "1d", ticker)
         
-        if not ind_15m or not ind_1d: return None
+        if not ind_15m or not ind_1d:
+            log_warning(MODULE, f"Skipping {ticker}: indicator calculation failed")
+            return None
 
-        # --- FILTRO DE VOLUMEN (Mínimo 1M) ---
+        # 3. VOLUME FILTER (Min 1M)
         volume_24h = ind_1d.get("volume", 0)
         if volume_24h < 1000000:
-            log_warning(MODULE, f"Skipping {ticker}: Insufficient volume ({volume_24h:.0f})")
             return None
-        # ------------------------------------
 
-        # 3. VERIFY TECHNICAL RULES (USER POINT 3)
-        # Rule 15m: EMA50 > EMA200
-        rule_15m = (ind_15m.get("ema_50") or 0) > (ind_15m.get("ema_200") or 999999)
-        
-        # Rule 1D: EMA50 > EMA200 AND Parabolic SAR is Bullish
-        rule_1d = (ind_1d.get("ema_50") or 0) > (ind_1d.get("ema_200") or 999999) and ind_1d.get("psar_direction") == "bullish"
-        
-        # Rule 4H: Last candle is positive (Green)
-        last_4h = df_4h.iloc[-1]
-        rule_4h = last_4h["close"] > last_4h["open"]
-
-        is_technically_perfect = rule_15m and rule_1d and rule_4h
-        if not ind_15m or not ind_1d: return None
-
-        # 3. VERIFY TECHNICAL RULES
+        # 4. TECHNICAL RULES (SINGLE PASS — NO DUPLICATES)
         sar_1d = 1 if ind_1d.get("psar_direction") == "bullish" else 0
         candle_4h = 1 if df_4h.iloc[-1]["close"] > df_4h.iloc[-1]["open"] else 0
 
-        # 4. SLIPPAGE & LIQUIDITY (Security)
-        # Check current price for price limit check (up to $300)
-        current_price = float(df_15m["close"].iloc[-1])
-        
-        # Buy alignment check (for the 'acceptable' flag only)
-        is_acceptable = False
-        if sar_1d > 0 and candle_4h > 0 and ind_15m.get("ema_alignment") == "bullish":
-            is_acceptable = True
-            log_info(MODULE, f"🌟 {ticker} is BULLISH ALIGNED (SAR 1D + 4H + EMA 15m)")
-
-        # 3. VERIFY TECHNICAL RULES
-        sar_1d = 1 if ind_1d.get("psar_direction") == "bullish" else 0
-        candle_4h = 1 if df_4h.iloc[-1]["close"] > df_4h.iloc[-1]["open"] else 0
-
-        # DETERMINAR PUNTUACIÓN (WEIGHTS ACTUALIZADOS)
-        # T01: Trend SAR (1D) -> 40 pts
-        # T02: EMA Alignment (15m) -> 30 pts
-        # T03: Price Action (4H) -> 20 pts
-        # T04: RSI Momentum (15m) -> 10 pts
+        # SCORING (T01: 40pts, T02: 30pts, T03: 20pts, T04: 10pts = 100 max)
         base_score = 40.0 if sar_1d > 0 else 10.0
         if ind_15m.get("ema_alignment") == "bullish": base_score += 30.0
         if candle_4h > 0: base_score += 20.0
@@ -225,15 +197,16 @@ async def process_ticker(ticker: str, config: dict) -> dict | None:
         if rsi_val and 40 <= rsi_val <= 70:
             base_score += 10.0
 
-        # CAPTURA DE PRECIO Y VOLUMEN REAL DESDE EL ÚLTIMO TICK
+        # 5. CAPTURE LIVE PRICE & VOLUME
         current_price = float(df_15m["close"].iloc[-1])
-        current_volume = float(df_15m["volume"].iloc[-1]) if "volume" in df_15m else 0
         
+        # 6. SAVE TO DB
         from app.analysis.stocks_indicators import upsert_technical_score
         is_acceptable = sar_1d > 0 and candle_4h > 0 and ind_15m.get("ema_alignment") == "bullish"
-        
         upsert_technical_score(ticker, ind_15m, base_score, is_acceptable)
 
+        if is_acceptable:
+            log_info(MODULE, f"🌟 {ticker} BULLISH ALIGNED (SAR+4H+EMA) Score={base_score}")
 
         return {
             "ticker": ticker,
@@ -244,7 +217,7 @@ async def process_ticker(ticker: str, config: dict) -> dict | None:
         }
 
     except Exception as e:
-        log_error(MODULE, f"Error processing {ticker}: {e}")
+        log_warning(MODULE, f"Skipping {ticker}: {e}")
         return None
 
 
