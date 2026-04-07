@@ -48,12 +48,12 @@ export default function OpportunitiesIntelligence() {
     .sort((a, b) => (b.rvol || 0) - (a.rvol || 0))
     .slice(0, settings.maxHotResults);
 
-  // 2. INVERSION PRO (REPLICANDO ORIGINAL, PERO CON PUNTUACION PRO DE 1 DIA)
+  // 2. INVERSION PRO (REPLICANDO ORIGINAL)
   const valueList = opportunities
     .filter(o => {
         const seed = o.ticker.split('').reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0);
         const noise = (seed % 15) / 100; 
-        const multiplier = (o.pro_score / 200) + 1.1 + noise;
+        const multiplier = (o.technical_score / 200) + 1.1 + noise;
         const gap = ((multiplier * o.price - o.price) / o.price) * 100;
         
         // Criterio original sin restricción de IA ni precio mínimo
@@ -62,8 +62,8 @@ export default function OpportunitiesIntelligence() {
     .sort((a, b) => { // Ordenar por valor de descuento (gap)
         const seedA = a.ticker.split('').reduce((accIdx: number, char: string) => accIdx + char.charCodeAt(0), 0);
         const seedB = b.ticker.split('').reduce((accIdx: number, char: string) => accIdx + char.charCodeAt(0), 0);
-        const gapA = ((a.pro_score / 200) + 1.1 + (seedA % 15 / 100));
-        const gapB = ((b.pro_score / 200) + 1.1 + (seedB % 15 / 100));
+        const gapA = ((a.technical_score / 200) + 1.1 + (seedA % 15 / 100));
+        const gapB = ((b.technical_score / 200) + 1.1 + (seedB % 15 / 100));
         return gapB - gapA;
     });
 
@@ -102,7 +102,7 @@ export default function OpportunitiesIntelligence() {
         <div style={{ display: 'grid', gridTemplateColumns: '80px 100px 75px 75px 90px 90px 140px 130px 60px 85px', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' }}>
           <span>Ticker</span><span>Status</span><span>Precio</span><span>Volumen</span><span>A. Técnico</span><span>A. Fund.</span><span>Clasificación</span><span>Valoración</span><span>IA</span><span>Acción</span>
         </div>
-        {!loading && displayList.map((opp, i) => ( <ScannerRow key={opp.ticker} index={i} opp={opp} isPro={activeTab === 'VALUE'} onOpenDetails={() => setSelectedStock({ ...opp, isPro: activeTab === 'VALUE' })} /> ))}
+        {!loading && displayList.map((opp, i) => ( <ScannerRow key={opp.ticker} index={i} opp={opp} onOpenDetails={() => setSelectedStock(opp)} /> ))}
         {!loading && displayList.length === 0 && <div style={{ padding: '60px', textAlign: 'center', color: '#444' }}>Sin activos bajo este criterio.</div>}
       </div>
 
@@ -119,8 +119,8 @@ function TabButton({ label, active, onClick, count }: any) {
     return ( <button onClick={onClick} style={{ background: active ? '#161922' : 'transparent', color: active ? '#22C55E' : '#666', border: active ? '1px solid rgba(34,197,94,0.3)' : 'none', padding: '8px 20px', borderRadius: '10px', cursor: 'pointer', fontSize: '12px', fontWeight: 900, display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.2s' }}>{label}<span style={{ fontSize: '9px', background: active ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px', color: active ? '#22C55E' : '#555' }}>{count}</span></button> )
 }
 
-function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
-  const score = isPro ? opp.pro_score || 0 : opp.technical_score || 0;
+function ScannerRow({ opp, index, onOpenDetails }: any) {
+  const score = opp.technical_score || 0
   const formatVol = (vol: number) => { if (!vol) return '—'; if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M'; return (vol / 1000).toFixed(0) + 'K'; }
   const seed = opp.ticker.split('').reduce((accIdx: number, charIdx: string) => accIdx + charIdx.charCodeAt(0), 0);
   const gap = (((score / 200) + 1.1 + (seed % 15 / 100)) * opp.price - opp.price) / opp.price * 100;
@@ -142,8 +142,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
 }
 
 function AnalysisModal({ stock, onClose }: any) {
-  const isPro = stock.isPro;
-  const score = isPro ? stock.pro_score || 0 : stock.technical_score || 0;
+  const score = stock.technical_score || 0
   const seed = stock.ticker.split('').reduce((acc: number, charIdx: string) => acc + charIdx.charCodeAt(0), 0);
   const intrinsic = stock.price * ((score / 200) + 1.1 + (seed % 15 / 100));
   const gap = (intrinsic - stock.price) / stock.price * 100;
@@ -156,47 +155,25 @@ function AnalysisModal({ stock, onClose }: any) {
           <div><h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900 }}>{stock.ticker} - Detalle</h2><span style={{ fontSize: '10px', color: '#22C55E' }}>Sustentación v4.5</span></div>
           <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer' }}>✕</button>
         </div>
-        <div style={{ padding: '24px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '24px' }}>
-            
-            {/* LEFT COLUMN: TECHNICAL ANALYSIS */}
-            <div>
-                <h3 style={{ fontSize: '14px', fontWeight: 950, color: '#38BDF8', marginBottom: '15px' }}>🔵 SUSTENTACIÓN TÉCNICA {isPro ? '(PRO - 1 DÍA)' : '(HOT - MTF)'}</h3>
-                {isPro ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
-                        <RuleBox id="P01" name="EMA50 > EMA200 (1D)" val={score >= 40 ? 'OK' : 'FAIL'} pts={40} pass={score >= 40} />
-                        <RuleBox id="P02" name="EMA20 > EMA50 (1D)" val={score >= 70 ? 'OK' : 'FAIL'} pts={30} pass={score >= 70} />
-                        <RuleBox id="P03" name="SAR Tendencia (1D)" val={score >= 90 || (score > 10 && score < 70) ? 'OK' : 'FAIL'} pts={20} pass={score >= 90 || (score > 10 && score < 70)} />
-                        <RuleBox id="P04" name="RSI Momentum <= 30 (1D)" val={(score % 10 !== 0) ? 'OK' : 'FAIL'} pts={10} pass={(score % 10 !== 0)} />
-                    </div>
-                ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
-                        <RuleBox id="T01" name="SAR Tendencia (1D)" val={score >= 40 ? 'OK' : 'FAIL'} pts={40} pass={score >= 40} />
-                        <RuleBox id="T02" name="EMA Alineación (15m)" val="OK" pts={30} pass={true} />
-                        <RuleBox id="T03" name="Cierre de Vela (4H)" val="OK" pts={20} pass={true} />
-                    </div>
-                )}
+        <div style={{ padding: '24px', overflowY: 'auto' }}>
+            <h3 style={{ fontSize: '13px', fontWeight: 950, color: '#22C55E', marginBottom: '15px' }}>🔵 SUSTENTACIÓN TÉCNICA</h3>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
+                <RuleBox id="T01" name="SAR 1D" val={score >= 40 ? 'OK' : 'FAIL'} pts={40} pass={score >= 40} />
+                <RuleBox id="T02" name="EMA 15m" val="OK" pts={30} pass={true} />
+                <RuleBox id="T03" name="4H Candle" val="OK" pts={20} pass={true} />
             </div>
-
-            {/* RIGHT COLUMN: FUNDAMENTAL & AI */}
-            <div>
-                <h3 style={{ fontSize: '14px', fontWeight: 950, color: '#A855F7', marginBottom: '15px' }}>🟣 ANÁLISIS FUNDAMENTAL E IA</h3>
-                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '16px', marginBottom: '20px' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '15px' }}>
-                        <IB label="VALOR INTRÍNSECO" val={`$${intrinsic.toFixed(2)}`} c="#22C55E" />
-                        <IB label="PRECIO ACTUAL" val={`$${stock.price.toFixed(2)}`} c="#38BDF8" />
-                        <IB label="VALORACIÓN" val={`${gap.toFixed(1)}%`} c={gap > 0 ? '#22C55E' : '#EF4444'} />
-                    </div>
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
-                     <IABox n="GOOGLE GEMINI" s={gS} c="#A855F7" t="Análisis de EBITDA y WACC positivo. Proyección estable basada en la evaluación del sector." />
-                     <IABox n="ALI QWEN" s={qS} c="#22C55E" t="Flujo de caja sólido con rentabilidad escalable detectada en el último balance financiero." />
+            <div style={{ marginTop: '24px', background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '16px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '15px' }}>
+                    <IB label="VALOR INTRÍNSECO" val={`$${intrinsic.toFixed(2)}`} c="#22C55E" /><IB label="PRICE" val={`$${stock.price.toFixed(2)}`} c="#38BDF8" />
+                    <IB label="VALORACIÓN" val={`${gap.toFixed(1)}%`} c={gap > 0 ? '#22C55E' : '#EF4444'} />
                 </div>
             </div>
-
+            <div style={{ marginTop: '20px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                 <IABox n="GOOGLE GEMINI" s={gS} c="#A855F7" t="Análisis de EBITDA y WACC positivo. Proyección estable." />
+                 <IABox n="ALI QWEN" s={qS} c="#22C55E" t="Flujo de caja sólido con rentabilidad escalable." />
+            </div>
         </div>
-        <div style={{ padding: '16px 32px', textAlign: 'right', background: '#161922' }}>
-            <button onClick={onClose} style={{ background: '#22C55E', color: '#000', border: 'none', padding: '10px 32px', borderRadius: '10px', fontWeight: 950, cursor: 'pointer' }}>CERRAR</button>
-        </div>
+        <div style={{ padding: '16px 32px', textAlign: 'right', background: '#161922' }}><button onClick={onClose} style={{ background: '#22C55E', color: '#000', border: 'none', padding: '10px 32px', borderRadius: '10px', fontWeight: 950, cursor: 'pointer' }}>CERRAR</button></div>
       </div>
     </div>
   )
