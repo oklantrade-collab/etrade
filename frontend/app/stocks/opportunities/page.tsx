@@ -136,7 +136,12 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
       <span style={{ color: gap > 0 ? '#22C55E' : '#F59E0B', fontSize: '9px', fontWeight: 900 }}>{gap > 20 ? 'MUY RENTABLE' : 'RENTABLE'}</span>
       <span style={{ fontSize: '9px', color: '#666' }}>({gap.toFixed(1)}%)</span>
       <span style={{ color: Number(avg) >= 8 ? '#A855F7' : '#22C55E', fontWeight: 950 }}>{avg}</span>
-      <button onClick={onOpenDetails} style={{ background: '#161922', border: '1px solid #333', color: '#22C55E', padding: '6px 0', borderRadius: '6px', fontSize: '9px', fontWeight: 900, cursor: 'pointer' }}>DETALLEfunction AnalysisModal({ stock, onClose }: any) {
+      <button onClick={onOpenDetails} style={{ background: '#161922', border: '1px solid #333', color: '#22C55E', padding: '6px 0', borderRadius: '6px', fontSize: '9px', fontWeight: 900, cursor: 'pointer' }}>DETALLES</button>
+    </div>
+  )
+}
+
+function AnalysisModal({ stock, onClose }: any) {
   const isPro = stock.isPro;
   const score = isPro ? stock.pro_score || 0 : stock.technical_score || 0;
   const seed = stock.ticker.split('').reduce((acc: number, charIdx: string) => acc + charIdx.charCodeAt(0), 0);
