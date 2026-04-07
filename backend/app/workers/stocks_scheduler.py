@@ -197,20 +197,35 @@ async def process_ticker(ticker: str, config: dict) -> dict | None:
         if rsi_val and 40 <= rsi_val <= 70:
             base_score += 10.0
 
+        # PRO SCORING (P01: 40pts, P02: 30pts, P03: 20pts, P04: 10pts = 100 max) - 1D TIMEFRAME
+        pro_score = 0.0
+        ema_50_1d = ind_1d.get("ema_50") or 0.0
+        ema_200_1d = ind_1d.get("ema_200") or 999999.0
+        ema_20_1d = ind_1d.get("ema_20") or 0.0
+        
+        if ema_50_1d > ema_200_1d: pro_score += 40.0
+        if ema_20_1d > ema_50_1d: pro_score += 30.0
+        if ind_1d.get("psar_direction") == "bullish": pro_score += 20.0
+        
+        rsi_1d = ind_1d.get("rsi_14")
+        if rsi_1d and rsi_1d <= 30.0:
+            pro_score += 10.0
+
         # 5. CAPTURE LIVE PRICE & VOLUME
         current_price = float(df_15m["close"].iloc[-1])
         
         # 6. SAVE TO DB
         from app.analysis.stocks_indicators import upsert_technical_score
         is_acceptable = sar_1d > 0 and candle_4h > 0 and ind_15m.get("ema_alignment") == "bullish"
-        upsert_technical_score(ticker, ind_15m, base_score, is_acceptable)
+        upsert_technical_score(ticker, ind_15m, base_score, is_acceptable, pro_score)
 
         if is_acceptable:
-            log_info(MODULE, f"🌟 {ticker} BULLISH ALIGNED (SAR+4H+EMA) Score={base_score}")
+            log_info(MODULE, f"🌟 {ticker} BULLISH ALIGNED (SAR+4H+EMA) Score={base_score} | Pro_Score={pro_score}")
 
         return {
             "ticker": ticker,
             "technical_score": base_score,
+            "pro_score": pro_score,
             "rvol": ind_15m.get("rvol", 1.0),
             "price": float(current_price),
             "acceptable": is_acceptable,

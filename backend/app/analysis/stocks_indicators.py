@@ -322,6 +322,7 @@ def upsert_technical_score(
     indicators: dict,
     technical_score: float,
     mtf_confirmed: bool,
+    pro_score: float = 0.0,
 ) -> None:
     """Upsert technical score into Supabase."""
     try:
@@ -376,6 +377,7 @@ def upsert_technical_score(
                 "stoch_k": indicators.get("stoch_k"),
                 "di_plus": indicators.get("di_plus"),
                 "di_minus": indicators.get("di_minus"),
+                "pro_score": pro_score,
             },
         }
 
