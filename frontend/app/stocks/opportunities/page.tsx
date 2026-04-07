@@ -187,6 +187,14 @@ function AnalysisModal({ stock, onClose }: any) {
                         <IB label="VALORACIÓN" val={`${gap.toFixed(1)}%`} c={gap > 0 ? '#22C55E' : '#EF4444'} />
                     </div>
                 </div>
+                
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <h4 style={{ margin: 0, fontSize: '11px', color: '#FFF', fontWeight: 900 }}>CONSENSO DE IA</h4>
+                    <span style={{ fontSize: '12px', background: 'rgba(168,85,247,0.2)', color: '#A855F7', padding: '4px 10px', borderRadius: '8px', fontWeight: 950 }}>
+                        PROMEDIO: {((gS + qS) / 2).toFixed(1)} / 10
+                    </span>
+                </div>
+                
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
                      <IABox n="GOOGLE GEMINI" s={gS} c="#A855F7" t="Análisis de EBITDA y WACC positivo. Proyección estable basada en la evaluación del sector." />
                      <IABox n="ALI QWEN" s={qS} c="#22C55E" t="Flujo de caja sólido con rentabilidad escalable detectada en el último balance financiero." />
