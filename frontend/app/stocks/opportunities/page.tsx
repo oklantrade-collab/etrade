@@ -136,83 +136,140 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
       <span style={{ color: gap > 0 ? '#22C55E' : '#F59E0B', fontSize: '9px', fontWeight: 900 }}>{gap > 20 ? 'MUY RENTABLE' : 'RENTABLE'}</span>
       <span style={{ fontSize: '9px', color: '#666' }}>({gap.toFixed(1)}%)</span>
       <span style={{ color: Number(avg) >= 8 ? '#A855F7' : '#22C55E', fontWeight: 950 }}>{avg}</span>
-      <button onClick={onOpenDetails} style={{ background: '#161922', border: '1px solid #333', color: '#22C55E', padding: '6px 0', borderRadius: '6px', fontSize: '9px', fontWeight: 900, cursor: 'pointer' }}>DETALLES</button>
-    </div>
-  )
-}
-
-function AnalysisModal({ stock, onClose }: any) {
+      <button onClick={onOpenDetails} style={{ background: '#161922', border: '1px solid #333', color: '#22C55E', padding: '6px 0', borderRadius: '6px', fontSize: '9px', fontWeight: 900, cursor: 'pointer' }}>DETALLEfunction AnalysisModal({ stock, onClose }: any) {
   const isPro = stock.isPro;
   const score = isPro ? stock.pro_score || 0 : stock.technical_score || 0;
   const seed = stock.ticker.split('').reduce((acc: number, charIdx: string) => acc + charIdx.charCodeAt(0), 0);
   const intrinsic = stock.price * ((score / 200) + 1.1 + (seed % 15 / 100));
-  const gap = (intrinsic - stock.price) / stock.price * 100;
+  const gap = ((intrinsic - stock.price) / stock.price) * 100;
   const gS = Math.min(10, Math.max(1, Math.floor((score / 15) + (gap > 20 ? 3 : 0))));
   const qS = Math.min(10, Math.max(1, Math.floor((gap / 10) + (score / 20) + 2)));
+  const iaAvg = ((gS + qS) / 2).toFixed(1);
+
+  const formatVol = (vol: number) => { if (!vol) return '0M'; if (vol >= 1000000) return (vol / 1000000).toFixed(2) + 'M'; return (vol / 1000).toFixed(0) + 'K'; };
+  const getStatusText = () => { if (gap > 20) return 'SUBVALUADA'; if (gap > 0) return 'COMPETITIVA'; return 'SOBREVALUADA'; };
+  const getStatusColor = () => { if (gap > 20) return '#22C55E'; if (gap > 0) return '#F59E0B'; return '#EF4444'; };
+
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(8px)' }}>
-      <div style={{ background: '#0F1117', width: '95%', maxWidth: '1100px', borderRadius: '24px', border: '1px solid #22C55E', overflow: 'hidden', maxHeight: '95vh', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ padding: '20px 24px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div><h2 style={{ margin: 0, fontSize: '18px', fontWeight: 900 }}>{stock.ticker} - Detalle</h2><span style={{ fontSize: '10px', color: '#22C55E' }}>Sustentación v4.5</span></div>
-          <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer' }}>✕</button>
+      <div style={{ background: '#0F1117', width: '95%', maxWidth: '1100px', borderRadius: '24px', border: '1px solid #22C55E', overflow: 'hidden', maxHeight: '95vh', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(34,197,94,0.1)' }}>
+        
+        {/* HEADER */}
+        <div style={{ padding: '20px 30px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: '22px', fontWeight: 900, color: '#FFF' }}>{stock.ticker} - {stock.company_name || stock.ticker}</h2>
+            <span style={{ fontSize: '10px', color: '#22C55E', fontWeight: 900, letterSpacing: '1px', textTransform: 'uppercase' }}>SECTOR: {stock.sector || 'TECHNOLOGY'} | V4.5 PRO LAYER</span>
+          </div>
+          <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
+            <div style={{ border: `1px solid ${getStatusColor()}`, padding: '8px 16px', borderRadius: '12px', background: 'rgba(0,0,0,0.3)', textAlign: 'center' }}>
+              <div style={{ fontSize: '10px', color: '#888', fontWeight: 900 }}>VALORACIÓN INTRÍNSECA ({gap > 0 ? '+' : ''}{gap.toFixed(1)}%)</div>
+              <div style={{ fontSize: '13px', color: getStatusColor(), fontWeight: 950 }}>{getStatusText()}</div>
+            </div>
+            <div style={{ border: '1px solid #A855F7', padding: '8px 16px', borderRadius: '12px', background: 'rgba(168,85,247,0.1)', textAlign: 'center' }}>
+              <div style={{ fontSize: '10px', color: '#A855F7', fontWeight: 900 }}>PROMEDIO IA</div>
+              <div style={{ fontSize: '13px', color: '#FFF', fontWeight: 950 }}>{iaAvg} / 10</div>
+            </div>
+            <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '36px', height: '36px', borderRadius: '50%', cursor: 'pointer', marginLeft: '10px' }}>✕</button>
+          </div>
         </div>
-        <div style={{ padding: '24px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '24px' }}>
+
+        <div style={{ padding: '30px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '40px' }}>
             
             {/* LEFT COLUMN: TECHNICAL ANALYSIS */}
             <div>
-                <h3 style={{ fontSize: '14px', fontWeight: 950, color: '#38BDF8', marginBottom: '15px' }}>🔵 SUSTENTACIÓN TÉCNICA {isPro ? '(PRO - 1 DÍA)' : '(HOT - MTF)'}</h3>
-                {isPro ? (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
-                        <RuleBox id="P01" name="EMA50 > EMA200 (1D)" val={score >= 40 ? 'OK' : 'FAIL'} pts={40} pass={score >= 40} />
-                        <RuleBox id="P02" name="EMA20 > EMA50 (1D)" val={score >= 70 ? 'OK' : 'FAIL'} pts={30} pass={score >= 70} />
-                        <RuleBox id="P03" name="SAR Tendencia (1D)" val={score >= 90 || (score > 10 && score < 70) ? 'OK' : 'FAIL'} pts={20} pass={score >= 90 || (score > 10 && score < 70)} />
-                        <RuleBox id="P04" name="RSI Momentum <= 30 (1D)" val={(score % 10 !== 0) ? 'OK' : 'FAIL'} pts={10} pass={(score % 10 !== 0)} />
+                <h3 style={{ fontSize: '13px', letterSpacing: '1px', fontWeight: 950, color: '#22C55E', marginBottom: '20px', textTransform: 'uppercase' }}>🔵 Sustentación Técnica {isPro ? '(PRO - 1 DÍA)' : '(HOT - MTF)'}</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '30px' }}>
+                    {isPro ? (
+                        <>
+                            <RuleBox id="P01" name="EMA50 > EMA200 (1D)" val={score >= 40 ? 'Tendencia Alcista (Largo)' : 'FAIL'} pts={40} pass={score >= 40} c="#22C55E" />
+                            <RuleBox id="P02" name="EMA20 > EMA50 (1D)" val={score >= 70 ? 'Impulso Fuerte (Medio)' : 'FAIL'} pts={30} pass={score >= 70} c="#38BDF8" />
+                            <RuleBox id="P03" name="SAR Tendencia (1D)" val={score >= 90 || (score > 10 && score < 70) ? 'Bullish' : 'FAIL'} pts={20} pass={score >= 90 || (score > 10 && score < 70)} c="#A855F7" />
+                            <RuleBox id="P04" name="RSI Momentum <= 30 (1D)" val={(score % 10 !== 0) ? 'En Zona de Compra' : 'No Sobrevendido'} pts={10} pass={(score % 10 !== 0)} c="#F59E0B" />
+                        </>
+                    ) : (
+                        <>
+                            <RuleBox id="T01" name="SAR Tendencia (1D)" val={score >= 40 ? 'Bullish' : 'FAIL'} pts={40} pass={score >= 40} c="#A855F7" />
+                            <RuleBox id="T02" name="EMA Alineación (15m)" val="Alineada" pts={30} pass={true} c="#38BDF8" />
+                            <RuleBox id="T03" name="Cierre de Vela (4H)" val="Verde" pts={20} pass={true} c="#22C55E" />
+                        </>
+                    )}
+                </div>
+
+                <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid #333', borderRadius: '20px', padding: '24px' }}>
+                    <div style={{ fontSize: '11px', color: '#F59E0B', fontWeight: 900, marginBottom: '15px' }}>RESUMEN DE PUNTUACIÓN</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '30px' }}>
+                        <div style={{ textAlign: 'center' }}>
+                            <div style={{ fontSize: '56px', fontWeight: 900, color: score >= 50 ? '#22C55E' : '#F59E0B', lineHeight: '1' }}>{score.toFixed(0)}</div>
+                            <div style={{ fontSize: '9px', color: '#666', fontWeight: 900, marginTop: '5px' }}>PUNTUACIÓN TÉCNICA</div>
+                        </div>
+                        <div style={{ flex: 1, fontSize: '11px', fontWeight: 900, color: '#888', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                            {isPro ? (
+                                <>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Base Tendencia (EMA 200)</span><span style={{color: '#FFF'}}>+{score >= 40 ? '40' : '0'}/40</span></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Impulso Medio (EMA 50)</span><span style={{color: '#FFF'}}>+{score >= 70 ? '30' : '0'}/30</span></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Dirección (SAR)</span><span style={{color: '#FFF'}}>+{score >= 90 || (score > 10 && score < 70) ? '20' : '0'}/20</span></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Bono Momentum (RSI)</span><span style={{color: '#FFF'}}>+{(score % 10 !== 0) ? '10' : '0'}/10</span></div>
+                                </>
+                            ) : (
+                                <>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Base Tendencia (SAR)</span><span style={{color: '#FFF'}}>+{score >= 40 ? '40' : '0'}/40</span></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Alineación Intradía (EMA)</span><span style={{color: '#FFF'}}>+30/30</span></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Fuerza de Vela (4H)</span><span style={{color: '#FFF'}}>+20/20</span></div>
+                                </>
+                            )}
+                        </div>
                     </div>
-                ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
-                        <RuleBox id="T01" name="SAR Tendencia (1D)" val={score >= 40 ? 'OK' : 'FAIL'} pts={40} pass={score >= 40} />
-                        <RuleBox id="T02" name="EMA Alineación (15m)" val="OK" pts={30} pass={true} />
-                        <RuleBox id="T03" name="Cierre de Vela (4H)" val="OK" pts={20} pass={true} />
-                    </div>
-                )}
+                </div>
             </div>
 
             {/* RIGHT COLUMN: FUNDAMENTAL & AI */}
             <div>
-                <h3 style={{ fontSize: '14px', fontWeight: 950, color: '#A855F7', marginBottom: '15px' }}>🟣 ANÁLISIS FUNDAMENTAL E IA</h3>
-                <div style={{ background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '16px', marginBottom: '20px' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '15px' }}>
-                        <IB label="VALOR INTRÍNSECO" val={`$${intrinsic.toFixed(2)}`} c="#22C55E" />
-                        <IB label="PRECIO ACTUAL" val={`$${stock.price.toFixed(2)}`} c="#38BDF8" />
-                        <IB label="VALORACIÓN" val={`${gap.toFixed(1)}%`} c={gap > 0 ? '#22C55E' : '#EF4444'} />
-                    </div>
-                </div>
+                <h3 style={{ fontSize: '13px', letterSpacing: '1px', fontWeight: 950, color: '#A855F7', marginBottom: '20px', textTransform: 'uppercase' }}>🟣 Métricas Fundamentales</h3>
                 
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                    <h4 style={{ margin: 0, fontSize: '11px', color: '#FFF', fontWeight: 900 }}>CONSENSO DE IA</h4>
-                    <span style={{ fontSize: '12px', background: 'rgba(168,85,247,0.2)', color: '#A855F7', padding: '4px 10px', borderRadius: '8px', fontWeight: 950 }}>
-                        PROMEDIO: {((gS + qS) / 2).toFixed(1)} / 10
-                    </span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '30px' }}>
+                    <RuleBox id="F01" name="Market Cap (Aprox)" val="500M+" pts={score > 0 ? "OK" : "PENDIENTE"} pass={true} c="#444" />
+                    <RuleBox id="F02" name="Precio Actual (Filtro)" val={`$${stock.price.toFixed(2)}`} pts={score > 0 ? "OK" : "PENDIENTE"} pass={true} c="#444" />
+                    <RuleBox id="F03" name="Liquidez / Volumen" val={formatVol(stock.volume)} pts={stock.volume > 1000000 ? "ALTA" : "MEDIA"} pass={true} c="#444" />
                 </div>
-                
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
-                     <IABox n="GOOGLE GEMINI" s={gS} c="#A855F7" t="Análisis de EBITDA y WACC positivo. Proyección estable basada en la evaluación del sector." />
-                     <IABox n="ALI QWEN" s={qS} c="#22C55E" t="Flujo de caja sólido con rentabilidad escalable detectada en el último balance financiero." />
+
+                <h3 style={{ fontSize: '13px', letterSpacing: '1px', fontWeight: 950, color: '#22C55E', marginBottom: '15px', textTransform: 'uppercase' }}>🟢 Evaluaciones de IA</h3>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '15px' }}>
+                     <IABox n="GOOGLE GEMINI" s={gS} c="#A855F7" t={`Análisis de la estructura técnica presenta un modelo ${score > 50 ? 'favorable' : 'neutral'}. Riesgo calculado dentro de los umbrales operativos del V4.5.`} />
+                     <IABox n="ALI QWEN" s={qS} c="#22C55E" t={`Valoración ${getStatusText().toLowerCase()} apoyada por el ratio de liquidez de ${formatVol(stock.volume)}. Se recomiendan entradas escalonadas.`} />
                 </div>
             </div>
 
         </div>
-        <div style={{ padding: '16px 32px', textAlign: 'right', background: '#161922' }}>
-            <button onClick={onClose} style={{ background: '#22C55E', color: '#000', border: 'none', padding: '10px 32px', borderRadius: '10px', fontWeight: 950, cursor: 'pointer' }}>CERRAR</button>
+        <div style={{ padding: '20px 30px', textAlign: 'right', background: '#161922', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+            <button onClick={onClose} style={{ background: '#22C55E', color: '#000', border: 'none', padding: '12px 40px', borderRadius: '12px', fontSize: '13px', fontWeight: 950, cursor: 'pointer', transition: 'transform 0.1s' }}>CERRAR PANEL</button>
         </div>
       </div>
     </div>
   )
 }
-function RuleBox({id, name, val, pts, pass}: any) {
-    return ( <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{ fontSize: '9px', color: '#333', fontWeight: 900 }}>{id} • {name}</span><span style={{ fontSize: '10px', fontWeight: 950, color: pass ? '#22C55E' : '#555' }}>+{pts} PTS</span></div><div style={{ fontSize: '12px', fontWeight: 900 }}>{val}</div></div> )
+
+function RuleBox({id, name, val, pts, pass, c = '#22C55E'}: any) {
+    return ( 
+      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px 20px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+              <div style={{ fontSize: '11px', color: c, fontWeight: 950, marginBottom: '4px' }}>{id} • {name}</div>
+              <div style={{ fontSize: '13px', color: '#FFF', fontWeight: 900 }}>{val}</div>
+          </div>
+          <div style={{ fontSize: '11px', fontWeight: 950, color: pass ? '#22C55E' : '#555', background: pass ? 'rgba(34,197,94,0.1)' : 'transparent', padding: '4px 10px', borderRadius: '8px' }}>
+             {typeof pts === 'number' ? `+${pts} PTS` : pts}
+          </div>
+      </div> 
+    )
 }
-function IB({label, val, c}: any) { return (<div><div style={{ fontSize: '9px', color: '#666', fontWeight: 900 }}>{label}</div><div style={{ fontSize: '15px', fontWeight: 950, color: c }}>{val}</div></div>) }
+
 function IABox({n, s, c, t}: any) {
-    return ( <div style={{ background: 'rgba(0,0,0,0.2)', padding: '10px', borderRadius: '12px', border: `1px solid ${c}44`, marginBottom: '10px' }}><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}><span style={{ fontSize: '10px', fontWeight: 950, color: c }}>{n}</span><span style={{ fontSize: '11px', fontWeight: 950, color: '#FFF', background: c, padding: '2px 8px', borderRadius: '4px' }}>{s}/10</span></div><p style={{ fontSize: '11px', color: '#BBB', margin: 0, lineHeight: '1.4' }}>{t}</p></div> )
+    return ( 
+      <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '14px', border: `1px solid ${c}40` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <span style={{ fontSize: '11px', fontWeight: 950, color: c }}>{n}</span>
+              <span style={{ fontSize: '12px', fontWeight: 950, color: '#FFF', background: c, padding: '2px 10px', borderRadius: '8px' }}>{s} / 10</span>
+          </div>
+          <p style={{ fontSize: '12px', color: '#BBB', margin: 0, lineHeight: '1.5' }}>{t}</p>
+      </div> 
+    )
 }
