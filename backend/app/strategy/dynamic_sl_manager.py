@@ -405,6 +405,11 @@ def evaluate_sl_action(
     existing_dynamic  = float(
         position.get('sl_dynamic_price', 0) or 0
     )
+    trailing_sl = float(
+        position.get('trailing_sl_price', 0) or 
+        position.get('stop_loss_price', 0) or 
+        position.get('sl_price', 0) or 0
+    )
 
     # ── CHECK 1: Backstop hit (siempre activo) ─
     if backstop > 0:
@@ -442,6 +447,25 @@ def evaluate_sl_action(
                     f'sl={existing_dynamic:.6f}'
                 ),
                 'sl_price': existing_dynamic,
+            }
+
+    # ── CHECK 2.5: Trailing SL hit (asegurar ganancia o limitar pérdida) ─
+    if trailing_sl > 0:
+        trailing_hit = (
+            (side in ('long','buy') and
+             current_price <= trailing_sl) or
+            (side not in ('long','buy') and
+             current_price >= trailing_sl)
+        )
+        if trailing_hit:
+            return {
+                'action':  'trigger_dynamic_sl', # Reutilizamos acción para simplificar monitor
+                'reason':  (
+                    f'Trailing/Active SL hit: '
+                    f'precio={current_price:.6f} '
+                    f'sl={trailing_sl:.6f}'
+                ),
+                'sl_price': trailing_sl,
             }
 
     # ── CHECK 3: Detectar señal SIPV ──────────
