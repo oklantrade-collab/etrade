@@ -19,6 +19,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
+from app.strategy.proactive_exit import evaluate_proactive_exit
+
 
 MODULE = "position_monitor"
 
@@ -30,9 +32,9 @@ class PositionMonitor:
         """Main cycle: check every active position."""
         sb = get_supabase()
         
-        active = sb.table("trades_active")\
+        active = sb.table("stocks_positions")\
             .select("*")\
-            .eq("status", "active")\
+            .eq("status", "open")\
             .execute()
 
         if not active.data:
@@ -61,9 +63,10 @@ class PositionMonitor:
             if current_price <= 0:
                 return
 
-            entry_price = float(trade.get("entry_price", 0))
-            stop_loss = float(trade.get("stop_loss", 0))
-            target_price = float(trade.get("target_1", 0))
+            entry_price = float(trade.get("avg_price", 0))
+            # SL/TP are sometimes stored in trade_opportunities, but let's check position first
+            stop_loss = float(trade.get("stop_loss", 0)) if trade.get("stop_loss") else 0
+            target_price = float(trade.get("take_profit", 0)) if trade.get("take_profit") else 0
             shares = int(trade.get("shares", 0))
 
             if entry_price <= 0 or shares <= 0:
@@ -75,10 +78,17 @@ class PositionMonitor:
 
             # Update unrealized P&L in DB
             sb = get_supabase()
-            sb.table("trades_active").update({
+            sb.table("stocks_positions").update({
                 "unrealized_pnl": round(pnl_usd, 2),
+                "unrealized_pnl_pct": round(pnl_pct, 2),
                 "current_price": current_price,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", trade["id"]).execute()
+
+            # ── NUEVO: Cierre Proactivo Aa51/Bb51 ──
+            closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, sb)
+            if closed:
+                return
 
             # Check STOP LOSS
             if current_price <= stop_loss and stop_loss > 0:
@@ -96,7 +106,7 @@ class PositionMonitor:
             if pnl_pct >= 1.5 and stop_loss < entry_price:
                 new_stop = round(entry_price + (current_price - entry_price) * 0.3, 2)
                 if new_stop > stop_loss:
-                    sb.table("trades_active").update({
+                    sb.table("stocks_positions").update({
                         "stop_loss": new_stop,
                     }).eq("id", trade["id"]).execute()
                     log_info(MODULE, f"📈 TRAILING STOP: {ticker} SL moved ${stop_loss:.2f} → ${new_stop:.2f}")
@@ -105,6 +115,66 @@ class PositionMonitor:
 
         except Exception as e:
             log_error(MODULE, f"Error monitoring {ticker}: {e}")
+
+    async def check_proactive_exit_stocks(self, ticker: str, position: dict, current_price: float, sb) -> bool:
+        """ Evalúa Aa51/Bb51 para posiciones de Stocks. """
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            # Para Stocks usamos velas diarias (1D) o de 1H como equivalente al 4H de Crypto
+            # Vamos a usar 1H para velocidad de reacción
+            hist = t.history(period="15d", interval="1h")
+            
+            if hist.empty or len(hist) < 3:
+                return False
+
+            import pandas as pd
+            df_4h = pd.DataFrame()
+            df_4h['open'] = hist['Open']
+            df_4h['high'] = hist['High']
+            df_4h['low'] = hist['Low']
+            df_4h['close'] = hist['Close']
+
+            # Recuperar snapshot de base de datos
+            snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
+            snap = snap_res.data[0] if snap_res.data else {}
+
+            position_std = {
+                'symbol':          ticker,
+                'side':            'long', # Default to long in spot
+                'avg_entry_price': float(position.get('avg_price', position.get('entry_price', 0))),
+                'size':            float(position.get('shares', 1)),
+            }
+
+            result = evaluate_proactive_exit(
+                position      = position_std,
+                current_price = current_price,
+                snap          = snap,
+                df_4h         = df_4h,
+                market_type   = 'stocks_spot',
+            )
+
+            if not result['should_close']:
+                return False
+
+            pnl = result['pnl']
+            
+            # Use normal process to close
+            await self._close_position(position, current_price, result['rule_code'])
+            
+            # Send alert
+            from app.core.telegram_notifier import send_telegram
+            await send_telegram(
+                f'🛡️ CIERRE PROACTIVO STOCKS [{ticker}]\n'
+                f'Regla: {result["rule_code"]}\n'
+                f'P&L: +{pnl["pnl_pct"]:.3f}% (${pnl["pnl_usd"]:.2f})\n'
+                f'Razón: {result["reason"]}'
+            )
+            return True
+        except Exception as e:
+            log_error(MODULE, f"Error en proactive exit stocks {ticker}: {e}")
+            return False
+
 
     async def _close_position(self, trade: dict, exit_price: float, exit_reason: str):
         """Close a position and record in journal."""
@@ -134,9 +204,13 @@ class PositionMonitor:
             }
             sb.table("trades_journal").insert(journal_entry).execute()
 
-            # 2. Mark trade as closed (only update columns that exist in schema)
-            sb.table("trades_active").update({
+            # 2. Mark trade as closed
+            sb.table("stocks_positions").update({
                 "status": "closed",
+                "current_price": exit_price,
+                "unrealized_pnl": pnl_usd,
+                "unrealized_pnl_pct": pnl_pct,
+                "updated_at": now
             }).eq("id", trade["id"]).execute()
 
             emoji = "🟢" if result == "win" else "🔴"
@@ -166,9 +240,9 @@ class PositionMonitor:
     async def force_close_all(self, reason: str = "manual_close"):
         """Emergency: close all active positions at market price."""
         sb = get_supabase()
-        active = sb.table("trades_active")\
+        active = sb.table("stocks_positions")\
             .select("*")\
-            .eq("status", "active")\
+            .eq("status", "open")\
             .execute()
 
         if not active.data:

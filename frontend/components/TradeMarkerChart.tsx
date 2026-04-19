@@ -29,6 +29,8 @@ interface TradeMarkerChartProps {
   basis?: number | null
   upper_6?: number | null
   lower_6?: number | null
+  precision?: number
+  minMove?: number
 }
 
 export default function TradeMarkerChart({
@@ -42,7 +44,9 @@ export default function TradeMarkerChart({
   activePosition = null,
   basis = null,
   upper_6 = null,
-  lower_6 = null
+  lower_6 = null,
+  precision = 2,
+  minMove = 0.01
 }: TradeMarkerChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
@@ -103,6 +107,11 @@ export default function TradeMarkerChart({
       borderDownColor: '#FF4757',
       wickUpColor: '#00C896',
       wickDownColor: '#FF4757',
+      priceFormat: {
+        type: 'price',
+        precision: precision,
+        minMove: minMove,
+      },
     })
     const sarSeries = chart.addSeries(LineSeries, {
       lineVisible: false,
@@ -234,16 +243,23 @@ export default function TradeMarkerChart({
 
     // Add Markers
     const markers = trades
-      .filter(t => t.type === 'entry' && showRealTrades) // Apply filter based on toggle
+      .filter(t => t.type === 'entry' && showRealTrades)
       .map(t => {
         const isLong = t.direction === 'long'
+        // Asegurar que el timestamp sea en segundos y sea un número válido
+        let tradeTime = typeof t.timestamp === 'string' ? new Date(t.timestamp).getTime() / 1000 : t.timestamp
+        if (tradeTime > 10000000000) tradeTime = tradeTime / 1000 // Convertir ms a s si es necesario
+        
+        // Encontrar la vela más cercana (o exacta) para alinear el marcador
+        const candleTime = formattedCandles.find(c => c.time <= tradeTime && (c.time + (15 * 60)) > tradeTime)?.time || tradeTime
+
         return {
-          time: t.timestamp as any,
+          time:     candleTime as any,
           position: isLong ? 'belowBar' : ('aboveBar' as any),
-          color: isLong ? '#00FF00' : '#FFA500', // Lime for Buy, Orange for Sell
-          shape: 'text' as any,
-          text: isLong ? 'BUY' : 'SELL',
-          size: 1
+          color:    isLong ? '#00FF00' : '#FFA500', 
+          shape:    'text' as any,
+          text:     isLong ? 'BUY' : 'SELL',
+          size:     1
         }
       })
 
@@ -251,12 +267,12 @@ export default function TradeMarkerChart({
     const pineMarkers = candles
       .filter(c => c.pinescript_signal === 'Buy' || c.pinescript_signal === 'Sell')
       .map(c => ({
-        time: Math.floor(new Date(c.open_time).getTime() / 1000) as any,
+        time:     Math.floor(new Date(c.open_time).getTime() / 1000) as any,
         position: c.pinescript_signal === 'Buy' ? 'belowBar' : ('aboveBar' as any),
-        color: c.pinescript_signal === 'Buy' ? '#00C896' : '#FF4757',
-        shape: 'text' as any,
-        text: c.pinescript_signal === 'Buy' ? 'B' : 'S',
-        size: 1
+        color:    c.pinescript_signal === 'Buy' ? '#00C896' : '#FF4757',
+        shape:    'text' as any,
+        text:     c.pinescript_signal === 'Buy' ? 'B' : 'S',
+        size:     2, // Aumentado de 1 a 2
       }))
 
     const allMarkers = [...markers, ...pineMarkers].sort((a, b) => a.time - b.time)
@@ -275,20 +291,25 @@ export default function TradeMarkerChart({
     priceLinesRef.current = []
 
     if (activePosition) {
-      const lines = [
-        { price: activePosition.avg_entry, color: '#00C896', title: `Entry $${activePosition.avg_entry.toLocaleString()}` },
-        { price: activePosition.sl_price, color: '#FF4757', title: `SL $${activePosition.sl_price.toLocaleString()}` },
-        { price: activePosition.tp_partial, color: '#FFD700', title: `TP1 $${activePosition.tp_partial.toLocaleString()}` },
-        { price: activePosition.tp_full, color: '#ffffff', title: `TP2 $${activePosition.tp_full.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 3 })}` },
-      ]
+      const entryPrice = activePosition.avg_entry || activePosition.entry_price || activePosition.avg_entry_price;
+      const slPrice = activePosition.sl_price;
+      const tp1Price = activePosition.tp_partial || activePosition.tp_partial_price || activePosition.tp_price;
+      const tp2Price = activePosition.tp_full || activePosition.tp_full_price;
 
-      lines.forEach(l => {
+      const lines = [
+        entryPrice ? { price: entryPrice, color: '#00C896', title: `Entry $${entryPrice.toLocaleString()}` } : null,
+        slPrice ? { price: slPrice, color: '#FF4757', title: `SL $${slPrice.toLocaleString()}` } : null,
+        tp1Price ? { price: tp1Price, color: '#FFD700', title: `TP1 $${tp1Price.toLocaleString()}` } : null,
+        tp2Price ? { price: tp2Price, color: '#ffffff', title: `TP2 $${tp2Price.toLocaleString()}` } : null,
+      ].filter(l => l !== null);
+
+      lines.forEach((l: any) => {
         if (l.price > 0) {
           const pl = candleSeriesRef.current?.createPriceLine({
             price: l.price,
             color: l.color,
             lineWidth: 1,
-            lineStyle: LineStyle.Dashed,
+            lineStyle: (LineStyle as any).Dashed || 2,
             axisLabelVisible: true,
             title: l.title,
           })

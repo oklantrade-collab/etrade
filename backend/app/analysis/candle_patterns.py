@@ -13,23 +13,7 @@ from app.analysis.data_fetcher import to_internal_symbol
 MODULE = "candle_patterns"
 
 
-def _vela_info(c: pd.Series) -> dict:
-    """Calculate body, range, shadows and direction for a candle."""
-    body = abs(c["close"] - c["open"])
-    rango = c["high"] - c["low"]
-    body_pct = body / rango if rango > 0 else 0
-    es_alcista = c["close"] > c["open"]
-    mecha_sup = c["high"] - max(c["open"], c["close"])
-    mecha_inf = min(c["open"], c["close"]) - c["low"]
-    return {
-        "body": body,
-        "rango": rango,
-        "body_pct": body_pct,
-        "es_alcista": es_alcista,
-        "mecha_sup": mecha_sup,
-        "mecha_inf": mecha_inf,
-    }
-
+from app.candle_signals.candle_patterns import CandlePatternDetector, CandleOHLC
 
 def detect_patterns(
     df: pd.DataFrame,
@@ -38,124 +22,69 @@ def detect_patterns(
     cycle_id: str | None = None,
 ) -> list[dict]:
     """
-    Detect candlestick patterns on the last 3 candles.
-
-    Requires minimum 3 candles. Returns a list of pattern dicts.
+    Detect candlestick patterns using the SIPV (26 patterns).
+    Returns a list of pattern dicts compatible with older callers.
     """
-    if df is None or len(df) < 3:
+    if df is None or len(df) < 5:
         return []
 
-    patterns = []
+    try:
+        # 1. Prepare Data
+        last_row = df.iloc[-1]
+        history_rows = df.tail(10).iloc[:-1]
+        
+        current_ohlc = CandleOHLC(
+            open=float(last_row['open']),
+            high=float(last_row['high']),
+            low=float(last_row['low']),
+            close=float(last_row['close']),
+            volume=float(last_row.get('volume', 0))
+        )
+        
+        history_ohlc = [
+            CandleOHLC(
+                open=float(r['open']),
+                high=float(r['high']),
+                low=float(r['low']),
+                close=float(r['close']),
+                volume=float(r.get('volume', 0))
+            )
+            for _, r in history_rows.iterrows()
+        ]
 
-    c3 = df.iloc[-3]  # oldest of the 3
-    c2 = df.iloc[-2]  # middle
-    c1 = df.iloc[-1]  # most recent (just closed)
+        # 2. SIPV Detection
+        market = "crypto" if "USD" in symbol.upper() else "stocks"
+        detector = CandlePatternDetector(market=market)
+        vol_sma = df['volume'].tail(20).mean() if 'volume' in df else None
+        
+        result = detector.evaluate(current_ohlc, history=history_ohlc, volume_sma20=vol_sma)
 
-    v1 = _vela_info(c1)
-    v2 = _vela_info(c2)
-    v3 = _vela_info(c3)
+        # 3. Format result (match legacy list[dict] expectation)
+        if result.pattern_id == 0:
+            return []
 
-    # Avoid division by zero
-    if v1["rango"] == 0:
-        return []
+        p_type = "neutral"
+        if result.action == "BUY": p_type = "bullish"
+        elif result.action == "SELL": p_type = "bearish"
+        elif "Alcista" in result.signal: p_type = "bullish"
+        elif "Bajista" in result.signal: p_type = "bearish"
 
-    # ── DOJI ──
-    if v1["body_pct"] < 0.10:
-        patterns.append({
-            "pattern_name": "Doji",
-            "pattern_type": "neutral",
-            "pattern_strength": 60,
-            "timestamp": c1.get("open_time"),
-        })
+        patterns = [{
+            "pattern_name": result.pattern_name,
+            "pattern_type": p_type,
+            "pattern_strength": result.confidence,
+            "timestamp": last_row.get("open_time", datetime.now(timezone.utc)),
+            "signal": result.signal
+        }]
 
-    # ── HAMMER (bullish reversal) ──
-    if (
-        not v1["es_alcista"]
-        and v1["mecha_inf"] >= 2 * v1["body"]
-        and v1["mecha_sup"] <= 0.2 * v1["rango"]
-        and 0.10 <= v1["body_pct"] <= 0.40
-    ):
-        patterns.append({
-            "pattern_name": "Hammer",
-            "pattern_type": "bullish",
-            "pattern_strength": 75,
-            "timestamp": c1.get("open_time"),
-        })
-
-    # ── SHOOTING STAR (bearish reversal) ──
-    if (
-        v1["mecha_sup"] >= 2 * v1["body"]
-        and v1["mecha_inf"] <= 0.2 * v1["rango"]
-        and 0.10 <= v1["body_pct"] <= 0.40
-    ):
-        patterns.append({
-            "pattern_name": "Shooting Star",
-            "pattern_type": "bearish",
-            "pattern_strength": 75,
-            "timestamp": c1.get("open_time"),
-        })
-
-    # ── BULLISH ENGULFING ──
-    if (
-        not v2["es_alcista"]
-        and v1["es_alcista"]
-        and c1["open"] < c2["close"]
-        and c1["close"] > c2["open"]
-        and v1["body"] > v2["body"]
-    ):
-        patterns.append({
-            "pattern_name": "Bullish Engulfing",
-            "pattern_type": "bullish",
-            "pattern_strength": 85,
-            "timestamp": c1.get("open_time"),
-        })
-
-    # ── BEARISH ENGULFING ──
-    if (
-        v2["es_alcista"]
-        and not v1["es_alcista"]
-        and c1["open"] > c2["close"]
-        and c1["close"] < c2["open"]
-        and v1["body"] > v2["body"]
-    ):
-        patterns.append({
-            "pattern_name": "Bearish Engulfing",
-            "pattern_type": "bearish",
-            "pattern_strength": 85,
-            "timestamp": c1.get("open_time"),
-        })
-
-    # ── MORNING STAR (3-candle bullish reversal) ──
-    if (
-        not v3["es_alcista"]
-        and v2["body_pct"] < 0.20
-        and v1["es_alcista"]
-        and c1["close"] > (c3["open"] + c3["close"]) / 2
-    ):
-        patterns.append({
-            "pattern_name": "Morning Star",
-            "pattern_type": "bullish",
-            "pattern_strength": 90,
-            "timestamp": c1.get("open_time"),
-        })
-
-    # ── EVENING STAR (3-candle bearish reversal) ──
-    if (
-        v3["es_alcista"]
-        and v2["body_pct"] < 0.20
-        and not v1["es_alcista"]
-        and c1["close"] < (c3["open"] + c3["close"]) / 2
-    ):
-        patterns.append({
-            "pattern_name": "Evening Star",
-            "pattern_type": "bearish",
-            "pattern_strength": 90,
-            "timestamp": c1.get("open_time"),
-        })
-
-    # ── Persist to Supabase ──
-    if patterns:
+        # 4. Persist to Supabase
         _save_patterns(patterns, symbol, timeframe, cycle_id)
+        
+        return patterns
+
+    except Exception as e:
+        log_warning(MODULE, f"Error in SIPV pattern detection for {symbol}: {e}")
+        return []
 
     return patterns
 

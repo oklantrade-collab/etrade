@@ -75,6 +75,36 @@ def calculate_stock_indicators(
     df["macd_signal"] = macd.macd_signal()
     df["macd_histogram"] = macd.macd_diff()
 
+    # ── MACD 4C Signal (PineScript Proxy) ──
+    # State: 1: Dark Green (Bullish Inc), 2: Light Green (Bullish Dec), 3: Dark Red (Bearish Inc), 4: Light Red (Bearish Dec)
+    prev_macd = df["macd_line"].shift(1)
+    df["macd_4c"] = np.select(
+        [(df["macd_line"] > 0) & (df["macd_line"] > prev_macd),
+         (df["macd_line"] > 0) & (df["macd_line"] <= prev_macd),
+         (df["macd_line"] < 0) & (df["macd_line"] < prev_macd),
+         (df["macd_line"] < 0) & (df["macd_line"] >= prev_macd)],
+        [1, 2, 3, 4], default=0
+    )
+    c = df["macd_4c"]
+    df["pinescript_signal"] = np.where((c == 4) & (c.shift(1) == 3) & (c.shift(2) == 3), 'Buy',
+                                np.where((c == 2) & (c.shift(1) == 1) & (c.shift(2) == 1), 'Sell', None))
+
+    # Signal Age logic
+    ages = []
+    last_sigs = []
+    cur_age = 999
+    cur_signal = None
+    for val in df["pinescript_signal"]:
+        if val is not None:
+            cur_age = 0
+            cur_signal = val
+        else:
+            cur_age += 1 if cur_age < 999 else 0
+        ages.append(cur_age)
+        last_sigs.append(cur_signal)
+    df["signal_age"] = ages
+    df["last_pinescript_signal"] = last_sigs
+
     # ── Bollinger Bands (20, 2σ) ──
     bb = BollingerBands(close=close, window=20, window_dev=2)
     df["bb_lower"] = bb.bollinger_lband()
@@ -116,11 +146,9 @@ def calculate_stock_indicators(
     ema_alignment = _classify_ema_alignment(last)
     df["ema_alignment"] = ema_alignment
 
-    # ── Daily/Period Change ──
-    if len(df) > 1:
-        df["change_pct"] = ((df["close"] - df["close"].shift(1)) / df["close"].shift(1)) * 100
-    else:
-        df["change_pct"] = 0.0
+    # ── Intraday/Period Performance (Open vs Close) ──
+    # User requested Apertura (1.11) vs Cierre (1.95) logic
+    df["change_pct"] = ((df["close"] - df["open"]) / df["open"]) * 100
 
     # ── Extract last candle values ──
     last = df.iloc[-1]
@@ -128,6 +156,7 @@ def calculate_stock_indicators(
         "ema_9", "ema_20", "ema_50", "ema_200",
         "rsi_14",
         "macd_line", "macd_signal", "macd_histogram",
+        "pinescript_signal", "signal_age", "last_pinescript_signal",
         "bb_upper", "bb_middle", "bb_lower", "bb_squeeze",
         "atr_14",
         "adx_14", "di_plus", "di_minus",
@@ -386,11 +415,38 @@ def upsert_technical_score(
                 "di_plus": indicators.get("di_plus"),
                 "di_minus": indicators.get("di_minus"),
                 "change_pct": indicators.get("change_pct", 0.0),
+                "market_cap": indicators.get("market_cap", 0),
+                "rvol": indicators.get("rvol", 1.0),
+                "volume": indicators.get("volume", 0),
                 "pro_score": pro_score,
+                "ai_rationale": indicators.get("ai_rationale", ""),
+                "qwen_score": indicators.get("qwen_score", 0),
+                "gemini_score": indicators.get("gemini_score", 0),
+                "qwen_summary": indicators.get("qwen_summary", ""),
+                "gemini_summary": indicators.get("gemini_summary", ""),
+                "intrinsic_value": indicators.get("intrinsic_value", 0),
+                "undervaluation": indicators.get("undervaluation", 0),
+                # Smart Limit & Movement (Multi-TF)
+                "movement_15m": indicators.get("movement_15m"),
+                "fib_zone_15m": indicators.get("fib_zone_15m"),
+                "smart_limit_long_15m": indicators.get("smart_limit_long_15m"),
+                "smart_limit_short_15m": indicators.get("smart_limit_short_15m"),
+                "movement_1d": indicators.get("movement_1d"),
+                "fib_zone_1d": indicators.get("fib_zone_1d"),
+                "smart_limit_long_1d": indicators.get("smart_limit_long_1d"),
+                "smart_limit_short_1d": indicators.get("smart_limit_short_1d"),
+                # Component Confirmation (For UI)
+                "t01_confirmed": indicators.get("t01_confirmed", False),
+                "t02_confirmed": indicators.get("t02_confirmed", False),
+                "t03_confirmed": indicators.get("t03_confirmed", False),
+                "t04_confirmed": indicators.get("t04_confirmed", False),
             },
         }
 
+        # Delete existing and Insert new (Robust fallback for missing DB constraints)
+        sb.table("technical_scores").delete().eq("ticker", ticker).execute()
         sb.table("technical_scores").insert(row).execute()
+        
         log_info(MODULE, f"Technical score for {ticker}: {technical_score:.1f} "
                          f"(MTF: {'✅' if mtf_confirmed else '❌'})")
 

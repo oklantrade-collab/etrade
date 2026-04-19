@@ -1,11 +1,18 @@
 """
-eTrader v4.5 — Stocks Universe Builder (IB Scanner)
-Capa 0: Discovers tradable stocks using IB TWS Hot by Volume scanner.
+eTrader v4.5 — Stocks Universe Builder (Dynamic Scanner)
+Capa 0: Discovers tradable stocks using multiple data sources.
 
-Filtros aplicados:
-  1. Precio < configurable (default $50)
-  2. Market Cap > $500M
-  3. Volumen > 700k
+Scanner Priority:
+  1. IB TWS HOT_BY_VOLUME scanner (when connected)
+  2. Yahoo Finance Screener API (always available, real-time)
+  3. Alpha Vantage Top Movers fallback
+  4. Static curated universe fallback
+
+Filtros configurables:
+  1. Precio: $1 – $20 (configurable)
+  2. Volumen Relativo > 1.5 (configurable)
+  3. Volumen > 1M acciones (configurable)
+  4. Market Cap > $1B (configurable)
 """
 import os
 import sys
@@ -16,6 +23,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
+from app.analysis.fundamental_scorer import FundamentalScorer
 
 MODULE = "universe_builder"
 
@@ -23,45 +31,125 @@ MODULE = "universe_builder"
 class UniverseBuilder:
     def __init__(self):
         self.last_scan_tickers: list[str] = []
+        self.f_scorer = FundamentalScorer()
 
-    async def build_daily_watchlist(self, max_price: float = 50.0, min_market_cap: int = 500_000_000) -> list[dict]:
-        log_info(MODULE, f"═══ SCANNER: max_price=${max_price} | min_cap=${min_market_cap/1e6:.0f}M ═══")
+    async def build_daily_watchlist(
+        self,
+        max_price: float = 20.0,
+        min_price: float = 1.0,
+        min_market_cap: int = 1_000_000_000,
+        min_volume: int = 1_000_000,
+        min_rvol: float = 1.5,
+        max_results: int = 50,
+    ) -> list[dict]:
+        """
+        Build a dynamic watchlist of Hot by Volume candidates.
 
-        # 1. Try IB Scanner
-        candidates = await self._scan_ib(max_price=max_price, min_market_cap=min_market_cap)
+        Uses IB Scanner as primary source, then Yahoo Finance Screener as
+        fallback. The Yahoo Screener queries Yahoo's real-time database of
+        ALL US equities — no hardcoded ticker lists needed.
+        """
+        log_info(MODULE, f"═══ SCANNER: ${min_price}-${max_price} | "
+                         f"Vol>{min_volume/1e6:.0f}M | MCap>{min_market_cap/1e9:.0f}B | "
+                         f"RVOL>{min_rvol} ═══")
 
-        # 2. Fallback: Alpha Vantage
+        candidates = []
+
+        # 1. Try IB Scanner (best quality — real TWS data)
+        candidates = await self._scan_ib(
+            max_price=max_price, min_price=min_price,
+            min_market_cap=min_market_cap, min_volume=min_volume,
+            max_results=max_results,
+        )
+
+        # 2. Fallback: Yahoo Finance Screener (excellent — full US market)
         if not candidates:
-            log_warning(MODULE, "IB Scanner sin resultados, usando Alpha Vantage fallback...")
+            log_info(MODULE, "IB Scanner unavailable — using Yahoo Finance Screener...")
+            candidates = await self._scan_yahoo_screener(
+                max_price=max_price, min_price=min_price,
+                min_market_cap=min_market_cap, min_volume=min_volume,
+                min_rvol=min_rvol, max_results=max_results,
+            )
+
+        # 3. Fallback: Alpha Vantage
+        if not candidates:
+            log_warning(MODULE, "Yahoo Screener failed — trying Alpha Vantage...")
             candidates = await self._scan_alphavantage_fallback(max_price=max_price)
 
-        # 3. Fallback: yfinance (SIEMPRE funciona)
+        # 4. Final fallback: static curated list
         if not candidates:
-            log_warning(MODULE, "Alpha Vantage fallback sin resultados, usando yfinance fallback...")
-            candidates = await self._scan_yfinance_fallback(max_price=max_price)
+            log_warning(MODULE, "All scanners failed — using static fallback...")
+            candidates = await self._scan_static_fallback(max_price=max_price)
 
-        # 4. Top 20
-        candidates = candidates[:20]
+        # Limit results
+        candidates = candidates[:max_results]
+
+        # ── 5. FUNDAMENTAL SCORING (Capa 0+ — "Futuras Gigantes") ──
+        if candidates:
+            log_info(MODULE, f"🧠 Calculando Fundamental Scores para {len(candidates)} candidatos...")
+            # Cargar configuración HIBRIDA (Nube + Local Fallback)
+            u_settings = None
+            try:
+                settings_res = get_supabase().table("universe_settings").select("*").eq("id", 1).maybe_single().execute()
+                u_settings = settings_res.data
+            except:
+                pass
+
+            if not u_settings:
+                try:
+                    import json
+                    spath = "c:/Fuentes/eTrade/backend/data/universe_settings.json"
+                    if os.path.exists(spath):
+                        with open(spath, 'r') as f:
+                            u_settings = json.load(f)
+                except:
+                    pass
+
+            # 3. Obtener performance del SPY (Index Benchmark)
+            spy_perf = await self.f_scorer.get_spy_performance_6m()
+            
+            # Procesar fundamentales en lotes para no saturar
+            tasks = []
+            for c in candidates:
+                price = c.get("_price", 100) # Fallback 100 si no hay precio
+                tasks.append(self.f_scorer.calculate_score(c["ticker"], spy_perf, price, u_settings))
+            
+            f_results = await asyncio.gather(*tasks)
+            
+            for i, f_data in enumerate(f_results):
+                if f_data:
+                    candidates[i].update(f_data)
+                else:
+                    # Fallback si falla el fundamental
+                    candidates[i]["fundamental_score"] = 0
 
         if candidates:
             await self._save_to_db(candidates)
             self.last_scan_tickers = [c["ticker"] for c in candidates]
-            tickers_str = ", ".join(c["ticker"] for c in candidates[:10])
-            log_info(MODULE, f"Universe: {len(candidates)} tickers. Top: {tickers_str}")
+            
+            # Preparar estadisticas para el Dashboard
+            counts = {"FUTURE_GIANT": 0, "GROWTH_LEADER": 0, "TOTAL": len(candidates)}
+            for c in candidates:
+                pt = str(c.get("pool_type", ""))
+                if "GIANT" in pt: counts["FUTURE_GIANT"] += 1
+                if "LEADER" in pt: counts["GROWTH_LEADER"] += 1
+            
+            log_info(MODULE, f"✅ Universe Sweep Complete: {counts}")
+            return counts
         else:
-            log_warning(MODULE, "No candidates found after all filters (will retry next cycle)")
+            log_warning(MODULE, "No candidates found after all scanners")
+            return {"FUTURE_GIANT": 0, "GROWTH_LEADER": 0, "TOTAL": 0}
 
-        return candidates
-
-    async def _scan_ib(self, max_price: float, min_market_cap: int) -> list[dict]:
+    # ─── 1. IB Scanner (Primary) ───────────────────────────────
+    async def _scan_ib(self, max_price, min_price, min_market_cap, min_volume, max_results) -> list[dict]:
         try:
             from app.data.ib_scanner import scan_hot_by_volume
             results = await scan_hot_by_volume(
-                max_results=50,
-                min_price=1.0,
+                max_results=max_results,
+                min_price=min_price,
                 max_price=max_price,
-                min_volume=300_000,
-                min_market_cap=200_000_000,
+                min_volume=min_volume,
+                min_market_cap=min_market_cap,
             )
             if not results:
                 return []
@@ -69,13 +157,106 @@ class UniverseBuilder:
             return [{
                 "ticker": r["ticker"].upper(),
                 "catalyst_score": max(1, 10 - r.get("rank", 50) // 5),
-                "source": "ib_scanner",  # 10 chars, fits varchar(20)
+                "source": "ib_scanner",
             } for r in results]
 
         except Exception as e:
-            log_error(MODULE, f"IB Scanner failed: {e}")
+            log_warning(MODULE, f"IB Scanner not available: {e}")
             return []
 
+    # ─── 2. Yahoo Finance Screener (Primary Fallback) ──────────
+    async def _scan_yahoo_screener(
+        self,
+        max_price: float,
+        min_price: float,
+        min_market_cap: int,
+        min_volume: int,
+        min_rvol: float,
+        max_results: int,
+    ) -> list[dict]:
+        """
+        Uses yfinance's built-in Screener API to query Yahoo Finance's
+        real-time stock database. This dynamically discovers ALL US equities
+        matching the user's 4 criteria — no hardcoded ticker lists.
+
+        Returns stocks sorted by volume (descending), matching:
+          - Price: $min_price to $max_price
+          - Volume: > min_volume
+          - Market Cap: > min_market_cap
+          - Region: US only
+        """
+        try:
+            from yfinance.screener import EquityQuery, screen
+
+            # Build the query matching all 4 criteria
+            query = EquityQuery('AND', [
+                EquityQuery('EQ', ['region', 'us']),
+                EquityQuery('GT', ['intradaymarketcap', min_market_cap]),
+                EquityQuery('GT', ['dayvolume', min_volume]),
+                EquityQuery('LT', ['intradayprice', max_price]),
+                EquityQuery('GT', ['intradayprice', min_price]),
+            ])
+
+            # Fetch from Yahoo — get a large pool, then filter by RVOL locally
+            # Yahoo max size is 250. We fetch all matching, then rank by RVOL.
+            fetch_size = min(250, max(max_results * 3, 100))
+            res = screen(query, size=fetch_size, sortField='dayvolume', sortAsc=False)
+
+            if not res or not res.get('quotes'):
+                log_warning(MODULE, "Yahoo Screener: no results returned")
+                return []
+
+            total_in_yahoo = res.get('total', 0)
+            log_info(MODULE, f"Yahoo Screener: {total_in_yahoo} total matches in US market, "
+                             f"fetched {len(res['quotes'])} by volume")
+
+            candidates = []
+            for rank, q in enumerate(res['quotes']):
+                sym = q.get('symbol', '')
+                if not sym or '.' in sym:  # Skip ADRs with dots
+                    continue
+
+                price = q.get('regularMarketPrice', 0)
+                vol = q.get('regularMarketVolume', 0)
+                avg_vol = q.get('averageDailyVolume3Month', 1)
+                mcap = q.get('marketCap', 0)
+                chg_pct = q.get('regularMarketChangePercent', 0)
+                name = q.get('shortName', '')
+
+                # Compute RVOL (today's volume / 3-month average)
+                rvol = vol / avg_vol if avg_vol > 0 else 0
+
+                candidates.append({
+                    "ticker": sym.upper(),
+                    "catalyst_score": max(1, min(10, int(vol / 5_000_000))),
+                    "source": "yf_screener",
+                    # Extra metadata for downstream processing
+                    "_price": price,
+                    "_volume": vol,
+                    "_avg_volume": avg_vol,
+                    "_rvol": rvol,
+                    "_market_cap": mcap,
+                    "_change_pct": chg_pct,
+                    "_name": name,
+                })
+
+            # Sort by RVOL descending — surface high-momentum stocks first
+            candidates.sort(key=lambda x: x.get("_rvol", 0), reverse=True)
+
+            # Log RVOL distribution for debugging
+            rvol_above_15 = sum(1 for c in candidates if c.get("_rvol", 0) >= 1.5)
+            rvol_above_10 = sum(1 for c in candidates if c.get("_rvol", 0) >= 1.0)
+            log_info(MODULE, f"Yahoo Screener: {len(candidates)} US stocks | "
+                             f"RVOL>=1.5: {rvol_above_15} | RVOL>=1.0: {rvol_above_10}")
+
+            # Return top N sorted by RVOL
+            return candidates[:max_results]
+
+        except Exception as e:
+            log_error(MODULE, f"Yahoo Screener failed: {e}")
+            return []
+
+    # ─── 3. Alpha Vantage Fallback ─────────────────────────────
     async def _scan_alphavantage_fallback(self, max_price: float) -> list[dict]:
         try:
             from app.data.ib_scanner import fallback_top_movers
@@ -86,12 +267,12 @@ class UniverseBuilder:
             candidates = []
             for r in results:
                 price = r.get("price", 0)
-                if price > 0 and price > max_price:
-                    continue  # Skip stocks above max price
+                if price <= 0 or price > max_price:
+                    continue
                 candidates.append({
                     "ticker": r["ticker"].upper(),
                     "catalyst_score": 5,
-                    "source": "av_fallback",  # 11 chars, fits varchar(20)
+                    "source": "av_fallback",
                 })
             return candidates
 
@@ -99,60 +280,21 @@ class UniverseBuilder:
             log_error(MODULE, f"Alpha Vantage fallback failed: {e}")
             return []
 
-    async def _scan_yfinance_fallback(self, max_price: float) -> list[dict]:
-        """
-        Third-tier fallback: Uses yfinance to scan a curated universe of liquid US stocks.
-        This ALWAYS works since it doesn't depend on IB TWS or an API key.
-        """
-        try:
-            import yfinance as yf
+    # ─── 4. Static Curated Fallback ────────────────────────────
+    async def _scan_static_fallback(self, max_price: float) -> list[dict]:
+        """Last-resort fallback using a curated list of liquid US stocks."""
+        UNIVERSE = [
+            "AAL", "WULF", "ET", "SOFI", "NIO", "PLUG", "SNAP", "MARA",
+            "RIOT", "LCID", "HOOD", "RIVN", "PLTR", "NOK", "F", "JBLU",
+            "COIN", "SQ", "DKNG", "OPEN", "BBD", "VALE", "KOS", "DNN",
+        ]
+        return [{
+            "ticker": t,
+            "catalyst_score": 5,
+            "source": "static_fallback",
+        } for t in UNIVERSE]
 
-            # Curated universe: 50 most liquid US stocks across sectors
-            UNIVERSE = [
-                "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD", "INTC", "SOFI",
-                "NIO", "PLTR", "MARA", "RIOT", "COIN", "HOOD", "LCID", "RIVN", "SNAP", "PINS",
-                "BITO", "SOXL", "TQQQ", "SQQQ", "TZA", "UVXY", "SPXS", "LABU", "JNUG",
-                "OPEN", "WISH", "BBIG", "MULN", "TELL", "FCEL", "PLUG", "CLOV", "DKNG", "WKHS",
-                "NOK", "BB", "VALE", "GOLD", "SLV", "USO", "XLE", "IWM", "SPY", "QQQ", "ARKK",
-            ]
-
-            candidates = []
-            # Download in batch for speed
-            tickers_str = " ".join(UNIVERSE)
-            data = yf.download(tickers_str, period="1d", group_by="ticker", progress=False, threads=True)
-
-            rank = 0
-            for ticker in UNIVERSE:
-                try:
-                    if ticker in data.columns.get_level_values(0):
-                        ticker_data = data[ticker]
-                        if ticker_data.empty or len(ticker_data) == 0:
-                            continue
-                        last = ticker_data.iloc[-1]
-                        price = float(last.get("Close", 0))
-                        volume = float(last.get("Volume", 0))
-
-                        if price <= 0 or price > max_price or volume < 100000:
-                            continue
-
-                        candidates.append({
-                            "ticker": ticker,
-                            "catalyst_score": max(1, min(10, int(volume / 1_000_000))),
-                            "source": "yf_fallback",
-                        })
-                        rank += 1
-                except Exception:
-                    continue
-
-            # Sort by catalyst_score (volume proxy) descending
-            candidates.sort(key=lambda x: x["catalyst_score"], reverse=True)
-            log_info(MODULE, f"yfinance fallback: {len(candidates)} tickers found")
-            return candidates
-
-        except Exception as e:
-            log_error(MODULE, f"yfinance fallback failed: {e}")
-            return []
-
+    # ─── Save to Database ──────────────────────────────────────
     async def _save_to_db(self, candidates: list[dict]):
         sb = get_supabase()
         today = date.today().isoformat()
@@ -161,16 +303,35 @@ class UniverseBuilder:
         for c in candidates:
             rows.append({
                 "ticker": c["ticker"],
-                "pool_type": c.get("source", "scanner")[:20],  # Truncate to 20 chars
+                "pool_type": c.get("pool_type", "")[:50] if c.get("pool_type") else "",
                 "catalyst_score": c.get("catalyst_score", 5),
-                "catalyst_type": "HOT_BY_VOLUME",
+                "catalyst_type": "HOT_BY_VOLUME" if c.get("_price", 100) < 20 else "SWEEP",
                 "date": today,
+                "price": round(float(c.get("_price", 0) or 0), 2),
                 "hard_filter_pass": True,
+                "quality_flag": c.get("quality_flag", "PASS"),
+                # CAMPOS FUNDAMENTALES
+                "fundamental_score": round(float(c.get("fundamental_score", 0) or 0), 2),
+                "revenue_growth_yoy": round(float(c.get("revenue_growth_yoy", 0) or 0), 2),
+                "gross_margin": round(float(c.get("gross_margin", 0) or 0), 2),
+                "eps_growth_qoq": round(float(c.get("eps_growth_qoq", 0) or 0), 2),
+                "rs_score_6m": round(float(c.get("rs_score_6m", 0) or 0), 2),
+                "inst_ownership_pct": round(float(c.get("inst_ownership_pct", 0) or 0), 2),
+                "market_cap_mln": round(float(c.get("market_cap_mln", 0) or 0), 2)
             })
 
+        # Log sample for debugging
+        if rows:
+            sample = rows[0]
+            log_info(MODULE, f"Sample row to save: {sample['ticker']} | price={sample['price']} | "
+                             f"fund_score={sample['fundamental_score']} | pool={sample['pool_type']}")
+
         try:
-            sb.table("watchlist_daily").delete().eq("date", today).execute()
-            res = sb.table("watchlist_daily").insert(rows).execute()
-            log_info(MODULE, f"✅ {len(rows)} tickers saved to watchlist_daily for {today}")
+            # LIMPIEZA TOTAL: Solo queremos ver lo que el escáner acaba de encontrar hoy.
+            # No queremos basura de días anteriores en Inversión Pro.
+            sb.table("watchlist_daily").delete().neq("ticker", "DUMMY").execute() 
+            sb.table("watchlist_daily").insert(rows).execute()
+            log_info(MODULE, f"DB OK: {len(rows)} tickers saved for {today}")
         except Exception as e:
-            log_error(MODULE, f"❌ DB insert failed: {e}")
+            import traceback
+            log_error(MODULE, f"DB insert failed: {e}\n{traceback.format_exc()}")

@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime, timezone
 from app.core.memory_store import BOT_STATE
 from app.core.logger import log_info, log_warning, log_error
+from app.core.crypto_symbols import normalize_crypto_symbol, crypto_symbol_match_variants
 
 MODULE = "POSITION_MONITOR"
 
@@ -199,13 +200,13 @@ async def check_open_positions_5m(
 
         # Get latest snapshot for MTFs
         snap_res = supabase.table('market_snapshot').select('symbol, price, mtf_score, adx').execute()
-        mtf_scores = {r['symbol'].replace("/", ""): float(r['mtf_score']) for r in snap_res.data}
+        mtf_scores = {r['symbol'].replace("/", ""): float(r.get('mtf_score') or 0) for r in (snap_res.data or [])}
         
         # Get active positions from Supabase
         pos_res = supabase.table('positions').select('*').eq('status', 'open').execute()
         for pos in pos_res.data:
             symbol = pos['symbol']
-            norm_symbol = symbol.replace("/", "").upper()
+            norm_symbol = normalize_crypto_symbol(symbol)
             
             # USO DE PRECIO EN TIEMPO REAL SI ES POSIBLE
             # Si el provider es real, obtenemos el ticker actual para evitar spam por snapshot estático
@@ -229,7 +230,8 @@ async def check_open_positions_5m(
             
             # 0. ACTUALIZACIÓN DE PRECIO EN VIVO Y P&L (Para el Dashboard)
             entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
-            upnl = (price - entry_p) * float(pos.get('size') or 0) if side == 'long' else (entry_p - price) * float(pos.get('size') or 0)
+            is_long = side in ['long', 'buy']
+            upnl = (price - entry_p) * float(pos.get('size') or 0) if is_long else (entry_p - price) * float(pos.get('size') or 0)
             
             try:
                 supabase.table('positions').update({
@@ -237,14 +239,74 @@ async def check_open_positions_5m(
                     'unrealized_pnl': round(upnl, 4)
                 }).eq('id', pos['id']).execute()
             except Exception as upd_e:
-                log_debug(MODULE, f"Silent update fail for {symbol}: {upd_e}")
+                log_warning(MODULE, f"Silent update fail for {symbol}: {upd_e}")
 
-            # 1. STOP LOSS (Full Close)
-            is_sl = (side == 'long' and price <= sl) or (side == 'short' and price >= sl) if sl > 0 else False
-            if is_sl:
-                await _execute_paper_close(pos, price, 'sl', supabase)
-                events.append({'symbol': symbol, 'event': 'sl_hit'})
+            # 1. STOP LOSS (Full Close) via Dynamic SL Manager
+            from app.strategy.dynamic_sl_manager import evaluate_sl_action
+            df_4h = MEMORY_STORE.get(norm_symbol, {}).get('4h', {}).get('df')
+            df_1d = MEMORY_STORE.get(norm_symbol, {}).get('1d', {}).get('df')
+
+            # We use snapshot info mapped to what evaluate_sl_action expects
+            snap_for_sl = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
+
+            sl_action = evaluate_sl_action(
+                position      = pos,
+                current_price = price,
+                snap          = snap_for_sl,
+                df_4h         = df_4h,
+                df_1d         = df_1d,
+                market_type   = 'crypto_futures',
+            )
+
+            action = sl_action['action']
+
+            if action == 'close_backstop':
+                await _execute_paper_close(pos, price, 'backstop_sl', supabase)
+                events.append({'symbol': symbol, 'event': 'backstop_sl_hit'})
                 continue
+
+            if action == 'trigger_dynamic_sl':
+                await _execute_paper_close(pos, price, 'dynamic_sl', supabase)
+                events.append({'symbol': symbol, 'event': 'dynamic_sl_hit'})
+                continue
+
+            if action == 'activate_dynamic_sl':
+                sl_dynamic_price = sl_action['sl_price']
+                sipv             = sl_action['sipv']
+                
+                log_info(MODULE, f'⚡ ACTIVANDO DYNAMIC SL {norm_symbol}: {sl_dynamic_price:.6f} ({sl_action["reason"]})')
+                
+                try:
+                    supabase.table('positions').update({
+                        'sl_dynamic_price':    sl_dynamic_price,
+                        'sl_type':             'dynamic',
+                        'sl_activated_at':     datetime.now(timezone.utc).isoformat(),
+                        'sl_activation_reason': sipv.get('pattern', 'sipv'),
+                        'stop_loss_price':     sl_dynamic_price,
+                    }).eq('id', pos['id']).execute()
+                    
+                    from app.strategy.dynamic_sl_manager import send_sl_to_exchange
+                    await send_sl_to_exchange(
+                        symbol      = norm_symbol,
+                        side        = side,
+                        sl_price    = sl_dynamic_price,
+                        quantity    = pos.get('size'),
+                        position_id = pos['id'],
+                        supabase    = supabase,
+                        market_type = 'crypto_futures'
+                    )
+                except Exception as upd_e:
+                    log_warning(MODULE, f"Silent dynamic SL update fail for {symbol}: {upd_e}")
+
+            if action == 'update_trailing':
+                try:
+                    supabase.table('positions').update({
+                        'trailing_sl_price': sl_action['sl_price'],
+                        'highest_price_reached': sl_action.get('new_max'),
+                        'lowest_price_reached': sl_action.get('new_min'),
+                    }).eq('id', pos['id']).execute()
+                except Exception as upd_e:
+                    log_warning(MODULE, f"Silent trailing SL update fail for {symbol}: {upd_e}")
 
             # 2. TAKE PROFIT PARTIAL (50% Close)
             is_tp_p = (side == 'long' and price >= tp_p) or (side == 'short' and price <= tp_p) if (tp_p > 0 and not pos.get('partial_closed')) else False
@@ -347,27 +409,42 @@ async def _execute_paper_open(
     from app.core.memory_store import BOT_STATE
     from app.core.logger import log_info
 
-    # 1. Límite GLOBAL (max_open_trades)
-    max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
-    
-    # Consultar DB directamente para conteo global exacto
-    pos_res = supabase.table('positions').select('id').eq('status', 'open').execute()
-    current_global = len(pos_res.data) if pos_res.data else 0
-    
-    if current_global >= max_global:
-        log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
-        return None
+    symbol = normalize_crypto_symbol(symbol)
 
-    # 2. Límite POR SÍMBOLO
-    max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
-    
-    # Contar posiciones abiertas para este símbolo específico
-    sym_pos_res = supabase.table('positions').select('id').eq('symbol', symbol).eq('status', 'open').execute()
-    current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
+    # 1. Límite GLOBAL (max_open_trades) y SÍMBOLO usando LOCK para atomicidad
+    async with BOT_STATE.order_lock:
+        max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
+        
+        # Consultar DB directamente para conteo global exacto
+        pos_res = supabase.table('positions').select('id').eq('status', 'open').execute()
+        current_global = len(pos_res.data) if pos_res.data else 0
+        
+        if current_global >= max_global:
+            log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
+            return None
 
-    if current_sym >= max_symbol:
-        log_info(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} posiciones por símbolo alcanzado ({current_sym}).")
-        return None
+        # 2. Límite POR SÍMBOLO
+        max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
+        
+        # Contar posiciones abiertas para este símbolo específico
+        sym_pos_res = supabase.table('positions').select('id').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
+        current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
+
+        if current_sym >= max_symbol:
+            log_info(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} posiciones por símbolo alcanzado ({current_sym}).")
+            return None
+
+        # Si pasamos los límites, procedemos a abrir (dentro del lock o justo después)
+        # Lo mantenemos dentro del lock para que el 'count' de la siguiente tarea sea correcto
+        res = await _execute_paper_open_unlocked(
+            symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
+        )
+        return res
+
+async def _execute_paper_open_unlocked(
+    symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
+):
+    """Lógica interna de apertura sin lock (ya envuelto por _execute_paper_open)"""
     from datetime import datetime, timezone
     from app.core.position_sizing import calculate_sl_tp
     
@@ -392,15 +469,29 @@ async def _execute_paper_open(
         tp_full    = price * (1.08 if side == 'long' else 0.92)
         tp_partial = price * (1.04 if side == 'long' else 0.96)
 
-    # Calculamos SL con el multiplicador dinámico de velocidad
+    # Calculamos SL con el multiplicador dinámico de velocidad y buffer extra
+    from app.core.memory_store import BOT_STATE
+    buffer_pct = float(BOT_STATE.config_cache.get('sl_extra_buffer_pct', 0.5))
+    
     sl_dict = calculate_sl_tp(
         side        = side,
         entry_price = price,
         atr         = float(levels.get('atr', price * 0.02)), # Fallback approx
         atr_mult    = float(vel_config.get('sl_mult', 1.0)),
-        levels      = levels
+        levels      = levels,
+        sl_buffer_pct = buffer_pct
     )
     
+    # ── VALIDACIÓN DE COHERENCIA SL vs ENTRY (V2 Engine) ──
+    sl_final = sl_dict['sl_price']
+    if side.lower() in ['long', 'buy'] and sl_final >= price and sl_final > 0:
+        sl_final = price * 0.995  # Forzar SL 0.5% debajo del entry
+        log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
+    elif side.lower() in ['short', 'sell'] and sl_final <= price and sl_final > 0:
+        sl_final = price * 1.005  # Forzar SL 0.5% arriba del entry
+        log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
+    sl_dict['sl_price'] = sl_final
+
     # Persistir
     data = {
         'symbol':           symbol,
@@ -409,9 +500,9 @@ async def _execute_paper_open(
         'avg_entry_price':  round(price, 8),
         'current_price':    round(price, 8),
         'size':             round(size, 8),
-        'stop_loss':        round(sl_dict['sl_price'], 8),
+        'stop_loss':        round(sl_final, 8),
         'take_profit':      round(tp_full, 8),
-        'sl_price':         round(sl_dict['sl_price'], 8),
+        'sl_price':         round(sl_final, 8),
         'tp_partial_price': round(tp_partial, 8),
         'tp_full_price':    round(tp_full, 8),
         'status':           'open',
@@ -442,8 +533,13 @@ async def _execute_paper_open(
         log_warning(MODULE, f"Failed to log order to orders table: {e}")
 
     res = supabase.table('positions').insert(data).execute()
+    new_pos = res.data[0] if res.data else None
+    if new_pos:
+        from app.core.memory_store import BOT_STATE
+        BOT_STATE.positions[symbol] = new_pos
+
     log_info(MODULE, f"🚀 PAPER OPEN [{symbol}] {side.upper()} at ${price:,.2f} (SL: ${data['sl_price']:,.2f}, TP: ${data['tp_full_price']:,.2f})")
-    return res.data[0] if res.data else None
+    return new_pos
 
 async def _execute_paper_partial_close(pos, price, supabase):
     """Ejecuta cierre parcial simulado (50% del capital)."""
@@ -452,13 +548,14 @@ async def _execute_paper_partial_close(pos, price, supabase):
     side = (pos.get('side') or '').lower()
     
     # PnL %
-    pnl_pct = ((price - entry) / entry * 100) if side == 'long' else ((entry - price) / entry * 100)
+    is_long = side in ['long', 'buy']
+    pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
     
     # Asumimos que T1 es todo el capital actual (v4 simple distribution)
     # Si queremos ser precisos necesitamos 'capital_per_symbol'
     # Por ahora, cerramos el 50% de la cantidad 'size'
     partial_qty = float(pos['size']) * 0.5
-    partial_pnl_usd = (price - entry) * partial_qty if side == 'long' else (entry - price) * partial_qty
+    partial_pnl_usd = (price - entry) * partial_qty if is_long else (entry - price) * partial_qty
     
     # Update Position
     supabase.table('positions').update({
@@ -494,7 +591,8 @@ async def _execute_paper_close(pos, price, reason, supabase):
     side = (pos.get('side') or '').lower()
     qty = float(pos['size'])
     
-    pnl_usd = (price - entry) * qty if side == 'long' else (entry - price) * qty
+    is_long = side in ['long', 'buy']
+    pnl_usd = (price - entry) * qty if is_long else (entry - price) * qty
     pnl_pct = ((price - entry) / entry * 100) if side == 'long' else ((entry - price) / entry * 100)
 
     # Si hubo cierre parcial previo, sumar sus USD
@@ -508,7 +606,13 @@ async def _execute_paper_close(pos, price, reason, supabase):
         'realized_pnl': round(total_pnl, 4)
     }).eq('id', pos['id']).execute()
     
-    p_rule_code = pos.get('rule_code') or pos.get('rule_entry') or "N/A"
+    from app.strategy.dynamic_sl_manager import cancel_all_sl_orders
+    await cancel_all_sl_orders(
+        symbol=symbol,
+        position=pos,
+        supabase=supabase,
+        reason=reason
+    )
 
     supabase.table('paper_trades').insert({
         'symbol': symbol,
@@ -523,6 +627,28 @@ async def _execute_paper_close(pos, price, reason, supabase):
         'rule_code': p_rule_code
     }).execute()
     
+    # ── CANCELAR ÓRDENES HUÉRFANAS ──
+    # Al cerrar la posición, cancelar todas las pending_orders y actualizar orders
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # 1. Cancelar pending_orders pendientes para este símbolo
+        supabase.table('pending_orders').update({
+            'status': 'cancelled',
+            'cancelled_at': now_iso,
+            'updated_at': now_iso
+        }).eq('symbol', symbol).eq('status', 'pending').execute()
+        
+        # 2. Actualizar orders asociados al cierre (marcar como cerrados)
+        close_status = 'sl_hit' if reason == 'sl' else ('tp_hit' if 'tp' in reason else 'closed')
+        supabase.table('orders').update({
+            'status': close_status,
+            'closed_at': now_iso
+        }).eq('symbol', symbol).eq('status', 'open').execute()
+        
+        log_info(MODULE, f"🧹 Órdenes pendientes canceladas para {symbol} (razón: {reason})")
+    except Exception as cancel_e:
+        log_warning(MODULE, f"Error cancelando órdenes huérfanas de {symbol}: {cancel_e}")
+
     # Remove from BOT_STATE
     BOT_STATE.positions.pop(symbol, None)
     log_info(MODULE, f"🏁 FULL CLOSE [{symbol}] ({reason}) at ${price:,.2f} | Total PnL: ${total_pnl:.2f}")

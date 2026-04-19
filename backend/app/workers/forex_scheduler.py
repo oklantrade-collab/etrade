@@ -71,12 +71,12 @@ from app.config.forex_config import (
 
 # Provider
 from app.execution.provider_factory import create_provider
-from app.execution.providers.ctrader_provider import CTraderProvider
+from app.execution.providers.ctrader_provider import CTraderProtobufProvider
 
 MODULE = "forex_scheduler"
 
 # ── State ──────────────────────────────────────────
-_forex_provider: Optional[CTraderProvider] = None
+_forex_provider: Optional[CTraderProtobufProvider] = None
 _forex_cycle_count = 0
 
 
@@ -84,7 +84,7 @@ _forex_cycle_count = 0
 #  WARM-UP (Phase 0)
 # ══════════════════════════════════════════════════
 
-async def warm_up_forex(symbols: list, timeframes: list, provider: CTraderProvider):
+async def warm_up_forex(symbols: list, timeframes: list, provider: CTraderProtobufProvider):
     """
     Precalentar MEMORY_STORE con datos Forex de IC Markets.
     Descarga velas historicas + calcula todos los indicadores.
@@ -106,7 +106,7 @@ async def warm_up_forex(symbols: list, timeframes: list, provider: CTraderProvid
     log_info(MODULE, f"Precalentamiento Forex completado: {elapsed:.1f}s")
 
 
-async def _warm_up_forex_symbol_tf(symbol: str, tf: str, provider: CTraderProvider):
+async def _warm_up_forex_symbol_tf(symbol: str, tf: str, provider: CTraderProtobufProvider):
     """Descargar y procesar un symbol/tf."""
     try:
         df = await provider.get_ohlcv(symbol, tf, limit=300)
@@ -435,7 +435,7 @@ async def open_forex_position(
     symbol: str,
     signal: dict,
     price: float,
-    provider: CTraderProvider,
+    provider: CTraderProtobufProvider,
     sb,
 ):
     """
@@ -551,7 +551,7 @@ async def open_forex_position(
 #  CYCLE 5m — Position Management (Forex)
 # ══════════════════════════════════════════════════
 
-async def _forex_process_symbol_5m(symbol: str, provider: CTraderProvider, sb):
+async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvider, sb):
     """Procesar un simbolo Forex en ciclo 5m."""
     try:
         # 1. Obtener precio actual
@@ -682,7 +682,7 @@ async def forex_cycle_5m():
 #  CYCLE 15m — Full Analysis (Forex)
 # ══════════════════════════════════════════════════
 
-async def _forex_process_symbol_15m(symbol: str, provider: CTraderProvider, sb):
+async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvider, sb):
     """Procesamiento completo 15m para un simbolo Forex."""
     global _forex_cycle_count
     t0 = time.time()
@@ -714,7 +714,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProvider, sb):
             results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
             for tf, res in zip(fetch_tasks.keys(), results):
                 if isinstance(res, Exception):
-                    log_error(MODULE, f"Error descargando {tf} para {symbol}: {res}")
+                    log_warning(MODULE, f"Error descargando {tf} para {symbol}: {res}")
                     if tf == '15m':
                         raise res
                 elif res is not None and not res.empty:
@@ -725,7 +725,8 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProvider, sb):
         # Recuperar DF 15m
         df = get_memory_df(symbol, '15m')
         if df is None or df.empty:
-            raise Exception(f"No hay datos 15m para {symbol}")
+            log_warning(MODULE, f"No hay datos 15m para {symbol}")
+            return
 
         last_row = df.iloc[-1]
         current_price = float(last_row['close'])
@@ -908,47 +909,98 @@ async def forex_cycle_15m():
 #  INIT & MAIN
 # ══════════════════════════════════════════════════
 
-async def init_forex_worker(sb=None) -> Optional[CTraderProvider]:
+async def get_forex_provider():
     """
-    Inicializar el worker de Forex.
-    Descarga historial y precalienta indicadores.
-    Retorna el provider conectado o None.
+    Singleton del provider Forex.
+    La conexión TCP se mantiene abierta.
     """
     global _forex_provider
+    if _forex_provider is None or \
+       not _forex_provider._authenticated:
+        _forex_provider = create_provider(
+            'forex_futures'
+        )
+        connected = await _forex_provider.connect()
+        if not connected:
+            raise Exception(
+                'No se pudo conectar a cTrader'
+            )
+        # Subscribir a precios en tiempo real
+        await _forex_provider.subscribe_prices(
+            symbols  = FOREX_SYMBOLS,
+            callback = _handle_forex_price
+        )
+        log_info('FOREX',
+            f'Provider Protobuf inicializado: '
+            f'{FOREX_SYMBOLS}'
+        )
+    return _forex_provider
 
-    if sb is None:
-        sb = get_supabase()
 
-    log_info(MODULE, "Inicializando Forex Worker (IC Markets)")
+def _handle_forex_price(symbol, mid, bid, ask):
+    """
+    Callback de precio en tiempo real.
+    Actualiza MEMORY_STORE con el precio actual.
+    Equivalente al WebSocket de Binance.
+    """
+    if symbol not in MEMORY_STORE:
+        MEMORY_STORE[symbol] = {}
+    MEMORY_STORE[symbol]['current_price'] = mid
+    MEMORY_STORE[symbol]['bid']           = bid
+    MEMORY_STORE[symbol]['ask']           = ask
+    MEMORY_STORE[symbol]['last_tick']     = \
+        datetime.now(timezone.utc)
 
-    # Verificar credenciales
-    required = ['CTRADER_CLIENT_ID', 'CTRADER_CLIENT_SECRET',
-                'CTRADER_ACCOUNT_ID', 'CTRADER_ACCESS_TOKEN']
-    missing = [v for v in required if not os.getenv(v) or os.getenv(v, '').startswith('tu_')]
-    if missing:
-        log_error(MODULE, f"Credenciales IC Markets faltantes: {', '.join(missing)}")
-        return None
 
-    # Crear y conectar provider
+async def init_forex_worker(supabase) -> Optional[CTraderProtobufProvider]:
+    """
+    Inicializar el worker de Forex con
+    provider Protobuf.
+    """
     try:
-        provider = create_provider('forex_futures')
-    except ValueError as e:
-        log_error(MODULE, f"Error creando provider: {e}")
+        provider = await get_forex_provider()
+    except Exception as e:
+        log_error(MODULE, f"Error inicializando provider Protobuf: {e}")
         return None
 
-    connected = await provider.connect()
-    if not connected:
-        log_error(MODULE, "No se pudo conectar a IC Markets")
-        return None
+    log_info('FOREX_SCHEDULER',
+        'Precalentando velas históricas...'
+    )
 
-    _forex_provider = provider
-    log_info(MODULE, f"Conectado. Precalentando {len(FOREX_SYMBOLS)} pares Forex...")
+    # Descargar historial para todos los símbolos
+    for symbol in FOREX_SYMBOLS:
+        MEMORY_STORE[symbol] = \
+            MEMORY_STORE.get(symbol, {})
 
-    # Precalentar memoria
-    await warm_up_forex(FOREX_SYMBOLS, list(FOREX_TIMEFRAMES.keys()), provider)
+        for tf in ['5m','15m','1h','4h','1d']:
+            try:
+                df = await provider.get_ohlcv(
+                    symbol, tf, limit=300
+                )
+                if df is not None and \
+                   not df.empty:
+                    df = fibonacci_bollinger(df)
+                    df = calculate_all_indicators(df, BOT_STATE.config_cache)
+                    df = calculate_parabolic_sar(df)
 
+                    MEMORY_STORE[symbol][tf] = {
+                        'df': df
+                    }
+                    log_info('FOREX',
+                        f'{symbol}/{tf}: '
+                        f'{len(df)} velas OK'
+                    )
+            except Exception as e:
+                log_error('FOREX',
+                    f'{symbol}/{tf}: {e}'
+                )
+
+    log_info('FOREX_SCHEDULER',
+        '✅ Forex Protobuf Worker listo'
+    )
+    
     # Cargar Strategy Engine
-    engine = StrategyEngine.get_instance(sb)
+    engine = StrategyEngine.get_instance(supabase)
     if not engine.loaded:
         await engine.load()
     log_info(MODULE, "Strategy Engine v1.0 cargado para Forex")

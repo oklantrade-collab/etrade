@@ -14,11 +14,16 @@ Endpoints:
   PUT /api/v1/stocks/config         — Update configuration
 """
 from fastapi import APIRouter, Depends, HTTPException
+import asyncio
+import os
 from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 
+from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
+from app.stocks.universe_builder import UniverseBuilder
+from app.analysis.fundamental_scorer import FundamentalScorer
 
 router = APIRouter()
 
@@ -84,30 +89,42 @@ async def get_stocks_watchlist(sb=Depends(get_supabase)):
 
 @router.get("/universe")
 async def get_stocks_universe(sb=Depends(get_supabase)):
-    """Get Universe Builder output (watchlist + technical scores)."""
+    """Get Universe Builder output (latest scan results)."""
     try:
         today = date.today().isoformat()
 
-        # Get watchlist
+        # 1. Intentar obtener el watchlist de HOY
         watchlist = sb.table("watchlist_daily")\
             .select("*")\
             .eq("date", today)\
-            .eq("hard_filter_pass", True)\
-            .order("catalyst_score", desc=True)\
             .execute()
+            
+        # 2. Si hoy está vacío (zona horaria?), traer los últimos 50 registros del sistema
+        if not watchlist.data:
+            watchlist = sb.table("watchlist_daily")\
+                .select("*")\
+                .order("date", desc=True)\
+                .limit(50)\
+                .execute()
+
+        if not watchlist.data:
+            return {"universe": [], "date": today, "total": 0}
+
+        # Última fecha detectada
+        actual_date = watchlist.data[0].get("date", today)
 
         # Get latest technical scores
         tech_scores = sb.table("technical_scores")\
             .select("ticker, technical_score, rvol, mtf_confirmed, ema_alignment, timestamp")\
             .order("timestamp", desc=True)\
-            .limit(50)\
+            .limit(100)\
             .execute()
 
         # Merge
         tech_map = {}
         for ts in (tech_scores.data or []):
             ticker = ts["ticker"]
-            if ticker not in tech_map:  # Keep latest only
+            if ticker not in tech_map:
                 tech_map[ticker] = ts
 
         universe = []
@@ -118,16 +135,23 @@ async def get_stocks_universe(sb=Depends(get_supabase)):
                 "ticker":          ticker,
                 "pool_type":       w.get("pool_type", "tactical"),
                 "catalyst_score":  w.get("catalyst_score", 0),
-                "catalyst_type":   w.get("catalyst_type", ""),
-                "market_regime":   w.get("market_regime", "sideways"),
                 "technical_score": tech.get("technical_score", 0),
                 "rvol":            tech.get("rvol", 0),
                 "mtf_confirmed":   tech.get("mtf_confirmed", False),
                 "ema_alignment":   tech.get("ema_alignment", "unknown"),
+                "fundamental_score": w.get("fundamental_score", 0),
+                "quality_flag":      w.get("quality_flag", "PASS"),
+                "revenue_growth":    w.get("revenue_growth_yoy", 0),
+                "gross_margin":      w.get("gross_margin", 0),
+                "rs_score":          w.get("rs_score_6m", 0),
+                "inst_ownership":    w.get("inst_ownership_pct", 0),
+                "market_cap":        w.get("market_cap_mln", 0),
+                "price":             w.get("price", 0)
             })
 
-        return {"universe": universe, "date": today, "total": len(universe)}
+        return {"universe": universe, "date": actual_date, "total": len(universe)}
     except Exception as e:
+        log_error("stocks_api", f"Error in get_stocks_universe: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -139,12 +163,9 @@ async def get_stocks_opportunities(
     try:
         today = date.today().isoformat()
 
-        # 1. Get full watchlist (ALL 30 tickers)
-        from datetime import timedelta
-        d_val = (date.today() - timedelta(days=1)).isoformat()
+        # 1. Get full watchlist (Cleaned automatically by UniverseBuilder)
         wl = sb.table("watchlist_daily")\
             .select("*")\
-            .gte("date", d_val)\
             .execute()
 
         # 2. Get latest technical scores
@@ -171,38 +192,58 @@ async def get_stocks_opportunities(
             if o["ticker"] not in opp_map:
                 opp_map[o["ticker"]] = o
 
-        # 4. Get stored prices and volumes from signals_json
+        # 3.5 Get active orders
+        orders_res = sb.table("stocks_orders")\
+            .select("*")\
+            .in_("status", ["pending", "filled"])\
+            .order("created_at", desc=True)\
+            .execute()
+        
+        orders_map = {}
+        for order in (orders_res.data or []):
+            tick = order["ticker"]
+            if tick not in orders_map:
+                orders_map[tick] = []
+            orders_map[tick].append(order)
+
+        # 3.6 Get active positions to ensure they appear in Opportunities
+        pos_res = sb.table("stocks_positions")\
+            .select("ticker")\
+            .eq("status", "open")\
+            .execute()
+        active_pos_tickers = [p["ticker"] for p in (pos_res.data or [])]
+
+        # 4. Get stored prices and volumes from signals_json/watchlist
         price_map = {}
         volume_map = {}
         for w in (wl.data or []):
             ticker = w["ticker"]
             t = tech_map.get(ticker, {})
             sj = t.get("signals_json") or {} if t else {}
-            if sj.get("price"):
-                price_map[ticker] = float(sj["price"])
-            if sj.get("volume"):
-                volume_map[ticker] = float(sj["volume"])
+            # Fallback robusto entre Universe (w) y Tech (sj)
+            price_map[ticker] = float(sj.get("price") or w.get("price") or 0)
+            volume_map[ticker] = float(sj.get("volume") or w.get("volume") or 0)
 
-        # 5. Build combined list and apply 1M volume filter
+        # 5. Build combined list
         result = []
+        processed_tickers = set()
+
         for w in (wl.data or []):
             ticker = w["ticker"]
+            processed_tickers.add(ticker)
             t = tech_map.get(ticker, {})
             o = opp_map.get(ticker, {})
 
-            # Filter by 1M volume
             vol = volume_map.get(ticker, 0)
-            if vol < 1000000:
-                continue
-
             result.append({
                 "ticker": ticker,
                 "company_name": w.get("company_name") or w.get("name") or ticker,
                 "sector": w.get("sector", "Technology"),
                 "price": price_map.get(ticker, 0),
                 "volume": vol,
+                "rvol": t.get("signals_json", {}).get("rvol", 1.0) if t.get("signals_json") else 1.0,
+                "market_cap": t.get("signals_json", {}).get("market_cap", 0) if t.get("signals_json") else 0,
                 "catalyst_type": w.get("catalyst_type", "Scan"),
-
                 "catalyst_score": w.get("catalyst_score", 5),
                 "market_regime": w.get("market_regime", "sideways"),
                 "technical_score": t.get("technical_score", 0),
@@ -215,91 +256,222 @@ async def get_stocks_opportunities(
                 # Opportunity status
                 "meta_score": o.get("meta_score", 0),
                 "trade_type": o.get("trade_type", ""),
-                "status": o.get("status", "scanning"),
+                "status": "position" if ticker in active_pos_tickers else o.get("status", "scanning"),
                 "entry_price": o.get("entry_zone_high"),
                 "stop_loss": o.get("stop_loss"),
                 "target_1": o.get("target_1"),
+                "movement_15m": t.get("signals_json", {}).get("movement_15m"),
+                "fib_zone_15m": t.get("signals_json", {}).get("fib_zone_15m"),
+                "smart_limit_long_15m": t.get("signals_json", {}).get("smart_limit_long_15m") or t.get("signals_json", {}).get("limit_long_15m"),
+                "smart_limit_short_15m": t.get("signals_json", {}).get("smart_limit_short_15m") or t.get("signals_json", {}).get("limit_short_15m"),
+                "movement_1d": t.get("signals_json", {}).get("movement_1d"),
+                "fib_zone_1d": t.get("signals_json", {}).get("fib_zone_1d"),
+                "smart_limit_long_1d": t.get("signals_json", {}).get("smart_limit_long_1d") or t.get("signals_json", {}).get("limit_long_1d"),
+                "smart_limit_short_1d": t.get("signals_json", {}).get("smart_limit_short_1d") or t.get("signals_json", {}).get("limit_short_1d"),
+                "t01_confirmed": t.get("signals_json", {}).get("t01_confirmed", False),
+                "t02_confirmed": t.get("signals_json", {}).get("t02_confirmed", False),
+                "t03_confirmed": t.get("signals_json", {}).get("t03_confirmed", False),
+                "t04_confirmed": t.get("signals_json", {}).get("t04_confirmed", False),
+                "orders": orders_map.get(ticker, []),
+                # ENRIQUECIMIENTO FUNDAMENTAL (Universe Promotion)
+                "pool_type": w.get("pool_type") or ("CORE" if ticker in active_pos_tickers else ""),
+                "fundamental_score": w.get("fundamental_score", 0),
+                "quality_flag": w.get("quality_flag", "PASS"),
+                "rev_growth": w.get("revenue_growth_yoy", 0),
+                "gross_margin": w.get("gross_margin", 0),
+                "rs_score": w.get("rs_score_6m", 0),
+                "analyst_rating": w.get("analyst_rating", 0),
+                "is_pro_member": (w.get("quality_flag") in ["PASS", "✓ PASS"] and bool(w.get("pool_type"))) or (ticker in active_pos_tickers),
+                # Conversión de UTC a Lima (GMT-5) para el Dashboard
+                "last_scan_time": (datetime.fromisoformat((t.get("timestamp") or "").split(".")[0][:19] + "+00:00") - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
+            })
+
+        # Extra: Add positions that are NOT in watchlist
+        for ticker in active_pos_tickers:
+            if ticker in processed_tickers: continue
+            t = tech_map.get(ticker, {})
+            o = opp_map.get(ticker, {})
+            sj = t.get("signals_json") or {}
+
+            result.append({
+                "ticker": ticker,
+                "company_name": ticker,
+                "sector": "Portfolio",
+                "price": float(sj.get("price") or 0),
+                "volume": float(sj.get("volume") or 0),
+                "rvol": sj.get("rvol", 1.0),
+                "market_cap": sj.get("market_cap", 0),
+                "catalyst_type": "Position",
+                "catalyst_score": 5,
+                "market_regime": "active",
+                "technical_score": t.get("technical_score", 0),
+                "pro_score": sj.get("pro_score", 0),
+                "change_pct": sj.get("change_pct", 0),
+                "mtf_confirmed": t.get("mtf_confirmed", False),
+                "ema_alignment": t.get("ema_alignment", "unknown"),
+                "rsi": t.get("rsi_14"),
+                "analyzed": True,
+                "meta_score": o.get("meta_score", 0),
+                "status": "position",
+                "movement_15m": sj.get("movement_15m"),
+                "fib_zone_15m": sj.get("fib_zone_15m"),
+                "orders": orders_map.get(ticker, []),
+                "is_pro_member": True, # Force to Pro tab
+                "last_scan_time": (datetime.fromisoformat((t.get("timestamp") or "").split(".")[0][:19] + "+00:00") - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
             })
 
         # Sort: by volume desc (User request)
-        result.sort(key=lambda x: x["volume"], reverse=True)
+        result.sort(key=lambda x: x.get("volume") or 0, reverse=True)
 
 
-        return {"opportunities": result, "total": len(result), "date": today}
+        # 6. Get market status
+        from app.core.market_hours import get_market_status_dict
+        mstatus = get_market_status_dict()
+
+        return {
+            "opportunities": result, 
+            "total": len(result), 
+            "date": today,
+            "market_status": mstatus
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/positions")
-async def get_stocks_positions(sb=Depends(get_supabase)):
-    """Get active stock positions."""
+async def get_stocks_positions():
+    """Get active stock positions from the industrialised table."""
+    sb = get_supabase()
     try:
-        res = sb.table("trades_active")\
+        res = sb.table("stocks_positions")\
             .select("*")\
-            .eq("status", "active")\
-            .order("entry_time", desc=True)\
+            .eq("status", "open")\
+            .order("first_buy_at", desc=True)\
+            .execute()
+        
+        positions = res.data or []
+        if not positions:
+            return []
+
+        # Enriquecer con precios actuales desde technical_scores (más frecuentes que watchlist)
+        tickers = [p["ticker"] for p in positions]
+        tech_res = sb.table("technical_scores")\
+            .select("ticker, signals_json")\
+            .in_("ticker", tickers)\
+            .execute()
+        
+        price_map = {}
+        for tr in (tech_res.data or []):
+            sj = tr.get("signals_json") or {}
+            if "price" in sj:
+                price_map[tr["ticker"]] = float(sj["price"])
+
+        for pos in positions:
+            ticker = pos["ticker"]
+            # Prioridad: technical_scores -> stocks_positions.current_price -> avg_price
+            cur_price = price_map.get(ticker, pos.get("current_price") or pos.get("avg_price") or 0)
+            avg_entry = float(pos.get("avg_price") or 0)
+            shares = float(pos.get("shares") or 0)
+
+            # Recalcular P&L
+            unrealized_pnl = (cur_price - avg_entry) * shares
+            unrealized_pnl_pct = ((cur_price - avg_entry) / avg_entry * 100) if avg_entry > 0 else 0
+
+            # ── ENRIQUECIMIENTO EXTRA PARA DETALLE ──
+            # 1. Traer Company y Sector desde watchlist (Uso select("*") para evitar error si faltan columnas)
+            wl_info = sb.table("watchlist_daily").select("*").eq("ticker", ticker).order("date", desc=True).limit(1).execute().data
+            if wl_info:
+                pos["company_name"] = wl_info[0].get("company_name") or wl_info[0].get("name") or ticker
+                pos["sector"] = wl_info[0].get("sector") or "Finance"
+            else:
+                pos["company_name"] = ticker
+                pos["sector"] = "Finance"
+
+            # 2. Traer SL/TP desde Trade Opportunities
+            opp_info = sb.table("trade_opportunities").select("stop_loss, target_1").eq("ticker", ticker).order("created_at", desc=True).limit(1).execute().data
+            if opp_info:
+                pos["sl_price"] = opp_info[0].get("stop_loss")
+                pos["tp_price"] = opp_info[0].get("target_1")
+
+            # 3. Traer Tipo de Orden desde stocks_orders
+            order_info = sb.table("stocks_orders").select("order_type").eq("ticker", ticker).eq("status", "filled").order("created_at", desc=True).limit(1).execute().data
+            if order_info:
+                pos["order_type"] = order_info[0].get("order_type", "market")
+            else:
+                pos["order_type"] = "market"
+
+            pos["current_price"] = cur_price
+            pos["unrealized_pnl"] = round(unrealized_pnl, 2)
+            pos["unrealized_pnl_pct"] = round(unrealized_pnl_pct, 2)
+            pos["total_cost"] = round(avg_entry * shares, 2)
+
+        return positions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/orders")
+async def get_stocks_orders():
+    """Get latest stock orders."""
+    sb = get_supabase()
+    try:
+        res = sb.table("stocks_orders")\
+            .select("*")\
+            .order("created_at", desc=True)\
+            .limit(100)\
             .execute()
 
-        return {"positions": res.data or []}
+        return res.data or []
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/journal")
-async def get_stocks_journal(
-    limit: int = 50,
-    sb=Depends(get_supabase),
-):
-    """Get trade journal history."""
+async def get_stocks_journal(limit: int = 50):
+    """Get trade journal history from closed positions."""
+    sb = get_supabase()
     try:
-        res = sb.table("trades_journal")\
+        res = sb.table("stocks_positions")\
             .select("*")\
-            .order("exit_date", desc=True)\
+            .eq("status", "closed")\
+            .order("updated_at", desc=True)\
             .limit(limit)\
             .execute()
 
-        return {"trades": res.data or []}
+        return res.data or []
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/performance")
-async def get_stocks_performance(sb=Depends(get_supabase)):
-    """Get performance metrics."""
+async def get_stocks_performance():
+    """Get performance metrics for the stocks industrial engine."""
+    sb = get_supabase()
     try:
-        # Latest daily metrics
-        metrics_res = sb.table("performance_metrics")\
-            .select("*")\
-            .order("date", desc=True)\
-            .limit(1)\
-            .execute()
+        # Query closed trades
+        res = sb.table("stocks_positions").select("*").eq("status", "closed").execute()
+        trades = res.data or []
+        
+        total = len(trades)
+        wins = sum(1 for t in trades if (t.get("unrealized_pnl", 0) or 0) > 0)
+        pnl_total = sum(float(t.get("unrealized_pnl", 0) or 0) for t in trades)
+        
+        # Build a cumulative P&L series
+        equity_curve = []
+        cumulative_pnl = 0
+        for t in sorted(trades, key=lambda x: x.get('updated_at', '')):
+            cumulative_pnl += float(t.get('unrealized_pnl', 0) or 0)
+            equity_curve.append({
+                "date": t['updated_at'][:10],
+                "equity": cumulative_pnl,
+                "pnl": float(t.get('unrealized_pnl', 0) or 0)
+            })
 
-        # Calculate from journal if no metrics yet
-        if not metrics_res.data:
-            journal = sb.table("trades_journal").select("result, pnl_pct, pnl_usd").execute()
-            trades = journal.data or []
-            total = len(trades)
-            wins = sum(1 for t in trades if t.get("result") == "win")
-
-            return {
-                "win_rate":     round(wins / total * 100, 1) if total > 0 else 0,
-                "total_trades": total,
-                "pnl_total":    sum(float(t.get("pnl_usd", 0) or 0) for t in trades),
-                "sharpe":       0,
-                "source":       "calculated",
-            }
-
-        m = metrics_res.data[0]
         return {
-            "win_rate":      m.get("win_rate_overall", 0),
-            "win_rate_swing": m.get("win_rate_swing_a", 0),
-            "win_rate_scalp": m.get("win_rate_scalping_c", 0),
-            "avg_rr":        m.get("avg_rr_achieved", 0),
-            "avg_slippage":  m.get("avg_slippage_actual", 0),
-            "sharpe":        m.get("sharpe_rolling_20", 0),
-            "regime":        m.get("regime", ""),
-            "trades_count":  m.get("trades_count", 0),
-            "source":        "metrics_table",
+            "win_rate": round(wins / total * 100, 1) if total > 0 else 0,
+            "total_trades": total,
+            "pnl_total": pnl_total,
+            "equity_curve": equity_curve,
+            "source": "calculated_v5"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -442,3 +614,191 @@ async def run_full_pipeline():
         return {"status": "ok", "pipeline": log, "decisions": decisions, "executions": exec_results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/rules")
+async def get_stocks_rules():
+    """Get all stocks strategy rules."""
+    sb = get_supabase()
+    try:
+        res = sb.table("stocks_rules").select("*").order("group_name").order("direction").order("order_type").execute()
+        rules = res.data or []
+        
+        # Enriquecimiento dinámico para coherencia UI
+        for r in rules:
+            code = r.get("rule_code")
+            # S01: IA + Técnico + Fundamental
+            if code == "S01":
+                if "fundamental_score_min" not in r: r["fundamental_score_min"] = 70.0
+                r["name"] = "PRO_BUY_MKT — IA + Técnico + Fundamental"
+            
+            # S02: Compra a Descuento por Valor Intrínseco
+            elif code == "S02":
+                if "fundamental_score_min" not in r: r["fundamental_score_min"] = 65.0
+                r["name"] = "PRO_BUY_LMT — Descuento por Valor Intrínseco"
+                r["notes"] = "MODELO MATH S02: Compra LIMIT en min(Bollinger Lower 1D, Precio Intrínseco * 0.95). Activación si precio < (BB Lower * 1.02). Expira en 5 días."
+            
+            # S09: Compra a Descuento Profundo por Valor Intrínseco
+            elif code == "S09":
+                if "fundamental_score_min" not in r: r["fundamental_score_min"] = 70.0
+                r["name"] = "PRO_BUY_VALUE — Descuento Profundo (10%)"
+                r["notes"] = "S09: Precio <= Intrinsic * 0.90. Se activa en valor profundo para GIANT/LEADER."
+        
+        return rules
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/rules/{rule_code}")
+async def update_stocks_rule(rule_code: str, rule_data: dict):
+    """Update a specific stocks strategy rule."""
+    sb = get_supabase()
+    try:
+        # Filtro de campos seguros (para evitar errores si la DB no tiene la columna)
+        safe_fields = [
+            "name", "enabled", "priority", "ia_min", "tech_score_min", 
+            "movements_allowed", "pine_signal", "pine_required", 
+            "fib_trigger", "rvol_min", "limit_trigger_pct", "close_all",
+            "dca_enabled", "dca_max_buys", "dca_min_drop_pct", "notes"
+        ]
+        
+        filtered_data = {k: v for k, v in rule_data.items() if k in safe_fields}
+        filtered_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        
+        res = sb.table("stocks_rules").update(filtered_data).eq("rule_code", rule_code).execute()
+        return {"status": "success", "data": res.data[0] if res.data else None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/backtest")
+async def run_stocks_backtest(params: dict):
+    """Run a real-data backtest for a ticker."""
+    try:
+        from app.stocks.stocks_backtester import StocksBacktester
+        tester = StocksBacktester()
+        
+        ticker = params.get("ticker", "NVDA")
+        rule_code = params.get("rule_code", "S01")
+        period = params.get("period", "1y")
+        
+        results = tester.run_backtest(ticker, rule_code, period)
+        return results
+    except Exception as e:
+        import traceback
+        err_msg = str(e)
+        stack = traceback.format_exc()
+        print(f"BACKTEST ERROR: {err_msg}\n{stack}")
+        return {"error": f"Backend Error: {err_msg}", "details": stack}
+
+@router.post("/refresh-fundamentals")
+async def manual_fundamental_refresh():
+    """Force an immediate refresh of all fundamental data AND trigger technical analysis for candidates."""
+    try:
+        from app.workers.stocks_scheduler import process_ticker, get_stocks_config
+        
+        builder = UniverseBuilder()
+        # 1. Barrido Fundamental (Capa 0-4)
+        summary = await builder.build_daily_watchlist()
+        
+        # 2. Barrido Técnico Inmediato para los candidatos encontrados
+        if summary.get("TOTAL", 0) > 0:
+            config = get_stocks_config()
+            # Obtenemos los tickers del ultimo escaneo (que estan en el builder o en la DB)
+            tickers = getattr(builder, 'last_scan_tickers', [])
+            if not tickers:
+                # Si por algun motivo no estan en el objeto, los buscamos en la DB del dia
+                today = date.today().isoformat()
+                from app.core.supabase_client import get_supabase
+                sb = get_supabase()
+                res = sb.table("watchlist_daily").select("ticker").eq("date", today).execute()
+                tickers = [r["ticker"] for r in res.data]
+
+            # Procesar tecnicamente los candidatos en paralelo (batches de 10 para no saturar CPU)
+            batch_size = 10
+            for i in range(0, len(tickers[:50]), batch_size):
+                batch = tickers[i:i+batch_size]
+                tasks = [process_ticker(t, config) for t in batch]
+                await asyncio.gather(*tasks, return_exceptions=True)
+                    
+        return {"status": "success", "summary": summary}
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/universe/settings")
+async def get_universe_settings():
+    """Get the current universe building settings (Hybrid with absolute path)."""
+    settings = None
+    
+    # 1. Intentar Supabase
+    try:
+        sb = get_supabase()
+        res = sb.table("universe_settings").select("*").eq("id", 1).maybe_single().execute()
+        if res.data:
+            settings = res.data
+    except:
+        pass
+
+    # 2. Fallback a Local JSON ABSOLUTO
+    if not settings:
+        try:
+            import json
+            settings_path = "c:/Fuentes/eTrade/backend/data/universe_settings.json"
+            if os.path.exists(settings_path):
+                with open(settings_path, 'r') as f:
+                    settings = json.load(f)
+        except:
+            pass
+            
+    # 3. Defaults Institucionales
+    if not settings:
+        settings = {
+            "fg_mcap_min": 300, "fg_mcap_max": 10000, "fg_rev_growth_min": 25, "fg_price_max": 50, "fg_rs_min": 70,
+            "gl_mcap_min": 5000, "gl_rev_growth_min": 12, "gl_margin_min": 30, "gl_rs_min": 75, "gl_inst_min": 40, "gl_price_max": 200,
+            "w_rev_growth": 25, "w_gross_margin": 20, "w_eps_growth": 20, "w_rs_score": 20, "w_inst_ownership": 15,
+            "filter_min_vol": 200000
+        }
+        
+    return settings
+
+@router.post("/universe/settings")
+async def save_universe_settings(settings: dict):
+    """Save fundamental selection criteria with absolute path fallback."""
+    try:
+        # Validación de pesos
+        w_fields = ["w_rev_growth", "w_gross_margin", "w_eps_growth", "w_rs_score", "w_inst_ownership"]
+        total = sum([float(settings.get(f, 0)) for f in w_fields])
+        if abs(total - 100) > 0.9:
+            raise HTTPException(status_code=400, detail=f"Los pesos deben sumar 100%. Suma actual: {total}%")
+
+        settings["id"] = 1
+        settings["updated_at"] = datetime.now(timezone.utc).isoformat()
+        
+        # 1. Guardado LOCAL (Prioridad para estabilidad local)
+        import json
+        # Ruta absoluta garantizada: c:\Fuentes\eTrade\backend\data\universe_settings.json
+        base_dir = "c:/Fuentes/eTrade/backend/data"
+        os.makedirs(base_dir, exist_ok=True)
+        settings_path = os.path.join(base_dir, "universe_settings.json")
+        
+        with open(settings_path, 'w') as f:
+            json.dump(settings, f, indent=4)
+            
+        # 2. Intento en la nube (Sincronización opcional)
+        try:
+            sb = get_supabase()
+            sb.table("universe_settings").upsert(settings).execute()
+        except:
+            pass # Si falla nube, no importa, ya tenemos la local.
+            
+        return {"status": "success", "data": settings}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        import traceback
+        err_stack = traceback.format_exc()
+        log_error("stocks_api", f"Critical fail on settings: {e}\n{err_stack}")
+        # Retornamos el error detallado para diagnosticar
+        raise HTTPException(
+            status_code=500, 
+            detail={"message": str(e), "traceback": err_stack}
+        )

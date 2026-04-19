@@ -8,6 +8,7 @@ import google.generativeai as genai
 from app.core.logger import log_info, log_error
 from app.core.config import settings
 from app.core.memory_store import MEMORY_STORE
+from app.candle_signals.candle_patterns import CandlePatternDetector, CandleOHLC
 
 MODULE = "ai_candles"
 
@@ -30,11 +31,11 @@ async def interpret_candles_with_ai(
     ema20_phase: str,
     adx_value: float,
     signal_direction: Optional[str] = None,
-    timeframe: str = '15m'
+    timeframe: str = '4h'
 ) -> dict:
     """
-    Contextual second opinion on market behavior using Gemini Flash (Optimized for cost).
-    Actualizado cada 15m para reflejar el estado actual de la vela de 4h.
+    SIPV REPLACEMENT: Analyzes candles using the local CandlePatternDetector.
+    Maintains the same JSON structure as the original AI version to ensure compatibility.
     """
     try:
         current_15m = get_current_15m_bar()
@@ -50,75 +51,82 @@ async def interpret_candles_with_ai(
                 cached['from_cache'] = True
                 return cached
 
-        # 2. Build Context using 4h candles
+        # 2. Build OHLCV Context
+        # We prefer regular 4h data for the major interpretation
         df_4h = MEMORY_STORE.get(symbol, {}).get('4h', {}).get('df')
-        if df_4h is not None and not df_4h.empty:
-            last_5 = df_4h.tail(5)[['open', 'high', 'low', 'close', 'volume']].copy()
-        else:
-            last_5 = df.tail(5)[["open", "high", "low", "close", "volume"]].copy()
-            
-        candles_table = last_5.to_string()
-
-        prompt = f"""Eres un analista técnico experto en trading.
-Analiza la vela de 4h actual y las 4 previas para {symbol}.
-Responde ÚNICAMENTE en JSON válido.
-
-CONTEXTO DE MERCADO:
-- Régimen: {regime.get('category', 'desconocido')} (Score: {regime.get('risk_score', 0)})
-- Fase EMA20: {ema20_phase}
-- ADX: {adx_value:.2f}
-- Zona Fibonacci: {levels.get('zone', 0)} (Basis: {levels.get('basis', 0):.2f})
-- Señal Pinescript del Sistema: {signal_direction or "None"}
-
-ÚLTIMAS 5 VELAS (4h):
-{candles_table}
-
-ESTRUCTURA DE RESPUESTA REQUERIDA (JSON):
-{{
-  "current_candle_color": "red|green|neutral",
-  "pattern_detected": "nombre del patrón",
-  "pattern_confidence": 0.0 a 1.0,
-  "market_sentiment": "bullish|bearish|indecision|reversal",
-  "opportune_buy": true|false,
-  "opportune_sell": true|false,
-  "candle_interpretation": "máx 2 oraciones",
-  "recommendation": "enter|wait|caution",
-  "key_observation": "1 oración"
-}}
-"""
-        # 3. Call Gemini API
-        if not settings.gemini_api_key:
-            log_error(MODULE, "Gemini API key not configured - AI interpretation disabled.")
+        target_df = df_4h if df_4h is not None and not df_4h.empty else df
+        
+        if target_df.empty:
             return _default_error_result()
 
-        try:
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            response = await model.generate_content_async(prompt)
-            content = response.text.strip()
-            
-            # Clean JSON
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            
-            result = json.loads(content)
-            # Normalize for binding compatibility
-            result['agrees_with_signal'] = True # Default to true unless we add logic
-            
-        except Exception as api_err:
-            log_error(MODULE, f"Gemini API/Parse Error: {api_err}")
-            result = _default_error_result()
+        # Last candle and history
+        last_row = target_df.iloc[-1]
+        history_rows = target_df.tail(4).iloc[:-1] # at least 3 previous
+        
+        current_ohlc = CandleOHLC(
+            open=float(last_row['open']),
+            high=float(last_row['high']),
+            low=float(last_row['low']),
+            close=float(last_row['close']),
+            volume=float(last_row.get('volume', 0))
+        )
+        
+        history_ohlc = [
+            CandleOHLC(
+                open=float(r['open']),
+                high=float(r['high']),
+                low=float(r['low']),
+                close=float(r['close']),
+                volume=float(r.get('volume', 0))
+            )
+            for _, r in history_rows.iterrows()
+        ]
 
-        # 4. Save to Cache
-        result['from_cache'] = False
-        MEMORY_STORE[symbol]['ai_cache_15m'] = result
+        # 3. Detect Pattern using SIPV
+        detector = CandlePatternDetector(market="crypto" if "USD" in symbol else "stocks")
+        vol_sma = target_df['volume'].tail(20).mean() if 'volume' in target_df else None
+        
+        result = detector.evaluate(current_ohlc, history=history_ohlc, volume_sma20=vol_sma)
+
+        # 4. Map SIPV Result to AI Response Schema
+        sentiment = "indecision"
+        if result.action == "BUY": sentiment = "bullish"
+        elif result.action == "SELL": sentiment = "bearish"
+        elif result.signal in ("Alcista", "Reversión Alcista"): sentiment = "bullish"
+        elif result.signal in ("Bajista", "Reversión Bajista"): sentiment = "bearish"
+
+        color = "neutral"
+        if current_ohlc.is_bullish: color = "green"
+        elif current_ohlc.is_bearish: color = "red"
+
+        interpretation = f"SIPV detectó {result.pattern_name} con {result.confidence:.0f}% de confianza."
+        if result.pattern_id == 0:
+            interpretation = "No se detectaron patrones significativos en esta vela."
+
+        final_res = {
+            "current_candle_color": color,
+            "pattern_detected": result.pattern_name,
+            "pattern_confidence": round(result.confidence / 100.0, 2),
+            "market_sentiment": sentiment,
+            "opportune_buy": result.action == "BUY",
+            "opportune_sell": result.action == "SELL",
+            "candle_interpretation": interpretation,
+            "recommendation": "enter" if result.action in ("BUY", "SELL") else "wait",
+            "key_observation": f"Señal SIPV: {result.signal}",
+            "agrees_with_signal": True, # SIPV is consistent by definition
+            "from_cache": False
+        }
+
+        # 5. Save to Cache
+        MEMORY_STORE[symbol]['ai_cache_15m'] = final_res
         MEMORY_STORE[symbol]['ai_cache_15m_bar'] = current_15m
+        MEMORY_STORE[symbol]['ai_cache_4h'] = final_res
         
-        # Compatibility with existing code expecting ai_cache_4h
-        MEMORY_STORE[symbol]['ai_cache_4h'] = result
-        
-        return result
+        return final_res
+
+    except Exception as e:
+        log_error(MODULE, f"SIPV interpretation error: {e}")
+        return _default_error_result()
 
     except Exception as e:
         log_error(MODULE, f"AI Error: {e}")

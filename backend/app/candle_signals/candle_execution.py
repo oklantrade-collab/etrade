@@ -1,0 +1,1094 @@
+"""
+ANTIGRAVITY · Candle Signal Execution Service v1.1
+Lanza MARKET orders cuando aparecen señales BUY/SELL en 4H/1D.
+
+Estrategias:
+  Crypto & Forex:
+    - Aa41 → BUY signals
+    - Bb41 → SELL signals
+
+  Stocks:
+    - Inversiones Pro / BUY  / V01 → PRO_CANDLE_BUY
+    - Inversiones Pro / SELL / V02 → PRO_CANDLE_SELL
+    - Hot by Volume  / BUY  / V03 → HOT_CANDLE_BUY
+    - Hot by Volume  / SELL / V04 → HOT_CANDLE_SELL
+
+Filtro de Fibonacci:
+  BUY  → solo si fibonacci_zone ∈ {+2, +1, 0, -1, -2, -3, -4, -5, -6}  (zone ≤ +2)
+  SELL → solo si fibonacci_zone ∈ {-2, -1, 0, +1, +2, +3, +4, +5, +6}  (zone ≥ -2)
+
+Regla de cierre:
+  Cuando aparece señal BUY o SELL, se cierran TODAS las posiciones
+  activas del par/ticker y luego se abre 1 nueva posición.
+"""
+
+import math
+import os
+import sys
+import traceback
+import uuid as uuid_mod
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+
+from app.core.logger import log_info, log_error, log_warning
+from app.core.supabase_client import get_supabase
+from app.core.crypto_symbols import (
+    normalize_crypto_symbol,
+    crypto_symbol_match_variants,
+    resolve_crypto_position_quantity,
+)
+from app.candle_signals.candle_patterns import PatternResult
+
+MODULE = "candle_signal_exec"
+
+
+def _is_uuid_str(value) -> bool:
+    try:
+        uuid_mod.UUID(str(value).strip())
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def _order_uuid_for_position(order_id) -> str | None:
+    """positions.order_id es UUID FK; rechazar exchange/paper ids (PAPER_*, etc.)."""
+    if order_id is None:
+        return None
+    s = str(order_id).strip()
+    if _is_uuid_str(s):
+        return s
+    log_warning(MODULE, f"Ignorando order_id no-UUID para tabla positions: {order_id!r}")
+    return None
+
+
+def _ensure_crypto_sl_tp(action: str, price: float, sl: float, tp: float) -> tuple[float, float]:
+    """Garantiza SL/TP numéricos válidos para NOT NULL en orders/positions."""
+    price = float(price or 0)
+    sl0 = float(sl) if sl is not None else 0.0
+    tp0 = float(tp) if tp is not None else 0.0
+    atr = max(price * 0.02, 1e-8) if price > 0 else 1e-8
+    a = (action or "").upper()
+
+    def bad(v: float) -> bool:
+        return (not math.isfinite(v)) or v <= 0
+
+    if a == "BUY":
+        if price > 0 and (bad(sl0) or sl0 >= price):
+            sl0 = round(price - atr * 2.0, 8)
+        if price > 0 and (bad(tp0) or tp0 <= price):
+            tp0 = round(price + atr * 5.0, 8)
+    else:
+        if price > 0 and (bad(sl0) or sl0 <= price):
+            sl0 = round(price + atr * 2.0, 8)
+        if price > 0 and (bad(tp0) or tp0 >= price):
+            tp0 = round(price - atr * 5.0, 8)
+
+    if bad(sl0) or bad(tp0):
+        sl0 = round(max(sl0, 1e-8), 8)
+        tp0 = round(max(tp0, 1e-8), 8)
+    return sl0, tp0
+
+
+# ─── FIBONACCI BAND ZONE VALIDATION ──────────────────────────────────────────
+# BUY  → price must be at or below zone +2 (zones: +2,+1,0,-1,-2,-3,-4,-5,-6)
+# SELL → price must be at or above zone -2 (zones: -2,-1,0,+1,+2,+3,+4,+5,+6)
+BUY_ALLOWED_ZONES = {+2, +1, 0, -1, -2, -3, -4, -5, -6}
+SELL_ALLOWED_ZONES = {-2, -1, 0, +1, +2, +3, +4, +5, +6}
+
+
+def _get_fibonacci_zone(market: str, pair_or_ticker: str) -> int:
+    """
+    Fetch the current Fibonacci band zone for a symbol.
+    
+    Sources:
+      Crypto/Forex: market_snapshot.fibonacci_zone
+      Stocks: technical_scores.signals_json.fib_zone_15m
+    
+    Returns:
+      int zone (-6 to +6), 0 if not found
+    """
+    sb = get_supabase()
+    try:
+        if market in ("crypto", "forex"):
+            # Crypto uses BTCUSDT format in market_snapshot
+            symbol = normalize_crypto_symbol(pair_or_ticker)
+            res = sb.table("market_snapshot") \
+                .select("fibonacci_zone") \
+                .eq("symbol", symbol) \
+                .limit(1) \
+                .execute()
+            if res.data:
+                return int(res.data[0].get("fibonacci_zone", 0))
+
+        elif market == "stocks":
+            res = sb.table("technical_scores") \
+                .select("signals_json") \
+                .eq("ticker", pair_or_ticker) \
+                .limit(1) \
+                .execute()
+            if res.data:
+                sj = res.data[0].get("signals_json") or {}
+                # Use 15m zone as primary, fall back to 1d
+                zone = sj.get("fib_zone_15m", sj.get("fib_zone_1d", 0))
+                return int(zone) if zone is not None else 0
+
+    except Exception as e:
+        log_warning(MODULE, f"Failed to fetch fibonacci zone for {pair_or_ticker}: {e}")
+
+    return 0  # default: center zone (always passes both BUY and SELL filters)
+
+
+def _validate_fibonacci_zone(action: str, fib_zone: int) -> bool:
+    """
+    Validate if the current Fibonacci zone allows the given action.
+    
+    BUY  → zone must be ≤ +2 (i.e. at basis or below — not overbought)
+    SELL → zone must be ≥ -2 (i.e. at basis or above — not oversold)
+    """
+    if action == "BUY":
+        return fib_zone in BUY_ALLOWED_ZONES
+    elif action == "SELL":
+        return fib_zone in SELL_ALLOWED_ZONES
+    return False
+
+
+# ─── STRATEGY CODES ──────────────────────────────────────────────────────────
+STRATEGY_CODES = {
+    "crypto": {
+        "BUY":  "Aa41",
+        "SELL": "Bb41",
+    },
+    "forex": {
+        "BUY":  "Aa41",
+        "SELL": "Bb41",
+    },
+    "stocks": {
+        # Inversiones Pro
+        "PRO_BUY":  "PRO_CANDLE_BUY",    # V01
+        "PRO_SELL": "PRO_CANDLE_SELL",    # V02
+        # Hot by Volume
+        "HOT_BUY":  "HOT_CANDLE_BUY",    # V03
+        "HOT_SELL": "HOT_CANDLE_SELL",    # V04
+    },
+}
+
+
+def _send_telegram_sync(message: str):
+    """Best-effort Telegram notification."""
+    try:
+        import asyncio
+        from app.workers.alerts_service import send_telegram_message
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_telegram_message(message))
+        except RuntimeError:
+            asyncio.run(send_telegram_message(message))
+    except Exception:
+        pass
+
+
+def _get_strategy_code(market: str, action: str, pool_type: str = "") -> str:
+    """
+    Get strategy code based on market and action.
+    For stocks, pool_type determines PRO vs HOT.
+    """
+    if market in ("crypto", "forex"):
+        return STRATEGY_CODES[market].get(action, "Aa41")
+
+    if market == "stocks":
+        is_pro = pool_type and any(
+            tag in pool_type.upper() for tag in ("PRO", "GIANT", "LEADER", "VALUE")
+        )
+        if action == "BUY":
+            return STRATEGY_CODES["stocks"]["PRO_BUY" if is_pro else "HOT_BUY"]
+        else:
+            return STRATEGY_CODES["stocks"]["PRO_SELL" if is_pro else "HOT_SELL"]
+
+    return "Aa41"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CRYPTO — Execute via Binance API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def execute_crypto_signal(
+    pair: str,
+    pattern: PatternResult,
+    timeframe: str,
+    candle_data: dict,
+    fib_zone: int = 0,
+) -> dict:
+    """
+    Execute a candle signal for Crypto via Binance.
+    
+    Steps:
+      1. Close ALL active positions for this pair
+      2. Open 1 new MARKET position in signal direction
+      3. Save to positions table
+    """
+    sb = get_supabase()
+    action = pattern.action
+    strategy_code = _get_strategy_code("crypto", action)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    log_info(MODULE,
+        f"🕯️ CRYPTO CANDLE SIGNAL: {action} {normalize_crypto_symbol(pair)} | "
+        f"Pattern: {pattern.pattern_name} (ID:{pattern.pattern_id}) | "
+        f"TF: {timeframe} | Confidence: {pattern.confidence:.0f} | "
+        f"Fib Zone: {fib_zone:+d}"
+    )
+
+    # ── STEP 1: Execute pre-requisites ──
+    from app.core.memory_store import BOT_STATE
+    is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+    binance_symbol = normalize_crypto_symbol(pair)
+
+    # Cerrar solo si todas las posiciones del par cumplen umbral de beneficio (no pérdidas por reversión vela)
+    close_meta = _close_all_positions_crypto(binance_symbol, strategy_code)
+    if close_meta.get("skipped_due_to_invalid_size"):
+        log_warning(
+            MODULE,
+            f"🚫 CANDLE SIGNAL abortado {binance_symbol}: tamaño 0 y sin cantidad en orders — revisar datos.",
+        )
+        return {
+            "success": False,
+            "reason": "invalid_position_size",
+            "pair": binance_symbol,
+        }
+    if close_meta.get("skipped_due_to_loss"):
+        log_info(
+            MODULE,
+            f"🚫 CANDLE SIGNAL omitido {binance_symbol}: posición(es) sin beneficio suficiente "
+            f"(cierre por vela solo con ganancia; pérdidas → SL / sl_prevention).",
+        )
+        return {
+            "success": False,
+            "reason": "candle_signal_requires_profit_exit",
+            "pair": binance_symbol,
+        }
+
+    # ── STEP 2: Execute MARKET order ──
+    price = float(candle_data.get("close", 0) or 0)
+    if price <= 0:
+        return {"success": False, "reason": "Precio inválido"}
+
+    from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+    from app.strategy.dynamic_sl_manager import calculate_backstop_sl
+
+    current_snap = MARKET_SNAPSHOT_CACHE.get(binance_symbol, {})
+
+    atr_fallback = price * 0.02
+    if action == "BUY":
+        tp = round(price + atr_fallback * 2.0 * 2.5, 8)
+    else:
+        tp = round(price - atr_fallback * 2.0 * 2.5, 8)
+
+    backstop_data = calculate_backstop_sl(
+        entry_price = price,
+        side        = 'long' if action == 'BUY' else 'short',
+        snap        = current_snap,
+        market_type = 'crypto_futures',
+    )
+    
+    sl = backstop_data['backstop_price']
+    sl, tp = _ensure_crypto_sl_tp(action, price, sl, tp)
+    
+    log_info('SL_MANAGER',
+        f'{binance_symbol}: Backstop SL = '
+        f'{backstop_data["backstop_price"]:.6f} '
+        f'({backstop_data["source"]}) '
+        f'({backstop_data["pct_from_entry"]:.2f}% '
+        f'del precio de entrada)'
+    )
+
+    qty_display: float | None = None
+    entry_display = price
+
+    if is_paper:
+        # Paper mode: simulate with a default $100 budget
+        paper_size = round(100.0 / price, 4)
+        order_row_id = _save_candle_order_crypto(
+            sb, binance_symbol, action, strategy_code, price, pattern, timeframe, "paper", paper_size, sl, tp
+        )
+        order_uuid = _order_uuid_for_position(order_row_id)
+        if not order_row_id:
+            log_warning(MODULE, f"No se pudo guardar orden paper en Supabase para {binance_symbol}; position sin order_id.")
+
+        if not _save_candle_position_crypto(
+            sb, binance_symbol, action, strategy_code, price, pattern, timeframe, order_uuid, paper_size, sl, tp
+        ):
+            log_error(MODULE, f"[PAPER] No se abrió posición en DB para {binance_symbol} — no se notifica Telegram.")
+            return {
+                "success": False,
+                "reason": "crypto_paper_position_not_saved",
+                "pair": binance_symbol,
+            }
+
+        qty_display = paper_size
+        log_info(MODULE, f"[PAPER] ✅ Crypto {action} {binance_symbol} @ {price} | Qty: {paper_size} | Strategy: {strategy_code}")
+    else:
+        # Live mode: Binance MARKET order
+        try:
+            from app.execution.binance_connector import get_client, get_symbol_info_cached
+            client = get_client()
+
+            # Get balance and calculate quantity
+            from app.execution.binance_connector import get_account_balance
+            balance = get_account_balance(client, "USDT")
+            max_risk = float(BOT_STATE.config_cache.get("max_risk_per_trade_pct", 2.0)) / 100.0
+            capital_for_trade = balance * max_risk * 10  # leverage adjustment
+            
+            info = get_symbol_info_cached(client, binance_symbol)
+            step_size = info.get("step_size", 0.001)
+            quantity = capital_for_trade / price
+            
+            from app.execution.binance_connector import round_step_size
+            quantity = round_step_size(quantity, step_size)
+
+            if quantity <= 0:
+                return {"success": False, "reason": "Cantidad insuficiente"}
+
+            if action == "BUY":
+                entry_order = client.order_market_buy(symbol=binance_symbol, quantity=quantity)
+            else:
+                entry_order = client.order_market_sell(symbol=binance_symbol, quantity=quantity)
+
+            fills = entry_order.get("fills", [])
+            if fills:
+                avg_price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / sum(float(f["qty"]) for f in fills)
+            else:
+                avg_price = price
+
+            # Recalculate backstop with actual avg_price for live
+            backstop_data_live = calculate_backstop_sl(
+                entry_price = float(avg_price),
+                side        = 'long' if action == 'BUY' else 'short',
+                snap        = current_snap,
+                market_type = 'crypto_futures',
+            )
+            sl_live = backstop_data_live['backstop_price']
+
+            sl_live, tp_live = _ensure_crypto_sl_tp(action, float(avg_price), sl_live, tp)
+            order_row_id = _save_candle_order_crypto(
+                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, "live", quantity, sl_live, tp_live
+            )
+            order_uuid = _order_uuid_for_position(order_row_id)
+            if not order_row_id:
+                log_warning(MODULE, f"No se pudo guardar orden live en Supabase para {binance_symbol}; position sin order_id.")
+            if not _save_candle_position_crypto(
+                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, order_uuid, quantity, sl_live, tp_live
+            ):
+                log_error(
+                    MODULE,
+                    f"[LIVE] Binance ejecutó pero falló guardar posición en DB para {binance_symbol} — revisar Supabase / no Telegram.",
+                )
+                return {
+                    "success": False,
+                    "reason": "crypto_live_position_not_saved",
+                    "pair": binance_symbol,
+                }
+
+            qty_display = float(quantity)
+            entry_display = float(avg_price)
+            log_info(MODULE, f"[LIVE] ✅ Crypto {action} {binance_symbol} @ {avg_price} | Strategy: {strategy_code}")
+
+        except Exception as e:
+            log_error(MODULE, f"Crypto MARKET order failed: {e}\n{traceback.format_exc()}")
+            return {"success": False, "reason": str(e)}
+
+    # Solo notificar si hay posición persistida (paper o live)
+    _send_telegram_sync(
+        f"🕯️ CRYPTO CANDLE SIGNAL (ejecutado)\n"
+        f"{'🟢 BUY' if action == 'BUY' else '🔴 SELL'} {binance_symbol}\n"
+        f"Cantidad: {qty_display}\n"
+        f"Patrón: {pattern.pattern_name}\n"
+        f"Temporalidad: {timeframe}\n"
+        f"Confianza: {pattern.confidence:.0f}%\n"
+        f"Estrategia: {strategy_code}\n"
+        f"Precio: {entry_display:.4f}\n"
+        f"Modo: {'PAPER' if is_paper else 'LIVE'}"
+    )
+
+    return {"success": True, "action": action, "pair": binance_symbol, "strategy": strategy_code}
+
+
+def _close_all_positions_crypto(binance_symbol: str, strategy_code: str) -> dict:
+    """
+    Cierra posiciones abiertas del par (formato canónico SOLUSDT, incluye legacy SOL/USDT).
+
+    Reglas:
+      - Cantidad efectiva desde positions.size o orders.quantity (corrige PnL 0 por size 0).
+      - Solo cierra si cada posición está en beneficio según min_profit_exit_usd / min_profit_exit_pct
+        (misma filosofía que reversión MTF; las pérdidas las gestiona SL / sl_prevention, no la vela).
+    """
+    sb = get_supabase()
+    out = {
+        "closed_count": 0,
+        "skipped_due_to_loss": False,
+        "skipped_due_to_invalid_size": False,
+    }
+    try:
+        variants = crypto_symbol_match_variants(binance_symbol)
+        res = (
+            sb.table("positions")
+            .select("*")
+            .eq("status", "open")
+            .in_("symbol", variants)
+            .execute()
+        )
+        positions = res.data or []
+
+        if not positions:
+            return out
+
+        from app.core.memory_store import BOT_STATE
+
+        is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+        min_usd = float(BOT_STATE.config_cache.get("min_profit_exit_usd", 1.0))
+        min_pct = float(BOT_STATE.config_cache.get("min_profit_exit_pct", 0.30))
+
+        close_price_live = None
+        if not is_paper:
+            from app.execution.binance_connector import get_current_price
+
+            close_price_live = get_current_price(binance_symbol)
+            if close_price_live <= 0:
+                log_warning(MODULE, f"No se pudo obtener precio de cierre para {binance_symbol}")
+                return out
+
+        previews = []
+        for pos in positions:
+            if is_paper:
+                close_price = float(pos.get("current_price", pos.get("entry_price", 0)))
+            else:
+                close_price = float(close_price_live or 0)
+
+            if close_price <= 0:
+                log_warning(MODULE, f"Precio de cierre inválido para posición {pos.get('id')} {binance_symbol}")
+                return out
+
+            entry_price = float(pos.get("entry_price", 0) or 0)
+            size = resolve_crypto_position_quantity(sb, pos)
+            if size <= 0:
+                out["skipped_due_to_invalid_size"] = True
+                log_error(
+                    MODULE,
+                    f"Posición {pos.get('id')} {pos.get('symbol')}: size=0 y sin quantity en orders — abortando cierre vela.",
+                )
+                return out
+
+            side_u = (pos.get("side") or "").upper()
+            if side_u in ("LONG", "BUY"):
+                pnl = (close_price - entry_price) * size
+                pnl_pct = ((close_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+            else:
+                pnl = (entry_price - close_price) * size
+                pnl_pct = ((entry_price - close_price) / entry_price * 100) if entry_price > 0 else 0.0
+
+            previews.append((pos, size, pnl, pnl_pct, close_price))
+
+        eps = 1e-9
+        for _pos, _sz, pnl, pnl_pct, _cpx in previews:
+            if pnl <= eps:
+                out["skipped_due_to_loss"] = True
+                log_info(
+                    MODULE,
+                    f"🚫 No cierre vela {binance_symbol}: PnL no positivo (usd={pnl:.4f}, pct={pnl_pct:.4f}).",
+                )
+                return out
+            profit_ok = (pnl >= min_usd) or (pnl_pct >= min_pct)
+            if not profit_ok:
+                out["skipped_due_to_loss"] = True
+                log_info(
+                    MODULE,
+                    f"🚫 No cierre vela {binance_symbol}: beneficio insuficiente vs umbrales "
+                    f"(usd={pnl:.4f} need>={min_usd} OR pct={pnl_pct:.4f}% need>={min_pct}%).",
+                )
+                return out
+
+        log_info(
+            MODULE,
+            f"🔄 Cerrando {len(previews)} posición(es) de {binance_symbol} (señal vela → {strategy_code})",
+        )
+
+        for pos, size, pnl, pnl_pct, close_px in previews:
+            try:
+                notional = float(pos.get("entry_price", 0) or 0) * size
+                pnl_pct_row = round((pnl / notional * 100), 4) if notional > 0 else round(pnl_pct, 4)
+
+                sb.table("positions").update(
+                    {
+                        "status": "closed",
+                        "symbol": binance_symbol,
+                        "close_reason": f"candle_signal_{strategy_code}",
+                        "realized_pnl": round(pnl, 4),
+                        "realized_pnl_pct": pnl_pct_row,
+                        "size": size,
+                        "current_price": close_px,
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ).eq("id", pos["id"]).execute()
+
+                out["closed_count"] += 1
+                log_info(
+                    MODULE,
+                    f"  ↳ Cerrada {pos['id'][:8]}... side={pos.get('side')} PnL: {pnl:.4f} ({pnl_pct_row}%) qty={size}",
+                )
+
+            except Exception as e:
+                log_error(MODULE, f"Error cerrando posición {pos.get('id')}: {e}")
+
+    except Exception as e:
+        log_error(MODULE, f"Error cerrando posiciones crypto: {e}")
+
+    return out
+
+
+def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, mode, quantity=0, sl=0.0, tp=0.0):
+    """Save order record for crypto candle signal."""
+    try:
+        sym = normalize_crypto_symbol(binance_symbol)
+        price_f = float(price or 0)
+        qty_f = float(quantity or 0)
+        sl_f, tp_f = _ensure_crypto_sl_tp(action, price_f, sl, tp)
+        row = {
+            "symbol": sym,
+            "side": action,
+            "order_type": "MARKET",
+            "status": "open",
+            "entry_price": price_f,
+            "stop_loss_price": sl_f,
+            "take_profit_price": tp_f,
+            "stop_price": sl_f,
+            "limit_price": tp_f,
+            "rule_code": strategy_code,
+            "quantity": qty_f,
+            "is_paper": mode == "paper",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        res = sb.table("orders").insert(row).execute()
+        if not res.data:
+            return None
+        oid = res.data[0].get("id")
+        return str(oid) if oid else None
+    except Exception as e:
+        log_error(MODULE, f"CRITICAL: Crypto Order save failed to Supabase: {e}")
+        return None
+
+
+def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, order_id, quantity=0, sl=0.0, tp=0.0) -> bool:
+    """Save position record for crypto candle signal. Returns True si la fila quedó en Supabase."""
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        
+        side = "LONG" if action == "BUY" else "SHORT"
+        sym = normalize_crypto_symbol(binance_symbol)
+        price_f = float(price or 0)
+        qty_f = float(quantity or 0)
+        sl_f, tp_f = _ensure_crypto_sl_tp(action, price_f, sl, tp)
+        oid = _order_uuid_for_position(order_id)
+
+        payload = {
+            "symbol": sym,
+            "side": side,
+            "entry_price": price_f,
+            "avg_entry_price": price_f,
+            "current_price": price_f,
+            "size": qty_f if qty_f > 0 else 1.0, # Simulated size if zero
+            "stop_loss": sl_f,
+            "sl_price": sl_f,
+            "stop_loss_price": sl_f,
+            "sl_backstop_price": sl_f,
+            "sl_type": "backstop",
+            "sl_dynamic_price": None,
+            "highest_price_reached": price_f,
+            "lowest_price_reached": price_f,
+            "take_profit": tp_f,
+            "tp_partial_price": tp_f,
+            "tp_full_price": tp_f,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "status": "open",
+            "rule_code": strategy_code,
+            "rule_entry": strategy_code,
+            "regime_entry": "candle_signal",
+            "opened_at": now_iso,
+        }
+        if oid:
+            payload["order_id"] = oid
+
+        res = sb.table("positions").insert(payload).execute()
+        
+        if not res.data:
+            log_error(MODULE, f"CRITICAL: Supabase rejected position insert for {sym}")
+            return False
+        log_info(MODULE, f"💾 Posición guardada en DB: {sym} ID:{res.data[0]['id'][:8]}...")
+        return True
+
+    except Exception as e:
+        log_error(MODULE, f"CRITICAL: Failed to save crypto position to Supabase: {e}\n{traceback.format_exc()}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  FOREX — Execute via cTrader (paper or live)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def execute_forex_signal(
+    pair: str,
+    pattern: PatternResult,
+    timeframe: str,
+    candle_data: dict,
+    fib_zone: int = 0,
+) -> dict:
+    """
+    Execute a candle signal for Forex.
+    
+    Steps:
+      1. Close ALL active positions for this pair
+      2. Open 1 new position (paper or live via cTrader)
+    """
+    sb = get_supabase()
+    action = pattern.action
+    strategy_code = _get_strategy_code("forex", action)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    price = candle_data.get("close", 0)
+
+    log_info(MODULE,
+        f"🕯️ FOREX CANDLE SIGNAL: {action} {pair} | "
+        f"Pattern: {pattern.pattern_name} (ID:{pattern.pattern_id}) | "
+        f"TF: {timeframe} | Confidence: {pattern.confidence:.0f} | "
+        f"Fib Zone: {fib_zone:+d}"
+    )
+
+    # ── STEP 1: Close ALL active positions for this pair ──
+    direction = "long" if action == "BUY" else "short"
+    _close_all_positions_forex(pair, strategy_code, price)
+
+    # ── STEP 2: Open new position ──
+    mode = os.getenv("FOREX_MODE", "paper")
+
+    # Calculate lot size
+    capital = float(os.getenv("FOREX_CAPITAL", 1000))
+    risk_pct = float(os.getenv("FOREX_RISK_PCT", 1.0))
+    pip_size = 0.0001 if "JPY" not in pair and "XAU" not in pair else 0.01
+    sl_pips = 30  # default
+    pip_val = 10.0 if "JPY" not in pair and "XAU" not in pair else 1.0
+
+    riesgo = capital * risk_pct / 100
+    lots = round(riesgo / (sl_pips * pip_val), 2) if sl_pips > 0 else 0.01
+    lots = min(max(lots, 0.01), 1.0)
+
+    # SL/TP calculation
+    atr = 20 * pip_size  # fallback ATR
+    if action == "BUY":
+        sl = round(price - atr * 2, 6)
+        tp = round(price + atr * 3, 6)
+    else:
+        sl = round(price + atr * 2, 6)
+        tp = round(price - atr * 3, 6)
+
+    # Save position
+    pos_data = {
+        "symbol": pair,
+        "side": direction,
+        "lots": lots,
+        "entry_price": price,
+        "sl_price": sl,
+        "tp_price": tp,
+        "status": "open",
+        "mode": mode,
+        "rule_code": strategy_code,
+        "opened_at": now_iso,
+    }
+    try:
+        sb.table("forex_positions").insert(pos_data).execute()
+    except Exception as e:
+        log_error(MODULE, f"Forex position save failed: {e}")
+        return {"success": False, "reason": str(e)}
+
+    mode_str = f"[{mode.upper()}]"
+    log_info(MODULE,
+        f"{mode_str} ✅ Forex {action} {pair} @ {price:.5f} | "
+        f"Lots: {lots} | SL: {sl:.5f} | TP: {tp:.5f} | Strategy: {strategy_code}"
+    )
+
+    _send_telegram_sync(
+        f"🕯️ FOREX CANDLE SIGNAL\n"
+        f"{'🟢 BUY' if action == 'BUY' else '🔴 SELL'} {pair}\n"
+        f"Patrón: {pattern.pattern_name}\n"
+        f"Temporalidad: {timeframe}\n"
+        f"Confianza: {pattern.confidence:.0f}%\n"
+        f"Estrategia: {strategy_code}\n"
+        f"Precio: {price:.5f}\n"
+        f"SL: {sl:.5f} | TP: {tp:.5f}\n"
+        f"Modo: {mode.upper()}"
+    )
+
+    return {"success": True, "action": action, "pair": pair, "strategy": strategy_code}
+
+
+def _close_all_positions_forex(pair: str, strategy_code: str, current_price: float):
+    """Close ALL active forex positions for a pair (any direction)."""
+    sb = get_supabase()
+    try:
+        res = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").execute()
+        positions = res.data or []
+
+        if not positions:
+            return
+
+        log_info(MODULE,
+            f"🔄 Cerrando TODAS las {len(positions)} posiciones activas de {pair} "
+            f"(nueva señal detectada → {strategy_code})"
+        )
+
+        pip_size = 0.0001 if "JPY" not in pair and "XAU" not in pair else 0.01
+        pip_val = 10.0 if "JPY" not in pair and "XAU" not in pair else 1.0
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for pos in positions:
+            try:
+                entry = float(pos.get("entry_price", 0))
+                lots = float(pos.get("lots", 0.01))
+                side = pos.get("side", "long").lower()
+
+                pips_pnl = (current_price - entry) / pip_size if side == "long" else (entry - current_price) / pip_size
+                pnl_usd = pips_pnl * pip_val * lots
+
+                sb.table("forex_positions").update({
+                    "status": "closed",
+                    "current_price": current_price,
+                    "close_reason": f"candle_signal_{strategy_code}",
+                    "pnl_usd": round(pnl_usd, 2),
+                    "pnl_pips": round(pips_pnl, 1),
+                    "closed_at": now_iso,
+                }).eq("id", pos["id"]).execute()
+
+                log_info(MODULE, f"  ↳ Cerrada forex {pos['id'][:8]}... side={side} PnL: {pnl_usd:.2f} USD ({pips_pnl:.1f} pips)")
+
+            except Exception as e:
+                log_error(MODULE, f"Error cerrando forex pos {pos.get('id')}: {e}")
+
+    except Exception as e:
+        log_error(MODULE, f"Error cerrando posiciones forex: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STOCKS — Execute via Paper/IB
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def execute_stocks_signal(
+    ticker: str,
+    pattern: PatternResult,
+    timeframe: str,
+    candle_data: dict,
+    pool_type: str = "HOT",
+    fib_zone: int = 0,
+) -> dict:
+    """
+    Execute a candle signal for Stocks.
+    
+    Strategies:
+      PRO: Inversiones Pro / BUY-V01, SELL-V02
+      HOT: Hot by Volume  / BUY-V03, SELL-V04
+    
+    Steps:
+      1. Close ALL active positions for this ticker
+      2. Open 1 new MARKET position
+    """
+    sb = get_supabase()
+    action = pattern.action
+    strategy_code = _get_strategy_code("stocks", action, pool_type)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    price = candle_data.get("close", 0)
+
+    if price <= 0:
+        return {"success": False, "reason": "Precio inválido"}
+
+    log_info(MODULE,
+        f"🕯️ STOCKS CANDLE SIGNAL: {action} {ticker} | "
+        f"Pattern: {pattern.pattern_name} (ID:{pattern.pattern_id}) | "
+        f"TF: {timeframe} | Pool: {pool_type} | Strategy: {strategy_code} | "
+        f"Fib Zone: {fib_zone:+d}"
+    )
+
+    # ── STEP 1: Close ALL active positions for this ticker ──
+    _close_all_stocks_positions(ticker, price, strategy_code)
+
+    # ── STEP 2: Open new position (only if BUY — for SELL we only close) ──
+    if action == "BUY":
+        # Load config
+        try:
+            cfg_res = sb.table("stocks_config").select("key, value").execute()
+            cfg = {r["key"]: r["value"] for r in (cfg_res.data or [])}
+            total_capital = float(cfg.get("total_capital_usd", 5000))
+            max_pct = float(cfg.get("max_pct_per_trade", 0.20))
+            if max_pct > 1:
+                max_pct = max_pct / 100.0
+        except Exception:
+            total_capital = 5000
+            max_pct = 0.20
+
+        capital_for_trade = total_capital * max_pct
+        shares = int(capital_for_trade / price)
+
+        if shares <= 0:
+            return {"success": False, "reason": "Capital insuficiente para 1 share"}
+
+        # SL/TP
+        atr_est = price * 0.02
+        sl = round(price - atr_est * 2.0, 2)
+        tp = round(price + atr_est * 2.0 * 2.5, 2)
+
+        # Save order
+        sb.table("stocks_orders").insert({
+            "ticker": ticker,
+            "group_name": f"Candle Signal {pool_type}",
+            "rule_code": strategy_code,
+            "order_type": "market",
+            "direction": "buy",
+            "shares": shares,
+            "market_price": price,
+            "status": "filled",
+            "filled_price": price,
+            "filled_at": now_iso,
+            "created_at": now_iso,
+        }).execute()
+
+        # Save position
+        sb.table("stocks_positions").insert({
+            "ticker": ticker,
+            "group_name": f"Candle Signal {pool_type}",
+            "direction": "long",
+            "shares": shares,
+            "avg_price": price,
+            "total_cost": round(shares * price, 2),
+            "current_price": price,
+            "stop_loss": sl,
+            "take_profit": tp,
+            "unrealized_pnl": 0.0,
+            "unrealized_pnl_pct": 0.0,
+            "dca_count": 0,
+            "first_buy_at": now_iso,
+            "updated_at": now_iso,
+            "status": "open",
+        }).execute()
+
+        log_info(MODULE,
+            f"✅ Stocks BUY {ticker} x{shares} @ ${price:.2f} | "
+            f"SL: ${sl:.2f} | TP: ${tp:.2f} | Strategy: {strategy_code}"
+        )
+    else:
+        # SELL signals only close positions — we don't short stocks in this model
+        log_info(MODULE, f"✅ Stocks SELL signal processed — positions closed for {ticker}")
+
+    _send_telegram_sync(
+        f"🕯️ STOCKS CANDLE SIGNAL\n"
+        f"{'🟢 BUY' if action == 'BUY' else '🔴 SELL'} {ticker}\n"
+        f"Patrón: {pattern.pattern_name}\n"
+        f"Temporalidad: {timeframe}\n"
+        f"Confianza: {pattern.confidence:.0f}%\n"
+        f"Estrategia: {strategy_code}\n"
+        f"Pool: {pool_type}\n"
+        f"Precio: ${price:.2f}"
+    )
+
+    return {"success": True, "action": action, "ticker": ticker, "strategy": strategy_code}
+
+
+def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
+    """Close ALL open stock positions for a ticker (triggered by SELL signal)."""
+    sb = get_supabase()
+    try:
+        res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+        positions = res.data or []
+
+        if not positions:
+            return
+
+        log_info(MODULE,
+            f"🔄 Cerrando {len(positions)} posiciones LONG de {ticker} "
+            f"(SELL signal detectada → {strategy_code})"
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for pos in positions:
+            try:
+                avg = float(pos.get("avg_price", 0))
+                shares = float(pos.get("shares", 0))
+                pnl = (price - avg) * shares
+                pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
+
+                sb.table("stocks_positions").update({
+                    "status": "closed",
+                    "current_price": price,
+                    "unrealized_pnl": round(pnl, 2),
+                    "unrealized_pnl_pct": round(pnl_pct, 2),
+                    "updated_at": now_iso,
+                }).eq("id", pos["id"]).execute()
+
+                # Also record the sell order
+                sb.table("stocks_orders").insert({
+                    "ticker": ticker,
+                    "group_name": "Candle Signal Close",
+                    "rule_code": strategy_code,
+                    "order_type": "market",
+                    "direction": "sell",
+                    "shares": int(shares),
+                    "market_price": price,
+                    "status": "filled",
+                    "filled_price": price,
+                    "filled_at": now_iso,
+                    "created_at": now_iso,
+                }).execute()
+
+                log_info(MODULE,
+                    f"  ↳ Cerrada {ticker} x{shares:.0f} "
+                    f"avg=${avg:.2f} exit=${price:.2f} PnL=${pnl:.2f} ({pnl_pct:.2f}%)"
+                )
+            except Exception as e:
+                log_error(MODULE, f"Error cerrando stocks pos {pos.get('id')}: {e}")
+
+    except Exception as e:
+        log_error(MODULE, f"Error buscando stocks positions: {e}")
+
+
+def _close_opposite_stocks_positions(ticker: str, price: float, strategy_code: str, opposite_dir: str):
+    """Close stock positions in opposite direction (if shorting were supported)."""
+    sb = get_supabase()
+    try:
+        res = (
+            sb.table("stocks_positions")
+            .select("*")
+            .eq("ticker", ticker)
+            .eq("status", "open")
+            .eq("direction", opposite_dir)
+            .execute()
+        )
+        if not res.data:
+            return
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for pos in res.data:
+            avg = float(pos.get("avg_price", 0))
+            shares = float(pos.get("shares", 0))
+            pnl = (price - avg) * shares if pos.get("direction") == "long" else (avg - price) * shares
+
+            sb.table("stocks_positions").update({
+                "status": "closed",
+                "current_price": price,
+                "unrealized_pnl": round(pnl, 2),
+                "updated_at": now_iso,
+            }).eq("id", pos["id"]).execute()
+
+    except Exception as e:
+        log_error(MODULE, f"Error closing opposite stocks positions: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  UNIFIED DISPATCHER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def execute_candle_signal(
+    market: str,
+    pair_or_ticker: str,
+    pattern: PatternResult,
+    timeframe: str,
+    candle_data: dict,
+    pool_type: str = "HOT",
+) -> dict:
+    """
+    Unified dispatcher — routes candle signals to the correct market executor.
+    
+    Pre-validation:
+      1. Action must be BUY or SELL
+      2. Fibonacci band zone filter:
+         BUY  → zone ∈ {+2,+1,0,-1,-2,-3,-4,-5,-6}  (zone ≤ +2)
+         SELL → zone ∈ {-2,-1,0,+1,+2,+3,+4,+5,+6}  (zone ≥ -2)
+    
+    Execution flow:
+      1. Close ALL active positions for the pair/ticker
+      2. Open 1 new MARKET position in the signal direction
+    
+    Args:
+        market: "crypto", "forex", or "stocks"
+        pair_or_ticker: "BTC/USDT", "EURUSD", "AAPL", etc.
+        pattern: PatternResult from candle_patterns.py
+        timeframe: "4H" or "1D"
+        candle_data: dict with at least {close: float}
+        pool_type: for stocks — "PRO" or "HOT"
+    
+    Returns:
+        dict with {success, action, pair/ticker, strategy}
+    """
+    if pattern.action not in ("BUY", "SELL"):
+        return {"success": False, "reason": f"Action is {pattern.action}, not BUY/SELL"}
+
+    # ── FIBONACCI BAND ZONE FILTER ──
+    fib_zone = _get_fibonacci_zone(market, pair_or_ticker)
+    zone_valid = _validate_fibonacci_zone(pattern.action, fib_zone)
+
+    if not zone_valid:
+        strategy_code = _get_strategy_code(market, pattern.action, pool_type)
+        log_info(MODULE,
+            f"🚫 FIBONACCI FILTER BLOCKED: {pattern.action} {pair_or_ticker} | "
+            f"Zone: {fib_zone:+d} | Pattern: {pattern.pattern_name} | "
+            f"Strategy: {strategy_code} | "
+            f"Allowed zones for {pattern.action}: "
+            f"{'≤ +2' if pattern.action == 'BUY' else '≥ -2'}"
+        )
+        # Save to audit as blocked
+        _save_candle_signal(market, pair_or_ticker, pattern, timeframe, candle_data, pool_type,
+                           fib_zone=fib_zone, blocked=True)
+        return {
+            "success": False,
+            "reason": f"Fibonacci zone {fib_zone:+d} not valid for {pattern.action}",
+            "fib_zone": fib_zone,
+        }
+
+    # Save signal to candle_signals table for audit (passed filter)
+    _save_candle_signal(market, pair_or_ticker, pattern, timeframe, candle_data, pool_type,
+                       fib_zone=fib_zone, blocked=False)
+
+    if market == "crypto":
+        return execute_crypto_signal(pair_or_ticker, pattern, timeframe, candle_data, fib_zone)
+    elif market == "forex":
+        return execute_forex_signal(pair_or_ticker, pattern, timeframe, candle_data, fib_zone)
+    elif market == "stocks":
+        return execute_stocks_signal(pair_or_ticker, pattern, timeframe, candle_data, pool_type, fib_zone)
+    else:
+        return {"success": False, "reason": f"Unknown market: {market}"}
+
+
+def _save_candle_signal(market, pair, pattern, timeframe, candle_data, pool_type,
+                       fib_zone: int = 0, blocked: bool = False):
+    """Persist signal to candle_signals audit table."""
+    try:
+        sb = get_supabase()
+        strategy_code = _get_strategy_code(market, pattern.action, pool_type)
+
+        sb.table("candle_signals").insert({
+            "pair": pair,
+            "market": market,
+            "timeframe": timeframe,
+            "pattern_id": pattern.pattern_id,
+            "pattern_name": pattern.pattern_name,
+            "signal_type": pattern.signal,
+            "action": pattern.action,
+            "confidence": round(pattern.confidence, 1),
+            "candles_used": pattern.candles_used,
+            "strategy_code": strategy_code,
+            "pool_type": pool_type if market == "stocks" else None,
+            "ohlc_open": candle_data.get("open"),
+            "ohlc_high": candle_data.get("high"),
+            "ohlc_low": candle_data.get("low"),
+            "ohlc_close": candle_data.get("close"),
+            "ohlc_volume": candle_data.get("volume"),
+            "executed": not blocked,
+            "result_status": "blocked_fib_zone" if blocked else "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception as e:
+        log_warning(MODULE, f"Failed to save candle signal audit: {e}")

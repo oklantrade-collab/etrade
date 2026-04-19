@@ -7,6 +7,12 @@ from app.core.parameter_guard import get_active_params
 from app.workers.performance_monitor import send_telegram_message
 from app.core.memory_store import BOT_STATE
 import asyncio
+from app.analysis.movement_classifier import (
+    classify_movement
+)
+from app.analysis.smart_limit import (
+    calculate_smart_limit_price
+)
 
 async def process_swing_orders_15m(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFrame, snap: dict, provider, sb) -> None:
     """Ciclo de gestión de órdenes Swing cada 15m"""
@@ -42,170 +48,133 @@ async def process_swing_orders_15m(symbol: str, df_15m: pd.DataFrame, df_4h: pd.
             
         await process_swing_orders(symbol, timeframe, df, snap, sb)
 
-async def process_swing_orders(symbol: str, timeframe: str, df: pd.DataFrame, snap: dict, sb) -> None:
-    market_type = BOT_STATE.config_cache.get('market_type', 'crypto_futures')
-    cfg = SWING_CONFIG.get(timeframe)
-    if not cfg: return
-
-    # 1. Detectar Régimen Lateral (Rango Plano) - Umbral 0.5% (Estrategia Dd61/Dd51)
-    horizontal = detect_basis_horizontal(df, lookback=10, slope_threshold=0.5)
-    is_flat = horizontal['is_flat']
-    log_info('SWING', f"{symbol}/{timeframe}: is_flat={is_flat} (slope={horizontal['slope_pct']:.4f}%)")
-
-    # ── Leer estructura 4h del snapshot ──
-    allow_long_4h  = bool(snap.get('allow_long_4h',  True))
-    allow_short_4h = bool(snap.get('allow_short_4h', True))
-    reverse_4h     = bool(snap.get('reverse_signal_4h', False))
+async def process_swing_orders(
+    symbol:   str,
+    timeframe: str,
+    df:       pd.DataFrame,
+    snap:     dict,
+    sb
+):
+    """
+    Versión actualizada de swing_orders con
+    Smart LIMIT Order Placement.
+    """
+    if timeframe != '15m':
+        return # Solo Smart Limit en 15m para este módulo
 
     for direction in ['long', 'short']:
-        if direction == 'short' and not can_open_short(market_type):
+        # ── 1. Clasificar movimiento ──────────
+        movement = classify_movement(
+            df    = df,
+            lookback = 20,
+        )
+
+        movement_type = movement['movement_type']
+        signal_bias   = movement['signal_bias']
+
+        # ── 2. Verificar sesgo de movimiento ──
+        if direction == 'long' and \
+           movement_type == 'descending' and \
+           movement['confidence'] > 0.80:
+            log_info('SMART_LIMIT',
+                f'{symbol}: LONG bloqueado — '
+                f'movimiento descendente fuerte'
+            )
             continue
 
-        # ── 2. Selección de Regla y Niveles ──
-        if is_flat:
-            # --- ESTRATEGIA TRAP (Dd61 / Dd51) ---
-            rule_code = 'Dd61' if direction == 'long' else 'Dd51'
-
-            # ── NUEVO: FILTRO DE COOLDOWN POST-SL (15 MINUTOS) ──
-            try:
-                limit_time = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
-                recent_sl = sb.table('paper_trades').select('id')\
-                    .eq('symbol', symbol)\
-                    .eq('rule_code', rule_code)\
-                    .eq('close_reason', 'sl')\
-                    .gte('closed_at', limit_time)\
-                    .execute()
-                    
-                if recent_sl.data:
-                    log_info('SWING', f"{symbol}: Cooldown de 15m activo para {rule_code} (SL reciente).")
-                    continue
-            except Exception as cooldown_e:
-                log_error('SWING', f"Error en validación de cooldown: {cooldown_e}")
-            
-            # FILTRO BASIS: Solo pesca si ya estamos en la mitad correcta del canal
-            basis_val = float(df['basis'].iloc[-1])
-            current_p = float(df['close'].iloc[-1])
-            
-            if direction == 'long' and current_p >= basis_val:
-                continue # No compra si estamos arriba del basis
-            if direction == 'short' and current_p <= basis_val:
-                continue # No vende si estamos abajo del basis
-
-            band = find_current_band_zone(df, direction)
-            
-            # Si no hay toque en zona extrema (L6/U6), no operamos Trap reactivamente
-            if not band:
-                continue
-            
-            # --- VALIDACIÓN DINÁMICA POR SCORE (Requirement: Sync with UI Rules) ---
-            # Si la regla Dd51/Dd61 existe en el motor, validamos el score (ej: 0.75)
-            from app.strategy.strategy_engine import StrategyEngine
-            engine = StrategyEngine.get_instance(sb)
-            if engine and engine.rules:
-                # El usuario puede usar Dd51 o Dd51_15m
-                possible_codes = [rule_code, f"{rule_code}_{timeframe}"]
-                match_rule = next((engine.rules.get(c) for c in possible_codes if c in engine.rules), None)
-                
-                if match_rule:
-                    from app.core.memory_store import get_memory_df
-                    df_15m_ctx = get_memory_df(symbol, "15m") if timeframe != "15m" else df
-                    df_4h_ctx = get_memory_df(symbol, "4h") if timeframe != "4h" else df
-                    context = engine.build_context(snap=snap, df_15m=df_15m_ctx, df_4h=df_4h_ctx)
-                    
-                    eval_res = engine.evaluate_rule(match_rule, context)
-                    if not eval_res['triggered']:
-                        log_info('SWING', f"{symbol}/{timeframe}: {rule_code} rechazada por SCORE ({eval_res['score']:.2f} < {eval_res['min_score']})")
-                        continue
-                    else:
-                        log_info('SWING', f"{symbol}/{timeframe}: {rule_code} aprobada por SCORE ({eval_res['score']:.2f} >= {eval_res['min_score']})")
-
-            band_val = band['band_value']
-
-            # ── NUEVO: BUFFER DE SL DINÁMICO (PATRONES DE VOLATILIDAD) ──
-            current_adx = float(snap.get('adx', 25))
-            if current_adx < 20: 
-                sl_buffer = 0.003 # 0.3% Estable
-                vol_label = "ESTABLE"
-            elif current_adx < 35:
-                sl_buffer = 0.005 # 0.5% Neutro
-                vol_label = "NEUTRO"
-            else:
-                sl_buffer = 0.007 # 0.7% VOLATIL
-                vol_label = "VOLATIL"
-
-            # Margen sugerido: 0.05% de buffer hacia el mercado (hacia Basis)
-            fill_margin = 0.0005
-            limit_p = band_val * (1 + fill_margin) if direction == 'long' else band_val * (1 - fill_margin)
-            
-            # SL dinámico según patrón de volatilidad
-            sl_p = band_val * (1 - sl_buffer) if direction == 'long' else band_val * (1 + sl_buffer)
-            tp_p = float(df['basis'].iloc[-1])
-            
-            levels = {
-                'limit_price': limit_p,
-                'sl_price': sl_p,
-                'tp1_price': tp_p,
-                'tp2_price': tp_p
-            }
-            
-            band_maturity = {
-                'band_name': band['band_name'],
-                'band_level': band['band_level'],
-                'band_value': band_val,
-                'is_mature': True  # Forzamos madurez proactiva en modo Trap
-            }
-            log_info('SWING', f"{symbol}/{timeframe}: {rule_code} ({vol_label}) activa. SL: {sl_buffer*100}% Caza en ${limit_p:,.4f}")
-            
-            # TTL 2h y Timeframe original (15m/4h) pero con trade_type='trap'
-            await cancel_swing_orders(symbol, direction=direction, trade_type='trap', timeframe=timeframe, reason='recalculated', sb=sb)
-            await create_swing_order(
-                symbol=symbol, direction=direction, timeframe=timeframe,
-                band=band_maturity, levels=levels, rule_code=rule_code,
-                basis_slope=horizontal['slope_pct'], sizing_pct=float(cfg['sizing_pct']),
-                expire_hours=2, sb=sb, trade_type='trap'
+        if direction == 'short' and \
+           movement_type == 'ascending' and \
+           movement['confidence'] > 0.80:
+            log_info('SMART_LIMIT',
+                f'{symbol}: SHORT bloqueado — '
+                f'movimiento ascendente fuerte'
             )
-            continue # Procesa la siguiente dirección
+            continue
 
+        # ── 3. Calcular precio LIMIT óptimo ───
+        limit_result = calculate_smart_limit_price(
+            df            = df,
+            direction     = direction,
+            movement_type = movement_type,
+            lookback      = 50,
+            margin_pct    = 0.0015,
+        )
+
+        if not limit_result or \
+           not limit_result.get('limit_price'):
+            continue
+
+        if limit_result['signal_quality'] == 'low':
+            log_info('SMART_LIMIT',
+                f'{symbol}/{direction}: Calidad baja — '
+                f'no se coloca orden'
+            )
+            continue
+
+        # ── 4. Cancelar orden anterior ────────
+        await cancel_swing_order(
+            symbol    = symbol,
+            direction = direction,
+            reason    = 'smart_limit_recalculated',
+            sb        = sb
+        )
+
+        # ── 5. Calcular SL y TP ───────────────
+        entry  = float(limit_result['limit_price'])
+        basis  = float(snap.get('basis', 0))
+        
+        if direction == 'long':
+            sl_price = entry * (1 - 0.005)  # 0.5% SL
+            tp_price = basis                 # TP = BASIS
         else:
-            # --- ESTRATEGIA SWING ESTÁNDAR (Dd21 / Dd11) ---
-            rule_code = 'Dd21' if direction == 'long' else 'Dd11'
+            sl_price = entry * (1 + 0.005)
+            tp_price = basis
 
-            if direction == 'long':
-                swing_authorized = allow_long_4h or (reverse_4h and allow_long_4h)
-                if not swing_authorized:
-                    band = find_current_band_zone(df, 'long')
-                    if band and band.get('band_level', 0) >= 6:
-                        swing_authorized = True
-                    else: continue
-            elif direction == 'short':
-                swing_authorized = allow_short_4h or (reverse_4h and allow_short_4h)
-                if not swing_authorized:
-                    band = find_current_band_zone(df, 'short')
-                    if band and band.get('band_level', 0) >= 6:
-                        swing_authorized = True
-                    else: continue
+        # ── 6. TTL según calidad y distancia ──
+        ttl_hours = 2 if \
+            limit_result['distance_pct'] < 1.5 \
+            else 4
 
-            band_maturity = calculate_fall_maturity(
-                df=df, direction=direction, lookback=cfg['lookback'],
-                min_bands=cfg['min_bands'], min_basis_dist=cfg['min_basis_dist']
-            )
+        # ── 7. Crear orden LIMIT en pending ───
+        await create_smart_limit_order(
+            symbol        = symbol,
+            direction     = direction,
+            limit_price   = entry,
+            sl_price      = sl_price,
+            tp_price      = tp_price,
+            band_target   = limit_result['band_target'],
+            sizing_pct    = limit_result['sizing_pct'],
+            movement_type = movement_type,
+            signal_quality= limit_result['signal_quality'],
+            fib_zone_entry= limit_result['fib_zone_entry'],
+            ttl_hours     = ttl_hours,
+            supabase      = sb
+        )
 
-            if not band_maturity.get('is_mature'):
-                await cancel_swing_orders(symbol, timeframe, f"no_maturity_{direction}", sb, direction)
-                log_info('SWING', f"{symbol}/{timeframe}: {direction.upper()} not mature: {band_maturity.get('reason')}")
-                continue
-                
-            log_info('SWING', f"{symbol}/{timeframe}: {direction.upper()} mature. Bands: {band_maturity.get('bands_perforated')}")
-            levels = calculate_swing_levels(df, direction, band_maturity)
+        log_info('SMART_LIMIT',
+            f'{symbol}/{direction}: '
+            f'LIMIT ${entry:.4f} en '
+            f'{limit_result["band_target"]} '
+            f'(mov: {movement_type}, '
+            f'calidad: {limit_result["signal_quality"]}, '
+            f'sizing: {limit_result["sizing_pct"]*100:.0f}%)'
+        )
 
-            # ── 3. Ejecución de la Orden (Swing Estándar) ──
-            await cancel_swing_orders(symbol, direction=direction, timeframe=timeframe, reason='recalculated', sb=sb)
-            await create_swing_order(
-                symbol=symbol, direction=direction, timeframe=timeframe,
-                band=band_maturity, levels=levels, rule_code=rule_code,
-                basis_slope=horizontal['slope_pct'], sizing_pct=float(cfg['sizing_pct']),
-                expire_hours=int(cfg['ttl_hours']), sb=sb
-            )
+        # ── 8. Alerta Telegram ────────────────
+        await send_telegram_message(
+            f'📍 SMART LIMIT [{symbol}]\n'
+            f'Dir: {direction.upper()}\n'
+            f'Movimiento: {movement_type}\n'
+            f'Banda objetivo: '
+            f'{limit_result["band_target"]}\n'
+            f'Precio LIMIT: ${entry:.4f}\n'
+            f'Distancia actual: '
+            f'{limit_result["distance_pct"]:.2f}%\n'
+            f'Calidad: {limit_result["signal_quality"]}\n'
+            f'Sizing: {limit_result["sizing_pct"]*100:.0f}%\n'
+            f'TTL: {ttl_hours}h\n'
+            f'Razón: {limit_result["rationale"]}'
+        )
 
 def calculate_swing_levels(df: pd.DataFrame, direction: str, band: dict) -> dict:
     band_value = band['band_value']
@@ -228,6 +197,14 @@ def calculate_swing_levels(df: pd.DataFrame, direction: str, band: dict) -> dict
 
     tp2_price = float(df['basis'].iloc[-1])
     
+    # ── VALIDACIÓN DE COHERENCIA SL vs ENTRY (Swing Estándar) ──
+    # Para LONG: SL DEBE estar DEBAJO del band_value (entry)
+    # Para SHORT: SL DEBE estar ARRIBA del band_value (entry)
+    if direction == 'long' and sl_price >= band_value:
+        sl_price = band_value * 0.985  # Forzar SL 1.5% debajo
+    elif direction == 'short' and sl_price <= band_value:
+        sl_price = band_value * 1.015  # Forzar SL 1.5% arriba
+
     return {
         'limit_price': float(band_value),
         'sl_price': float(sl_price),
@@ -252,6 +229,39 @@ async def cancel_swing_orders(symbol: str, timeframe: str = None, reason: str = 
         query = query.eq('trade_type', trade_type)
     
     res = query.execute()
+
+async def cancel_swing_order(symbol: str, direction: str, reason: str, sb):
+    """Alias/Helper para cancelar órdenes específicas"""
+    await cancel_swing_orders(symbol=symbol, direction=direction, reason=reason, sb=sb)
+
+async def create_smart_limit_order(
+    symbol, direction, limit_price, sl_price, tp_price, 
+    band_target, sizing_pct, movement_type, signal_quality, 
+    fib_zone_entry, ttl_hours, supabase
+):
+    new_order = {
+        'symbol': symbol,
+        'direction': direction,
+        'order_type': 'limit',
+        'trade_type': 'smart_limit',
+        'rule_code': 'SMART' if direction == 'long' else 'SMART_S',
+        'limit_price': limit_price,
+        'sl_price': sl_price,
+        'tp1_price': tp_price,
+        'tp2_price': tp_price,
+        'band_name': band_target,
+        'status': 'pending',
+        'mode': 'paper' if BOT_STATE.config_cache.get("paper_trading", True) else 'real',
+        'expires_at': (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat(),
+        'sizing_pct': sizing_pct,
+        'timeframe': '15m',
+        # Nuevos campos
+        'movement_type': movement_type,
+        'signal_quality': signal_quality,
+        'fib_zone_entry': fib_zone_entry
+    }
+    supabase.table('pending_orders').insert(new_order).execute()
+
 
 async def create_swing_order(symbol: str, direction: str, timeframe: str, band: dict, levels: dict, rule_code: str, basis_slope: float, sizing_pct: float, expire_hours: int, sb, trade_type: str = 'swing') -> None:
     new_order = {
@@ -310,112 +320,122 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
     symbol = order['symbol']
     direction = order['direction']
 
-    # --- VALIDACIÓN DE LÍMITES (GLOBAL Y SÍMBOLO) ---
-    try:
-        # 1. Límite Global
-        max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
-        pos_res = sb.table('positions').select('id').eq('status', 'open').execute()
-        current_global = len(pos_res.data) if pos_res.data else 0
-        
-        if current_global >= max_global:
-            log_warning('SWING', f"GLOBAL_LIMIT: {symbol} bloqueado. Límite global de {max_global} alcanzado ({current_global}).")
+    # --- VALIDACIÓN DE LÍMITES (GLOBAL Y SÍMBOLO) CON LOCK ---
+    async with BOT_STATE.order_lock:
+        try:
+            # 1. Límite Global
+            max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
+            pos_res = sb.table('positions').select('id').eq('status', 'open').execute()
+            current_global = len(pos_res.data) if pos_res.data else 0
+            
+            if current_global >= max_global:
+                log_warning('SWING', f"GLOBAL_LIMIT: {symbol} bloqueado. Límite global de {max_global} alcanzado ({current_global}).")
+                return
+
+            # 2. Límite por Símbolo
+            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
+            sym_pos_res = sb.table('positions').select('id').eq('symbol', symbol).eq('status', 'open').execute()
+            current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
+            
+            if current_sym >= max_symbol:
+                log_warning('SWING', f"SYMBOL_LIMIT: {symbol} bloqueado. Límite por símbolo de {max_symbol} alcanzado ({current_sym}).")
+                await cancel_swing_orders(symbol, timeframe=order.get('timeframe',''), reason='limit_reached', sb=sb)
+                return
+        except Exception as limit_e:
+            log_error('SWING', f"Error validando límites en ejecución: {limit_e}")
             return
 
-        # 2. Límite por Símbolo
-        max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
-        sym_pos_res = sb.table('positions').select('id').eq('symbol', symbol).eq('status', 'open').execute()
-        current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
-        
-        if current_sym >= max_symbol:
-            log_warning('SWING', f"SYMBOL_LIMIT: {symbol} bloqueado. Límite por símbolo de {max_symbol} alcanzado ({current_sym}).")
-            # Si alcanzamos el límite, deberíamos cancelar cualquier otra órdenes pendientes de este símbolo
-            # para evitar que se ejecuten después y sigan sobrepasando el límite.
-            await cancel_swing_orders(symbol, timeframe=order.get('timeframe',''), reason='limit_reached', sb=sb)
-            return
-
-    except Exception as limit_e:
-        log_error('SWING', f"Error validando límites en ejecución: {limit_e}")
-
-    # Continuar con el proceso original si pasó los límites
-    from app.core.memory_store import MARKET_SNAPSHOT_CACHE
-    snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
-    regime = snap.get('regime_category', 'bajo_riesgo')
-    params = get_active_params(regime=regime, supabase_client=sb)
-    market_type = BOT_STATE.config_cache.get('market_type', 'crypto_futures')
-    sizing = calculate_position_size(
-        symbol=symbol,
-        entry_price=execution_price,
-        sl_price=float(order.get('sl_price') or 0),
-        market_type=market_type,
-        trade_number=1,
-        regime=regime,
-        supabase=sb
-    )
-    qty = sizing['quantity'] if sizing else 0
-    if qty <= 0:
-        log_error('SWING', f"Could not calculate quantity for {symbol}")
-        return
-
-    sb.table('pending_orders').update({
-        'status': 'triggered',
-        'triggered_at': datetime.now(timezone.utc).isoformat(),
-        'updated_at': datetime.now(timezone.utc).isoformat()
-    }).eq('id', order['id']).execute()
-    
-    pos_data = {
-        'symbol': symbol,
-        'side': direction,
-        'entry_price': execution_price,
-        'avg_entry_price': execution_price,
-        'stop_loss': float(order.get('sl_price') or 0),
-        'take_profit': float(order.get('tp2_price') or 0),
-        'sl_price': float(order.get('sl_price') or 0),
-        'tp_partial_price': float(order.get('tp1_price') or 0),
-        'tp_full_price': float(order.get('tp2_price') or 0),
-        'rule_code': order.get('rule_code', 'Dd11'),
-        'rule_entry': order.get('rule_code', 'Dd11'),
-        'status': 'open',
-        'is_open': True,
-        'size': qty,
-        'current_price': execution_price,
-        'opened_at': datetime.now(timezone.utc).isoformat(),
-        'mode': 'paper'
-    }
-
-    # Dashboard log (orders table)
-    try:
-        sb.table('orders').insert({
-            'symbol': symbol,
-            'side': 'BUY' if direction == 'long' else 'SELL',
-            'order_type': 'LIMIT',
-            'quantity': qty,
-            'limit_price': float(order.get('limit_price') or 0),
-            'entry_price': execution_price,
-            'stop_loss_price': float(order.get('sl_price') or 0),
-            'take_profit_price': float(order.get('tp2_price') or 0),
-            'status': 'open',
-            'is_paper': True,
-            'rule_code': order.get('rule_code', 'Dd11')
-        }).execute()
-    except Exception as e:
-        log_warning('SWING', f"Failed to log swing order to orders table: {e}")
-
-    res = sb.table('positions').upsert(pos_data).execute()
-    if res.data:
-        BOT_STATE.positions[symbol] = res.data[0]
-
-    if asyncio.iscoroutinefunction(send_telegram_message):
-        await send_telegram_message(
-            f"⚡ LIMIT EJECUTADO — SWING [{symbol}]\n"
-            f"Regla: {order.get('rule_code', '')}\n"
-            f"Dirección: {direction.upper()}\n"
-            f"Precio ejecución: ${execution_price:,.4f}\n"
-            f"Precio limit:     ${float(order.get('limit_price', 0)):,.4f}\n"
-            f"Banda: {order.get('band_name', '')}\n"
-            f"SL:  ${float(order.get('sl_price', 0)):,.4f}\n"
-            f"TP1: ${float(order.get('tp1_price', 0)):,.4f}\n"
-            f"TP2: ${float(order.get('tp2_price', 0)):,.4f}"
+        # Continuar con el proceso original si pasó los límites
+        from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+        snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+        regime = snap.get('regime_category', 'bajo_riesgo')
+        params = get_active_params(regime=regime, supabase_client=sb)
+        market_type = BOT_STATE.config_cache.get('market_type', 'crypto_futures')
+        sizing = calculate_position_size(
+            symbol=symbol,
+            entry_price=execution_price,
+            sl_price=float(order.get('sl_price') or 0),
+            market_type=market_type,
+            trade_number=1,
+            regime=regime,
+            supabase=sb
         )
+        qty = sizing['quantity'] if sizing else 0
+        if qty <= 0:
+            log_error('SWING', f"Could not calculate quantity for {symbol}")
+            return
+
+        sb.table('pending_orders').update({
+            'status': 'triggered',
+            'triggered_at': datetime.now(timezone.utc).isoformat(),
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }).eq('id', order['id']).execute()
+        
+        sl_value = float(order.get('sl_price') or 0)
+        
+        # ── VALIDACIÓN FINAL DE COHERENCIA SL vs PRECIO DE EJECUCIÓN ──
+        # Previene que un SL quede en el lado incorrecto del entry
+        if direction == 'long' and sl_value >= execution_price and sl_value > 0:
+            sl_value = execution_price * 0.995  # Forzar SL 0.5% debajo del entry
+            log_warning('SWING', f"{symbol}: SL corregido en ejecución LONG. SL={sl_value:.6f} < Entry={execution_price:.6f}")
+        elif direction == 'short' and sl_value <= execution_price and sl_value > 0:
+            sl_value = execution_price * 1.005  # Forzar SL 0.5% arriba del entry
+            log_warning('SWING', f"{symbol}: SL corregido en ejecución SHORT. SL={sl_value:.6f} > Entry={execution_price:.6f}")
+
+        pos_data = {
+            'symbol': symbol,
+            'side': direction,
+            'entry_price': execution_price,
+            'avg_entry_price': execution_price,
+            'stop_loss': sl_value,
+            'take_profit': float(order.get('tp2_price') or 0),
+            'sl_price': sl_value,
+            'tp_partial_price': float(order.get('tp1_price') or 0),
+            'tp_full_price': float(order.get('tp2_price') or 0),
+            'rule_code': order.get('rule_code', 'Dd11'),
+            'rule_entry': order.get('rule_code', 'Dd11'),
+            'status': 'open',
+            'is_open': True,
+            'size': qty,
+            'current_price': execution_price,
+            'opened_at': datetime.now(timezone.utc).isoformat(),
+            'mode': 'paper'
+        }
+
+        # Dashboard log (orders table)
+        try:
+            sb.table('orders').insert({
+                'symbol': symbol,
+                'side': 'BUY' if direction == 'long' else 'SELL',
+                'order_type': 'LIMIT',
+                'quantity': qty,
+                'limit_price': float(order.get('limit_price') or 0),
+                'entry_price': execution_price,
+                'stop_loss_price': sl_value,
+                'take_profit_price': float(order.get('tp2_price') or 0),
+                'status': 'open',
+                'is_paper': True,
+                'rule_code': order.get('rule_code', 'Dd11')
+            }).execute()
+        except Exception as e:
+            log_warning('SWING', f"Failed to log swing order to orders table: {e}")
+
+        res = sb.table('positions').upsert(pos_data).execute()
+        if res.data:
+            BOT_STATE.positions[symbol] = res.data[0]
+
+        if asyncio.iscoroutinefunction(send_telegram_message):
+            await send_telegram_message(
+                f"⚡ LIMIT EJECUTADO — SWING [{symbol}]\n"
+                f"Regla: {order.get('rule_code', '')}\n"
+                f"Dirección: {direction.upper()}\n"
+                f"Precio ejecución: ${execution_price:,.4f}\n"
+                f"Precio limit:     ${float(order.get('limit_price', 0)):,.4f}\n"
+                f"Banda: {order.get('band_name', '')}\n"
+                f"SL:  ${float(order.get('sl_price', 0)):,.4f}\n"
+                f"TP1: ${float(order.get('tp1_price', 0)):,.4f}\n"
+                f"TP2: ${float(order.get('tp2_price', 0)):,.4f}"
+            )
 
 async def execute_limit_order_real(order: dict, execution_price: float, binance_client, sb) -> None:
     log_info('SWING', f"{order['symbol']}: Real mode execution pending validation...")

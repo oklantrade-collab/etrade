@@ -10,6 +10,7 @@ from ta.momentum import RSIIndicator, StochasticOscillator, WilliamsRIndicator
 from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import VolumeWeightedAveragePrice
 from datetime import datetime, timezone
+from app.analysis.fibonacci_bb import fibonacci_bollinger, extract_fib_levels
 
 from app.core.supabase_client import get_supabase
 from app.core.logger import log_info, log_warning, log_error
@@ -113,6 +114,9 @@ def calculate_indicators(
     # ── Volume SMA 20 ── (BASE for volume spike detection)
     df["volume_sma_20"] = SMAIndicator(close=df["volume"], window=20).sma_indicator()
 
+    # ── Fibonacci Bollinger Bands (length=200, mult=3.0) ──
+    df = fibonacci_bollinger(df, length=200, mult=3.0)
+
     # ── Extract last candle values ──
     last = df.iloc[-1]
     indicator_fields = [
@@ -132,6 +136,10 @@ def calculate_indicators(
     for field in indicator_fields:
         val = last.get(field)
         result[field] = float(val) if pd.notna(val) else None
+
+    # Fibonacci results
+    fib_levels = extract_fib_levels(df)
+    result.update(fib_levels)
 
     # Add metadata
     result["symbol"] = symbol

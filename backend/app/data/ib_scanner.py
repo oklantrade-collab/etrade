@@ -144,10 +144,6 @@ async def scan_hot_by_volume(
         filter_options.append(TagValue("priceBelow", str(max_price)))
     if min_volume > 0:
         filter_options.append(TagValue("volumeAbove", str(min_volume)))
-    if min_market_cap > 0:
-        # IB expects value in Millions for this filter sometimes, or absolute for others. 
-        # For HOT_BY_VOLUME we use absolute value for safety.
-        filter_options.append(TagValue("marketCapAbove", str(min_market_cap)))
 
     # Clear previous results
     with _scanner_lock:

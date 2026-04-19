@@ -50,7 +50,6 @@ def log_to_db(
 
 def log_info(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):
     logger.info(f"[{module}] {message}")
-    log_to_db(module, "INFO", message, context, cycle_id)
 
 
 def log_warning(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):

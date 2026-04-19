@@ -2,6 +2,11 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 
+/** Canonical crypto symbol for display (matches backend SOLUSDT). */
+function normalizeCryptoSymbol(s: string) {
+  return (s || '').replace(/\//g, '').toUpperCase()
+}
+
 export default function PositionsPage() {
   const [positions, setPositions] = useState<any[]>([])
   const [closedPositions, setClosedPositions] = useState<any[]>([])
@@ -104,29 +109,38 @@ export default function PositionsPage() {
             <div className="table-container" style={{ margin: 0 }}>
               <table>
                 <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Entry</th>
-                    <th>Current Px <span style={{ fontSize: '0.65rem', opacity: 0.6 }}>(5m)</span></th>
-                    <th>Size</th>
-                    <th>SL / TP Bracket</th>
-                    <th className="text-end">Live PnL</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {positions.map((p) => {
-                    const pnl = parseFloat(p.unrealized_pnl || '0')
-                    return (
-                      <tr key={p.id}>
-                        <td style={{ fontWeight: 600 }}>{p.symbol}</td>
-                        <td>
-                          <span className={`badge ${(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'badge-green' : 'badge-red'}`}>
-                            {(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'BUY' : 'SELL'}
-                          </span>
-                        </td>
-                        <td>${parseFloat(p.entry_price).toFixed(4)}</td>
+                    <tr>
+                      <th>Time UTC</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th className="text-center">Estrategia</th>
+                      <th>Entry</th>
+                      <th>Current Px <span style={{ fontSize: '0.65rem', opacity: 0.6 }}>(5m)</span></th>
+                      <th>Size</th>
+                      <th>SL / TP Bracket</th>
+                      <th className="text-end">Live PnL</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {positions.map((p) => {
+                      const pnl = parseFloat(p.unrealized_pnl || '0')
+                      return (
+                        <tr key={p.id}>
+                          <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: '1.2' }}>
+                            <div>{new Date(p.opened_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}</div>
+                            <div style={{ fontWeight: 'bold' }}>{new Date(p.opened_at).toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
+                          </td>
+                          <td style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</td>
+                          <td>
+                            <span className={`badge ${(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'badge-green' : 'badge-red'}`}>
+                              {(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'BUY' : 'SELL'}
+                            </span>
+                          </td>
+                          <td className="text-center" style={{ fontWeight: 800, color: 'var(--accent-blue)', fontSize: '0.85rem' }}>
+                            {p.rule_code || '—'}
+                          </td>
+                          <td>${parseFloat(p.entry_price).toFixed(4)}</td>
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <span style={{ color: 'var(--accent-blue)' }}>
@@ -187,7 +201,7 @@ export default function PositionsPage() {
                     <th className="text-center">Size</th>
                     <th>Entry</th>
                     <th>Close Px</th>
-                    <th className="text-center">Strategy</th>
+                    <th className="text-center">Estrategia</th>
                     <th>Reason</th>
                     <th className="text-end">PnL</th>
                   </tr>
@@ -200,7 +214,7 @@ export default function PositionsPage() {
                     return (
                       <tr key={p.id}>
                         <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{time}</td>
-                        <td style={{ fontWeight: 600 }}>{p.symbol}</td>
+                        <td style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</td>
                         <td>
                           <span className={`badge ${(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'badge-green' : 'badge-red'}`}>
                             {(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'BUY' : 'SELL'}

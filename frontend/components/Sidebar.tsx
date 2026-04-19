@@ -38,7 +38,7 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       ],
     },
     {
-      title: 'FOREX (Sprint 3)',
+      title: 'FOREX',
       items: [
         { href: '/forex/dashboard', icon: '📊', label: 'Command Center', disabled: !forexConnected },
         { href: '/forex/strategies', icon: '🧠', label: 'Strategies', disabled: !forexConnected },
@@ -55,6 +55,8 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
         { href: '/stocks/universe',    icon: '🔍', label: 'Universe' },
         { href: '/stocks/opportunities', icon: '💡', label: 'Opportunities' },
         { href: '/stocks/positions',   icon: '📋', label: 'Positions' },
+        { href: '/stocks/orders',      icon: '🎫', label: 'Orders' },
+        { href: '/stocks/strategies',  icon: '🧠', label: 'Strategies' },
         { href: '/stocks/journal',     icon: '📓', label: 'Journal' },
         { href: '/stocks/performance', icon: '📈', label: 'Performance' },
         { href: '/stocks/backtesting', icon: '🔬', label: 'Backtesting' },

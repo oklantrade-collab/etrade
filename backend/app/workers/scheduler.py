@@ -48,6 +48,16 @@ from app.strategy.band_exit import evaluate_band_exit
 from app.workers.performance_monitor import send_telegram_message
 from app.analysis.parabolic_sar import calculate_parabolic_sar, analyze_structure
 from app.strategy.strategy_engine import StrategyEngine
+from app.analysis.movement_classifier import (
+    classify_movement
+)
+from app.analysis.smart_limit import (
+    calculate_smart_limit_price
+)
+from app.strategy.proactive_exit import (
+    evaluate_proactive_exit
+)
+
 
 MODULE = "v4_scheduler"
 
@@ -242,6 +252,26 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
             'sar_phase':        sar_phase,
             'updated_at':       datetime.now(timezone.utc).isoformat()
         }
+
+        # ─── 4. CLASIFICACIÓN DE MOVIMIENTO Y SMART LIMIT ───
+        df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+        if df_15m is not None and not df_15m.empty:
+            movement = classify_movement(df_15m)
+            limit_long  = calculate_smart_limit_price(df_15m, 'long',  movement['movement_type'])
+            limit_short = calculate_smart_limit_price(df_15m, 'short', movement['movement_type'])
+
+            upsert_data.update({
+                'movement_type':       movement['movement_type'],
+                'basis_slope_pct':     movement['basis_slope_pct'],
+                'ema200_slope_pct':    movement['ema200_slope_pct'],
+                'movement_confidence': movement['confidence'],
+                'signal_bias':         movement['signal_bias'],
+                'movement_description':movement['description'],
+                'smart_limit_long':    limit_long.get('limit_price'),
+                'smart_limit_short':   limit_short.get('limit_price'),
+                'smart_limit_band_long':  limit_long.get('band_target'),
+                'smart_limit_band_short': limit_short.get('band_target'),
+            })
 
         # ── ESTRUCTURA 15m (para el ciclo de 5m) ────
         cfg_struct = STRUCTURE_CONFIG
@@ -661,7 +691,80 @@ async def apply_structure_filter_15m(
     return None
 
 
+async def check_proactive_exit_crypto(
+    symbol:        str,
+    current_price: float,
+    snap:          dict,
+    sb
+) -> bool:
+    """
+    Evalúa Aa51/Bb51 para posiciones de Crypto.
+    Retorna True si se cerró la posición.
+    """
+    position = BOT_STATE.positions.get(symbol)
+    if not position:
+        return False
+
+    # Obtener velas 4H del MEMORY_STORE
+    df_4h = MEMORY_STORE.get(symbol, {}).get('4h', {}).get('df')
+
+    if df_4h is None or len(df_4h) < 3:
+        return False
+
+    # Evaluar cierre proactivo
+    result = evaluate_proactive_exit(
+        position      = position,
+        current_price = current_price,
+        snap          = snap,
+        df_4h         = df_4h,
+        market_type   = 'crypto_futures',
+    )
+
+    if not result['should_close']:
+        return False
+
+    # ── Cerrar posición ───────────────────────
+    log_info('PROACTIVE_EXIT', f'🛡️ {symbol}: {result["rule_code"]} — {result["reason"]}')
+
+    from app.core.position_monitor import _execute_paper_close
+    await _execute_paper_close(position, current_price, result['rule_code'], sb)
+
+    # Guardar en strategy_evaluations
+    try:
+        sb.table('strategy_evaluations').insert({
+            'symbol':    symbol,
+            'rule_code': result['rule_code'],
+            'cycle':     '5m',
+            'direction': 'close',
+            'score':     1.0,
+            'triggered': True,
+            'context': {
+                'pnl_pct':   result['pnl']['pnl_pct'],
+                'pnl_usd':   result['pnl']['pnl_usd'],
+                'reason':    result['reason'],
+                'urgency':   result['urgency'],
+            },
+        }).execute()
+    except Exception as e:
+        log_warning('PROACTIVE_EXIT', f"Failed to log evaluation: {e}")
+
+    # Alerta Telegram
+    pnl = result['pnl']
+    cond_str = "\n".join([f"  {'✅' if v['passed'] else '❌'} {v['name']}" for v in result['conditions'].values()])
+    await send_telegram_message(
+        f"🛡️ CIERRE PROACTIVO [{symbol}]\n"
+        f"Regla: {result['rule_code']}\n"
+        f"P&L: +{pnl['pnl_pct']:.3f}% (${pnl['pnl_usd']:.2f})\n"
+        f"Razón: {result['reason']}\n"
+        f"Urgencia: {result['urgency']}\n"
+        f"Condiciones:\n{cond_str}"
+    )
+
+    return True
+
+
 async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
+
     """Auxiliar para procesar un símbolo en el ciclo 5m (Paralelo)."""
     cycle_start = time.time()
     try:
@@ -771,6 +874,12 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                     f"(Antes del SL en ${position.get('sl_price', 0):,.2f})"
                 )
                 return # Detener procesamiento para este símbolo en este ciclo
+
+        # ── NUEVO: Cierre Proactivo Aa51/Bb51 ──
+        if position:
+            closed = await check_proactive_exit_crypto(symbol, current_price, snap, sb)
+            if closed:
+                return # Posición cerrada
 
         # 6. SMART EXIT (Signal Reversal)
         if position:
@@ -1640,25 +1749,8 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 f'{symbol}: FINAL -> BLOCKED by=observe_only '
                 f'(regla={rule_eval}, triggered={bool(rule_match)})'
             )
-        elif rule_match:
-            # Check limits before execution (Paso 6 Corregido)
-            max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
-            current_global = len([s for s in BOT_STATE.positions if BOT_STATE.positions[s].get('status') == 'open'])
-            
-            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 1))
-            num_for_symbol = 1 if (symbol in BOT_STATE.positions and BOT_STATE.positions[symbol].get('status') == 'open') else 0
-
-            if current_global >= max_global:
-                log_info('ENTRY_EVAL', f'{symbol}: FINAL -> BLOCKED by=global_limit ({max_global})')
-                blocked_by = 'global_limit'
-            elif num_for_symbol >= max_symbol:
-                log_info('ENTRY_EVAL', f'{symbol}: FINAL -> BLOCKED by=symbol_limit ({max_symbol})')
-                blocked_by = 'symbol_limit'
-            else:
-                log_info('ENTRY_EVAL',
-                    f'{symbol}: FINAL -> EXECUTING trade! '
-                    f'regla={rule_eval}'
-                )
+            # Limits are now handled atomically inside _execute_paper_open
+            pass
         else:
             log_info('ENTRY_EVAL',
                 f'{symbol}: FINAL -> NO TRADE (sin regla activa)'
@@ -1758,26 +1850,21 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                       max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 1))
                                       num_for_symbol = 1 if (symbol in BOT_STATE.positions and BOT_STATE.positions[symbol].get('status') == 'open') else 0
 
-                                      if current_open >= max_global:
-                                          log_info('POSITION_LIMIT', f'{symbol}: Límite GLOBAL de {max_global} posiciones alcanzado. Omitiendo 4h scalping.')
-                                      elif num_for_symbol >= max_symbol:
-                                          log_info('POSITION_LIMIT', f'{symbol}: Límite por SÍMBOLO de {max_symbol} alcanzado. Omitiendo 4h scalping.')
-                                      else:
-                                          from app.core.position_monitor import _execute_paper_open
-                                          from app.core.parameter_guard import get_velocity_config
-                                          from app.workers.performance_monitor import send_telegram_message
-                                          current_price = float(last_row['close'])
-                                          vel_config = get_velocity_config(float(snap_ref.get('adx', 25)))
-                                          cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
-                                          qty_4h = (cap_op * 0.1 * vel_config.get('sizing_pct', 1.0)) / current_price
-                                          await _execute_paper_open(
-                                              symbol=symbol, side=signal_4h['direction'], price=current_price,
-                                              size=qty_4h, rule_code=signal_4h['rule_code'], 
-                                              regime=snap_ref, levels=snap_ref, vel_config=vel_config, supabase=sb
-                                          )
-                                          await send_telegram_message(
-                                              f"⚡ SCALPING 4H [{symbol}]\nRegla: {signal_4h['rule_code']}\nDirección: {signal_4h['direction'].upper()}\nScore: {signal_4h['score']:.2f}\nRazón: {signal_4h['reason']}"
-                                          )
+                                      # Limits are now handled atomically inside _execute_paper_open
+                                      from app.core.parameter_guard import get_velocity_config
+                                      from app.workers.performance_monitor import send_telegram_message
+                                      current_price = float(last_row['close'])
+                                      vel_config = get_velocity_config(float(snap_ref.get('adx', 25)))
+                                      cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+                                      qty_4h = (cap_op * 0.1 * vel_config.get('sizing_pct', 1.0)) / current_price
+                                      await _execute_paper_open(
+                                          symbol=symbol, side=signal_4h['direction'], price=current_price,
+                                          size=qty_4h, rule_code=signal_4h['rule_code'], 
+                                          regime=snap_ref, levels=snap_ref, vel_config=vel_config, supabase=sb
+                                      )
+                                      await send_telegram_message(
+                                          f"⚡ SCALPING 4H [{symbol}]\nRegla: {signal_4h['rule_code']}\nDirección: {signal_4h['direction'].upper()}\nScore: {signal_4h['score']:.2f}\nRazón: {signal_4h['reason']}"
+                                      )
                        except Exception as scalp_4h_e:
                            log_error('SCALPING_4H', f'{symbol}: Error en evaluación scalping 4h: {scalp_4h_e}')
 

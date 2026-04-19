@@ -4,6 +4,7 @@ Implements the Memory-First Architecture.
 HOT Data (Volatility/Indicators) lives only here.
 WARM Data (Operational State) is mirrored with Supabase.
 """
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,6 +32,7 @@ class BotState:
     config_cache: dict = field(default_factory=dict)              # Global settings
     cycle_count_15m: int = 0                                       # Cycle counter for 15m interval
     sl_alerts: Dict[str, Any] = field(default_factory=dict)       # {symbol: alert_state}
+    order_lock: asyncio.Lock = field(default_factory=asyncio.Lock) # Lock for atomic order placement
 
 BOT_STATE = BotState()
 

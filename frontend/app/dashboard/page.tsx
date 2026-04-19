@@ -410,6 +410,8 @@ export default function DashboardPage() {
               basis={currentFocus?.basis}
               upper_6={currentFocus?.upper_6}
               lower_6={currentFocus?.lower_6}
+              precision={selectedSymbol?.includes('BTC') ? 1 : 3}
+              minMove={selectedSymbol?.includes('BTC') ? 0.1 : 0.001}
               activePosition={currentFocus?.position ? {
                 avg_entry: currentFocus.position.avg_entry,
                 sl_price: currentFocus.position.sl_price,
@@ -440,11 +442,17 @@ export default function DashboardPage() {
 
         <div>
           {currentFocus?.position ? (
-            <div className="card glass-effect border-emerald-500/20 h-full p-8 flex flex-col justify-between shadow-[0_0_50px_rgba(16,185,129,0.05)]">
+            <div className={`card glass-effect-premium h-full p-8 flex flex-col justify-between transition-all duration-500 ${
+              currentFocus.position.side.toLowerCase() === 'long' ? 'glass-effect-buy' : 'glass-effect-sell'
+            }`}>
               <div>
                 <div className="flex justify-between items-center mb-8 pb-4 border-b border-white/5">
-                   <h3 className="text-[0.65rem] font-black text-slate-500 uppercase tracking-[0.2em]">ANÁLISIS DE POSICIÓN ACTIVA</h3>
-                   <span className="badge badge-green px-3 py-1 font-black italic shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+                   <h3 className="text-[0.65rem] font-black text-slate-400 uppercase tracking-[0.2em]">ANÁLISIS DE POSICIÓN ACTIVA</h3>
+                   <span className={`badge px-4 py-1.5 font-black italic rounded-lg shadow-lg ${
+                     currentFocus.position.side.toLowerCase() === 'long' 
+                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                       : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                   }`}>
                      {currentFocus.position.side.toUpperCase()} × {currentFocus.position.trades_count} TRADE{currentFocus.position.trades_count > 1 ? 'S' : ''}
                    </span>
                 </div>
@@ -600,8 +608,8 @@ export default function DashboardPage() {
                          </div>
                       </div>
                       <div className="flex items-center gap-2 justify-end pt-2">
-                         <span>😐</span>
-                         <span className="text-[0.6rem] font-black text-slate-400 uppercase tracking-widest">SENTIMIENTO: {currentFocus.ai_sentiment?.toUpperCase() || 'NEUTRAL'}</span>
+                         <span className="text-sm">🤖</span>
+                         <span className="text-[0.6rem] font-black text-slate-400 uppercase tracking-widest">SENTIMIENTO IA: {currentFocus.ai_sentiment?.toUpperCase() || 'NEUTRAL'}</span>
                       </div>
                    </div>
                 </div>
@@ -645,10 +653,28 @@ export default function DashboardPage() {
 
       <style jsx>{`
         .glass-effect {
-          background: rgba(17, 24, 39, 0.4);
-          backdrop-filter: blur(12px);
-          -webkit-backdrop-filter: blur(12px);
-          border: 1px solid rgba(255, 255, 255, 0.04);
+          background: rgba(17, 24, 39, 0.45);
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        }
+        .glass-effect-premium {
+          background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
+          backdrop-filter: blur(20px);
+          -webkit-backdrop-filter: blur(20px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          box-shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
+        }
+        .glass-effect-buy {
+          background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(16, 185, 129, 0.03) 100%);
+          border: 1px solid rgba(16, 185, 129, 0.2);
+          box-shadow: 0 0 30px rgba(16, 185, 129, 0.05);
+        }
+        .glass-effect-sell {
+          background: linear-gradient(135deg, rgba(244, 63, 94, 0.1) 0%, rgba(244, 63, 94, 0.03) 100%);
+          border: 1px solid rgba(244, 63, 94, 0.2);
+          box-shadow: 0 0 30px rgba(244, 63, 94, 0.05);
         }
       `}</style>
     </div>
@@ -657,9 +683,12 @@ export default function DashboardPage() {
 
 function MetricCard({ label, value, color }: { label: string, value: string, color: string }) {
   return (
-    <div className="card glass-effect border-slate-800/50 p-6">
-      <span className="text-[0.65rem] font-black text-slate-500 uppercase tracking-[.25em] block mb-2">{label}</span>
-      <span className={`text-3xl font-black italic tracking-tighter ${color}`}>{value}</span>
+    <div className="card glass-effect-premium border-white/5 p-6 relative overflow-hidden group">
+      <div className="absolute top-0 right-0 p-2 opacity-5 transition-opacity group-hover:opacity-10">
+        <span className="text-4xl font-black italic">eT</span>
+      </div>
+      <span className="text-[0.6rem] font-black text-slate-500 uppercase tracking-[.3em] block mb-2">{label}</span>
+      <span className={`text-3xl font-black italic tracking-tighter ${color} drop-shadow-[0_0_15px_rgba(255,255,255,0.05)]`}>{value}</span>
     </div>
   )
 }
@@ -734,7 +763,9 @@ function SymbolCard({
   return (
     <div 
       onClick={onSelect}
-      className={`card glass-effect !p-5 cursor-pointer transition-all duration-300 hover:scale-[1.02] ${getStatusColor()}`}
+      className={`card glass-effect-premium !p-6 cursor-pointer transition-all duration-500 hover:scale-[1.02] hover:-translate-y-1 ${getStatusColor()} ${
+        data.sar_phase === 'long' ? 'glass-effect-buy' : data.sar_phase === 'short' ? 'glass-effect-sell' : ''
+      }`}
     >
       <div className="flex justify-between items-start mb-5">
         <div className="flex items-center gap-2">
@@ -749,16 +780,16 @@ function SymbolCard({
       {/* --- SAR 4H MACD FILTER --- */}
       <div className="mb-4">
         {data.sar_phase === 'long' ? (
-          <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/20 px-2 py-1 rounded">
-             <span className="text-[0.65rem] font-black text-emerald-500 italic">🟢 FASE LONG (SAR 4h)</span>
+          <div className="flex items-center gap-2 bg-emerald-500/15 border border-emerald-500/30 px-3 py-1.5 rounded-lg shadow-[0_0_15px_rgba(16,185,129,0.1)]">
+             <span className="text-[0.7rem] font-black text-emerald-400 italic letter-spacing-wide">🟢 FASE LONG (BUY)</span>
           </div>
         ) : data.sar_phase === 'short' ? (
-          <div className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 px-2 py-1 rounded">
-             <span className="text-[0.65rem] font-black text-rose-500 italic">🔴 FASE SHORT (SAR 4h)</span>
+          <div className="flex items-center gap-2 bg-rose-500/15 border border-rose-500/30 px-3 py-1.5 rounded-lg shadow-[0_0_15px_rgba(244,63,94,0.1)]">
+             <span className="text-[0.7rem] font-black text-rose-400 italic letter-spacing-wide">🔴 FASE SHORT (SELL)</span>
           </div>
         ) : (
-          <div className="flex items-center gap-2 bg-slate-500/10 border border-slate-500/20 px-2 py-1 rounded">
-             <span className="text-[0.65rem] font-black text-slate-500 italic">⚪ FASE NEUTRAL (SAR)</span>
+          <div className="flex items-center gap-2 bg-slate-500/10 border border-slate-500/20 px-3 py-1.5 rounded-lg">
+             <span className="text-[0.7rem] font-black text-slate-400 italic letter-spacing-wide">⚪ FASE NEUTRAL</span>
           </div>
         )}
         

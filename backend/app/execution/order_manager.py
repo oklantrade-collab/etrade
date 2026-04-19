@@ -2,6 +2,12 @@ import logging
 from datetime import datetime
 from binance.exceptions import BinanceAPIException
 
+from app.core.crypto_symbols import (
+    normalize_crypto_symbol,
+    resolve_crypto_position_quantity,
+    crypto_symbol_match_variants,
+)
+
 def round_price(price: float, tick_size: float) -> float:
     import math
     if tick_size <= 0: return price
@@ -26,9 +32,10 @@ def execute_trade(
 
     # PASO 1 — Crear registro de orden en Supabase (status='pending')
     try:
+        sym_norm = normalize_crypto_symbol(oco_params['symbol'])
         order_record = supabase_client.table('orders').insert({
             'signal_id': signal['signal_id'],
-            'symbol': oco_params['symbol'],
+            'symbol': sym_norm,
             'side': oco_params['side'],
             'order_type': 'MARKET',
             'quantity': oco_params['quantity'],
@@ -49,12 +56,12 @@ def execute_trade(
     try:
         if oco_params['side'] == 'BUY':
             entry_order = binance_client.order_market_buy(
-                symbol=oco_params['symbol'],
+                symbol=sym_norm,
                 quantity=oco_params['quantity']
             )
         else:
             entry_order = binance_client.order_market_sell(
-                symbol=oco_params['symbol'],
+                symbol=sym_norm,
                 quantity=oco_params['quantity']
             )
             
@@ -99,7 +106,7 @@ def execute_trade(
 
     # Find tick size using symbol info
     try:
-        info = binance_client.get_symbol_info(oco_params['symbol'])
+        info = binance_client.get_symbol_info(sym_norm)
         tick_size = 0.01
         for f in info['filters']:
             if f['filterType'] == 'PRICE_FILTER':
@@ -120,7 +127,7 @@ def execute_trade(
 
     try:
         oco_order = binance_client.create_oco_order(
-            symbol=oco_params['symbol'],
+            symbol=sym_norm,
             side=oco_side,
             quantity=oco_params['quantity'],
             price=str(tp_price_final),
@@ -140,11 +147,11 @@ def execute_trade(
         
     except BinanceAPIException as e:
         loguear(logging.CRITICAL, 
-            f'⚠️ OCO FAILED para {oco_params["symbol"]}. Posición abierta SIN SL/TP: {e}')
+            f'⚠️ OCO FAILED para {sym_norm}. Posición abierta SIN SL/TP: {e}')
         
         supabase_client.table('alert_events').insert({
             'event_type': 'oco_failed',
-            'symbol': oco_params['symbol'],
+            'symbol': sym_norm,
             'message': f'OCO ORDER FAILED - posición sin protección: {str(e)}',
             'severity': 'critical',
             'data': { 'order_id': order_id, 'error': str(e) }
@@ -154,7 +161,7 @@ def execute_trade(
         try:
             if oco_side == 'SELL':
                 binance_client.create_order(
-                    symbol=oco_params['symbol'],
+                    symbol=sym_norm,
                     side='SELL',
                     type='STOP_LOSS_LIMIT',
                     quantity=oco_params['quantity'],
@@ -165,7 +172,7 @@ def execute_trade(
                 loguear(logging.WARNING, 'Fallback SL colocado exitosamente')
             else:
                 binance_client.create_order(
-                    symbol=oco_params['symbol'],
+                    symbol=sym_norm,
                     side='BUY',
                     type='STOP_LOSS_LIMIT',
                     quantity=oco_params['quantity'],
@@ -179,7 +186,7 @@ def execute_trade(
 
     # PASO 5 — Obtener niveles Fibonacci finales de market_snapshot
     try:
-        snap_res = supabase_client.table('market_snapshot').select('*').eq('symbol', signal['symbol']).single().execute()
+        snap_res = supabase_client.table('market_snapshot').select('*').eq('symbol', sym_norm).single().execute()
         snap = snap_res.data or {}
         if oco_params['side'] == 'BUY':
             tp_partial = snap.get('upper_5', tp_price_final * 0.98) # fallback if snap missing
@@ -194,7 +201,7 @@ def execute_trade(
     # FINAL STEP — Crear registro en positions
     position = supabase_client.table('positions').insert({
         'order_id': order_id,
-        'symbol': signal['symbol'],
+        'symbol': sym_norm,
         'side': 'LONG' if oco_params['side'] == 'BUY' else 'SHORT',
         'entry_price': avg_fill_price,
         'avg_entry_price': avg_fill_price,
@@ -227,7 +234,7 @@ def execute_trade(
         'order_id': order_id,
         'exchange_order_id': exchange_order_id,
         'oco_list_id': oco_list_id,
-        'symbol': signal['symbol'],
+        'symbol': sym_norm,
         'side': oco_params['side'],
         'quantity': oco_params['quantity'],
         'entry_price': avg_fill_price,
@@ -244,7 +251,7 @@ def close_all_positions(supabase, client):
         return
         
     for pos in open_positions.data:
-        symbol = pos['symbol'].replace('/', '')
+        symbol = normalize_crypto_symbol(pos['symbol'])
         oco_client_id = pos.get('orders', {}).get('oco_list_client_id')
         
         # a. Cancelar la OCO order en Binance si existe:
@@ -291,7 +298,11 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
             return False
 
         position = pos_resp.data[0]
-        binance_symbol = position["symbol"].replace("/", "")
+        binance_symbol = normalize_crypto_symbol(position["symbol"])
+        qty = resolve_crypto_position_quantity(sb, position)
+        if qty <= 0:
+            log_error("ORDER_MANAGER", f"Position {position_id} has zero size; cannot close on exchange.")
+            return False
         
         # Guard against position['orders'] being None (if no order_id exists)
         orders_data = position.get('orders') or {}
@@ -318,9 +329,9 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
 
             try:
                 if side == "SELL":
-                    close_order = client.order_market_sell(symbol=binance_symbol, quantity=float(position["size"]))
+                    close_order = client.order_market_sell(symbol=binance_symbol, quantity=float(qty))
                 else:
-                    close_order = client.order_market_buy(symbol=binance_symbol, quantity=float(position["size"]))
+                    close_order = client.order_market_buy(symbol=binance_symbol, quantity=float(qty))
 
                 fills = close_order.get('fills', [])
                 if fills:
@@ -333,14 +344,21 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
             
         # Calulamos el PnL según el lado de la posición (Case-Insensitive)
         if position['side'].upper() in ['LONG', 'BUY']:
-            realized_pnl = (avg_fill_price - float(position['entry_price'])) * float(position['size'])
+            realized_pnl = (avg_fill_price - float(position['entry_price'])) * float(qty)
         else:
-            realized_pnl = (float(position['entry_price']) - avg_fill_price) * float(position['size'])
+            realized_pnl = (float(position['entry_price']) - avg_fill_price) * float(qty)
+
+        entry_p = float(position['entry_price'] or 0)
+        notional = entry_p * float(qty)
+        pnl_pct = round((realized_pnl / notional * 100), 4) if notional > 0 else 0.0
 
         sb.table("positions").update({
             "status": "closed",
+            "symbol": binance_symbol,
+            "size": qty,
             "close_reason": reason[:50], # Guard against long reasons
             "realized_pnl": round(float(realized_pnl), 4),
+            "realized_pnl_pct": pnl_pct,
             "current_price": avg_fill_price,
             "closed_at": datetime.utcnow().isoformat(),
         }).eq("id", position_id).execute()
@@ -350,6 +368,24 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
                 "status": "manual_close",
                 "closed_at": datetime.utcnow().isoformat(),
             }).eq("id", position["order_id"]).execute()
+
+        # ── CANCELAR ÓRDENES HUÉRFANAS ──
+        # Cancelar cualquier pending_order y order abierto del símbolo
+        try:
+            now_iso = datetime.utcnow().isoformat()
+            for sym_v in crypto_symbol_match_variants(binance_symbol):
+                sb.table("pending_orders").update({
+                    "status": "cancelled",
+                    "cancelled_at": now_iso,
+                    "updated_at": now_iso
+                }).eq("symbol", sym_v).eq("status", "pending").execute()
+                sb.table("orders").update({
+                    "status": "manual_close",
+                    "closed_at": now_iso
+                }).eq("symbol", sym_v).eq("status", "open").execute()
+            log_info("ORDER_MANAGER", f"🧹 Órdenes pendientes canceladas para {binance_symbol}")
+        except Exception as cancel_e:
+            log_warning("ORDER_MANAGER", f"Error cancelando órdenes huérfanas: {cancel_e}")
 
         log_info("ORDER_MANAGER", f"Position {position_id} ({binance_symbol}) closed manually with PnL: {realized_pnl:.4f}")
         return True

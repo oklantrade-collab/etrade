@@ -2,7 +2,6 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 
-// COMPONENTE PRINCIPAL (REVERSIÓN A ESTADO ORIGINAL SIN RESTRICCIONES IA)
 export default function OpportunitiesIntelligence() {
   const [opportunities, setOpportunities] = useState<any[]>([])
   const [total, setTotal] = useState(0)
@@ -10,12 +9,16 @@ export default function OpportunitiesIntelligence() {
   const [selectedStock, setSelectedStock] = useState<any | null>(null)
   const [activeTab, setActiveTab] = useState<'HOT' | 'VALUE'>('HOT')
   
+  const [marketStatus, setMarketStatus] = useState({ is_open: true, status: 'ABIERTO' })
+  
   const [settings, setSettings] = useState({
-    hotMaxPrice: 20,
-    proMaxPrice: 200,
-    minRvol: 1.1,
+    hotMaxPrice: 50,
+    proMaxPrice: 500,
+    minRvol: 0.1,
+    minVolume: 0,
+    minMarketCap: 0,
     minValueGap: 15,
-    maxHotResults: 20
+    maxHotResults: 50
   })
   const [showSettings, setShowSettings] = useState(false);
 
@@ -29,12 +32,16 @@ export default function OpportunitiesIntelligence() {
     try {
       const res = await fetch('/api/v1/stocks/opportunities')
       const data = await res.json()
+      
+      if (data.market_status) {
+          setMarketStatus(data.market_status)
+      }
+
       const raw = data.opportunities || []
       const uniqueMap = new Map();
       raw.forEach((item: any) => uniqueMap.set(item.ticker, item));
-      const deduplicated = Array.from(uniqueMap.values());
-      setOpportunities(deduplicated)
-      setTotal(deduplicated.length)
+      setOpportunities(Array.from(uniqueMap.values()))
+      setTotal(uniqueMap.size)
     } catch (err) {
       console.error(err)
     } finally {
@@ -44,28 +51,12 @@ export default function OpportunitiesIntelligence() {
 
   // 1. HOT BY VOLUME (Intradía Momentum)
   const hotList = opportunities
-    .filter(o => (o.price <= settings.hotMaxPrice && (o.rvol >= settings.minRvol || o.volume > 500000)))
-    .sort((a, b) => (b.rvol || 0) - (a.rvol || 0))
+    .filter(o => o.price <= settings.hotMaxPrice && o.rvol >= settings.minRvol && o.volume >= settings.minVolume)
+    .sort((a, b) => b.rvol - a.rvol)
     .slice(0, settings.maxHotResults);
 
-  // 2. INVERSION PRO (REPLICANDO ORIGINAL, PERO CON PUNTUACION PRO DE 1 DIA)
-  const valueList = opportunities
-    .filter(o => {
-        const seed = o.ticker.split('').reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0);
-        const noise = (seed % 15) / 100; 
-        const multiplier = (o.pro_score / 200) + 1.1 + noise;
-        const gap = ((multiplier * o.price - o.price) / o.price) * 100;
-        
-        // Criterio original sin restricción de IA ni precio mínimo
-        return o.price <= settings.proMaxPrice && (o.catalyst_type === 'Sweep' || o.catalyst_type === 'Universe' || gap >= settings.minValueGap);
-    })
-    .sort((a, b) => { // Ordenar por valor de descuento (gap)
-        const seedA = a.ticker.split('').reduce((accIdx: number, char: string) => accIdx + char.charCodeAt(0), 0);
-        const seedB = b.ticker.split('').reduce((accIdx: number, char: string) => accIdx + char.charCodeAt(0), 0);
-        const gapA = ((a.pro_score / 200) + 1.1 + (seedA % 15 / 100));
-        const gapB = ((b.pro_score / 200) + 1.1 + (seedB % 15 / 100));
-        return gapB - gapA;
-    });
+  // 2. INVERSION PRO (Promovidos desde Universe Fundamental)
+  const valueList = opportunities.filter(o => o.is_pro_member);
 
   const displayList = activeTab === 'HOT' ? hotList : valueList;
 
@@ -73,15 +64,25 @@ export default function OpportunitiesIntelligence() {
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
         <div>
-          <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Intelligence Layer</div>
+          <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Intelligence Layer v4.5</div>
           <h1 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0', letterSpacing: '-0.02em' }}>🎯 AI Stock Scanner</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <p style={{ color: '#555', fontSize: '12px' }}>{total} monitoreados · NYC Live Tracking (v4.5)</p>
-              <span style={{ fontSize: '10px', background: '#22C55E', color: '#000', padding: '1px 6px', borderRadius: '4px', fontWeight: 900 }}>MERCADO ABIERTO</span>
+              <p style={{ color: '#555', fontSize: '12px' }}>{total} monitoreados · NYC Live Tracking</p>
+              <span style={{ 
+                fontSize: '10px', 
+                background: marketStatus.is_open ? '#22C55E' : '#EF4444', 
+                color: '#000', 
+                padding: '1px 8px', 
+                borderRadius: '4px', 
+                fontWeight: 950, 
+                textTransform: 'uppercase' 
+              }}>
+                {marketStatus.is_open ? '🟢' : '🔴'} MERCADO {marketStatus.status} | {new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' })}
+              </span>
           </div>
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>
-            <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>{showSettings ? 'GUARDAR' : '⚙️ FILTROS'}</button>
+            <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>⚙️ FILTROS</button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
                 <TabButton label="🔥 Hot by Volume" active={activeTab === 'HOT'} onClick={() => setActiveTab('HOT')} count={hotList.length}/>
                 <TabButton label="💎 Inversión Pro" active={activeTab === 'VALUE'} onClick={() => setActiveTab('VALUE')} count={valueList.length}/>
@@ -91,23 +92,27 @@ export default function OpportunitiesIntelligence() {
 
       {showSettings && (
         <div style={{ background: '#161922', padding: '20px', borderRadius: '16px', marginBottom: '20px', border: '1px solid #22C55E', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '15px' }}>
-            <SettingInput label="Hot Price Max" value={settings.hotMaxPrice} onChange={(v) => setSettings({...settings, hotMaxPrice: Number(v)})} />
-            <SettingInput label="Pro Price Max" value={settings.proMaxPrice} onChange={(v) => setSettings({...settings, proMaxPrice: Number(v)})} />
-            <SettingInput label="Min RVOL" value={settings.minRvol} onChange={(v) => setSettings({...settings, minRvol: Number(v)})} step={0.1} />
-            <SettingInput label="Min Value %" value={settings.minValueGap} onChange={(v) => setSettings({...settings, minValueGap: Number(v)})} />
+            <SettingInput label="Hot Price Max" value={settings.hotMaxPrice} onChange={(v:any) => setSettings({...settings, hotMaxPrice: Number(v)})} />
+            <SettingInput label="Min RVOL" value={settings.minRvol} onChange={(v:any) => setSettings({...settings, minRvol: Number(v)})} step={0.1} />
+            <SettingInput label="Min Volume" value={settings.minVolume} onChange={(v:any) => setSettings({...settings, minVolume: Number(v)})} step={100000} />
+            <SettingInput label="Min Market Cap" value={settings.minMarketCap} onChange={(v:any) => setSettings({...settings, minMarketCap: Number(v)})} step={100000000} />
         </div>
       )}
 
       <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '80px 100px 75px 75px 90px 90px 140px 130px 60px 85px', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' }}>
-          <span>Ticker</span><span>% Inc Dia</span><span>Precio</span><span>Volumen</span><span>A. Técnico</span><span>A. Fund.</span><span>Clasificación</span><span>Valoración</span><span>IA</span><span>Acción</span>
+        <div style={{ 
+            display: 'grid', 
+            gridTemplateColumns: '70px 85px 75px 75px 75px 75px 70px 125px 65px 95px 35px 35px 1fr', 
+            padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' 
+        }}>
+          <span>Ticker</span><span>Pool</span><span>Precio</span><span>Vol</span><span>Rev G.</span><span>F.Score</span><span>Margin</span><span>Movimiento</span><span>HH:MM</span><span>Orden</span><span>TS</span><span>IA</span><span style={{textAlign:'right'}}>Accion</span>
         </div>
         {!loading && displayList.map((opp, i) => ( <ScannerRow key={opp.ticker} index={i} opp={opp} isPro={activeTab === 'VALUE'} onOpenDetails={() => setSelectedStock({ ...opp, isPro: activeTab === 'VALUE' })} /> ))}
-        {!loading && displayList.length === 0 && <div style={{ padding: '60px', textAlign: 'center', color: '#444' }}>Sin activos bajo este criterio.</div>}
+        {!loading && displayList.length === 0 && <div style={{ padding: '60px', textAlign: 'center', color: '#444' }}>Monitoreando señales...</div>}
       </div>
 
       {selectedStock && <AnalysisModal stock={selectedStock} onClose={() => setSelectedStock(null)} />}
-      <Link href="/stocks/dashboard" style={{ display: 'inline-block', marginTop: '20px', color: '#22C55E', textDecoration: 'none', fontWeight: 800, fontSize: '11px' }}>← VOLVER AL COMMAND CENTER</Link>
+      <Link href="/stocks/universe" style={{ display: 'inline-block', marginTop: '20px', color: '#22C55E', textDecoration: 'none', fontWeight: 800, fontSize: '11px' }}>← VOLVER AL UNIVERSE BUILDER</Link>
     </div>
   )
 }
@@ -119,134 +124,267 @@ function TabButton({ label, active, onClick, count }: any) {
     return ( <button onClick={onClick} style={{ background: active ? '#161922' : 'transparent', color: active ? '#22C55E' : '#666', border: active ? '1px solid rgba(34,197,94,0.3)' : 'none', padding: '8px 20px', borderRadius: '10px', cursor: 'pointer', fontSize: '12px', fontWeight: 900, display: 'flex', alignItems: 'center', gap: '8px', transition: 'all 0.2s' }}>{label}<span style={{ fontSize: '9px', background: active ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px', color: active ? '#22C55E' : '#555' }}>{count}</span></button> )
 }
 
-function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
-  const score = isPro ? opp.pro_score || 0 : opp.technical_score || 0;
-  const formatVol = (vol: number) => { if (!vol) return '—'; if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M'; return (vol / 1000).toFixed(0) + 'K'; }
-  const seed = opp.ticker.split('').reduce((accIdx: number, charIdx: string) => accIdx + charIdx.charCodeAt(0), 0);
-  const gap = (((score / 200) + 1.1 + (seed % 15 / 100)) * opp.price - opp.price) / opp.price * 100;
-  const gS = Math.min(10, Math.max(1, Math.floor((score / 15) + (gap > 20 ? 3 : 0))));
-  const qS = Math.min(10, Math.max(1, Math.floor((gap / 10) + (score / 20) + 2)));
-  const avg = ((gS + qS) / 2).toFixed(1);
+const FLAG_CONFIG: Record<string, any> = {
+  market_buy_filled: { icon: '✅', label: 'BUY', color: '#00C896', bg: 'rgba(0,200,150,0.12)' },
+  market_sell_filled: { icon: '✅', label: 'SELL', color: '#FF4757', bg: 'rgba(255,71,87,0.12)' },
+  limit_pending: { icon: '⏳', label: 'LIMIT', color: '#FFB74D', bg: 'rgba(255,183,77,0.12)' },
+  limit_filled: { icon: '📍', label: 'LIMIT ✓', color: '#00C896', bg: 'rgba(0,200,150,0.12)' },
+  none: { icon: '❌', label: '—', color: '#444', bg: 'transparent' }
+}
+
+const OrderActivityIndicator = ({ orders }: { orders: any[] }) => {
+  if (!orders || orders.length === 0) {
+    return ( <span style={{ color: '#444', fontSize: '12px', display: 'flex', justifyContent: 'center' }}>❌</span> );
+  }
+  
+  // Priorizar órdenes LIMIT pendientes o MARKET llenadas
+  const lastOrder = orders[0]; 
+  const isLimit = lastOrder.order_type === 'limit';
+  const isBuy = lastOrder.direction === 'buy';
+  
+  const color = isBuy ? '#00C896' : '#FF4757';
+  const label = isLimit ? (lastOrder.status === 'filled' ? 'LIMIT ✓' : 'LIMIT ⏳') : (isBuy ? 'BUY' : 'SELL');
+  const bg = isBuy ? 'rgba(0,200,150,0.12)' : 'rgba(255,71,87,0.12)';
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '80px 100px 75px 75px 90px 90px 140px 130px 60px 85px', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
-      <span style={{ fontWeight: 900, color: '#FFF' }}>{opp.ticker}</span>
-      <span style={{ fontSize: '11px', fontWeight: 950, color: (opp.change_pct || 0) >= 0 ? '#22C55E' : '#EF4444' }}>{(opp.change_pct || 0) > 0 ? '+' : ''}{(opp.change_pct || 0).toFixed(2)}%</span>
-      <span>${opp.price.toFixed(2)}</span><span style={{ color: '#444' }}>{formatVol(opp.volume)}</span>
-      <span style={{ color: score >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 900 }}>{score.toFixed(0)}</span><span>88</span>
-      <span style={{ color: gap > 0 ? '#22C55E' : '#F59E0B', fontSize: '9px', fontWeight: 900 }}>{gap > 20 ? 'MUY RENTABLE' : 'RENTABLE'}</span>
-      <span style={{ fontSize: '9px', color: '#666' }}>({gap.toFixed(1)}%)</span>
-      <span style={{ color: Number(avg) >= 8 ? '#A855F7' : '#22C55E', fontWeight: 950 }}>{avg}</span>
-      <button onClick={onOpenDetails} style={{ background: '#161922', border: '1px solid #333', color: '#22C55E', padding: '6px 0', borderRadius: '6px', fontSize: '9px', fontWeight: 900, cursor: 'pointer' }}>DETALLES</button>
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 8px', borderRadius: '4px', background: bg, fontSize: '9px', color: color, fontWeight: 800 }}>
+      {isLimit ? '📍' : '⚡'} {label} {lastOrder.limit_price && <span style={{ fontFamily:'monospace', marginLeft:'2px' }}>${parseFloat(lastOrder.limit_price).toFixed(2)}</span>}
+    </div>
+  );
+}
+
+function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
+  // Sincronizado con DecisionEngine (Consenso Real)
+  const rawIA = opp.pro_score || 0;
+  const scoreIA = (rawIA > 10 ? rawIA / 10 : rawIA).toFixed(1);
+  
+  // CALCULACIÓN REAL PARA EVITAR DATOS VIEJOS EN DB
+  let displayScoreTech = 0;
+  if (opp.t01_confirmed) displayScoreTech += 40;
+  if (opp.t02_confirmed) displayScoreTech += 30;
+  if (opp.t03_confirmed) displayScoreTech += 20;
+  if (opp.t04_confirmed) displayScoreTech += 10;
+
+  const formatVol = (vol: number) => { if (!vol) return '—'; if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M'; return (vol / 1000).toFixed(0) + 'K'; }
+  const getMovColor = (type: string) => { if (type?.includes('ascending')) return '#22C55E'; if (type?.includes('descending')) return '#EF4444'; return '#F59E0B'; };
+
+  const rawMovement = isPro ? opp.movement_1d : opp.movement_15m;
+  const fibZone = isPro ? opp.fib_zone_1d : opp.fib_zone_15m;
+  let movementDisplay = rawMovement?.toUpperCase().replace('_', ' ') || '—';
+  if (movementDisplay.includes('ASCENDING')) movementDisplay = movementDisplay.replace('ASCENDING', 'ASC');
+  if (movementDisplay.includes('DESCENDING')) movementDisplay = movementDisplay.replace('DESCENDING', 'DESC');
+  if (fibZone !== undefined && fibZone !== null && movementDisplay !== '—') movementDisplay = `${movementDisplay} F(${fibZone})`;
+
+  return (
+    <div style={{ 
+        display: 'grid', 
+        gridTemplateColumns: '70px 85px 75px 75px 75px 75px 70px 125px 65px 95px 35px 35px 1fr', 
+        padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' 
+    }}>
+      {/* COL 1: TICKER */}
+      <div style={{ display:'flex', alignItems:'center', gap: '4px' }}>
+          <span style={{ fontWeight: 900, color: '#FFF', fontSize: '13px' }}>{opp.ticker}</span>
+          {(opp.intrinsic_value > opp.price && opp.intrinsic_value > 0) && (
+            <span style={{ fontSize: '7px', background: '#22C55E', color: '#000', padding: '1px 3px', borderRadius: '2px', fontWeight: 950 }}>VALOR</span>
+          )}
+      </div>
+
+      {/* COL 2: POOL */}
+      <div style={{ display:'flex', alignItems:'center', gap:'3px' }}>
+          {opp.pool_type?.includes('GIANT') && <span style={{ fontSize:'7px', background:'#2563EB', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>G</span>}
+          {opp.pool_type?.includes('LEADER') && <span style={{ fontSize:'7px', background:'#D97706', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>L</span>}
+          {opp.pool_type?.includes('HOT') && <span style={{ fontSize:'7px', background:'#EF4444', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>HOT</span>}
+          {!opp.pool_type && <span style={{ fontSize:'7px', background:'#555', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>PRO</span>}
+      </div>
+
+      <span style={{ fontWeight: 700, fontSize:'12px' }}>${opp.price.toFixed(2)}</span>
+      <span style={{ fontWeight: 800, fontSize:'11px', color: '#888' }}>{(opp.volume / 1_000_000).toFixed(2)}M</span>
+      <span style={{ color:(opp.rev_growth || 0) >= 0 ? '#22C55E' : '#EF4444', fontWeight:900, fontSize:'11px' }}>{opp.rev_growth > 0 ? '+' : ''}{opp.rev_growth}%</span>
+      <div>
+          <div style={{ width: '50px', height: '2px', background: 'rgba(255,255,255,0.05)', borderRadius: '1px', overflow: 'hidden' }}>
+              <div style={{ width: `${opp.fundamental_score}%`, height: '100%', background: '#22C55E' }}></div>
+          </div>
+          <div style={{ fontSize:'8px', color:'#22C55E', fontWeight:900 }}>{opp.fundamental_score}</div>
+      </div>
+      <span style={{ color:'#666', fontSize:'11px' }}>{opp.gross_margin}%</span>
+
+      {/* COMMON COLS */}
+      <span style={{ color: getMovColor(rawMovement), fontSize: '10px', fontWeight: 900, textTransform: 'uppercase' }}>{movementDisplay}</span>
+      
+      <div style={{ display:'flex', flexDirection:'column' }}>
+        <span style={{ fontSize:'8px', color:'#444', fontWeight:800 }}>{opp.created_at ? new Date(opp.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
+        <span style={{ fontSize:'10px', color:'#555', fontWeight:800, fontFamily:'monospace' }}>{opp.last_scan_time || '—:—'}</span>
+      </div>
+      <OrderActivityIndicator orders={opp.orders || []} />
+      
+      <span style={{ color: displayScoreTech >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 950, fontSize:'11px' }}>{displayScoreTech}</span>
+      <span style={{ color: Number(scoreIA) >= 7.5 ? '#A855F7' : '#22C55E', fontWeight: 950, fontSize:'11px' }}>{scoreIA}</span>
+      
+      <div style={{textAlign:'right'}}>
+        <button onClick={onOpenDetails} title="Analizar Empresa" style={{ 
+            background: 'rgba(34,197,94,0.1)', 
+            border: '1px solid rgba(34,197,94,0.3)', 
+            color: '#22C55E', 
+            width: '28px', height: '28px', 
+            borderRadius: '50%', 
+            fontSize: '12px', 
+            cursor: 'pointer',
+            display: 'inline-flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            transition: 'all 0.2s'
+        }}
+        onMouseEnter={e => e.currentTarget.style.background = 'rgba(34,197,94,0.2)'}
+        onMouseLeave={e => e.currentTarget.style.background = 'rgba(34,197,94,0.1)'}
+        >🔍</button>
+      </div>
     </div>
   )
 }
 
 function AnalysisModal({ stock, onClose }: any) {
   const isPro = stock.isPro;
-  const score = isPro ? stock.pro_score || 0 : stock.technical_score || 0;
-  const seed = stock.ticker.split('').reduce((acc: number, charIdx: string) => acc + charIdx.charCodeAt(0), 0);
-  const intrinsic = stock.price * ((score / 200) + 1.1 + (seed % 15 / 100));
-  const gap = ((intrinsic - stock.price) / stock.price) * 100;
-  const gS = Math.min(10, Math.max(1, Math.floor((score / 15) + (gap > 20 ? 3 : 0))));
-  const qS = Math.min(10, Math.max(1, Math.floor((gap / 10) + (score / 20) + 2)));
-  const iaAvg = ((gS + qS) / 2).toFixed(1);
-
-  const formatVol = (vol: number) => { if (!vol) return '0M'; if (vol >= 1000000) return (vol / 1000000).toFixed(2) + 'M'; return (vol / 1000).toFixed(0) + 'K'; };
-  const getStatusText = () => { if (gap > 20) return 'SUBVALUADA'; if (gap > 0) return 'COMPETITIVA'; return 'SOBREVALUADA'; };
-  const getStatusColor = () => { if (gap > 20) return '#22C55E'; if (gap > 0) return '#F59E0B'; return '#EF4444'; };
+  
+  // CALCULACIÓN REAL EN TIEMPO REAL (Para evitar datos inconsistentes en DB)
+  let displayScoreTech = 0;
+  if (stock.t01_confirmed) displayScoreTech += 40;
+  if (stock.t02_confirmed) displayScoreTech += 30;
+  if (stock.t03_confirmed) displayScoreTech += 20;
+  if (stock.t04_confirmed) displayScoreTech += 10;
+  
+  const rawIA = stock.pro_score || 0;
+  const iaAvg = (rawIA > 10 ? rawIA / 10 : rawIA).toFixed(1);
+  const uv = stock.undervaluation || 0;
+  const iv = stock.intrinsic_value || 0;
 
   return (
-    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.9)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(8px)' }}>
-      <div style={{ background: '#0F1117', width: '95%', maxWidth: '1100px', borderRadius: '24px', border: '1px solid #22C55E', overflow: 'hidden', maxHeight: '95vh', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(34,197,94,0.1)' }}>
+    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.95)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(10px)' }}>
+      <div style={{ background: '#0F1117', width: '95%', maxWidth: '1100px', borderRadius: '24px', border: '1px solid #22C55E', overflow: 'hidden', maxHeight: '95vh', display: 'flex', flexDirection: 'column' }}>
         
         {/* HEADER */}
         <div style={{ padding: '20px 30px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
           <div>
             <h2 style={{ margin: 0, fontSize: '22px', fontWeight: 900, color: '#FFF' }}>{stock.ticker} - {stock.company_name || stock.ticker}</h2>
-            <span style={{ fontSize: '10px', color: '#22C55E', fontWeight: 900, letterSpacing: '1px', textTransform: 'uppercase' }}>SECTOR: {stock.sector || 'TECHNOLOGY'} | V4.5 PRO LAYER</span>
+            <div style={{ display:'flex', gap:'10px', marginTop:'4px' }}>
+                <span style={{ fontSize: '10px', color: '#22C55E', fontWeight: 900, textTransform: 'uppercase' }}>SECTOR: {stock.sector || 'TECHNOLOGY'} | V4.5 PRO LAYER</span>
+            </div>
           </div>
-          <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
-            <div style={{ border: `1px solid ${getStatusColor()}`, padding: '8px 16px', borderRadius: '12px', background: 'rgba(0,0,0,0.3)', textAlign: 'center' }}>
-              <div style={{ fontSize: '10px', color: '#888', fontWeight: 900 }}>VALORACIÓN INTRÍNSECA ({gap > 0 ? '+' : ''}{gap.toFixed(1)}%)</div>
-              <div style={{ fontSize: '13px', color: getStatusColor(), fontWeight: 950 }}>{getStatusText()}</div>
+          <div style={{ display: 'flex', gap: '15px', alignItems:'center' }}>
+            {iv > 0 && (
+                <div style={{ border: '2px solid #22C55E', padding: '6px 16px', borderRadius: '12px', background: 'rgba(34,197,94,0.05)', textAlign: 'center' }}>
+                    <div style={{ fontSize: '8px', color: '#22C55E', fontWeight: 950 }}>VALORACIÓN INTRÍNSECA (+{uv.toFixed(1)}%)</div>
+                    <div style={{ fontSize: '12px', color: '#FFF', fontWeight: 950 }}>SUBVALUADA</div>
+                </div>
+            )}
+            <div style={{ border: '1px solid #A855F7', padding: '8px 20px', borderRadius: '14px', background: 'rgba(168,85,247,0.1)', textAlign: 'center' }}>
+                <div style={{ fontSize: '10px', color: '#A855F7', fontWeight: 900 }}>PROMEDIO IA</div>
+                <div style={{ fontSize: '16px', color: '#FFF', fontWeight: 950 }}>{iaAvg} / 10</div>
             </div>
-            <div style={{ border: '1px solid #A855F7', padding: '8px 16px', borderRadius: '12px', background: 'rgba(168,85,247,0.1)', textAlign: 'center' }}>
-              <div style={{ fontSize: '10px', color: '#A855F7', fontWeight: 900 }}>PROMEDIO IA</div>
-              <div style={{ fontSize: '13px', color: '#FFF', fontWeight: 950 }}>{iaAvg} / 10</div>
-            </div>
-            <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '36px', height: '36px', borderRadius: '50%', cursor: 'pointer', marginLeft: '10px' }}>✕</button>
+            <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '36px', height: '36px', borderRadius: '50%', cursor: 'pointer' }}>✕</button>
           </div>
         </div>
 
-        <div style={{ padding: '30px', overflowY: 'auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '40px' }}>
-            
-            {/* LEFT COLUMN: TECHNICAL ANALYSIS */}
-            <div>
-                <h3 style={{ fontSize: '13px', letterSpacing: '1px', fontWeight: 950, color: '#22C55E', marginBottom: '20px', textTransform: 'uppercase' }}>🔵 Sustentación Técnica {isPro ? '(PRO - 1 DÍA)' : '(HOT - MTF)'}</h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '30px' }}>
-                    {isPro ? (
-                        <>
-                            <RuleBox id="P01" name="EMA50 > EMA200 (1D)" val={score >= 40 ? 'Tendencia Alcista (Largo)' : 'FAIL'} pts={40} pass={score >= 40} c="#22C55E" />
-                            <RuleBox id="P02" name="EMA20 > EMA50 (1D)" val={score >= 70 ? 'Impulso Fuerte (Medio)' : 'FAIL'} pts={30} pass={score >= 70} c="#38BDF8" />
-                            <RuleBox id="P03" name="SAR Tendencia (1D)" val={score >= 90 || (score > 10 && score < 70) ? 'Bullish' : 'FAIL'} pts={20} pass={score >= 90 || (score > 10 && score < 70)} c="#A855F7" />
-                            <RuleBox id="P04" name="RSI Momentum <= 30 (1D)" val={(score % 10 !== 0) ? 'En Zona de Compra' : 'No Sobrevendido'} pts={10} pass={(score % 10 !== 0)} c="#F59E0B" />
-                        </>
-                    ) : (
-                        <>
-                            <RuleBox id="T01" name="SAR Tendencia (1D)" val={score >= 40 ? 'Bullish' : 'FAIL'} pts={40} pass={score >= 40} c="#A855F7" />
-                            <RuleBox id="T02" name="EMA Alineación (15m)" val="Alineada" pts={30} pass={true} c="#38BDF8" />
-                            <RuleBox id="T03" name="Cierre de Vela (4H)" val="Verde" pts={20} pass={true} c="#22C55E" />
-                        </>
-                    )}
+        <div style={{ padding: '25px 30px', overflowY: 'auto', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px' }}>
+            {/* IZQUIERDA: TECNICO + RESUMEN */}
+            <div style={{ display:'flex', flexDirection:'column', gap:'20px' }}>
+                <div>
+                    <h3 style={{ fontSize: '11px', letterSpacing: '1px', fontWeight: 950, color: '#22C55E', marginBottom: '15px' }}>TÉCNICO OPERATIVO</h3>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        <RuleBox id="T01" name="Señal PineScript 'B' (4H)" val={stock.t01_confirmed ? 'Confirmada (Buy)' : 'FAIL'} pts="+40 PTS" pass={stock.t01_confirmed} c="#A855F7" />
+                        <RuleBox id="T02" name="EMA Alineación (1D)" val={stock.t02_confirmed ? 'EMA 50 > 200' : 'FAIL'} pts="+30 PTS" pass={stock.t02_confirmed} c="#38BDF8" />
+                        <RuleBox id="T03" name="Cierre de Vela (4H)" val={stock.t03_confirmed ? 'Verde (Optimista)' : 'FAIL'} pts="+20 PTS" pass={stock.t03_confirmed} c="#22C55E" />
+                        <RuleBox id="T04" name="RSI Momentum (40-70)" val={stock.t04_confirmed ? 'Momentum OK' : 'FAIL'} pts="+10 PTS" pass={stock.t04_confirmed} c="#F59E0B" />
+                    </div>
                 </div>
 
-                <div style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid #333', borderRadius: '20px', padding: '24px' }}>
-                    <div style={{ fontSize: '11px', color: '#F59E0B', fontWeight: 900, marginBottom: '15px' }}>RESUMEN DE PUNTUACIÓN</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '30px' }}>
-                        <div style={{ textAlign: 'center' }}>
-                            <div style={{ fontSize: '56px', fontWeight: 900, color: score >= 50 ? '#22C55E' : '#F59E0B', lineHeight: '1' }}>{score.toFixed(0)}</div>
-                            <div style={{ fontSize: '9px', color: '#666', fontWeight: 900, marginTop: '5px' }}>PUNTUACIÓN TÉCNICA</div>
+                {/* CUADRO RESUMEN GRANDE */}
+                <div style={{ background: '#0D0E14', padding: '20px', borderRadius: '16px', border:'1px solid rgba(255,255,255,0.05)', display:'flex', gap:'20px', alignItems:'center' }}>
+                    <div style={{ textAlign:'center' }}>
+                        <div style={{ fontSize: '10px', color: '#F59E0B', fontWeight: 950, marginBottom:'4px' }}>RESUMEN DE PUNTUACIÓN</div>
+                        <div style={{ fontSize: '48px', fontWeight: 950, color: '#22C55E', lineHeight:'1' }}>{displayScoreTech}</div>
+                        <div style={{ fontSize: '8px', color: '#666', fontWeight: 900 }}>PUNTUACIÓN TÉCNICA</div>
+                    </div>
+                    <div style={{ flex:1, display:'flex', flexDirection:'column', gap:'6px' }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', fontWeight:700 }}>
+                            <span style={{ color:'#888' }}>Señal PineScript "B"</span>
+                            <span style={{ color: stock.t01_confirmed ? '#22C55E' : '#444' }}>+{stock.t01_confirmed?40:0}/40</span>
                         </div>
-                        <div style={{ flex: 1, fontSize: '11px', fontWeight: 900, color: '#888', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                            {isPro ? (
-                                <>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Base Tendencia (EMA 200)</span><span style={{color: '#FFF'}}>+{score >= 40 ? '40' : '0'}/40</span></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Impulso Medio (EMA 50)</span><span style={{color: '#FFF'}}>+{score >= 70 ? '30' : '0'}/30</span></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Dirección (SAR)</span><span style={{color: '#FFF'}}>+{score >= 90 || (score > 10 && score < 70) ? '20' : '0'}/20</span></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Bono Momentum (RSI)</span><span style={{color: '#FFF'}}>+{(score % 10 !== 0) ? '10' : '0'}/10</span></div>
-                                </>
-                            ) : (
-                                <>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Base Tendencia (SAR)</span><span style={{color: '#FFF'}}>+{score >= 40 ? '40' : '0'}/40</span></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Alineación Intradía (EMA)</span><span style={{color: '#FFF'}}>+30/30</span></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>Fuerza de Vela (4H)</span><span style={{color: '#FFF'}}>+20/20</span></div>
-                                </>
-                            )}
+                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', fontWeight:700 }}>
+                            <span style={{ color:'#888' }}>EMA Alineación (1D)</span>
+                            <span style={{ color: stock.t02_confirmed ? '#22C55E' : '#444' }}>+{stock.t02_confirmed?30:0}/30</span>
+                        </div>
+                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', fontWeight:700 }}>
+                            <span style={{ color:'#888' }}>Fuerza de Vela (4H)</span>
+                            <span style={{ color: stock.t03_confirmed ? '#22C55E' : '#444' }}>+{stock.t03_confirmed?20:0}/20</span>
+                        </div>
+                        <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', fontWeight:700 }}>
+                            <span style={{ color:'#888' }}>RSI Momentum (15m)</span>
+                            <span style={{ color: stock.t04_confirmed ? '#22C55E' : '#444' }}>+{stock.t04_confirmed?10:0}/10</span>
                         </div>
                     </div>
                 </div>
             </div>
 
-            {/* RIGHT COLUMN: FUNDAMENTAL & AI */}
-            <div>
-                <h3 style={{ fontSize: '13px', letterSpacing: '1px', fontWeight: 950, color: '#A855F7', marginBottom: '20px', textTransform: 'uppercase' }}>🟣 Métricas Fundamentales</h3>
-                
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '30px' }}>
-                    <RuleBox id="F01" name="Market Cap (Aprox)" val="500M+" pts={score > 0 ? "OK" : "PENDIENTE"} pass={true} c="#444" />
-                    <RuleBox id="F02" name="Precio Actual (Filtro)" val={`$${stock.price.toFixed(2)}`} pts={score > 0 ? "OK" : "PENDIENTE"} pass={true} c="#444" />
-                    <RuleBox id="F03" name="Liquidez / Volumen" val={formatVol(stock.volume)} pts={stock.volume > 1000000 ? "ALTA" : "MEDIA"} pass={true} c="#444" />
+            {/* DERECHA: FUNDAMENTAL + IA BOXES */}
+            <div style={{ display:'flex', flexDirection:'column', gap:'20px' }}>
+                <div>
+                   <h3 style={{ fontSize: '11px', letterSpacing: '1px', fontWeight: 950, color: '#A855F7', marginBottom: '15px' }}>FILTROS INSTITUCIONALES</h3>
+                   <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '8px' }}>
+                        <RuleBox id="F01" name="Market Cap (Aprox)" val={stock.market_cap > 1e9 ? `${(stock.market_cap/1e9).toFixed(1)}B` : '500M+'} pts="OK" pass={true} c="#FFF" />
+                        <RuleBox id="F02" name="Precio Actual (Filtro)" val={`$${stock.price.toFixed(2)} | OBJ: $${iv.toFixed(2)}`} pts="OK" pass={true} c="#FFF" />
+                        <RuleBox id="F03" name="Liquidez / Volumen" val={`${(stock.volume/1e6).toFixed(2)}M`} pts="ALTA" pass={true} c="#22C55E" />
+                        <RuleBox id="F04" name="RVOL (Relativo)" val={`${(stock.rvol || 1.0).toFixed(2)}x`} pts={(stock.rvol || 0) >= 1.2 ? "OK" : "BAJO"} pass={(stock.rvol || 0) >= 1.2} c="#F59E0B" />
+                   </div>
                 </div>
 
-                <h3 style={{ fontSize: '13px', letterSpacing: '1px', fontWeight: 950, color: '#22C55E', marginBottom: '15px', textTransform: 'uppercase' }}>🟢 Evaluaciones de IA</h3>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '15px' }}>
-                     <IABox n="GOOGLE GEMINI" s={gS} c="#A855F7" t={`Análisis de la estructura técnica presenta un modelo ${score > 50 ? 'favorable' : 'neutral'}. Riesgo calculado dentro de los umbrales operativos del V4.5.`} />
-                     <IABox n="ALI QWEN" s={qS} c="#22C55E" t={`Valoración ${getStatusText().toLowerCase()} apoyada por el ratio de liquidez de ${formatVol(stock.volume)}. Se recomiendan entradas escalonadas.`} />
+                <div>
+                    <h3 style={{ fontSize: '11px', letterSpacing: '1px', fontWeight: 950, color: '#F59E0B', marginBottom: '15px' }}>ANÁLISIS DE MERCADO & IA</h3>
+                    <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+                        {/* CONSENSO DE EXPERTOS (HUMAN ANALYSTS) */}
+                        <div style={{ background: 'rgba(34,197,94,0.05)', padding: '14px', borderRadius: '12px', border: '1px solid rgba(34,197,94,0.3)' }}>
+                            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px' }}>
+                                <span style={{ fontSize:'10px', color:'#22C55E', fontWeight:950 }}>CONSENSO DE EXPERTOS (NYC)</span>
+                                <span style={{ background:'#22C55E', color:'#000', padding:'2px 8px', borderRadius:'10px', fontSize:'10px', fontWeight:950 }}>
+                                    {stock.analyst_rating ? stock.analyst_rating.toFixed(1) : '—'}/10
+                                </span>
+                            </div>
+                            <div style={{ fontSize: '11px', color: '#AAA', lineHeight: '1.5' }}>
+                                Esta puntuación refleja el sentimiento agregado de analistas institucionales de Wall Street. Un valor {stock.analyst_rating >= 8 ? 'ALTO' : stock.analyst_rating >= 6 ? 'MODERADO' : 'NEUTRAL'} valida el análisis fundamental técnico.
+                            </div>
+                        </div>
+
+                        {/* GOOGLE GEMINI */}
+                        <div style={{ background: '#161922', padding: '14px', borderRadius: '12px', border: '1px solid rgba(168,85,247,0.2)' }}>
+                            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px' }}>
+                                <span style={{ fontSize:'10px', color:'#A855F7', fontWeight:950 }}>GOOGLE GEMINI</span>
+                                <span style={{ background:'#A855F7', padding:'2px 8px', borderRadius:'10px', fontSize:'10px', fontWeight:950 }}>
+                                    {(stock.gemini_score > 10 ? stock.gemini_score / 10 : (stock.gemini_score || 0)).toFixed(1)}/10
+                                </span>
+                            </div>
+                            <div style={{ fontSize: '11px', color: '#AAA', lineHeight: '1.5', fontStyle: 'italic' }}>
+                                {stock.gemini_summary || "Análisis financiero detallado en proceso..."}
+                            </div>
+                        </div>
+
+                        {/* QWEB / QWEN */}
+                        <div style={{ background: '#161922', padding: '14px', borderRadius: '12px', border: '1px solid rgba(56,189,248,0.2)' }}>
+                            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px' }}>
+                                <span style={{ fontSize:'10px', color:'#38BDF8', fontWeight:950 }}>QWEB AI (PRIMARY)</span>
+                                <span style={{ background:'#38BDF8', padding:'2px 8px', borderRadius:'10px', fontSize:'10px', fontWeight:950 }}>
+                                    {(stock.qwen_score > 10 ? stock.qwen_score / 10 : (stock.qwen_score || 0)).toFixed(1)}/10
+                                </span>
+                            </div>
+                            <div style={{ fontSize: '11px', color: '#AAA', lineHeight: '1.5', fontStyle: 'italic' }}>
+                                {stock.qwen_summary || "Consolidando datos de flujo de caja y proyección operativa..."}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
-
         </div>
+        
         <div style={{ padding: '20px 30px', textAlign: 'right', background: '#161922', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-            <button onClick={onClose} style={{ background: '#22C55E', color: '#000', border: 'none', padding: '12px 40px', borderRadius: '12px', fontSize: '13px', fontWeight: 950, cursor: 'pointer', transition: 'transform 0.1s' }}>CERRAR PANEL</button>
+            <button onClick={onClose} style={{ background: '#22C55E', color: '#000', padding: '12px 60px', borderRadius: '12px', fontSize: '12px', fontWeight: 950, cursor: 'pointer', textTransform:'uppercase', letterSpacing:'1px' }}>Cerrar Panel</button>
         </div>
       </div>
     </div>
@@ -255,26 +393,14 @@ function AnalysisModal({ stock, onClose }: any) {
 
 function RuleBox({id, name, val, pts, pass, c = '#22C55E'}: any) {
     return ( 
-      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '16px 20px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div>
-              <div style={{ fontSize: '11px', color: c, fontWeight: 950, marginBottom: '4px' }}>{id} • {name}</div>
-              <div style={{ fontSize: '13px', color: '#FFF', fontWeight: 900 }}>{val}</div>
+              <div style={{ fontSize: '10px', color: c, fontWeight: 950, marginBottom: '2px' }}>{id} • {name}</div>
+              <div style={{ fontSize: '12px', color: '#FFF', fontWeight: 700 }}>{val}</div>
           </div>
-          <div style={{ fontSize: '11px', fontWeight: 950, color: pass ? '#22C55E' : '#555', background: pass ? 'rgba(34,197,94,0.1)' : 'transparent', padding: '4px 10px', borderRadius: '8px' }}>
-             {typeof pts === 'number' ? `+${pts} PTS` : pts}
+          <div style={{ fontSize: '10px', fontWeight: 950, color: pass ? '#22C55E' : '#555' }}>
+             {typeof pts === 'number' ? `+${pts}` : pts}
           </div>
-      </div> 
-    )
-}
-
-function IABox({n, s, c, t}: any) {
-    return ( 
-      <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '14px', border: `1px solid ${c}40` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <span style={{ fontSize: '11px', fontWeight: 950, color: c }}>{n}</span>
-              <span style={{ fontSize: '12px', fontWeight: 950, color: '#FFF', background: c, padding: '2px 10px', borderRadius: '8px' }}>{s} / 10</span>
-          </div>
-          <p style={{ fontSize: '12px', color: '#BBB', margin: 0, lineHeight: '1.5' }}>{t}</p>
       </div> 
     )
 }

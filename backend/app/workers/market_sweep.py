@@ -1,7 +1,8 @@
-import yfinance as yf
-from app.core.supabase_client import get_supabase as get_supabase_client
+import asyncio
 import logging
 from datetime import datetime
+from app.core.supabase_client import get_supabase as get_supabase_client
+from app.stocks.universe_builder import UniverseBuilder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MarketSweep")
@@ -15,17 +16,42 @@ def get_fallback_tickers():
         "OPEN", "UPST", "VALE", "PBR", "NIO", "XPEV", "LI", "JD", "BABA", "PDD"
     ]
 
-def run_market_sweep(price_limit=200, volume_limit=1000000):
-    tickers = get_fallback_tickers()
-    logger.info(f"Escaneando {len(tickers)} líderes de volumen.")
+async def run_market_sweep(price_limit=200, volume_limit=1000000):
+    """
+    Realiza un barrido profundo del mercado usando UniverseBuilder (IB -> Yahoo -> Fallback).
+    Configurado para correr justo después del cierre (16:01 ET).
+    """
+    logger.info("═══ INICIANDO MARKET SWEEP DINÁMICO (Capa 0) ═══")
     
+    try:
+        builder = UniverseBuilder()
+        # Intentamos el escaneo dinámico (usa IB si está el PC prendido, si no Yahoo)
+        candidates = await builder.build_daily_watchlist(
+            max_price=price_limit,
+            min_volume=volume_limit,
+            max_results=50
+        )
+        
+        if candidates and len(candidates) > 0:
+            logger.info(f"✅ EXITO: {len(candidates)} candidatos dinámicos encontrados y guardados.")
+            return
+
+        logger.warning("⚠️ Scanner dinámico no devolvió resultados. Iniciando barrido de lista fija...")
+        
+    except Exception as e:
+        logger.error(f"❌ Error en UniverseBuilder: {e}. Usando lista fija de respaldo.")
+
+    # FALLBACK: Si todo lo anterior falla, usamos la lista de líderes históricos
+    await run_fallback_sweep(price_limit, volume_limit)
+
+async def run_fallback_sweep(price_limit, volume_limit):
+    import yfinance as yf
+    tickers = get_fallback_tickers()
     final_candidates = []
     today = datetime.now().date().isoformat()
     
-    # Descarga directa sin parámetros conflictivos
     for ticker in tickers:
         try:
-            logger.info(f"Analizando: {ticker}")
             t = yf.Ticker(ticker)
             df = t.history(period="1d")
             if df.empty: continue
@@ -38,14 +64,15 @@ def run_market_sweep(price_limit=200, volume_limit=1000000):
                     "ticker": ticker,
                     "date": today,
                     "hard_filter_pass": True,
-                    "catalyst_type": "Sweep",
+                    "catalyst_type": "Sweep_Fallback",
                     "market_regime": "bullish"
                 })
         except Exception as e:
             logger.error(f"Error con {ticker}: {e}")
 
-    logger.info(f"Candidatos encontrados: {len(final_candidates)}")
-    save_to_watchlist(final_candidates)
+    if final_candidates:
+        save_to_watchlist(final_candidates)
+        logger.info(f"✅ EXITO: {len(final_candidates)} empresas de la lista fija cargadas.")
 
 def save_to_watchlist(candidates):
     if not candidates: return
@@ -55,7 +82,6 @@ def save_to_watchlist(candidates):
     for i in range(0, len(candidates), 100):
         batch = candidates[i:i+100]
         supabase.table("watchlist_daily").insert(batch).execute()
-    logger.info(f"EXITO: {len(candidates)} empresas cargadas.")
 
 if __name__ == "__main__":
-    run_market_sweep()
+    asyncio.run(run_market_sweep())

@@ -1,0 +1,23 @@
+{
+    "id": 1,
+    "fg_mcap_min": 200,
+    "fg_mcap_max": 10000,
+    "fg_rev_growth_min": 21,
+    "fg_price_max": 50,
+    "fg_rs_min": 70,
+    "gl_mcap_min": 1000,
+    "gl_rev_growth_min": 12,
+    "gl_margin_min": 20,
+    "gl_rs_min": 75,
+    "gl_inst_min": 40,
+    "gl_price_max": 200,
+    "ex_vol_min": 200000,
+    "ex_debt_equity_max": 3,
+    "ex_eps_neg_quarters_max": 4,
+    "w_rev_growth": 25,
+    "w_gross_margin": 20,
+    "w_eps_growth": 20,
+    "w_rs_score": 20,
+    "w_inst_ownership": 15,
+    "updated_at": "2026-04-09T20:01:53.698814+00:00"
+}

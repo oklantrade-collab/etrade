@@ -79,21 +79,37 @@ def generate_signal(
     tp_price = 0.0
     rr_ratio = 0.0
 
-    if signal_type in ["BUY", "SELL"] and atr_4h is not None:
-        sl_mult = float(config.get("sl_multiplier", 2.0))
-        rr = float(config.get("rr_ratio", 2.5))
-
-        sl_distance = atr_4h * sl_mult
-        tp_distance = sl_distance * rr
-
-        if signal_type == "BUY":
-            sl_price = round(entry_price - sl_distance, 8)
-            tp_price = round(entry_price + tp_distance, 8)
-        elif signal_type == "SELL":
-            sl_price = round(entry_price + sl_distance, 8)
-            tp_price = round(entry_price - tp_distance, 8)
-
-        rr_ratio = round(rr, 2)
+    if signal_type in ["BUY", "SELL"]:
+        indicators_15m = all_indicators.get("15m", {})
+        
+        # 1. Intentar derivar ATR de las bandas de Fibonacci (upper_1 / lower_1)
+        u1 = float(indicators_15m.get('upper_1') or 0)
+        l1 = float(indicators_15m.get('lower_1') or 0)
+        
+        # Derivamos ATR de la distancia entre bandas (3.236 * ATR = upper_1 - lower_1)
+        derived_atr = (u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else None
+        
+        # Fallback al ATR_4h tradicional si no hay bandas
+        active_atr = derived_atr if derived_atr else (atr_4h if atr_4h else 0.0)
+        
+        if active_atr > 0:
+            if signal_type == "BUY":
+                # SL: LOWER_6 - (1 * ATR)
+                lower_6 = float(indicators_15m.get('lower_6') or (entry_price * 0.95))
+                sl_price = round(lower_6 - active_atr, 8)
+                # TP: Entrada + (3 * ATR)
+                tp_price = round(entry_price + (3 * active_atr), 8)
+            elif signal_type == "SELL":
+                # SL: UPPER_6 + (1 * ATR)
+                upper_6 = float(indicators_15m.get('upper_6') or (entry_price * 1.05))
+                sl_price = round(upper_6 + active_atr, 8)
+                # TP: Entrada - (3 * ATR)
+                tp_price = round(entry_price - (3 * active_atr), 8)
+            
+            # Recalcular RR Ratio real
+            risk = abs(entry_price - sl_price)
+            reward = abs(tp_price - entry_price)
+            rr_ratio = round(reward / risk, 2) if risk > 0 else 0
 
     # ── STEP 5: Build and save signal ──
     votes = mtf_result.get("votes", {})

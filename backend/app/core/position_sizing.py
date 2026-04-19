@@ -37,19 +37,27 @@ def calculate_sl_tp(
     entry_price:  float,
     atr:          float,
     atr_mult:     float,
-    levels:       dict   # Fibonacci levels (upper_x, lower_x, basis)
+    levels:       dict,   # Fibonacci levels (upper_x, lower_x, basis)
+    sl_buffer_pct: float = 0.5  # Porcentaje adicional de respiro
 ) -> dict:
     """
     Calcula SL y TP de forma simétrica según la dirección.
+    Capa 1: Stop Loss basado en niveles extremos (lower_6/upper_6) con buffer extra.
     """
     basis = float(levels.get('basis', entry_price))
     
-    if side == 'long' or side == 'Buy':
-        sl_price   = entry_price - (atr * atr_mult)
+    if side.lower() in ['long', 'buy']:
+        # SL = nivel_lower_6 - buffer%
+        l6 = float(levels.get('lower_6', entry_price * 0.95))
+        sl_price = l6 * (1 - (sl_buffer_pct / 100))
+        
         tp_partial = float(levels.get('upper_5', basis * 1.05))
         tp_full    = float(levels.get('upper_6', basis * 1.08))
-    else:  # short / Sell
-        sl_price   = entry_price + (atr * atr_mult)
+    else:  # short / Sell / sell
+        # SL = nivel_upper_6 + buffer%
+        u6 = float(levels.get('upper_6', entry_price * 1.05))
+        sl_price = u6 * (1 + (sl_buffer_pct / 100))
+        
         tp_partial = float(levels.get('lower_5', basis * 0.95))
         tp_full    = float(levels.get('lower_6', basis * 0.92))
 
