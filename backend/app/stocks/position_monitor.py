@@ -20,6 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
 from app.strategy.proactive_exit import evaluate_proactive_exit
+from app.strategy.dynamic_sl_manager import evaluate_sl_action
 
 
 MODULE = "position_monitor"
@@ -90,26 +91,71 @@ class PositionMonitor:
             if closed:
                 return
 
-            # Check STOP LOSS
-            if current_price <= stop_loss and stop_loss > 0:
-                log_warning(MODULE, f"🔴 STOP HIT: {ticker} @ ${current_price:.2f} (SL=${stop_loss:.2f})")
-                await self._close_position(trade, current_price, "stop_loss")
+            # ── NUEVO: Stop Loss Dinámico y Trailing Stop ──
+            # Reutilizamos el motor SIPV adaptado para Stocks
+            import yfinance as yf
+            t_obj = yf.Ticker(ticker)
+            hist_4h = t_obj.history(period="15d", interval="1h") # 1h como proxy de 4h para Stocks
+            hist_1d = t_obj.history(period="30d", interval="1d")
+
+            # Mapeo a formato estándar para el evaluador
+            pos_std = {
+                'id': trade['id'],
+                'symbol': ticker,
+                'side': 'long',
+                'avg_entry_price': entry_price,
+                'sl_type': trade.get('sl_type', 'backstop'),
+                'sl_backstop_price': trade.get('sl_backstop_price') or stop_loss,
+                'sl_dynamic_price': trade.get('sl_dynamic_price'),
+                'trailing_sl_price': trade.get('trailing_sl_price'),
+                'highest_price_reached': trade.get('highest_price_reached', current_price),
+                'lowest_price_reached': trade.get('lowest_price_reached', current_price),
+                'stop_loss_price': stop_loss
+            }
+
+            snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
+            snap_val = snap_res.data[0] if snap_res.data else {}
+
+            sl_res = evaluate_sl_action(
+                position=pos_std,
+                current_price=current_price,
+                snap=snap_val,
+                df_4h=hist_4h,
+                df_1d=hist_1d,
+                market_type='stocks_spot'
+            )
+
+            sl_action = sl_res['action']
+
+            if sl_action == 'close_backstop':
+                log_warning(MODULE, f"🔴 BACKSTOP HIT: {ticker} @ ${current_price:.2f}")
+                await self._close_position(trade, current_price, "backstop_sl")
                 return
 
-            # Check TARGET
-            if current_price >= target_price and target_price > 0:
-                log_info(MODULE, f"🟢 TARGET HIT: {ticker} @ ${current_price:.2f} (TP=${target_price:.2f})")
-                await self._close_position(trade, current_price, "target_hit")
+            if sl_action == 'trigger_dynamic_sl':
+                log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {ticker} @ ${current_price:.2f} (SIPV)")
+                await self._close_position(trade, current_price, "dynamic_sl")
                 return
 
-            # TRAILING STOP: if trade is >1.5% in profit, tighten stop
-            if pnl_pct >= 1.5 and stop_loss < entry_price:
-                new_stop = round(entry_price + (current_price - entry_price) * 0.3, 2)
-                if new_stop > stop_loss:
-                    sb.table("stocks_positions").update({
-                        "stop_loss": new_stop,
-                    }).eq("id", trade["id"]).execute()
-                    log_info(MODULE, f"📈 TRAILING STOP: {ticker} SL moved ${stop_loss:.2f} → ${new_stop:.2f}")
+            if sl_action == 'activate_dynamic_sl':
+                new_sl = sl_res['sl_price']
+                sb.table("stocks_positions").update({
+                    "sl_type": "dynamic",
+                    "sl_dynamic_price": new_sl,
+                    "stop_loss": new_sl,
+                    "sl_activated_at": datetime.now(timezone.utc).isoformat(),
+                    "sl_activation_reason": sl_res.get('reason', 'sipv')
+                }).eq("id", trade["id"]).execute()
+                log_info(MODULE, f"⚡ ACTIVANDO SL DINÁMICO: {ticker} @ ${new_sl:.2f}")
+
+            if sl_action == 'update_trailing':
+                new_trailing = sl_res['sl_price']
+                sb.table("stocks_positions").update({
+                    "trailing_sl_price": new_trailing,
+                    "highest_price_reached": sl_res.get('new_max'),
+                    "stop_loss": new_trailing # En Stocks protegemos el stop_loss directamente
+                }).eq("id", trade["id"]).execute()
+                log_info(MODULE, f"📈 TRAILING STOP ACTIVO: {ticker} SL movido a ${new_trailing:.2f}")
 
             log_info(MODULE, f"  {ticker}: ${current_price:.2f} | P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
 
