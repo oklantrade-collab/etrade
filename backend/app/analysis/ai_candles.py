@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
-import google.generativeai as genai
 
 from app.core.logger import log_info, log_error
 from app.core.config import settings
@@ -12,9 +11,6 @@ from app.candle_signals.candle_patterns import CandlePatternDetector, CandleOHLC
 
 MODULE = "ai_candles"
 
-# Configure Gemini
-if settings.gemini_api_key:
-    genai.configure(api_key=settings.gemini_api_key)
 
 def get_current_15m_bar(ts: datetime = None) -> datetime:
     """Retorna el inicio de la vela de 15m actual para cache."""

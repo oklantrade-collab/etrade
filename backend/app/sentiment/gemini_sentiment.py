@@ -6,7 +6,12 @@ Never raises exceptions that block the main pipeline.
 import json
 import os
 import httpx
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    HAS_GENAI = True
+except ImportError:
+    genai = None
+    HAS_GENAI = False
 
 from app.core.config import settings
 from app.core.supabase_client import get_supabase
@@ -15,7 +20,7 @@ from app.core.logger import log_info, log_warning, log_error
 MODULE = "sentiment"
 
 # Configure Gemini
-if settings.gemini_api_key:
+if HAS_GENAI and settings.gemini_api_key:
     genai.configure(api_key=settings.gemini_api_key)
 
 CRYPTOPANIC_API_KEY = os.getenv("CRYPTOPANIC_API_KEY", "")
@@ -110,12 +115,13 @@ def get_sentiment(
             return result
 
         # ── STEP 3: Call Gemini ──
-        if not settings.gemini_api_key:
-            log_warning(MODULE, "Gemini API key not configured — returning neutral sentiment", cycle_id=cycle_id)
+        if not HAS_GENAI or not settings.gemini_api_key:
+            reason = "google-generativeai_not_installed" if not HAS_GENAI else "gemini_api_key_not_configured"
+            log_warning(MODULE, f"Gemini system not available ({reason}) — returning neutral sentiment", cycle_id=cycle_id)
             result = {
                 "sentiment_score": 0.0,
                 "confidence": 0.0,
-                "key_factors": ["gemini_api_key_not_configured"],
+                "key_factors": [reason],
                 "adjustment": 0.0,
                 "headlines_count": len(headlines),
             }
