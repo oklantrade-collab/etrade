@@ -17,7 +17,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from typing import Optional
-from app.core.memory_store import log_info, log_error
+from app.core.logger import log_info, log_error
 
 # ── Configuración ──────────────────────────────
 SL_CONFIG = {
