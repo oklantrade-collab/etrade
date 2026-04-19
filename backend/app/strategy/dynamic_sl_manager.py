@@ -60,6 +60,7 @@ def calculate_backstop_sl(
     snap:         dict,
     market_type:  str = 'crypto_futures'
 ) -> dict:
+    side = side.lower()
     """
     Calcula el SL de seguridad amplio (Capa 1).
     Se registra al abrir la posición.
@@ -113,6 +114,7 @@ def calculate_dynamic_sl(
     snap:          dict,
     market_type:   str = 'crypto_futures'
 ) -> dict:
+    side = side.lower()
     """
     Calcula el SL dinámico (Capa 2).
     Se activa cuando SIPV detecta señal contraria.
@@ -224,7 +226,7 @@ def calculate_trailing_sl(
     Para SELL:
       trailing_sl = min_precio × (1 + trail_pct)
     """
-    side      = str(position.get('side', 'long'))
+    side      = str(position.get('side', 'long')).lower()
     trail_pct = SL_CONFIG.get(
         f'trailing_pct_{market_type.split("_")[0]}',
         0.03
@@ -268,6 +270,7 @@ def detect_sipv_exit_signal(
     df_4h: pd.DataFrame,
     df_1d: pd.DataFrame = None
 ) -> dict:
+    side = side.lower()
     """
     Detecta si el SIPV (Sistema de Identificación
     de Patrones de Velas) genera una señal de
@@ -388,7 +391,7 @@ def evaluate_sl_action(
     """
     Función principal del Dynamic SL Manager.
     """
-    side    = str(position.get('side', 'long'))
+    side    = str(position.get('side', 'long')).lower()
     entry   = float(position.get(
         'avg_entry_price',
         position.get('entry_price', 0)
@@ -530,6 +533,7 @@ async def send_sl_to_exchange(
     supabase,
     market_type: str = 'crypto_futures'
 ) -> Optional[str]:
+    side = side.lower()
     """
     Envía la orden de Stop Loss al exchange.
     Retorna el ID de la orden del exchange.
