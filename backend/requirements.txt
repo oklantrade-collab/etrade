@@ -4,7 +4,7 @@ supabase>=2.13.0
 requests
 pandas
 ta
-google-generativeai
+google-generativeai==0.3.1
 httpx
 apscheduler
 pydantic>=2.0.0
@@ -18,5 +18,5 @@ sendgrid
 email-validator
 yfinance>=0.2.36
 numpy>=1.24.0
-ctrader-open-api>=1.1.0
-twisted>=24.3.0
+ctrader-open-api==0.9.2
+twisted
