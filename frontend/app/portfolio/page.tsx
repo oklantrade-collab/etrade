@@ -64,9 +64,9 @@ export default function PortfolioPage() {
 
   if (loading || !perf || !global) return <div className="min-h-screen bg-[#020205] flex items-center justify-center text-blue-500 font-black uppercase tracking-widest text-[0.6rem] animate-pulse">Sincronizando Sistema...</div>
 
-  const activeCrypto = global.markets.crypto.symbols.filter(s => s.status === 'active')
-  const activeForex = (global.markets.forex?.symbols || []).filter(s => s.status === 'active')
-  const activeStocks = (global.markets.stocks?.symbols || []).filter(s => s.status === 'active')
+  const activeCrypto = global?.markets?.crypto?.symbols?.filter(s => s.status === 'active') || []
+  const activeForex  = global?.markets?.forex?.symbols?.filter(s => s.status === 'active') || []
+  const activeStocks = global?.markets?.stocks?.symbols?.filter(s => s.status === 'active') || []
 
   return (
     <div className="min-h-screen bg-[#020208] text-slate-200 pb-40 selection:bg-blue-500/30">
@@ -91,34 +91,34 @@ export default function PortfolioPage() {
 
         {/* PERFORMANCE GRID */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-           <PerfCard title="PNL HOY (CONSOLIDADO)" val={perf.today.pnl_usd} trades={perf.today.trades} wr={perf.today.win_rate} color="blue" />
-           <PerfCard title="PNL SEMANA (CERRADO)" val={perf.this_week.pnl_usd} trades={perf.this_week.trades} wr={perf.this_week.win_rate} color="emerald" />
-           <PerfCard title="PNL MES (TOTAL)" val={perf.this_month.pnl_usd} trades={perf.this_month.trades} wr={perf.this_month.win_rate} color="indigo" />
+           <PerfCard title="PNL HOY (CONSOLIDADO)" val={perf?.today?.pnl_usd || 0} trades={perf?.today?.trades || 0} wr={perf?.today?.win_rate || 0} color="blue" />
+           <PerfCard title="PNL SEMANA (CERRADO)" val={perf?.this_week?.pnl_usd || 0} trades={perf?.this_week?.trades || 0} wr={perf?.this_week?.win_rate || 0} color="emerald" />
+           <PerfCard title="PNL MES (TOTAL)" val={perf?.this_month?.pnl_usd || 0} trades={perf?.this_month?.trades || 0} wr={perf?.this_month?.win_rate || 0} color="indigo" />
         </div>
 
         {/* HISTORICO SEMANAL */}
         <div className="space-y-6">
            <h3 className="section-label pl-2">Rendimiento Histórico Semanal</h3>
            <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-              {perf.weekly_breakdown.map((w, i) => (
-                <div key={i} className="glass-card flex flex-col items-center justify-center p-8 text-center border-white/5 hover:border-white/10 transition-colors">
-                   <span className="text-[0.55rem] font-black text-slate-500 uppercase tracking-widest mb-4">SEMANA {w.week_num}</span>
-                   <span className={`text-2xl font-black italic tracking-tighter ${w.pnl_usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                     {w.pnl_usd >= 0 ? '+' : ''}${w.pnl_usd.toFixed(2)}
-                   </span>
-                   <div className="mt-4 pt-4 border-t border-white/5 w-full text-[0.5rem] font-black text-slate-500 uppercase">
-                      {w.trades} Trades <span className="opacity-30 mx-1">|</span> {w.win_rate}% Win
-                   </div>
-                </div>
-              ))}
+               {(perf?.weekly_breakdown || []).map((w, i) => (
+                 <div key={i} className="glass-card flex flex-col items-center justify-center p-8 text-center border-white/5 hover:border-white/10 transition-colors">
+                    <span className="text-[0.55rem] font-black text-slate-500 uppercase tracking-widest mb-4">SEMANA {w?.week_num || i}</span>
+                    <span className={`text-2xl font-black italic tracking-tighter ${(w?.pnl_usd || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {(w?.pnl_usd || 0) >= 0 ? '+' : ''}${(w?.pnl_usd || 0).toFixed(2)}
+                    </span>
+                    <div className="mt-4 pt-4 border-t border-white/5 w-full text-[0.5rem] font-black text-slate-500 uppercase">
+                       {w?.trades || 0} Trades <span className="opacity-30 mx-1">|</span> {w?.win_rate || 0}% Win
+                    </div>
+                 </div>
+               ))}
            </div>
         </div>
 
         {/* SEGMENTOS DE MERCADO */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 pt-8">
-           <MarketBox title="CRIPTO" icon="₿" data={perf.by_market.crypto} regime={global.markets.crypto.regime} />
-           <MarketBox title="FOREX" icon="¥" data={perf.by_market.forex} regime={global.markets.forex.regime} />
-           <MarketBox title="ACCIONES" icon="🏛️" data={perf.by_market.stocks} regime="RIESGO CONTROLADO" locked={activeStocks.length === 0} />
+           <MarketBox title="CRIPTO" icon="₿" data={perf?.by_market?.crypto} regime={global?.markets?.crypto?.regime} />
+           <MarketBox title="FOREX" icon="¥" data={perf?.by_market?.forex} regime={global?.markets?.forex?.regime} />
+           <MarketBox title="ACCIONES" icon="🏛️" data={perf?.by_market?.stocks || {}} regime="RIESGO CONTROLADO" locked={activeStocks.length === 0} />
         </div>
 
         {/* TABLAS DE EJECUCIÓN */}
@@ -142,15 +142,15 @@ export default function PortfolioPage() {
               <div className="flex gap-16">
                  <div className="text-center md:text-left">
                     <div className="text-[0.55rem] font-black text-slate-500 uppercase tracking-[0.3em] mb-3">P&L TOTAL (ABIERTO)</div>
-                    <div className={`text-4xl font-black italic tracking-tighter ${global.summary.total_pnl_usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                       {global.summary.total_pnl_usd >= 0 ? '+' : ''}${global.summary.total_pnl_usd.toFixed(2)}
+                    <div className={`text-4xl font-black italic tracking-tighter ${(global?.summary?.total_pnl_usd || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                       {(global?.summary?.total_pnl_usd || 0) >= 0 ? '+' : ''}${(global?.summary?.total_pnl_usd || 0).toFixed(2)}
                     </div>
                  </div>
                  
                  <div className="text-center md:text-left">
                     <div className="text-[0.55rem] font-black text-slate-500 uppercase tracking-[0.3em] mb-3">ROI GLOBAL PROMEDIO</div>
-                    <div className={`text-4xl font-black italic tracking-tighter ${global.summary.avg_roi_pct >= 0 ? 'text-blue-400' : 'text-rose-400'}`}>
-                       {global.summary.avg_roi_pct >= 0 ? '+' : ''}{global.summary.avg_roi_pct.toFixed(2)}%
+                    <div className={`text-4xl font-black italic tracking-tighter ${(global?.summary?.avg_roi_pct || 0) >= 0 ? 'text-blue-400' : 'text-rose-400'}`}>
+                       {(global?.summary?.avg_roi_pct || 0) >= 0 ? '+' : ''}{(global?.summary?.avg_roi_pct || 0).toFixed(2)}%
                     </div>
                  </div>
               </div>
@@ -183,23 +183,23 @@ export default function PortfolioPage() {
                        </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                       {global.recent_activity.map((a, i) => {
-                          const isWin = a.pnl >= 0
+                       {(global?.recent_activity || []).map((a, i) => {
+                          const isWin = (a?.pnl || 0) >= 0
                           return (
                             <tr key={i} className="hover:bg-white/[0.04] transition-colors group">
                                <td className="py-6 px-10">
-                                  <div className="text-[0.6rem] font-black text-slate-500 uppercase leading-none mb-1">{new Date(a.time).toLocaleTimeString()}</div>
-                                  <div className="text-[0.55rem] font-medium text-slate-700 uppercase tracking-widest">{new Date(a.time).toLocaleDateString()}</div>
+                                  <div className="text-[0.6rem] font-black text-slate-500 uppercase leading-none mb-1">{a?.time ? new Date(a.time).toLocaleTimeString() : '--:--'}</div>
+                                  <div className="text-[0.55rem] font-medium text-slate-700 uppercase tracking-widest">{a?.time ? new Date(a.time).toLocaleDateString() : '--/--'}</div>
                                </td>
-                               <td className="font-black text-white italic uppercase tracking-tighter">{a.symbol}</td>
+                               <td className="font-black text-white italic uppercase tracking-tighter">{a?.symbol || '---'}</td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
-                                  ${a.entry_price ? a.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
+                                  ${a?.entry_price ? a.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
                                </td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
-                                  {a.quantity ? a.quantity.toFixed(4) : '---'}
+                                  {a?.quantity ? (a.quantity).toFixed(4) : '---'}
                                </td>
                                <td className="font-mono text-[0.6rem] text-slate-500 font-bold uppercase">
-                                  {a.rule || 'S-01'}
+                                  {a?.rule || 'S-01'}
                                </td>
                                <td>
                                   <span className={`px-3 py-1 rounded-full text-[0.55rem] font-black uppercase border italic ${isWin ? 'text-emerald-400 border-emerald-400/20 bg-emerald-400/5' : 'text-rose-400 border-rose-400/20 bg-rose-400/5'}`}>
@@ -208,7 +208,7 @@ export default function PortfolioPage() {
                                </td>
                                <td className="text-right px-10 font-mono font-black text-sm italic">
                                   <span style={{ color: isWin ? '#34d399' : '#fb7185' }}>
-                                     {isWin ? '+' : ''}${a.pnl.toFixed(2)}
+                                     {isWin ? '+' : ''}${(a?.pnl || 0).toFixed(2)}
                                   </span>
                                </td>
                             </tr>
@@ -263,7 +263,7 @@ function PerfCard({ title, val, trades, wr, color }: any) {
 }
 
 function MarketBox({ title, icon, data, regime, locked }: any) {
-  const isPositive = data.pnl_usd >= 0
+  const isPositive = (data?.pnl_usd || 0) >= 0
   return (
     <div className={`glass-card flex flex-col items-center gap-6 text-center ${locked ? 'opacity-30 grayscale' : 'hover:border-white/10'}`}>
        <div className="text-4xl bg-white/5 w-16 h-16 flex items-center justify-center rounded-2xl group-hover:scale-110 transition-transform">
