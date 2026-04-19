@@ -231,7 +231,11 @@ async def check_open_positions_5m(
             # 0. ACTUALIZACIÓN DE PRECIO EN VIVO Y P&L (Para el Dashboard)
             entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
             is_long = side in ['long', 'buy']
-            upnl = (price - entry_p) * float(pos.get('size') or 0) if is_long else (entry_p - price) * float(pos.get('size') or 0)
+            
+            from app.core.crypto_symbols import resolve_crypto_position_quantity
+            current_qty = resolve_crypto_position_quantity(supabase, pos)
+            
+            upnl = (price - entry_p) * current_qty if is_long else (entry_p - price) * current_qty
             
             try:
                 supabase.table('positions').update({
