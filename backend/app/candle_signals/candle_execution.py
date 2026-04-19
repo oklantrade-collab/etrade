@@ -306,8 +306,15 @@ def execute_crypto_signal(
     entry_display = price
 
     if is_paper:
-        # Paper mode: simulate with a default $100 budget
-        paper_size = round(100.0 / price, 4)
+        # Paper mode: calculate size based on settings (Inversion x Operacion)
+        config = BOT_STATE.config_cache
+        capital = float(config.get('capital_assigned', config.get('capital_crypto_futures', 500)))
+        risk_pct = float(config.get('risk_per_operation_pct', 1.0))
+        leverage = float(config.get('leverage_crypto', 15))
+        
+        target_inv = capital * (risk_pct / 100) # $5
+        target_notional = target_inv * leverage  # $75
+        paper_size = round(target_notional / price, 4)
         order_row_id = _save_candle_order_crypto(
             sb, binance_symbol, action, strategy_code, price, pattern, timeframe, "paper", paper_size, sl, tp
         )
@@ -669,16 +676,32 @@ def execute_forex_signal(
     # ── STEP 2: Open new position ──
     mode = os.getenv("FOREX_MODE", "paper")
 
-    # Calculate lot size
-    capital = float(os.getenv("FOREX_CAPITAL", 1000))
-    risk_pct = float(os.getenv("FOREX_RISK_PCT", 1.0))
-    pip_size = 0.0001 if "JPY" not in pair and "XAU" not in pair else 0.01
-    sl_pips = 30  # default
-    pip_val = 10.0 if "JPY" not in pair and "XAU" not in pair else 1.0
-
-    riesgo = capital * risk_pct / 100
-    lots = round(riesgo / (sl_pips * pip_val), 2) if sl_pips > 0 else 0.01
-    lots = min(max(lots, 0.01), 1.0)
+    # Calculate size based on settings (Unified Inversion rule)
+    from app.core.memory_store import BOT_STATE
+    config = BOT_STATE.config_cache
+    capital = float(config.get('capital_assigned', 500))
+    # Risk % is used as the investment portion per trade
+    inv_pct = float(config.get('risk_per_operation_pct', 1.0))
+    leverage = float(config.get('leverage_forex', 100))
+    
+    target_inv = capital * (inv_pct / 100) # e.g. $5.00
+    
+    # Notional = Inversion * Leverage
+    target_notional = target_inv * leverage # e.g. $500.00
+    
+    # Contract size: 100k for currencies, usually 100 for Gold (XAU)
+    multiplier = 100.0 if "XAU" in pair.upper() else 100000.0
+    
+    # Notional = Lots * Multiplier * Price
+    # Lots = Notional / (Multiplier * Price)
+    lots = target_notional / (multiplier * price) if price > 0 else 0.01
+    
+    # Rounding and limits
+    lots = round(max(lots, 0.01), 3)
+    if "XAU" not in pair.upper():
+        lots = round(lots, 2) # Standard forex lots
+    
+    lots = min(lots, 10.0)
 
     # SL/TP calculation
     atr = 20 * pip_size  # fallback ATR
@@ -819,21 +842,17 @@ def execute_stocks_signal(
 
     # ── STEP 2: Open new position (only if BUY — for SELL we only close) ──
     if action == "BUY":
-        # Load config
-        try:
-            cfg_res = sb.table("stocks_config").select("key, value").execute()
-            cfg = {r["key"]: r["value"] for r in (cfg_res.data or [])}
-            total_capital = float(cfg.get("total_capital_usd", 5000))
-            max_pct = float(cfg.get("max_pct_per_trade", 0.20))
-            if max_pct > 1:
-                max_pct = max_pct / 100.0
-        except Exception:
-            total_capital = 5000
-            max_pct = 0.20
-
-        capital_for_trade = total_capital * max_pct
+        # Load unified config from BOT_STATE
+        from app.core.memory_store import BOT_STATE
+        config = BOT_STATE.config_cache
+        capital = float(config.get('capital_assigned', 500))
+        inv_pct = float(config.get('risk_per_operation_pct', 1.0))
+        
+        capital_for_trade = capital * (inv_pct / 100) # e.g. $5.00
         shares = int(capital_for_trade / price)
-
+        if shares <= 0 and capital_for_trade > 0:
+            shares = 1 # At least 1 share for paper trading
+            
         if shares <= 0:
             return {"success": False, "reason": "Capital insuficiente para 1 share"}
 
