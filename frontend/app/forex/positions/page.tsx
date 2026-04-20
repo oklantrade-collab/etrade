@@ -100,16 +100,37 @@ export default function ForexPositions() {
             </div>
             <div className="glass-card !p-6 border-white/5 shadow-xl">
                  <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-1">Live PnL</div>
-                 <div className={`text-3xl font-black italic mb-1 ${positions.reduce((s, p) => s + (p.current_price ? (p.side.toLowerCase() === 'long' ? (p.current_price - p.entry_price) : (p.entry_price - p.current_price)) : 0), 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    ${positions.reduce((acc, p) => {
-                        const cur = Math.abs(parseFloat(snapshots[p.symbol]?.price || 0))
-                        if(cur <= 0) return acc
+                 <div className={`text-3xl font-black italic mb-1 ${
+                    positions.reduce((acc, p) => {
+                        const snap = snapshots[p.symbol] || {}
+                        const cur = parseFloat(snap.price || 0)
+                        if (cur <= 0) return acc
                         const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
                         const pipSize = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 0.01 : 0.0001
                         const pipVal = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 1.0 : 10.0
                         const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
                         return acc + (pips * pipVal * p.lots)
-                    }, 0).toFixed(2)}
+                    }, 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                 }`}>
+                    {positions.reduce((acc, p) => {
+                        const snap = snapshots[p.symbol] || {}
+                        const cur = parseFloat(snap.price || 0)
+                        if (cur <= 0) return acc
+                        const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
+                        const pipSize = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 0.01 : 0.0001
+                        const pipVal = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 1.0 : 10.0
+                        const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
+                        return acc + (pips * pipVal * p.lots)
+                    }, 0) >= 0 ? '+' : '-'}${Math.abs(positions.reduce((acc, p) => {
+                        const snap = snapshots[p.symbol] || {}
+                        const cur = parseFloat(snap.price || 0)
+                        if (cur <= 0) return acc
+                        const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
+                        const pipSize = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 0.01 : 0.0001
+                        const pipVal = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 1.0 : 10.0
+                        const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
+                        return acc + (pips * pipVal * p.lots)
+                    }, 0)).toFixed(2)}
                  </div>
                  <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
             </div>
