@@ -80,22 +80,39 @@ export default function ForexPositions() {
       <div className="max-w-7xl mx-auto px-6 pt-12 space-y-12 relative z-10">
         
         {/* HEADER SECTION */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8">
            <div className="space-y-4">
               <div className="flex items-center gap-3">
                  <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_10px_#3b82f6] animate-pulse" />
-                 <span className="text-[0.6rem] font-black text-blue-400 uppercase tracking-[0.4em]">Ejecución en Tiempo Real</span>
+                 <span className="text-[0.6rem] font-black text-blue-400 uppercase tracking-[0.4em]">Configuración Forex activa</span>
               </div>
-              <h1 className="text-4xl font-black italic tracking-tighter text-white uppercase leading-none">Monitor de Posiciones</h1>
-              <p className="text-slate-500 text-sm max-w-xl">Supervisión industrial de órdenes activas en el mercado Forex vía cTrader API.</p>
+              <h1 className="text-4xl font-black italic tracking-tighter text-white uppercase leading-none">Positions</h1>
+              <p className="text-slate-500 text-sm max-w-xl">Live trailing positions with cTrader API integration</p>
            </div>
-           
-           <div className="flex gap-4">
-              <div className="glass-card !p-4 !px-8 text-center border-white/5 shadow-xl">
-                 <div className="text-[0.5rem] font-black text-slate-500 uppercase tracking-widest mb-1">Órdenes Activas</div>
-                 <div className="text-xl font-black italic text-white">{positions.length}</div>
-              </div>
-           </div>
+        </div>
+
+        {/* STATS CARDS like Crypto */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div className="glass-card !p-6 border-white/5 shadow-xl">
+                 <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-1">Active Risk</div>
+                 <div className="text-3xl font-black italic text-white mb-1">{positions.length}/{process.env.NEXT_PUBLIC_MAX_FX_MOD || '15'}</div>
+                 <div className="text-[0.7rem] text-slate-500">Max open operations</div>
+            </div>
+            <div className="glass-card !p-6 border-white/5 shadow-xl">
+                 <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-1">Live PnL</div>
+                 <div className={`text-3xl font-black italic mb-1 ${positions.reduce((s, p) => s + (p.current_price ? (p.side.toLowerCase() === 'long' ? (p.current_price - p.entry_price) : (p.entry_price - p.current_price)) : 0), 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    ${positions.reduce((acc, p) => {
+                        const cur = Math.abs(parseFloat(snapshots[p.symbol]?.price || 0))
+                        if(cur <= 0) return acc
+                        const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
+                        const pipSize = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 0.01 : 0.0001
+                        const pipVal = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 1.0 : 10.0
+                        const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
+                        return acc + (pips * pipVal * p.lots)
+                    }, 0).toFixed(2)}
+                 </div>
+                 <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
+            </div>
         </div>
 
         {/* TABLE SECTION */}
