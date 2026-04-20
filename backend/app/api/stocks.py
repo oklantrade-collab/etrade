@@ -364,12 +364,15 @@ async def get_stocks_positions():
         for tr in (tech_res.data or []):
             sj = tr.get("signals_json") or {}
             if "price" in sj:
-                price_map[tr["ticker"]] = float(sj["price"])
+                try:
+                    price_map[tr["ticker"]] = float(sj["price"] or 0)
+                except:
+                    price_map[tr["ticker"]] = 0.0
 
         for pos in positions:
             ticker = pos["ticker"]
             # Prioridad: technical_scores -> stocks_positions.current_price -> avg_price
-            cur_price = price_map.get(ticker, pos.get("current_price") or pos.get("avg_price") or 0)
+            cur_price = price_map.get(ticker) or float(pos.get("current_price") or pos.get("avg_price") or 0)
             avg_entry = float(pos.get("avg_price") or 0)
             shares = float(pos.get("shares") or 0)
 
@@ -394,11 +397,13 @@ async def get_stocks_positions():
                 pos["tp_price"] = opp_info[0].get("target_1")
 
             # 3. Traer Tipo de Orden desde stocks_orders
-            order_info = sb.table("stocks_orders").select("order_type").eq("ticker", ticker).eq("status", "filled").order("created_at", desc=True).limit(1).execute().data
+            order_info = sb.table("stocks_orders").select("order_type, direction").eq("ticker", ticker).eq("status", "filled").order("created_at", desc=True).limit(1).execute().data
             if order_info:
                 pos["order_type"] = order_info[0].get("order_type", "market")
+                pos["side"] = order_info[0].get("direction") or pos.get("direction") or "buy"
             else:
                 pos["order_type"] = "market"
+                pos["side"] = pos.get("direction") or "buy"
 
             pos["current_price"] = cur_price
             pos["unrealized_pnl"] = round(unrealized_pnl, 2)
@@ -407,6 +412,47 @@ async def get_stocks_positions():
 
         return positions
     except Exception as e:
+        log_error("stocks_api", f"Error in get_stocks_positions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/positions/{position_id}")
+async def delete_stocks_position(position_id: str):
+    """Manual close/delete of a position."""
+    sb = get_supabase()
+    try:
+        # Get position details first
+        pos_res = sb.table("stocks_positions").select("*").eq("id", position_id).single().execute()
+        if not pos_res.data:
+            raise HTTPException(status_code=404, detail="Position not found")
+        
+        pos = pos_res.data
+        ticker = pos["ticker"]
+
+        # 1. Archive in journal (simplified)
+        now = datetime.now(timezone.utc).isoformat()
+        journal_entry = {
+            "ticker": ticker,
+            "shares": int(float(pos.get("shares", 0))),
+            "entry_price": float(pos.get("avg_price", 0)),
+            "exit_price": float(pos.get("current_price", 0)),
+            "entry_date": pos.get("first_buy_at"),
+            "exit_date": now,
+            "pnl_usd": float(pos.get("unrealized_pnl", 0)),
+            "pnl_pct": float(pos.get("unrealized_pnl_pct", 0)),
+            "result": "win" if float(pos.get("unrealized_pnl", 0)) > 0 else "loss",
+            "exit_reason": "manual_delete",
+        }
+        sb.table("trades_journal").insert(journal_entry).execute()
+
+        # 2. Mark as closed
+        sb.table("stocks_positions").update({
+            "status": "closed",
+            "updated_at": now
+        }).eq("id", position_id).execute()
+
+        return {"status": "ok", "message": f"Position {ticker} closed manually"}
+    except Exception as e:
+        log_error("stocks_api", f"Error deleting position {position_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/orders")

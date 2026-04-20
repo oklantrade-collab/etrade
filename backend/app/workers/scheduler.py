@@ -1612,12 +1612,16 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
 
             # Validar pre-filtros si hay match
             if rule_match and rule_match['direction'] in ['long', 'short']:
-                rule_eval = rule_match['rule']['rule_code']
-                log_info(MODULE, f"Signal Triggered from {source_tf}: {symbol} Rule {rule_eval}")
+                symbol_positions_count = len([p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol])
+                max_per_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                
                 pre_res = check_pre_filters(
                     regime, rule_match['market_data'], rule_match['direction'],
                     symbol, float(last_row['close']), fib_levels['basis'],
-                    open_trades_count=len(BOT_STATE.positions), capital_sufficient=True, warmup_complete=True,
+                    open_trades_count=len(BOT_STATE.positions), 
+                    symbol_positions_count=symbol_positions_count,
+                    capital_sufficient=True, warmup_complete=True,
+                    max_per_symbol=max_per_symbol,
                     rule_code=rule_match['rule']['rule_code']
                 )
                 if not pre_res['passed']: 

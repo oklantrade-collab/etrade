@@ -77,7 +77,7 @@ def calculate_backstop_sl(
 
     if side in ('long', 'buy'):
         # Intentar usar lower_6
-        lower_6 = float(snap.get('lower_6', 0))
+        lower_6 = float(snap.get('lower_6') or 0)
         if lower_6 > 0 and \
            lower_6 < entry_price * (1 - pct / 2):
             backstop = lower_6 * (
@@ -88,7 +88,7 @@ def calculate_backstop_sl(
             backstop = entry_price * (1 - pct)
             source = f'fixed_{pct*100:.0f}pct'
     else:
-        upper_6 = float(snap.get('upper_6', 0))
+        upper_6 = float(snap.get('upper_6') or 0)
         if upper_6 > 0 and \
            upper_6 > entry_price * (1 + pct / 2):
             backstop = upper_6 * (
@@ -139,7 +139,7 @@ def calculate_dynamic_sl(
 
         for band_name in LOWER_BANDS_ORDER:
             band_val = float(
-                snap.get(band_name, 0)
+                snap.get(band_name) or 0
             )
             if band_val > 0 and \
                band_val < current_price:
@@ -173,7 +173,7 @@ def calculate_dynamic_sl(
 
         for band_name in UPPER_BANDS_ORDER:
             band_val = float(
-                snap.get(band_name, 0)
+                snap.get(band_name) or 0
             )
             if band_val > 0 and \
                band_val > current_price:
@@ -234,11 +234,11 @@ def calculate_trailing_sl(
 
     # Actualizar el precio máximo/mínimo alcanzado
     highest = float(
-        position.get('highest_price_reached', 0)
+        position.get('highest_price_reached') or 0
     ) or current_price
     lowest  = float(
-        position.get('lowest_price_reached',
-                     current_price)
+        position.get('lowest_price_reached') or 
+        current_price
     )
 
     if side in ('long', 'buy'):
@@ -311,8 +311,8 @@ def detect_sipv_exit_signal(
     c4_candle_4h = False
     if df_4h is not None and len(df_4h) >= 2:
         last = df_4h.iloc[-2]
-        o    = float(last.get('open',  0))
-        c_price = float(last.get('close', 0))
+        o    = float(last.get('open') or 0)
+        c_price = float(last.get('close') or 0)
         if o > 0:
             body = (c_price - o) / o
             if side in ('long', 'buy'):
@@ -324,8 +324,8 @@ def detect_sipv_exit_signal(
     c5_candle_1d = False
     if df_1d is not None and len(df_1d) >= 2:
         last_1d  = df_1d.iloc[-2]
-        o_1d     = float(last_1d.get('open',  0))
-        c_1d     = float(last_1d.get('close', 0))
+        o_1d     = float(last_1d.get('open') or 0)
+        c_1d     = float(last_1d.get('close') or 0)
         if o_1d > 0:
             body_1d = (c_1d - o_1d) / o_1d
             if side in ('long', 'buy'):
@@ -392,23 +392,20 @@ def evaluate_sl_action(
     Función principal del Dynamic SL Manager.
     """
     side    = str(position.get('side', 'long')).lower()
-    entry   = float(position.get(
-        'avg_entry_price',
-        position.get('entry_price', 0)
-    ))
+    entry   = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     backstop = float(
-        position.get('sl_backstop_price', 0) or 0
+        position.get('sl_backstop_price') or 0
     )
     dynamic_sl_active = bool(
         position.get('sl_dynamic_price')
     )
     existing_dynamic  = float(
-        position.get('sl_dynamic_price', 0) or 0
+        position.get('sl_dynamic_price') or 0
     )
     trailing_sl = float(
-        position.get('trailing_sl_price', 0) or 
-        position.get('stop_loss_price', 0) or 
-        position.get('sl_price', 0) or 0
+        position.get('trailing_sl_price') or 
+        position.get('stop_loss_price') or 
+        position.get('sl_price') or 0
     )
 
     # ── CHECK 1: Backstop hit (siempre activo) ─

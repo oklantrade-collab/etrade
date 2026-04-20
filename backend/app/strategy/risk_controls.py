@@ -388,8 +388,10 @@ def check_pre_filters(
     current_price: float,
     basis_price: float,
     open_trades_count: int,
+    symbol_positions_count: int,
     capital_sufficient: bool,
     warmup_complete: bool,
+    max_per_symbol: int = 4,
     rule_code: str = "",
 ) -> dict:
     """
@@ -403,10 +405,14 @@ def check_pre_filters(
         if rule_code not in ("Aa21", "Aa22", "Aa23", "Bb22", "Cc11", "Cc21"):
             reasons.append("Volume too low for entry (< 70% vol_ema)")
 
-    # Max trades check
-    max_trades = cfg.get("max_trades", 3)
+    # Max trades check (GLOBAL)
+    max_trades = cfg.get("max_trades", 15) # Default large, the per-symbol one is more restrictive usually
     if open_trades_count >= max_trades:
-        reasons.append(f"Max trades reached ({open_trades_count}/{max_trades})")
+        reasons.append(f"Global max trades reached ({open_trades_count}/{max_trades})")
+
+    # Max trades check (PER SYMBOL - Compliance with Cant. Operación x Cripto)
+    if symbol_positions_count >= max_per_symbol:
+        reasons.append(f"Max positions for {symbol} reached ({symbol_positions_count}/{max_per_symbol})")
 
     # Capital check
     if not capital_sufficient:
@@ -429,3 +435,52 @@ def check_pre_filters(
         "passed": len(reasons) == 0,
         "reasons": reasons,
     }
+
+
+def check_total_market_risk(
+    market: str, # 'crypto' or 'forex'
+    capital_total: float,
+    sb_client=None
+) -> dict:
+    """
+    Check if the total investment in a specific market exceeds the allowed limit.
+    """
+    if sb_client is None:
+        sb_client = get_supabase()
+    
+    # 1. Get limit from trading_config
+    try:
+        cfg_res = sb_client.table('trading_config').select('regime_params').eq('id', 1).single().execute()
+        params = cfg_res.data.get('regime_params', {})
+        
+        limit_key = f"max_total_risk_{market}_pct"
+        limit_pct = float(params.get(limit_key, 30)) / 100.0
+        
+        max_allowed_usd = capital_total * limit_pct
+        
+        # 2. Calculate current investment
+        current_invested_usd = 0.0
+        if market == 'crypto':
+            # Crypto positions (Binance) - usually tracked in positions table
+            res = sb_client.table('paper_trades').select('entry_price, quantity').is_('closed_at', 'null').execute()
+            for p in (res.data or []):
+                current_invested_usd += float(p.get('entry_price', 0)) * float(p.get('quantity', 0))
+        else:
+            # Forex positions
+            res = sb_client.table('forex_positions').select('lots, entry_price').eq('status', 'open').execute()
+            # Approximation: Lots * 100,000 * Price (for currencies) or Lots * 100 * Price (for Gold)
+            for p in (res.data or []):
+                mul = 100.0 if "XAU" in p.get('symbol', '').upper() else 100000.0
+                current_invested_usd += float(p.get('lots', 0)) * mul * float(p.get('entry_price', 0))
+
+        passed = current_invested_usd < max_allowed_usd
+        
+        return {
+            "passed": passed,
+            "current_usd": round(current_invested_usd, 2),
+            "limit_usd": round(max_allowed_usd, 2),
+            "reason": None if passed else f"Límite {market.upper()} alcanzado (${current_invested_usd:.0f}/${max_allowed_usd:.0f})"
+        }
+    except Exception as e:
+        log_warning("RISK", f"Error checking total risk for {market}: {e}")
+        return {"passed": True, "current_usd": 0, "limit_usd": 0}

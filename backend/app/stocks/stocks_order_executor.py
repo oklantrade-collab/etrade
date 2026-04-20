@@ -27,8 +27,20 @@ def _get_config() -> dict:
     try:
         res = sb.table("stocks_config").select("key, value").execute()
         cfg = {r["key"]: r["value"] for r in (res.data or [])}
-        pct = float(cfg.get("max_pct_per_trade", 0.20))
-        if pct > 1: pct = pct / 100.0 # Convertir 20 a 0.20
+        
+        pct_trade = float(cfg.get("max_pct_per_trade", 0.02))
+        if pct_trade > 1: pct_trade = pct_trade / 100.0 # 2 -> 0.02
+
+        pct_max_total = float(cfg.get("max_total_risk_pct", 0.30))
+        if pct_max_total > 1: pct_max_total = pct_max_total / 100.0 # 30 -> 0.30
+
+        return {
+            "paper_mode": str(cfg.get("paper_mode_active", "true")).lower() == "true",
+            "total_capital": float(cfg.get("total_capital_usd", 5000)),
+            "max_pct_per_trade": pct_trade,
+            "max_total_risk_pct": pct_max_total,
+            "max_positions": int(cfg.get("max_concurrent_positions", 5)),
+        }
 
         return {
             "paper_mode": str(cfg.get("paper_mode_active", "true")).lower() == "true",
@@ -82,11 +94,33 @@ def execute_market_order(
 
     capital = config["total_capital"]
     max_pct = config["max_pct_per_trade"]
-    capital_op = capital * max_pct
-    shares = int(capital_op / price)
+    max_total_risk_pct = config["max_total_risk_pct"]
+    
+    # ── VALIDACIÓN 1: RIESGO TOTAL ACUMULADO ──
+    open_pos_res = sb.table("stocks_positions").select("total_cost").eq("status", "open").execute()
+    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_res.data or []))
+    max_allowed_investment = capital * max_total_risk_pct
 
+    if current_investment >= max_allowed_investment:
+        return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
+
+    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5) ──
+    capital_op = capital * max_pct
+    raw_shares = capital_op / price
+    
+    # Redondear al múltiplo de 5 inferior más cercano (mínimo 5 si el capital permite)
+    shares = int(raw_shares // 5) * 5
+    
     if shares <= 0:
-        return {"success": False, "reason": "Capital insuficiente para 1 share"}
+        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital_op:.0f} vs {5*price:.0f} p/lote)"}
+    
+    # Validar que no superemos el riesgo total con esta nueva compra
+    if current_investment + (shares * price) > max_allowed_investment:
+        # Intentar ajustar shares a lo que quede
+        remaining_cap = max_allowed_investment - current_investment
+        shares = int(remaining_cap // (price * 5)) * 5
+        if shares <= 0:
+            return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -164,8 +198,8 @@ def place_limit_order(
     sb = get_supabase()
 
     # Lógica de cálculo de precio LIMIT
-    limit_price = context.get("smart_limit_price") or context.get(limit_key)
-    band_name = context.get(band_key) or ("Intrinsic_Value" if "smart_limit_price" in context else "BB_Lower")
+    limit_price = context.get("smart_limit_price") or context.get("limit_price")
+    band_name = context.get("band_name") or ("Intrinsic_Value" if "smart_limit_price" in context else "BB_Lower")
 
     if not limit_price or float(limit_price) <= 0:
         return {"success": False, "reason": "Precio LIMIT no disponible"}
@@ -177,6 +211,32 @@ def place_limit_order(
         trigger_price = limit_price * (1 + trigger_pct)
     else:
         trigger_price = limit_price * (1 - trigger_pct)
+
+    # ── VALIDACIÓN 1: RIESGO TOTAL ACUMULADO ──
+    config = _get_config()
+    capital = config["total_capital"]
+    max_total_risk_pct = config["max_total_risk_pct"]
+    open_pos_res = sb.table("stocks_positions").select("total_cost").eq("status", "open").execute()
+    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_res.data or []))
+    max_allowed_investment = capital * max_total_risk_pct
+
+    if direction == "buy" and current_investment >= max_allowed_investment:
+        return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
+
+    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5) ──
+    max_pct = config["max_pct_per_trade"]
+    capital_op = capital * max_pct
+    raw_shares = capital_op / limit_price
+    shares = int(raw_shares // 5) * 5
+    
+    if direction == "buy" and shares <= 0:
+        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital_op:.0f} vs {5*limit_price:.0f} p/lote)"}
+    
+    if direction == "buy" and current_investment + (shares * limit_price) > max_allowed_investment:
+        remaining_cap = max_allowed_investment - current_investment
+        shares = int(remaining_cap // (limit_price * 5)) * 5
+        if shares <= 0:
+            return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
     # Expiración: 5 días para S02 (120h), 4h para el resto
     ttl_hours = 120 if (rule_code == "S02" or rule_code == "PRO_BUY_LMT") else 4
@@ -197,6 +257,7 @@ def place_limit_order(
         "rule_code": rule_code,
         "order_type": "limit",
         "direction": direction,
+        "shares": shares,
         "limit_price": limit_price,
         "trigger_price": trigger_price,
         "estimated_price": limit_price,
@@ -423,8 +484,14 @@ def _close_all_positions(ticker: str, price: float):
 
     now = datetime.now(timezone.utc).isoformat()
     for pos in positions.data:
-        avg = float(pos["avg_price"])
-        shares = float(pos["shares"])
+        def safe_float(v, default=0.0):
+            try:
+                return float(v) if v is not None else default
+            except:
+                return default
+
+        avg = safe_float(pos.get("avg_price") or pos.get("entry_price"))
+        shares = safe_float(pos.get("shares"))
         pnl = (price - avg) * shares
         pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
 

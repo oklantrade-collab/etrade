@@ -26,6 +26,13 @@ from app.strategy.dynamic_sl_manager import evaluate_sl_action
 MODULE = "position_monitor"
 
 
+def safe_float(v, default=0.0):
+    try:
+        if v is None: return default
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
 class PositionMonitor:
     """Monitors active stock positions and manages exits."""
 
@@ -60,15 +67,14 @@ class PositionMonitor:
                 log_warning(MODULE, f"Cannot get price for {ticker}")
                 return
 
-            current_price = float(info.get("current_price", 0))
+            current_price = safe_float(info.get("current_price"))
             if current_price <= 0:
                 return
 
-            entry_price = float(trade.get("avg_price", 0))
-            # SL/TP are sometimes stored in trade_opportunities, but let's check position first
-            stop_loss = float(trade.get("stop_loss", 0)) if trade.get("stop_loss") else 0
-            target_price = float(trade.get("take_profit", 0)) if trade.get("take_profit") else 0
-            shares = int(trade.get("shares", 0))
+            entry_price = safe_float(trade.get("avg_price") or trade.get("entry_price"))
+            stop_loss = safe_float(trade.get("stop_loss"))
+            target_price = safe_float(trade.get("take_profit"))
+            shares = int(safe_float(trade.get("shares", 0)))
 
             if entry_price <= 0 or shares <= 0:
                 return
@@ -188,8 +194,8 @@ class PositionMonitor:
             position_std = {
                 'symbol':          ticker,
                 'side':            'long', # Default to long in spot
-                'avg_entry_price': float(position.get('avg_price', position.get('entry_price', 0))),
-                'size':            float(position.get('shares', 1)),
+                'avg_entry_price': safe_float(position.get('avg_price') or position.get('entry_price')),
+                'size':            safe_float(position.get('shares'), 1),
             }
 
             result = evaluate_proactive_exit(
@@ -227,8 +233,8 @@ class PositionMonitor:
         sb = get_supabase()
         now = datetime.now(timezone.utc).isoformat()
         ticker = trade["ticker"]
-        entry_price = float(trade.get("entry_price", 0))
-        shares = int(trade.get("shares", 0))
+        entry_price = safe_float(trade.get("entry_price") or trade.get("avg_price"))
+        shares = int(safe_float(trade.get("shares")))
 
         pnl_usd = round((exit_price - entry_price) * shares, 2)
         pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
@@ -301,7 +307,7 @@ class PositionMonitor:
                 from app.data.yfinance_provider import YFinanceProvider
                 provider = YFinanceProvider()
                 info = await provider.get_ticker_info(trade["ticker"])
-                price = float(info.get("current_price", trade.get("entry_price", 0)))
+                price = safe_float(info.get("current_price")) or safe_float(trade.get("avg_price"))
                 await self._close_position(trade, price, reason)
                 results.append({"ticker": trade["ticker"], "status": "closed"})
             except Exception as e:

@@ -222,6 +222,10 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
       {/* SECCIÓN GENERAL SIEMPRE VISIBLE */}
       <SettingsSection title="💰 Configuración de Cuenta & Riesgo">
          <SettingRow label="Capital Total (USD)" value={generalForm.total_capital_usd} type="number" prefix="$" onChange={(v: any) => setGeneralForm({ ...generalForm, total_capital_usd: v })} />
+         <SettingRow label="Max. Tot Riesgo Inv." value={generalForm.max_total_risk_pct || 30} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_total_risk_pct: v })} />
+         <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+            Límite de exposición: ${(generalForm.total_capital_usd * ((generalForm.max_total_risk_pct || 30) / 100)).toLocaleString()} USD
+         </div>
          <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_stocks || 1} type="number" suffix="x" onChange={(v: any) => onSaveGlobal({ leverage_stocks: v })} />
          <SettingRow label="% Inversión por Operación" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSaveGlobal({ pct_for_trading: v })} />
          <SettingRow label="Máximo Riesgo por Trade" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
@@ -314,6 +318,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
     max_risk_per_trade_pct: config.max_risk_per_trade_pct || 2.0, 
     max_open_trades: config.max_open_trades || 3,
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
+    max_total_risk_crypto_pct: config.regime_params?.max_total_risk_crypto_pct || 30,
     active_symbols_str: (config.active_symbols || ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]).join(', ')
   })
 
@@ -322,15 +327,18 @@ const CryptoSettings = ({ config, onSave }: any) => {
       ...form,
       active_symbols_str: (config.active_symbols || []).join(', '),
       max_positions_per_symbol: config.max_positions_per_symbol,
-      max_risk_per_trade_pct: config.max_risk_per_trade_pct
+      max_risk_per_trade_pct: config.max_risk_per_trade_pct,
+      max_total_risk_crypto_pct: config.regime_params?.max_total_risk_crypto_pct || 30
     })
-  }, [config.active_symbols, config.max_positions_per_symbol, config.max_risk_per_trade_pct])
+  }, [config.active_symbols, config.max_positions_per_symbol, config.max_risk_per_trade_pct, config.regime_params?.max_total_risk_crypto_pct])
 
   const handleLocalSave = () => {
     const symbols = form.active_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '')
+    const newRegimeParams = { ...config.regime_params, max_total_risk_crypto_pct: form.max_total_risk_crypto_pct }
     onSave({
       ...form,
-      active_symbols: symbols
+      active_symbols: symbols,
+      regime_params: newRegimeParams
     })
   }
 
@@ -346,6 +354,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
       </SettingsSection>
       
       <SettingsSection title="🛡️ Gestión de Riesgo (Cripto)">
+        <SettingRow label="Max. Tot Riesgo Inv." value={form.max_total_risk_crypto_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_total_risk_crypto_pct: v })} />
         <SettingRow label="Cant. Operación x Cripto" value={form.max_positions_per_symbol} type="number" onChange={(v: any) => setForm({ ...form, max_positions_per_symbol: v })} />
         <SettingRow label="Inversión x Operación (Risk %)" value={form.max_risk_per_trade_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_risk_per_trade_pct: v })} />
         <div style={{ padding: '8px 18px', color: '#666', fontSize: '11px' }}>
@@ -363,6 +372,7 @@ const ForexSettings = ({ config, onSave }: any) => {
   const [form, setForm] = useState({ 
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
     max_risk_per_trade_pct: config.max_risk_per_trade_pct || 2.0,
+    max_total_risk_forex_pct: config.regime_params?.max_total_risk_forex_pct || 30,
     forex_symbols_str: (config.regime_params?.forex_assets || ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD"]).join(', ')
   })
 
@@ -370,13 +380,14 @@ const ForexSettings = ({ config, onSave }: any) => {
     setForm({
       max_positions_per_symbol: config.max_positions_per_symbol,
       max_risk_per_trade_pct: config.max_risk_per_trade_pct,
+      max_total_risk_forex_pct: config.regime_params?.max_total_risk_forex_pct || 30,
       forex_symbols_str: (config.regime_params?.forex_assets || []).join(', ')
     })
-  }, [config.max_positions_per_symbol, config.max_risk_per_trade_pct, config.regime_params?.forex_assets])
+  }, [config.max_positions_per_symbol, config.max_risk_per_trade_pct, config.regime_params?.forex_assets, config.regime_params?.max_total_risk_forex_pct])
 
   const handleLocalSave = () => {
     const symbols = form.forex_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '')
-    const newRegimeParams = { ...config.regime_params, forex_assets: symbols }
+    const newRegimeParams = { ...config.regime_params, forex_assets: symbols, max_total_risk_forex_pct: form.max_total_risk_forex_pct }
     onSave({
       ...form,
       regime_params: newRegimeParams
@@ -394,6 +405,7 @@ const ForexSettings = ({ config, onSave }: any) => {
       </SettingsSection>
 
       <SettingsSection title="🛡️ Gestión de Riesgo (Forex)">
+        <SettingRow label="Max. Tot Riesgo Inv." value={form.max_total_risk_forex_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_total_risk_forex_pct: v })} />
         <SettingRow label="Cant. Operación x Par" value={form.max_positions_per_symbol} type="number" onChange={(v: any) => setForm({ ...form, max_positions_per_symbol: v })} />
         <SettingRow label="Inversión x Operación (Risk %)" value={form.max_risk_per_trade_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_risk_per_trade_pct: v })} />
       </SettingsSection>

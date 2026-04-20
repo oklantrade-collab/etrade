@@ -244,8 +244,10 @@ def execute_crypto_signal(
     is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
     binance_symbol = normalize_crypto_symbol(pair)
 
-    # Cerrar solo si todas las posiciones del par cumplen umbral de beneficio (no pérdidas por reversión vela)
-    close_meta = _close_all_positions_crypto(binance_symbol, strategy_code)
+    # Cerrar posiciones: 
+    # 1. Forzar cierre de las opuestas (Hedge no permitido)
+    # 2. Cierre opcional por beneficio si son de la misma dirección (Rotación por vela)
+    close_meta = _close_all_positions_crypto(binance_symbol, strategy_code, new_signal_action=action)
     if close_meta.get("skipped_due_to_invalid_size"):
         log_warning(
             MODULE,
@@ -266,6 +268,37 @@ def execute_crypto_signal(
             "success": False,
             "reason": "candle_signal_requires_profit_exit",
             "pair": binance_symbol,
+        }
+
+    # ── CHECK 1: Limit per symbol (Compliance with Cant. Operación x Cripto) ──
+    from app.core.supabase_client import get_risk_config
+    risk_config = get_risk_config()
+    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+    
+    current_open = close_meta.get("remaining_open_count", 0)
+    if current_open >= max_per_symbol:
+        log_warning(
+            MODULE,
+            f"🚫 LÍMITE ALCANZADO para {binance_symbol}: {current_open}/{max_per_symbol} posiciones abiertas. "
+            f"No se abrirán más operaciones hasta que se cierren las actuales."
+        )
+        return {
+            "success": False,
+            "reason": "max_positions_per_symbol_reached",
+            "pair": binance_symbol,
+        }
+
+    # ── CHECK 2: Total Market Risk Limit ──
+    from app.strategy.risk_controls import check_total_market_risk
+    capital_total = float(BOT_STATE.config_cache.get('capital_assigned', 5000))
+    risk_check = check_total_market_risk('crypto', capital_total, sb)
+    if not risk_check["passed"]:
+        log_warning(MODULE, f"🚫 RIESGO TOTAL ALCANZADO: {risk_check['reason']}")
+        return {
+            "success": False,
+            "reason": "max_total_risk_reached",
+            "pair": binance_symbol,
+            "detail": risk_check["reason"]
         }
 
     # ── STEP 2: Execute MARKET order ──
@@ -420,18 +453,19 @@ def execute_crypto_signal(
     return {"success": True, "action": action, "pair": binance_symbol, "strategy": strategy_code}
 
 
-def _close_all_positions_crypto(binance_symbol: str, strategy_code: str) -> dict:
+def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_signal_action: str = None) -> dict:
     """
     Cierra posiciones abiertas del par (formato canónico SOLUSDT, incluye legacy SOL/USDT).
 
     Reglas:
-      - Cantidad efectiva desde positions.size o orders.quantity (corrige PnL 0 por size 0).
-      - Solo cierra si cada posición está en beneficio según min_profit_exit_usd / min_profit_exit_pct
-        (misma filosofía que reversión MTF; las pérdidas las gestiona SL / sl_prevention, no la vela).
+      - Cantidad efectiva desde positions.size o orders.quantity.
+      - Si new_signal_action es opuesta a la posición existente: CIERRE FORZADO (no importa PnL).
+      - Si es la misma dirección: Solo cierra si hay beneficio (min_profit_exit_usd/pct).
     """
     sb = get_supabase()
     out = {
         "closed_count": 0,
+        "remaining_open_count": 0,
         "skipped_due_to_loss": False,
         "skipped_due_to_invalid_size": False,
     }
@@ -445,6 +479,7 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str) -> dict
             .execute()
         )
         positions = res.data or []
+        out["remaining_open_count"] = len(positions)
 
         if not positions:
             return out
@@ -497,6 +532,20 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str) -> dict
 
         eps = 1e-9
         for _pos, _sz, pnl, pnl_pct, _cpx in previews:
+            # Determinar si es dirección opuesta
+            is_opposite = False
+            if new_signal_action:
+                p_side = (_pos.get("side") or "").upper()
+                # LONG/BUY vs SHORT/SELL
+                if new_signal_action.upper() == "BUY":
+                    is_opposite = p_side in ("SHORT", "SELL")
+                else:
+                    is_opposite = p_side in ("LONG", "BUY")
+
+            if is_opposite:
+                log_info(MODULE, f"⚠️ FORZANDO CIERRE por reversión de dirección ({_pos.get('side')} -> {new_signal_action}) en {binance_symbol}")
+                continue # Pasa a cerrar
+
             if pnl <= eps:
                 out["skipped_due_to_loss"] = True
                 log_info(
@@ -538,6 +587,7 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str) -> dict
                 ).eq("id", pos["id"]).execute()
 
                 out["closed_count"] += 1
+                out["remaining_open_count"] -= 1
                 log_info(
                     MODULE,
                     f"  ↳ Cerrada {pos['id'][:8]}... side={pos.get('side')} PnL: {pnl:.4f} ({pnl_pct_row}%) qty={size}",
@@ -605,7 +655,6 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
             "size": qty_f if qty_f > 0 else 1.0, # Simulated size if zero
             "stop_loss": sl_f,
             "sl_price": sl_f,
-            "stop_loss_price": sl_f,
             "sl_backstop_price": sl_f,
             "sl_type": "backstop",
             "sl_dynamic_price": None,
@@ -672,6 +721,25 @@ def execute_forex_signal(
     # ── STEP 1: Close ALL active positions for this pair ──
     direction = "long" if action == "BUY" else "short"
     _close_all_positions_forex(pair, strategy_code, price)
+    
+    # ── CHECK 2: Total Market Risk Limit ──
+    from app.strategy.risk_controls import check_total_market_risk
+    from app.core.memory_store import BOT_STATE
+    capital_total = float(BOT_STATE.config_cache.get('capital_forex_futures', 5000))
+    # capital_forex_futures is used here, but check_total_market_risk expects global capital if limit is % of global?
+    # User said: "Total inversion = 5000 then Max Tot Riesgo Inv = 1500".
+    # This 5000 is the Total Capital.
+    global_capital = float(BOT_STATE.config_cache.get('capital_total', 5000))
+    
+    risk_check = check_total_market_risk('forex', global_capital, sb)
+    if not risk_check["passed"]:
+        log_warning(MODULE, f"🚫 RIESGO TOTAL ALCANZADO (FOREX): {risk_check['reason']}")
+        return {
+            "success": False,
+            "reason": "max_total_risk_reached",
+            "pair": pair,
+            "detail": risk_check["reason"]
+        }
 
     # ── STEP 2: Open new position ──
     mode = os.getenv("FOREX_MODE", "paper")
@@ -691,6 +759,7 @@ def execute_forex_signal(
     
     # Contract size: 100k for currencies, usually 100 for Gold (XAU)
     multiplier = 100.0 if "XAU" in pair.upper() else 100000.0
+    pip_size = 0.01 if "JPY" in pair.upper() or "XAU" in pair.upper() else 0.0001
     
     # Notional = Lots * Multiplier * Price
     # Lots = Notional / (Multiplier * Price)
@@ -935,8 +1004,14 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
         now_iso = datetime.now(timezone.utc).isoformat()
         for pos in positions:
             try:
-                avg = float(pos.get("avg_price", 0))
-                shares = float(pos.get("shares", 0))
+                def safe_float(v, default=0.0):
+                    try:
+                        return float(v) if v is not None else default
+                    except:
+                        return default
+
+                avg = safe_float(pos.get("avg_price") or pos.get("entry_price"))
+                shares = safe_float(pos.get("shares"))
                 pnl = (price - avg) * shares
                 pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
 

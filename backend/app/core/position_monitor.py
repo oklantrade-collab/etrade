@@ -286,7 +286,7 @@ async def check_open_positions_5m(
                         'sl_type':             'dynamic',
                         'sl_activated_at':     datetime.now(timezone.utc).isoformat(),
                         'sl_activation_reason': sipv.get('pattern', 'sipv'),
-                        'stop_loss_price':     sl_dynamic_price,
+                        'stop_loss':     sl_dynamic_price,
                     }).eq('id', pos['id']).execute()
                     
                     from app.strategy.dynamic_sl_manager import send_sl_to_exchange
@@ -415,8 +415,27 @@ async def _execute_paper_open(
 
     symbol = normalize_crypto_symbol(symbol)
 
-    # 1. Límite GLOBAL (max_open_trades) y SÍMBOLO usando LOCK para atomicidad
+    # 1. REVERSIÓN FORZADA (Hedge no permitido)
+    # Si llega una señal LONG y hay SHORTs (o viceversa), cerrar todo lo opuesto primero.
     async with BOT_STATE.order_lock:
+        opposite_side = 'SHORT' if side.upper() in ['LONG', 'BUY'] else 'LONG'
+        opp_res = supabase.table('positions').select('*').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
+        
+        # Filtrar manualmente por el lado opuesto (considerando alias BUY/LONG)
+        to_close = []
+        for p in (opp_res.data or []):
+            p_side = (p.get('side') or '').upper()
+            if opposite_side == 'SHORT' and p_side in ['SHORT', 'SELL']:
+                to_close.append(p)
+            elif opposite_side == 'LONG' and p_side in ['LONG', 'BUY']:
+                to_close.append(p)
+        
+        if to_close:
+            log_info(MODULE, f"🔄 REVERSIÓN: Cerrando {len(to_close)} posiciones opuestas ({opposite_side}) en {symbol} antes de abrir {side.upper()}")
+            for pos in to_close:
+                await _execute_paper_close(pos, price, f'reversal_{side.lower()}', supabase)
+
+        # 2. Límite GLOBAL (max_open_trades) y SÍMBOLO usando LOCK para atomicidad
         max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
         
         # Consultar DB directamente para conteo global exacto
@@ -427,8 +446,10 @@ async def _execute_paper_open(
             log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
             return None
 
-        # 2. Límite POR SÍMBOLO
-        max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
+        # 3. Límite POR SÍMBOLO
+        from app.core.supabase_client import get_risk_config
+        risk_config = get_risk_config()
+        max_symbol = int(risk_config.get('max_positions_per_symbol', 4))
         
         # Contar posiciones abiertas para este símbolo específico
         sym_pos_res = supabase.table('positions').select('id').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
