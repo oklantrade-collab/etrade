@@ -125,7 +125,7 @@ export default function TradeMarkerChart({
       color: '#9B59B6',
       lineWidth: 1,
       lineStyle: LineStyle.Solid,
-      lastValueVisible: false, // Avoid doubling
+      lastValueVisible: true, // Axis label
       priceLineVisible: false,
       title: 'BASIS',
     })
@@ -134,7 +134,7 @@ export default function TradeMarkerChart({
       color: '#00C896',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
-      lastValueVisible: false,
+      lastValueVisible: true, // Axis label
       priceLineVisible: false,
       title: 'U6',
     })
@@ -143,7 +143,7 @@ export default function TradeMarkerChart({
       color: '#FF4757',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
-      lastValueVisible: false,
+      lastValueVisible: true, // Axis label
       priceLineVisible: false,
       title: 'L6',
     })
@@ -226,88 +226,28 @@ export default function TradeMarkerChart({
       }
     }
 
-    // --- CALCULATE FIBONACCI BANDS FROM OHLC (FRONTEND) ---
-    // The DB often has basis/upper_6/lower_6 = 0 for Forex.
-    // We calculate EMA20, ATR14, and Fibonacci bands directly from candle OHLC.
+    // --- SET INDICATOR DATA (FROM API) ---
     const basisSeries = (chartRef.current as any)?.basisSeries
     const upper6Series = (chartRef.current as any)?.upper6Series
     const lower6Series = (chartRef.current as any)?.lower6Series
 
-    // Check if DB has valid band data
-    const hasDbBands = uniqueCandles.length > 0 && candles.some(c => parseFloat(c.basis) > 0)
-
-    if (hasDbBands) {
-      // Use DB data directly
-      if (basisSeries && showBasis) {
+    if (basisSeries && showBasis) {
         basisSeries.setData(candles.filter(c => parseFloat(c.basis) > 0).map(c => ({
-          time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-          value: parseFloat(c.basis)
+            time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
+            value: parseFloat(c.basis)
         })).sort((a: any, b: any) => a.time - b.time))
-      }
-      if (upper6Series) {
+    }
+    if (upper6Series) {
         upper6Series.setData(candles.filter(c => parseFloat(c.upper_6) > 0).map(c => ({
-          time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-          value: parseFloat(c.upper_6)
+            time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
+            value: parseFloat(c.upper_6)
         })).sort((a: any, b: any) => a.time - b.time))
-      }
-      if (lower6Series) {
+    }
+    if (lower6Series) {
         lower6Series.setData(candles.filter(c => parseFloat(c.lower_6) > 0).map(c => ({
-          time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-          value: parseFloat(c.lower_6)
+            time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
+            value: parseFloat(c.lower_6)
         })).sort((a: any, b: any) => a.time - b.time))
-      }
-    } else if (uniqueCandles.length >= 20) {
-      // FRONTEND CALCULATION: EMA20 + ATR14 + Fibonacci Band 6
-      const emaLen = 20
-      const atrLen = 14
-      const fibMultiplier = 6.618 // Band 6 multiplier
-
-      // Calculate EMA20 of close
-      const closes = uniqueCandles.map(c => c.close)
-      const ema: number[] = new Array(closes.length).fill(0)
-      const k = 2 / (emaLen + 1)
-      // Seed with SMA
-      let sum = 0
-      for (let i = 0; i < emaLen; i++) sum += closes[i]
-      ema[emaLen - 1] = sum / emaLen
-      for (let i = emaLen; i < closes.length; i++) {
-        ema[i] = closes[i] * k + ema[i - 1] * (1 - k)
-      }
-
-      // Calculate ATR14
-      const highs = uniqueCandles.map(c => c.high)
-      const lows = uniqueCandles.map(c => c.low)
-      const tr: number[] = new Array(closes.length).fill(0)
-      tr[0] = highs[0] - lows[0]
-      for (let i = 1; i < closes.length; i++) {
-        tr[i] = Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]))
-      }
-      const atr: number[] = new Array(closes.length).fill(0)
-      let atrSum = 0
-      for (let i = 0; i < atrLen; i++) atrSum += tr[i]
-      atr[atrLen - 1] = atrSum / atrLen
-      for (let i = atrLen; i < closes.length; i++) {
-        atr[i] = (atr[i - 1] * (atrLen - 1) + tr[i]) / atrLen
-      }
-
-      // Build series data from index emaLen onward (where EMA is valid)
-      const startIdx = Math.max(emaLen, atrLen)
-      const basisData: any[] = []
-      const u6Data: any[] = []
-      const l6Data: any[] = []
-
-      for (let i = startIdx; i < uniqueCandles.length; i++) {
-        if (ema[i] > 0 && atr[i] > 0) {
-          const t = uniqueCandles[i].time
-          basisData.push({ time: t, value: ema[i] })
-          u6Data.push({ time: t, value: ema[i] + atr[i] * fibMultiplier })
-          l6Data.push({ time: t, value: ema[i] - atr[i] * fibMultiplier })
-        }
-      }
-
-      if (basisSeries && showBasis) basisSeries.setData(basisData)
-      if (upper6Series) upper6Series.setData(u6Data)
-      if (lower6Series) lower6Series.setData(l6Data)
     }
 
     // Add Markers
@@ -392,32 +332,7 @@ export default function TradeMarkerChart({
     }
   }, [candles, trades, activePosition, showRealTrades]);
 
-  // EFFECT 3: Snapshot Indicator Horizontal Lines (Persistent)
-  useEffect(() => {
-    if (!candleSeriesRef.current || !chartRef.current) return
-
-    indicatorLinesRef.current.forEach(l => candleSeriesRef.current?.removePriceLine(l))
-    indicatorLinesRef.current = []
-
-    if (basis && basis > 0) {
-      const pl = candleSeriesRef.current.createPriceLine({
-        price: basis, color: '#9B59B6', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'BASIS'
-      })
-      indicatorLinesRef.current.push(pl)
-    }
-    if (upper_6 && upper_6 > 0) {
-      const pl = candleSeriesRef.current.createPriceLine({
-        price: upper_6, color: '#00C896', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'U6'
-      })
-      indicatorLinesRef.current.push(pl)
-    }
-    if (lower_6 && lower_6 > 0) {
-      const pl = candleSeriesRef.current.createPriceLine({
-        price: lower_6, color: '#FF4757', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'L6'
-      })
-      indicatorLinesRef.current.push(pl)
-    }
-  }, [basis, upper_6, lower_6]);
+   }, [candles, trades, activePosition, showRealTrades]);
 
   return (
     <div className="relative w-full h-full">
