@@ -330,8 +330,6 @@ export default function TradeMarkerChart({
       chartRef.current?.timeScale().fitContent()
       setHasFitInitial(true)
     }
-  }, [candles, trades, activePosition, showRealTrades]);
-
    }, [candles, trades, activePosition, showRealTrades]);
 
   return (
