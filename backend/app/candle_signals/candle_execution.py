@@ -542,11 +542,12 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                 return out
 
             side_u = (pos.get("side") or "").upper()
+            size_abs = abs(size) # Usamos valor absoluto para el cálculo pecuniario
             if side_u in ("LONG", "BUY"):
-                pnl = (close_price - entry_price) * size
+                pnl = (close_price - entry_price) * size_abs
                 pnl_pct = ((close_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
             else:
-                pnl = (entry_price - close_price) * size
+                pnl = (entry_price - close_price) * size_abs
                 pnl_pct = ((entry_price - close_price) / entry_price * 100) if entry_price > 0 else 0.0
 
             previews.append((pos, size, pnl, pnl_pct, close_price))
@@ -591,7 +592,8 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
 
         for pos, size, pnl, pnl_pct, close_px in previews:
             try:
-                notional = float(pos.get("entry_price", 0) or 0) * size
+                # El valor de la inversión (notional) se basa en el tamaño absoluto
+                notional = float(pos.get("entry_price", 0) or 0) * abs(size)
                 pnl_pct_row = round((pnl / notional * 100), 4) if notional > 0 else round(pnl_pct, 4)
 
                 sb.table("positions").update(
@@ -664,6 +666,9 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
         sym = normalize_crypto_symbol(binance_symbol)
         price_f = float(price or 0)
         qty_f = float(quantity or 0)
+        # NUEVO: Signo algebraico para la cantidad (Negativo para SELL/SHORT)
+        final_qty = abs(qty_f) if action == "BUY" else -abs(qty_f)
+        
         sl_f, tp_f = _ensure_crypto_sl_tp(action, price_f, sl, tp)
         oid = _order_uuid_for_position(order_id)
 
@@ -673,7 +678,7 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
             "entry_price": price_f,
             "avg_entry_price": price_f,
             "current_price": price_f,
-            "size": qty_f if qty_f > 0 else 1.0, # Simulated size if zero
+            "size": final_qty if final_qty != 0 else (1.0 if action == "BUY" else -1.0),
             "stop_loss": sl_f,
             "sl_price": sl_f,
             "sl_backstop_price": sl_f,
@@ -739,14 +744,10 @@ def execute_forex_signal(
         f"Fib Zone: {fib_zone:+d}"
     )
 
-    # ── STEP 1: Multi-layer vs Reversal ──
-    # Si hay opuestas, cerramos todo (Hedge OFF)
-    opposite_side = "short" if action == "BUY" else "long"
-    existing_opp = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").eq("side", opposite_side).execute().data or []
-    
-    if existing_opp:
-        log_info(MODULE, f"⚠️ REVERSIÓN: Cerrando {len(existing_opp)} posiciones {opposite_side} por señal {action}")
-        _close_all_positions_forex(pair, strategy_code, price)
+    # ── STEP 1: Hedge OFF (Netting) ──
+    # Si hay opuestas, cerramos todo lo de la dirección contraria antes de seguir
+    opp_side = "short" if action == "BUY" else "long"
+    _close_all_positions_forex(pair, strategy_code, price, only_side=opp_side)
     
     # ── STEP 2: Reglas Multi-layer (Misma estrategia) ──
     existing_same = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").eq("rule_code", strategy_code).execute().data or []
@@ -778,9 +779,6 @@ def execute_forex_signal(
             return {"success": False, "reason": "price_improvement"}
             
         log_info(MODULE, f"💎 Agregando capa Forex {len(existing_same)+1} para {pair}")
-    else:
-        # Si no hay estrategia idéntica, podemos cerrar por rotación normal
-        _close_all_positions_forex(pair, strategy_code, price)
     
     # ── CHECK 1: Limit per symbol (Forex) ──
     from app.core.supabase_client import get_risk_config
@@ -852,11 +850,14 @@ def execute_forex_signal(
         sl = round(price + atr * 2, 6)
         tp = round(price - atr * 3, 6)
 
+    # Aplicar signo algebraico a los lotes (Negativo para SELL)
+    final_lots = -abs(lots) if action == "SELL" else abs(lots)
+
     # Save position
     pos_data = {
         "symbol": pair,
-        "side": direction,
-        "lots": lots,
+        "side": action.lower(),
+        "lots": final_lots,
         "entry_price": price,
         "sl_price": sl,
         "tp_price": tp,
@@ -874,7 +875,7 @@ def execute_forex_signal(
     mode_str = f"[{mode.upper()}]"
     log_info(MODULE,
         f"{mode_str} ✅ Forex {action} {pair} @ {price:.5f} | "
-        f"Lots: {lots} | SL: {sl:.5f} | TP: {tp:.5f} | Strategy: {strategy_code}"
+        f"Lots: {final_lots} | SL: {sl:.5f} | TP: {tp:.5f} | Strategy: {strategy_code}"
     )
 
     _send_telegram_sync(
@@ -892,11 +893,15 @@ def execute_forex_signal(
     return {"success": True, "action": action, "pair": pair, "strategy": strategy_code}
 
 
-def _close_all_positions_forex(pair: str, strategy_code: str, current_price: float):
-    """Close ALL active forex positions for a pair (any direction)."""
+def _close_all_positions_forex(pair: str, strategy_code: str, current_price: float, only_side: str = None):
+    """Close active forex positions for a pair. If only_side is set, closes only that side (for netting)."""
     sb = get_supabase()
     try:
-        res = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").execute()
+        query = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open")
+        if only_side:
+            query = query.eq("side", only_side.lower())
+        
+        res = query.execute()
         positions = res.data or []
 
         if not positions:
@@ -918,7 +923,7 @@ def _close_all_positions_forex(pair: str, strategy_code: str, current_price: flo
                 side = pos.get("side", "long").lower()
 
                 pips_pnl = (current_price - entry) / pip_size if side == "long" else (entry - current_price) / pip_size
-                pnl_usd = pips_pnl * pip_val * lots
+                pnl_usd = pips_pnl * pip_val * abs(lots)
 
                 sb.table("forex_positions").update({
                     "status": "closed",
@@ -1058,14 +1063,21 @@ def execute_stocks_signal(
             "created_at": now_iso,
         }).execute()
 
+        # Aplicar signo algebraico (Negativo para SHORT/SELL)
+        final_shares = int(shares)
+        if action == "SELL":
+             final_shares = -abs(final_shares)
+        else:
+             final_shares = abs(final_shares)
+
         # Save position
         sb.table("stocks_positions").insert({
             "ticker": ticker,
             "group_name": f"Candle Signal {pool_type}",
-            "direction": "long",
-            "shares": shares,
+            "direction": "long" if action == "BUY" else "short",
+            "shares": final_shares,
             "avg_price": price,
-            "total_cost": round(shares * price, 2),
+            "total_cost": round(abs(final_shares) * price, 2),
             "current_price": price,
             "stop_loss": sl,
             "take_profit": tp,

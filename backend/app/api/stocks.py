@@ -396,14 +396,11 @@ async def get_stocks_positions():
                 pos["sl_price"] = opp_info[0].get("stop_loss")
                 pos["tp_price"] = opp_info[0].get("target_1")
 
-            # 3. Traer Tipo de Orden desde stocks_orders
-            order_info = sb.table("stocks_orders").select("order_type, direction").eq("ticker", ticker).eq("status", "filled").order("created_at", desc=True).limit(1).execute().data
-            if order_info:
-                pos["order_type"] = order_info[0].get("order_type", "market")
-                pos["side"] = order_info[0].get("direction") or pos.get("direction") or "buy"
-            else:
-                pos["order_type"] = "market"
-                pos["side"] = pos.get("direction") or "buy"
+            # 3. Side: En stocks solo operamos LONG (BUY). 
+            # Mostramos 'buy' siempre que la posición esté abierta, 
+            # independientemente de si la última orden fue un cierre parcial o total anterior.
+            pos["order_type"] = "market"
+            pos["side"] = "buy"  # Stocks are always Long in this model
 
             pos["current_price"] = cur_price
             pos["unrealized_pnl"] = round(unrealized_pnl, 2)

@@ -109,7 +109,8 @@ export default function ForexPositions() {
                         const pipSize = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 0.01 : 0.0001
                         const pipVal = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 1.0 : 10.0
                         const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
-                        return acc + (pips * pipVal * p.lots)
+                        // Usar valor absoluto de lots para PnL, ya que pips ya considera la dirección
+                        return acc + (pips * pipVal * Math.abs(p.lots))
                     }, 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
                  }`}>
                     {positions.reduce((acc, p) => {
@@ -129,7 +130,7 @@ export default function ForexPositions() {
                         const pipSize = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 0.01 : 0.0001
                         const pipVal = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 1.0 : 10.0
                         const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
-                        return acc + (pips * pipVal * p.lots)
+                        return acc + (pips * pipVal * Math.abs(p.lots))
                     }, 0)).toFixed(2)}
                  </div>
                  <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
@@ -199,10 +200,12 @@ export default function ForexPositions() {
                               <td className="py-8">
                                  <span className="text-[0.65rem] font-bold text-slate-500 uppercase">{new Date(pos.opened_at).toLocaleTimeString()}</span>
                               </td>
-                              <td className="py-8">
-                                 <span className="font-mono text-sm text-white font-black">{pos.lots.toFixed(2)}</span>
+                               <td className="py-8">
+                                 <span className={`font-mono text-sm font-black ${pos.lots >= 0 ? 'text-white' : 'text-rose-400'}`}>
+                                    {pos.lots >= 0 ? '+' : ''}{pos.lots.toFixed(2)}
+                                 </span>
                                  <span className="text-[0.5rem] font-black text-slate-700 ml-1">LOTS</span>
-                              </td>
+                               </td>
                               <td className="py-8 font-mono text-[0.8rem] text-slate-400">
                                  {pos.entry_price.toFixed(pos.symbol.includes('JPY') ? 3 : 5)}
                               </td>
@@ -288,7 +291,9 @@ export default function ForexPositions() {
                                 </div>
                              </td>
                              <td className="py-8">
-                                <span className="font-mono text-sm text-slate-400">{pos.lots.toFixed(2)}</span>
+                                <span className={`font-mono text-sm ${pos.lots >= 0 ? 'text-slate-400' : 'text-rose-400/60'}`}>
+                                   {pos.lots >= 0 ? '+' : ''}{pos.lots.toFixed(2)}
+                                </span>
                              </td>
                              <td className="py-8 font-mono text-[0.8rem] text-slate-500">
                                 {pos.entry_price.toFixed(pos.symbol.includes('JPY') ? 3 : 5)}

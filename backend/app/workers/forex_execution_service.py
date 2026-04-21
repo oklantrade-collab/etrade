@@ -197,17 +197,24 @@ class ForexExecutionService:
             self.log(f'🚫 LÍMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
 
-        # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF)
+        # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
         opposite = 'short' if direction == 'long' else 'long'
         opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'] == opposite]
         if opp_positions:
-            self.log(f'[HEDGE] Cerrando {len(opp_positions)} posiciones de {opposite.upper()} por reversión a {direction.upper()}')
+            self.log(f'[REVERSIÓN] Cerrando {len(opp_positions)} posiciones {opposite.upper()} por entrada {direction.upper()}')
             for p in opp_positions:
-                price_data = self.state['prices'].get(symbol, {})
-                price = float(price_data.get('mid', snap.get('price', 0)))
+                entry = float(p.get('entry_price', 0))
+                # Usar valor absoluto del lotaje para cálculos de margen/riesgo
+                lots_abs = abs(float(p.get('lots', 0.01)))
                 pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-                pips = (price - p['entry_price'])/pip_size if p['side']=='long' else (p['entry_price'] - price)/pip_size
-                self._close_position(p, price, f'reversal_{direction}', pips)
+                pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+                
+                side = p['side'].lower()
+                pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
+                pnl = pips * pip_val * lots_abs
+                self._close_position(p, price, f'netting_{direction}', pips)
+            # Recargar posiciones tras cerrar opuestas
+            self._load_open_positions()
 
         # 2. Ejecutar nueva señal
         price = float(snap.get('price', 0))
@@ -272,9 +279,25 @@ class ForexExecutionService:
 
     def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper'):
         try:
-            pos = {'symbol': symbol, 'side': direction, 'lots': float(lots), 'entry_price': float(entry), 'sl_price': float(sl), 'tp_price': float(tp), 'status': 'open', 'mode': mode, 'rule_code': rule_code, 'opened_at': datetime.now(timezone.utc).isoformat()}
+            # Aplicar signo algebraico (Negativo para SHORT/SELL)
+            final_lots = -abs(float(lots)) if str(direction).lower() == 'short' or str(direction).lower() == 'sell' else abs(float(lots))
+            
+            pos = {
+                'symbol': symbol, 
+                'side': direction, 
+                'lots': final_lots, 
+                'entry_price': float(entry), 
+                'sl_price': float(sl), 
+                'tp_price': float(tp), 
+                'status': 'open', 
+                'mode': mode, 
+                'rule_code': rule_code, 
+                'opened_at': datetime.now(timezone.utc).isoformat()
+            }
             res = self.sb.table('forex_positions').insert(pos).execute()
-            if res.data: self._open_positions_list.append(res.data[0])
+            if res.data: 
+                self.log(f'✅ Guardada posición {symbol} {direction.upper()} Lots: {final_lots}')
+                self._open_positions_list.append(res.data[0])
         except Exception as e: self.log(f'Error guardando: {e}')
 
     def run_position_management(self):
@@ -400,10 +423,11 @@ class ForexExecutionService:
             except Exception as sl_e:
                 self.log(f'Error cancelando SL: {sl_e}', 'ERROR')
 
-            pnl_usd = pips_pnl * PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0) * float(pos['lots'])
+            # Usar valor absoluto de lots para el cálculo de PnL ya que pips_pnl ya considera la dirección
+            pnl_usd = pips_pnl * PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0) * abs(float(pos['lots']))
             self.sb.table('forex_positions').update({'status': 'closed', 'current_price': close_price, 'close_reason': reason, 'pnl_usd': round(pnl_usd, 2), 'pnl_pips': round(pips_pnl, 1), 'closed_at': datetime.now(timezone.utc).isoformat()}).eq('id', pos['id']).execute()
             self._open_positions_list = [p for p in self._open_positions_list if p['id'] != pos['id']]
-            self.log(f'Cerrada {symbol}: {reason} | PnL: {pips_pnl:.1f} pips')
+            self.log(f'Cerrada {symbol}: {reason} | PnL: {pips_pnl:.1f} pips | USD: {pnl_usd:.2f}')
         except Exception as e: self.log(f'Error cierre: {e}')
 
     def _send_telegram(self, message):

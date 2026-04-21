@@ -46,6 +46,10 @@ def fibonacci_bollinger(
     typical_vol = src * df["volume"]
     vol_sum = df["volume"].rolling(window=length).sum()
     basis = typical_vol.rolling(window=length).sum() / vol_sum
+    
+    # Fallback to SMA if VWMA fails (common in Forex if volume is erratic)
+    basis = basis.fillna(src.rolling(window=length).mean())
+    
     df["basis"] = basis
 
     # Standard Deviation (Population)

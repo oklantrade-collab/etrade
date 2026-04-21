@@ -99,7 +99,7 @@ export default function StocksPositions() {
               <DetailItem label="Fecha Compra" val={selectedPos.first_buy_at ? new Date(selectedPos.first_buy_at).toLocaleDateString() : '—'} color="#AAA" />
               <DetailItem label="Tipo Orden" val={selectedPos.order_type} color="#00C896" />
               <DetailItem label="Precio Entrada" val={`$${selectedPos.avg_price?.toFixed(2)}`} color="#FFF" />
-              <DetailItem label="Cantidad" val={selectedPos.shares} color="#FFF" />
+              <DetailItem label="Cantidad" val={`${selectedPos.shares >= 0 ? '+' : ''}${selectedPos.shares}`} color={selectedPos.shares >= 0 ? '#FFF' : '#FF4757'} />
               <DetailItem label="Stop Loss (SL)" val={selectedPos.sl_price ? `$${selectedPos.sl_price}` : '—'} color="#FF4757" />
               <DetailItem label="Take Profit (TP)" val={selectedPos.tp_price ? `$${selectedPos.tp_price}` : '—'} color="#00C896" />
               <DetailItem label="Inversión" val={`$${selectedPos.total_cost?.toLocaleString()}`} color="#AAA" />
@@ -185,11 +185,18 @@ export default function StocksPositions() {
               
               {!loading && positions.map((pos, i) => (
                 <div key={`open-${pos.id || i}`} style={{ ...TableRowStyle, background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
-                  <span style={{ fontWeight: 900, fontSize: '15px' }}>{pos.ticker}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ 
+                        width: '3px', height: '24px', borderRadius: '4px',
+                        background: pos.side?.toUpperCase() === 'SELL' ? '#ff4757' : '#00C896',
+                        boxShadow: pos.side?.toUpperCase() === 'SELL' ? '0 0 10px #ff4757' : '0 0 10px #00C896'
+                    }}></div>
+                    <span style={{ fontWeight: 900, fontSize: '15px' }}>{pos.ticker}</span>
+                  </div>
                   <span style={{ fontSize: '10px', fontWeight: 900, color: pos.side?.toUpperCase() === 'SELL' ? '#FF4757' : '#00C896' }}>{pos.side?.toUpperCase() || 'BUY'}</span>
                   <span><GroupBadge group={pos.group_name} /></span>
                   <span style={{ fontSize: '11px', color: '#666' }}>{pos.first_buy_at ? new Date(pos.first_buy_at).toLocaleDateString() : '—'}</span>
-                  <span style={{ fontWeight: 700 }}>{pos.shares}</span>
+                  <span style={{ fontWeight: 700, color: pos.shares >= 0 ? '#FFF' : '#FF4757' }}>{pos.shares >= 0 ? '+' : ''}{pos.shares}</span>
                   <span style={{ color: '#AAA', fontSize: '13px' }}>${pos.avg_price?.toFixed(2)}</span>
                   <span style={{ fontWeight: 700, fontSize: '13px', color: '#4FC3F7' }}>${pos.current_price?.toFixed(2)}</span>
                   <span style={{ color: pos.dca_count > 0 ? '#CE93D8' : '#444', fontWeight: 800, textAlign: 'center' }}>{pos.dca_count > 0 ? `×${pos.dca_count}` : '—'}</span>
@@ -227,13 +234,20 @@ export default function StocksPositions() {
               
               {closedPositions.map((pos, i) => (
                 <div key={`closed-${pos.id || i}`} style={{ ...TableRowStyle, background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
-                  <span style={{ fontWeight: 900, fontSize: '15px' }}>{pos.ticker}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{ 
+                        width: '3px', height: '24px', borderRadius: '4px', opacity: 0.5,
+                        background: pos.side?.toUpperCase() === 'SELL' ? '#ff4757' : '#00C896',
+                        boxShadow: pos.side?.toUpperCase() === 'SELL' ? '0 0 10px #ff4757' : '0 0 10px #00C896'
+                    }}></div>
+                    <span style={{ fontWeight: 900, fontSize: '15px' }}>{pos.ticker}</span>
+                  </div>
                   <span><GroupBadge group={pos.group_name} /></span>
                   <span style={{ fontSize: '10px', color: '#555' }}>{pos.first_buy_at ? new Date(pos.first_buy_at).toLocaleDateString() : '—'}</span>
                   <span style={{ fontSize: '10px', color: '#666' }}>{pos.updated_at ? new Date(pos.updated_at).toLocaleDateString() : '—'}</span>
                   <span style={{ color: '#AAA', fontSize: '13px' }}>${pos.avg_price?.toFixed(2)}</span>
                   <span style={{ fontWeight: 700, fontSize: '13px' }}>${pos.current_price?.toFixed(2)}</span>
-                  <span style={{ fontSize: '13px' }}>{pos.shares}</span>
+                  <span style={{ fontSize: '13px', color: pos.shares >= 0 ? '#AAA' : '#FF4757/70' }}>{pos.shares >= 0 ? '+' : ''}{pos.shares}</span>
                   <span style={{ textAlign: 'center' }}><ReasonBadge reason={pos.exit_reason || 'closed'} /></span>
                   <div style={{ textAlign: 'right' }}>
                     <p style={{ margin: 0, fontWeight: 900, color: (pos.unrealized_pnl || 0) >= 0 ? '#00C896' : '#FF4757' }}>

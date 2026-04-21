@@ -451,7 +451,8 @@ class StandaloneForexWorker:
                     fib_bands[f'lower_{i}'] = float(ema20 - (atr * m))
 
             # Calculate SAR from 4h data if available
-            sar_4h = sar  # Default to 15m SAR
+            sar_15m = float(last['sar'])
+            sar_4h = sar_15m  # Default to 15m SAR
             sar_trend_4h = 0
             key_4h = f"{symbol}_4h"
             data_4h = STATE['candles'].get(key_4h, [])
@@ -478,9 +479,9 @@ class StandaloneForexWorker:
                 'dist_basis_pct': round(dist_basis, 4),
                 'sar_4h': float(sar_4h),
                 'sar_trend_4h': sar_trend_4h,
-                'sar_15m': float(sar),
+                'sar_15m': sar_15m,
                 'sar_trend_15m': 1 if last['sar_trend'] > 0 else -1,
-                'sar_phase': 'long' if sar_trend_4h > 0 else ('short' if sar_trend_4h < 0 else ('long' if price > sar else 'short')),
+                'sar_phase': 'long' if sar_trend_4h > 0 else ('short' if sar_trend_4h < 0 else ('long' if price > sar_15m else 'short')),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
             }
 

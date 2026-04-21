@@ -149,12 +149,16 @@ def execute_market_order(
     if direction == "sell" and rule.get("close_all", False):
         _close_all_positions(ticker, price)
 
-    # Si BUY: abrir/actualizar posición
-    if direction == "buy":
+    # En STOCKS solo permitimos LONG (BUY).
+    # Si la orden es SELL, solo ejecutamos el cierre de lo que ya existe.
+    if direction.lower() == "buy":
         _open_or_update_position(
             ticker, price, shares,
             rule.get("group_name"),
         )
+    else:
+        # Forzar que cualquier SELL sea un cierre total
+        _close_all_positions(ticker, price)
 
     mode_str = "[PAPER]" if paper else "[LIVE]"
     log_info(MODULE,

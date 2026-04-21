@@ -131,7 +131,18 @@ export default function PositionsPage() {
                             <div>{new Date(p.opened_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}</div>
                             <div style={{ fontWeight: 'bold' }}>{new Date(p.opened_at).toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
                           </td>
-                          <td style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{ 
+                                  width: '3px', 
+                                  height: '24px', 
+                                  borderRadius: '2px',
+                                  background: (p.side || '').toLowerCase().includes('buy') || (p.side || '').toLowerCase().includes('long') ? '#10b981' : '#f43f5e',
+                                  boxShadow: (p.side || '').toLowerCase().includes('buy') || (p.side || '').toLowerCase().includes('long') ? '0 0 10px #10b981' : '0 0 10px #f43f5e'
+                                }} />
+                                <span style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</span>
+                            </div>
+                          </td>
                           <td>
                             <span className={`badge ${(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'badge-green' : 'badge-red'}`}>
                               {(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'BUY' : 'SELL'}
@@ -148,7 +159,9 @@ export default function PositionsPage() {
                             </span>
                           </div>
                         </td>
-                        <td>{parseFloat(p.size).toLocaleString('en-US', { maximumFractionDigits: 6 })}</td>
+                        <td style={{ color: parseFloat(p.size) >= 0 ? 'var(--text)' : 'var(--accent-red)' }}>
+                          {parseFloat(p.size) >= 0 ? '+' : ''}{parseFloat(p.size).toLocaleString('en-US', { maximumFractionDigits: 6 })}
+                        </td>
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', fontSize: '0.8rem' }}>
                             <span style={{ color: 'var(--accent-red)' }}>SL: ${parseFloat(p.stop_loss).toFixed(4)}</span>
@@ -162,7 +175,7 @@ export default function PositionsPage() {
                             </span>
                             {parseFloat(p.entry_price) > 0 && (
                               <span style={{ fontSize: '0.75rem', opacity: 0.8, color: pnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
-                                ({pnl >= 0 ? '+' : ''}{((pnl / (parseFloat(p.entry_price) * parseFloat(p.size))) * 100).toFixed(2)}%)
+                                ({pnl >= 0 ? '+' : ''}{((pnl / (parseFloat(p.entry_price) * Math.abs(parseFloat(p.size)))) * 100).toFixed(2)}%)
                               </span>
                             )}
                           </div>
@@ -214,7 +227,19 @@ export default function PositionsPage() {
                     return (
                       <tr key={p.id}>
                         <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{time}</td>
-                        <td style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</td>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                              <div style={{ 
+                                width: '3px', 
+                                height: '24px', 
+                                borderRadius: '2px',
+                                opacity: 0.5,
+                                background: (p.side || '').toLowerCase().includes('buy') || (p.side || '').toLowerCase().includes('long') ? '#10b981' : '#f43f5e',
+                                boxShadow: (p.side || '').toLowerCase().includes('buy') || (p.side || '').toLowerCase().includes('long') ? '0 0 10px #10b981' : '0 0 10px #f43f5e'
+                              }} />
+                              <span style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</span>
+                          </div>
+                        </td>
                         <td>
                           <span className={`badge ${(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'badge-green' : 'badge-red'}`}>
                             {(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'BUY' : 'SELL'}

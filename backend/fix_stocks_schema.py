@@ -13,7 +13,9 @@ def fix_schema():
     
     queries = [
         "ALTER TABLE stocks_positions ADD COLUMN IF NOT EXISTS stop_loss NUMERIC;",
-        "ALTER TABLE stocks_positions ADD COLUMN IF NOT EXISTS take_profit NUMERIC;"
+        "ALTER TABLE stocks_positions ADD COLUMN IF NOT EXISTS take_profit NUMERIC;",
+        "ALTER TABLE stocks_positions DROP CONSTRAINT IF EXISTS stocks_positions_ticker_status_key;",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_stocks_positions_ticker_open ON stocks_positions (ticker) WHERE (status = 'open');"
     ]
     
     print("Adding stop_loss and take_profit columns to stocks_positions...")
