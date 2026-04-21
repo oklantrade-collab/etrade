@@ -27,7 +27,7 @@ import os
 import sys
 import traceback
 import uuid as uuid_mod
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
@@ -290,16 +290,18 @@ def execute_crypto_signal(
             log_info(MODULE, f"🚫 CANDLE SIGNAL omitido {binance_symbol}: posición previa en pérdida.")
             return {"success": False, "reason": "candle_signal_requires_profit_exit", "pair": binance_symbol}
 
-    # ── CHECK 1: Limit per symbol (Compliance with Cant. Operación x Cripto) ──
+    # ── CHECK 1: Limit per symbol (Compliance with Cant. Operación x Par/Cripto) ──
     from app.core.supabase_client import get_risk_config
     risk_config = get_risk_config()
     max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
     
-    current_open = len(existing_same)
-    if current_open >= max_per_symbol:
+    # Contar TODAS las posiciones abiertas de este símbolo (no solo de esta estrategia)
+    total_open_symbol = sb.table("positions").select("id", count='exact').eq("symbol", binance_symbol).eq("status", "open").execute().count
+    
+    if total_open_symbol >= max_per_symbol:
         log_warning(
             MODULE,
-            f"🚫 LÍMITE ALCANZADO para {binance_symbol}: {current_open}/{max_per_symbol} posiciones abiertas estrategia {strategy_code}."
+            f"🚫 LÍMITE ALCANZADO para {binance_symbol}: {total_open_symbol}/{max_per_symbol} posiciones abiertas totales."
         )
         return {
             "success": False,
@@ -780,13 +782,24 @@ def execute_forex_signal(
         # Si no hay estrategia idéntica, podemos cerrar por rotación normal
         _close_all_positions_forex(pair, strategy_code, price)
     
+    # ── CHECK 1: Limit per symbol (Forex) ──
+    from app.core.supabase_client import get_risk_config
+    risk_config = get_risk_config()
+    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+    
+    total_open_symbol = sb.table("forex_positions").select("id", count='exact').eq("symbol", pair).eq("status", "open").execute().count
+    
+    if total_open_symbol >= max_per_symbol:
+        log_warning(MODULE, f"🚫 LÍMITE ALCANZADO para {pair}: {total_open_symbol}/{max_per_symbol} posiciones.")
+        return {
+            "success": False,
+            "reason": "max_positions_per_symbol_reached",
+            "pair": pair,
+        }
+
     # ── CHECK 2: Total Market Risk Limit ──
     from app.strategy.risk_controls import check_total_market_risk
     from app.core.memory_store import BOT_STATE
-    capital_total = float(BOT_STATE.config_cache.get('capital_forex_futures', 5000))
-    # capital_forex_futures is used here, but check_total_market_risk expects global capital if limit is % of global?
-    # User said: "Total inversion = 5000 then Max Tot Riesgo Inv = 1500".
-    # This 5000 is the Total Capital.
     global_capital = float(BOT_STATE.config_cache.get('capital_total', 5000))
     
     risk_check = check_total_market_risk('forex', global_capital, sb)
@@ -993,6 +1006,21 @@ def execute_stocks_signal(
         log_info(MODULE, f"💎 Agregando capa Stock {len(existing_same)+1} para {ticker}")
     else:
         _close_all_stocks_positions(ticker, price, strategy_code)
+
+    # ── CHECK 1: Limit per symbol (Stocks) ──
+    from app.core.supabase_client import get_risk_config
+    risk_config = get_risk_config()
+    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+    
+    total_open_symbol = sb.table("stocks_positions").select("id", count='exact').eq("ticker", ticker).eq("status", "open").execute().count
+    
+    if total_open_symbol >= max_per_symbol:
+        log_warning(MODULE, f"🚫 LÍMITE ALCANZADO para {ticker}: {total_open_symbol}/{max_per_symbol} posiciones.")
+        return {
+            "success": False,
+            "reason": "max_positions_per_symbol_reached",
+            "pair": ticker,
+        }
 
     # ── STEP 2: Open new position (only if BUY — for SELL we only close) ──
     if action == "BUY":

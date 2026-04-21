@@ -189,6 +189,14 @@ class ForexExecutionService:
             
             self.log(f'💎 Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
 
+        # Gualdián final: Límite TOTAL por símbolo (Para todas las estrategias)
+        total_symbol = len([p for p in self._open_positions_list if p['symbol'] == symbol])
+        from app.core.supabase_client import get_risk_config
+        max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
+        if total_symbol >= max_per_symbol:
+            self.log(f'🚫 LÍMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
+            return
+
         # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF)
         opposite = 'short' if direction == 'long' else 'long'
         opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'] == opposite]
