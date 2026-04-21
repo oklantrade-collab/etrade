@@ -50,9 +50,18 @@ class ForexExecutionService:
 
     def run_evaluation_cycle(self):
         try:
+            # 1. Recargar posiciones frescas desde DB para evitar discrepancias
+            self._load_open_positions()
             open_count = len(self._open_positions_list)
-            if open_count >= 16:
-                self.log(f'Limite global de posiciones alcanzado ({open_count}/16)')
+
+            # 2. Cargar config de riesgo dinamica
+            from app.core.supabase_client import get_risk_config
+            risk_config = get_risk_config()
+            limit_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+            limit_global = int(risk_config.get('max_total_positions', 16))
+
+            if open_count >= limit_global:
+                self.log(f'Limite global de posiciones alcanzado ({open_count}/{limit_global})')
                 return
 
             pos_count = {}
@@ -64,11 +73,15 @@ class ForexExecutionService:
             snaps_res = self.sb.table('market_snapshot').select('*').in_('symbol', symbols).execute()
             snaps_data = snaps_res.data or []
             
-            self.log(f'Evaluando {len(snaps_data)} símbolos. Total abiertos: {open_count}')
+            summary = ", ".join([f"{s}: {pos_count.get(s,0)}" for s in symbols])
+            self.log(f'Evaluando {len(snaps_data)} simbolos. Total: {open_count} | {summary} (Limite/Simbolo: {limit_per_symbol})')
 
             for snap in snaps_data:
                 symbol = snap['symbol']
-                if pos_count.get(symbol, 0) >= 4:
+                count = pos_count.get(symbol, 0)
+                if count >= limit_per_symbol:
+                    if count > limit_per_symbol:
+                        self.log(f"[EXCESO] Detectado en {symbol}: {count} > {limit_per_symbol}", "WARNING")
                     continue 
                 
                 self._evaluate_symbol(snap)
@@ -150,10 +163,64 @@ class ForexExecutionService:
         return max(triggered, key=lambda x: x['score']) if triggered else None
 
     def _execute_signal(self, symbol, direction, signal, snap):
+        # 1. Reglas Multi-layer (Misma estrategia)
+        same_strat = [p for p in self._open_positions_list if p['symbol'] == symbol and p['rule_code'] == signal['rule_code']]
+        if same_strat:
+            # Regla 1: 1 compra por vela (usamos 15 min como estándar solicitado)
+            last_pos = sorted(same_strat, key=lambda x: x['opened_at'], reverse=True)[0]
+            opened_at_str = str(last_pos['opened_at'])
+            if 'Z' in opened_at_str: opened_at_str = opened_at_str.replace('Z', '+00:00')
+            opened_at = datetime.fromisoformat(opened_at_str)
+            now = datetime.now(timezone.utc)
+            
+            if (now - opened_at).total_seconds() < 900: # 15 minutos
+                 self.log(f'⏸️ Omitiendo {symbol} {signal["rule_code"]}: Ya se abrió en los últimos 15 min.')
+                 return
+            
+            # Regla 2: Mejora de precio
+            price = float(snap.get('price', 0))
+            last_entry = float(last_pos['entry_price'])
+            if direction == 'long' and price >= last_entry:
+                 self.log(f'⏸️ Omitiendo {symbol} {direction.upper()}: Precio {price} >= {last_entry} (No mejora costo)')
+                 return
+            if direction == 'short' and price <= last_entry:
+                 self.log(f'⏸️ Omitiendo {symbol} {direction.upper()}: Precio {price} <= {last_entry} (No mejora costo)')
+                 return
+            
+            self.log(f'💎 Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
+
+        # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF)
+        opposite = 'short' if direction == 'long' else 'long'
+        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'] == opposite]
+        if opp_positions:
+            self.log(f'[HEDGE] Cerrando {len(opp_positions)} posiciones de {opposite.upper()} por reversión a {direction.upper()}')
+            for p in opp_positions:
+                price_data = self.state['prices'].get(symbol, {})
+                price = float(price_data.get('mid', snap.get('price', 0)))
+                pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                pips = (price - p['entry_price'])/pip_size if p['side']=='long' else (p['entry_price'] - price)/pip_size
+                self._close_position(p, price, f'reversal_{direction}', pips)
+
+        # 2. Ejecutar nueva señal
         price = float(snap.get('price', 0))
         sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal['rule_code'])
         lots = self._calculate_lot_size(symbol, sl_pips)
-        self.log(f'[ORDEN] {direction.upper()} {symbol} ({signal["rule_code"]}): lots={lots}')
+
+        # 3. Validación estricta de riesgo (Máximo $10 o 1% del capital)
+        riesgo_limite = FOREX_CONFIG['capital_usd'] * FOREX_CONFIG['risk_per_trade_pct'] / 100
+        pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+        riesgo_real = lots * sl_pips * pip_val
+
+        if riesgo_real > (riesgo_limite * 1.2): # Permitimos un pequeño margen por redondeo a 0.01
+            self.log(
+                f'🚫 ABORTANDO {symbol}: Riesgo proyectado ${riesgo_real:.2f} '
+                f'excede el límite de ${riesgo_limite:.2f} '
+                f'(SL Pips: {sl_pips:.1f}, Lots: {lots})',
+                'WARNING'
+            )
+            return
+
+        self.log(f'[ORDEN] {direction.upper()} {symbol} ({signal["rule_code"]}): lots={lots} risk=${riesgo_real:.2f}')
         if self.mode == 'live': self._execute_live_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
         else: self._execute_paper_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
 

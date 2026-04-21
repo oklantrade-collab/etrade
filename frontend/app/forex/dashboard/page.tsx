@@ -19,6 +19,7 @@ export default function ForexDashboard() {
   const [snapshots, setSnapshots] = useState<any>({})
   const [focusPair, setFocusPair] = useState('EURUSD')
   const [candles, setCandles] = useState<any[]>([])
+  const [trades, setTrades] = useState<any[]>([])
   const [timeframe, setTimeframe] = useState('15m')
   const [connected, setConnected] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -28,7 +29,7 @@ export default function ForexDashboard() {
   useEffect(() => {
     checkConnection()
     const intervalSnap = setInterval(fetchSnapshots, 15000)
-    const intervalCandles = setInterval(() => fetchCandles(focusPair, timeframe), 30000)
+    const intervalCandles = setInterval(() => loadChartData(focusPair, false), 30000)
     const intervalPos = setInterval(fetchPositions, 10000)
     return () => {
         clearInterval(intervalSnap)
@@ -40,12 +41,14 @@ export default function ForexDashboard() {
   const checkConnection = async () => {
     try {
       const res = await fetch('/api/v1/forex/status')
-      const data = await res.json()
-      setConnected(data.connected)
-      if (data.connected) {
-          fetchSnapshots()
-          fetchCandles(focusPair, timeframe)
-          fetchPositions()
+      if (res.ok) {
+        const data = await res.json().catch(() => ({ connected: false }))
+        setConnected(data.connected)
+        if (data.connected) {
+            fetchSnapshots()
+            loadChartData(focusPair, true)
+            fetchPositions()
+        }
       }
     } catch (err) {
       console.error("Connection check failed", err)
@@ -57,30 +60,52 @@ export default function ForexDashboard() {
   const fetchSnapshots = async () => {
     try {
       const res = await fetch('/api/v1/forex/snapshots')
-      const data = await res.json()
-      setSnapshots(data)
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setSnapshots(data)
+      }
     } catch (err) {
       console.error("Fetch snapshots failed", err)
     }
   }
 
-  const fetchCandles = async (sym: string, tf: string) => {
+  const loadChartData = async (pair: string, isInitial: boolean = false) => {
+    if (isInitial) {
+      setCandles([]) // Reset to avoid scale mixup
+      setTrades([])
+    }
     try {
-      const res = await fetch(`/api/v1/forex/candles?symbol=${sym}&timeframe=${tf}`)
-      const data = await res.json()
-      if (data && Array.isArray(data)) setCandles(data)
+      const [cRes, tRes] = await Promise.all([
+        fetch(`/api/v1/forex/candles?symbol=${pair}&timeframe=${timeframe}`),
+        fetch(`/api/v1/market/trade-events/${pair}?days=15`)
+      ])
+      
+      if (cRes.ok) {
+        try {
+          const data = await cRes.json()
+          setCandles(Array.isArray(data) ? data : [])
+        } catch (e) { console.error("Bad candles JSON", e) }
+      }
+      if (tRes.ok) {
+        try {
+          const tData = await tRes.json()
+          setTrades(Array.isArray(tData) ? tData : [])
+        } catch (e) { console.error("Bad trades JSON", e) }
+      }
     } catch (err) {
-      console.error("Fetch candles failed", err)
+      console.error('Error loading chart data:', err)
     }
   }
 
   const fetchPositions = async () => {
     try {
       const res = await fetch('/api/v1/forex/positions')
-      const data = await res.json()
-      setActivePositions(data || [])
-      const currentPos = data.find((p: any) => p.symbol === focusPair)
-      setActivePosition(currentPos || null)
+      if (res.ok) {
+        const data = await res.json().catch(() => [])
+        setActivePositions(data || [])
+        const currentPos = data.find((p: any) => p.symbol === focusPair)
+        setActivePosition(currentPos || null)
+      }
     } catch (err) {
       console.error("Fetch positions failed", err)
     }
@@ -206,9 +231,17 @@ export default function ForexDashboard() {
           </div>
           <div style={{ flex: 1, padding: '10px' }}>
              <TradeMarkerChart
-                symbol={focusPair} timeframe={timeframe} candles={candles} activePosition={activePosition} trades={[]} height={460}
-                basis={snap.basis} upper_1={snap.upper_1} lower_1={snap.lower_1}
-                upper_6={snap.upper_6 || (snap.upper_1 + (snap.upper_1 - snap.basis)*2)}
+                symbol={focusPair} 
+                timeframe={timeframe} 
+                candles={candles} 
+                activePosition={activePosition} 
+                trades={trades} 
+                height={460}
+                basis={snap.basis} 
+                upper_1={snap.upper_1} 
+                lower_1={snap.lower_1}
+                upper_6={snap.upper_6}
+                lower_6={snap.lower_6}
                 precision={PAIR_META[focusPair]?.decimals ?? 5}
                 minMove={1 / Math.pow(10, PAIR_META[focusPair]?.decimals ?? 5)}
               />
@@ -264,6 +297,11 @@ function ForexPairCard({ pair, snap, isFocus, position, onClick }: any) {
 }
 
 function ForexAnalysisPanel({ pair, snap, activePosition }: any) {
+  const meta = PAIR_META[pair] || {}
+  const isBuy = activePosition?.side?.toLowerCase() === 'long' || activePosition?.side?.toLowerCase() === 'buy'
+  const pnl = activePosition ? (activePosition.pnl_usd || activePosition.unrealized_pnl || 0) : 0
+  const pnlColor = pnl >= 0 ? '#00C896' : '#FF4757'
+
   return (
     <div style={{
        background: 'rgba(17, 24, 39, 0.4)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255, 255, 255, 0.04)', borderRadius: '16px', padding: '24px', flex: 1
@@ -273,13 +311,31 @@ function ForexAnalysisPanel({ pair, snap, activePosition }: any) {
           <AnalysisRow label="Sentimiento" value={snap.sar_phase === 'long' ? 'ALCISTA' : 'BAJISTA'} color={snap.sar_phase === 'long' ? '#00C896' : '#FF4757'} />
           <AnalysisRow label="Zona Actual" value={`Fibo ${snap.fibonacci_zone || 0}`} />
           <AnalysisRow label="SAR 15m" value={snap.sar_trend_15m > 0 ? 'LONG' : 'SHORT'} color={snap.sar_trend_15m > 0 ? '#00C896' : '#FF4757'} />
-          <AnalysisRow label="Basis (EMA)" value={snap.basis ? parseFloat(snap.basis).toFixed(5) : '—'} />
+          <AnalysisRow label="Basis (EMA)" value={snap.basis ? parseFloat(snap.basis).toFixed(meta.decimals || 5) : '—'} />
+          
+          {activePosition && (
+             <>
+                <AnalysisRow label="Estrategia" value={activePosition.rule_code || 'Manual'} color="#4FC3F7" />
+                <AnalysisRow label="Live P&L" value={`${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USD`} color={pnlColor} />
+             </>
+          )}
+
           <div style={{ marginTop: '10px', paddingTop: '15px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
              <div style={{ fontSize: '10px', fontWeight: 900, color: '#555', textTransform: 'uppercase', marginBottom: '10px' }}>Estatus de Posición</div>
              {activePosition ? (
-                <div style={{ background: 'rgba(0,200,150,0.1)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(0,200,150,0.2)' }}>
-                   <div style={{ color: '#00C896', fontSize: '11px', fontWeight: 900 }}>COMPRADO: {activePosition.side.toUpperCase()}</div>
-                   <div style={{ color: '#555', fontSize: '10px', marginTop: '4px' }}>Entry: {parseFloat(activePosition.entry_price).toFixed(5)}</div>
+                <div style={{ 
+                    background: isBuy ? 'rgba(0,200,150,0.1)' : 'rgba(255,71,87,0.1)', 
+                    padding: '12px', 
+                    borderRadius: '12px', 
+                    border: `1px solid ${isBuy ? 'rgba(0,200,150,0.2)' : 'rgba(255,71,87,0.2)'}`,
+                    boxShadow: `0 0 10px ${isBuy ? 'rgba(0,200,150,0.05)' : 'rgba(255,71,87,0.05)'}`
+                }}>
+                   <div style={{ color: isBuy ? '#00C896' : '#FF4757', fontSize: '11px', fontWeight: 900 }}>
+                       COMPRADO: {activePosition.side.toUpperCase()}
+                   </div>
+                   <div style={{ color: '#AAA', fontSize: '10px', marginTop: '4px', fontFamily: 'monospace' }}>
+                       Entry: {parseFloat(activePosition.entry_price).toFixed(meta.decimals || 5)}
+                   </div>
                 </div>
              ) : ( <div style={{ fontSize: '12px', color: '#555', fontWeight: 700 }}>SIN POSICIÓN ACTIVA</div> )}
           </div>

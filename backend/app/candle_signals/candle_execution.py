@@ -246,41 +246,60 @@ def execute_crypto_signal(
 
     # Cerrar posiciones: 
     # 1. Forzar cierre de las opuestas (Hedge no permitido)
-    # 2. Cierre opcional por beneficio si son de la misma dirección (Rotación por vela)
-    close_meta = _close_all_positions_crypto(binance_symbol, strategy_code, new_signal_action=action)
-    if close_meta.get("skipped_due_to_invalid_size"):
-        log_warning(
-            MODULE,
-            f"🚫 CANDLE SIGNAL abortado {binance_symbol}: tamaño 0 y sin cantidad en orders — revisar datos.",
-        )
-        return {
-            "success": False,
-            "reason": "invalid_position_size",
-            "pair": binance_symbol,
-        }
-    if close_meta.get("skipped_due_to_loss"):
-        log_info(
-            MODULE,
-            f"🚫 CANDLE SIGNAL omitido {binance_symbol}: posición(es) sin beneficio suficiente "
-            f"(cierre por vela solo con ganancia; pérdidas → SL / sl_prevention).",
-        )
-        return {
-            "success": False,
-            "reason": "candle_signal_requires_profit_exit",
-            "pair": binance_symbol,
-        }
+    # 2. Cierre opcional por beneficio si son de la misma dirección (Rotación por vela) - AHORA MANEJADO PARA MULTI-LAYER
+    
+    # NUEVO: Buscar si ya existe una posición abierta con esta misma estrategia
+    existing_same = sb.table("positions").select("*").eq("status", "open").eq("symbol", binance_symbol).eq("rule_code", strategy_code).execute().data or []
+    
+    if existing_same:
+        # Regla 1: 1 compra por vela y estrategia
+        # Determinamos si la última compra fue en esta misma vela (TF: 4H o 1D en Crypto)
+        last_pos = sorted(existing_same, key=lambda x: x['opened_at'], reverse=True)[0]
+        opened_at = datetime.fromisoformat(last_pos['opened_at'].replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        
+        # Aproximación del open_time de la vela actual
+        # TF de Crypto suele ser '4H' o '1D'.
+        if timeframe == "4H":
+            candle_start = now - timedelta(hours=now.hour % 4, minutes=now.minute, seconds=now.second, microseconds=now.microsecond)
+        else: # 1D
+            candle_start = now - timedelta(hours=now.hour, minutes=now.minute, seconds=now.second, microseconds=now.microsecond)
+            
+        if opened_at >= candle_start:
+            log_info(MODULE, f"⏸️ Omitiendo {binance_symbol} {strategy_code}: Ya se abrió una posición en esta vela ({timeframe}).")
+            return {"success": False, "reason": "one_trade_per_candle", "pair": binance_symbol}
+
+        # Regla 2: Mejora de precio
+        last_entry = float(last_pos.get('entry_price', 0))
+        current_price = float(candle_data.get("close", 0))
+        if action == "BUY" and current_price >= last_entry:
+            log_info(MODULE, f"⏸️ Omitiendo BUY {binance_symbol}: Precio {current_price} no es menor que anterior {last_entry}.")
+            return {"success": False, "reason": "price_improvement_required", "pair": binance_symbol}
+        if action == "SELL" and current_price <= last_entry:
+            log_info(MODULE, f"⏸️ Omitiendo SELL {binance_symbol}: Precio {current_price} no es mayor que anterior {last_entry}.")
+            return {"success": False, "reason": "price_improvement_required", "pair": binance_symbol}
+            
+        log_info(MODULE, f"💎 Agregando CAPA {len(existing_same)+1} para {binance_symbol} strategy {strategy_code}")
+    else:
+        # Si no hay misma estrategia, procedemos con el cierre de las OPUESTAS (o las mismas si fuera otra estrategia y estamos refrescando)
+        close_meta = _close_all_positions_crypto(binance_symbol, strategy_code, new_signal_action=action)
+        if close_meta.get("skipped_due_to_invalid_size"):
+            log_warning(MODULE, f"🚫 CANDLE SIGNAL abortado {binance_symbol}: tamaño 0.")
+            return {"success": False, "reason": "invalid_position_size", "pair": binance_symbol}
+        if close_meta.get("skipped_due_to_loss"):
+            log_info(MODULE, f"🚫 CANDLE SIGNAL omitido {binance_symbol}: posición previa en pérdida.")
+            return {"success": False, "reason": "candle_signal_requires_profit_exit", "pair": binance_symbol}
 
     # ── CHECK 1: Limit per symbol (Compliance with Cant. Operación x Cripto) ──
     from app.core.supabase_client import get_risk_config
     risk_config = get_risk_config()
     max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
     
-    current_open = close_meta.get("remaining_open_count", 0)
+    current_open = len(existing_same)
     if current_open >= max_per_symbol:
         log_warning(
             MODULE,
-            f"🚫 LÍMITE ALCANZADO para {binance_symbol}: {current_open}/{max_per_symbol} posiciones abiertas. "
-            f"No se abrirán más operaciones hasta que se cierren las actuales."
+            f"🚫 LÍMITE ALCANZADO para {binance_symbol}: {current_open}/{max_per_symbol} posiciones abiertas estrategia {strategy_code}."
         )
         return {
             "success": False,
@@ -718,9 +737,48 @@ def execute_forex_signal(
         f"Fib Zone: {fib_zone:+d}"
     )
 
-    # ── STEP 1: Close ALL active positions for this pair ──
-    direction = "long" if action == "BUY" else "short"
-    _close_all_positions_forex(pair, strategy_code, price)
+    # ── STEP 1: Multi-layer vs Reversal ──
+    # Si hay opuestas, cerramos todo (Hedge OFF)
+    opposite_side = "short" if action == "BUY" else "long"
+    existing_opp = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").eq("side", opposite_side).execute().data or []
+    
+    if existing_opp:
+        log_info(MODULE, f"⚠️ REVERSIÓN: Cerrando {len(existing_opp)} posiciones {opposite_side} por señal {action}")
+        _close_all_positions_forex(pair, strategy_code, price)
+    
+    # ── STEP 2: Reglas Multi-layer (Misma estrategia) ──
+    existing_same = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").eq("rule_code", strategy_code).execute().data or []
+    
+    if existing_same:
+        # Regla 1: 1 por vela
+        last_pos = sorted(existing_same, key=lambda x: x['opened_at'], reverse=True)[0]
+        opened_at = datetime.fromisoformat(last_pos['opened_at'].replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        
+        # En Forex, TF suele ser 4H o 1D en candle_worker, pero detectamos 15m/1H en otros
+        # Para Forex general usamos 1H como vela de seguridad si no viene TF
+        tf_h = 4 if timeframe == "4H" else (24 if timeframe == "1D" else 0.25) # 15m = 0.25h
+        candle_start = now - timedelta(hours=now.hour % tf_h if tf_h >= 1 else 0, 
+                                        minutes=now.minute % (tf_h*60) if tf_h < 1 else now.minute,
+                                        seconds=now.second, microseconds=now.microsecond)
+        
+        if opened_at >= candle_start:
+            log_info(MODULE, f"⏸️ Omitiendo Forex {pair} {strategy_code}: Ya se abrió en esta vela.")
+            return {"success": False, "reason": "one_trade_per_candle"}
+
+        # Regla 2: Mejora de precio
+        last_entry = float(last_pos.get('entry_price', 0))
+        if action == "BUY" and price >= last_entry:
+            log_info(MODULE, f"⏸️ Omitiendo Forex BUY {pair}: Precio {price} >= {last_entry}")
+            return {"success": False, "reason": "price_improvement"}
+        if action == "SELL" and price <= last_entry:
+            log_info(MODULE, f"⏸️ Omitiendo Forex SELL {pair}: Precio {price} <= {last_entry}")
+            return {"success": False, "reason": "price_improvement"}
+            
+        log_info(MODULE, f"💎 Agregando capa Forex {len(existing_same)+1} para {pair}")
+    else:
+        # Si no hay estrategia idéntica, podemos cerrar por rotación normal
+        _close_all_positions_forex(pair, strategy_code, price)
     
     # ── CHECK 2: Total Market Risk Limit ──
     from app.strategy.risk_controls import check_total_market_risk
@@ -906,8 +964,35 @@ def execute_stocks_signal(
         f"Fib Zone: {fib_zone:+d}"
     )
 
-    # ── STEP 1: Close ALL active positions for this ticker ──
-    _close_all_stocks_positions(ticker, price, strategy_code)
+    # ── STEP 1: Multi-layer vs Reversal ──
+    # Para Stocks solo tenemos BUY signals (Inversiones Pro / BUY)
+    # Por lo que no hay "opposite" como tal en short, pero cerramos si estamos refrescando.
+    
+    existing_same = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").eq("rule_code", strategy_code).execute().data or []
+    
+    if existing_same:
+        # Regla 1: 1 por vela
+        last_pos = sorted(existing_same, key=lambda x: x['first_buy_at'], reverse=True)[0]
+        opened_at = datetime.fromisoformat(last_pos['first_buy_at'].replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        
+        # TF: 4H o 1D
+        tf_h = 4 if timeframe == "4H" else 24
+        candle_start = now - timedelta(hours=now.hour % tf_h, minutes=now.minute, seconds=now.second, microseconds=now.microsecond)
+
+        if opened_at >= candle_start:
+            log_info(MODULE, f"⏸️ Omitiendo Stock {ticker} {strategy_code}: Ya se abrió en esta vela.")
+            return {"success": False, "reason": "one_trade_per_candle"}
+
+        # Regla 2: Mejora de precio (Solo BUY para stocks)
+        last_entry = float(last_pos.get('avg_price', 0))
+        if action == "BUY" and price >= last_entry:
+            log_info(MODULE, f"⏸️ Omitiendo Stock BUY {ticker}: Precio {price} >= {last_entry}")
+            return {"success": False, "reason": "price_improvement"}
+            
+        log_info(MODULE, f"💎 Agregando capa Stock {len(existing_same)+1} para {ticker}")
+    else:
+        _close_all_stocks_positions(ticker, price, strategy_code)
 
     # ── STEP 2: Open new position (only if BUY — for SELL we only close) ──
     if action == "BUY":
