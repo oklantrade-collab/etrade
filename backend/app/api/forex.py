@@ -1,5 +1,8 @@
+from fastapi import APIRouter, Depends
+import os
 import pandas as pd
 import numpy as np
+from app.core.supabase_client import get_supabase
 
 router = APIRouter()
 
@@ -37,6 +40,46 @@ def calculate_forex_indicators(candles):
         print(f"Error calculating API indicators: {e}")
         return candles
 
+@router.get('/status')
+async def get_forex_status(
+    sb = Depends(get_supabase)
+):
+    """Verificar si Forex está configurado y conectado."""
+    try:
+        has_credentials = all([
+            os.getenv('CTRADER_CLIENT_ID'),
+            os.getenv('CTRADER_CLIENT_SECRET'),
+            os.getenv('CTRADER_ACCOUNT_ID'),
+            os.getenv('CTRADER_ACCESS_TOKEN'),
+        ])
+        config_res = sb.table('trading_config').select('capital_forex_futures, regime_params').eq('id', 1).execute()
+        config = config_res.data[0] if config_res.data else {}
+        has_capital = float(config.get('capital_forex_futures', 0) or 0) > 0
+        connected = has_credentials and has_capital
+        return {
+            'connected': connected,
+            'has_credentials': has_credentials,
+            'has_capital': has_capital,
+            'environment': os.getenv('CTRADER_ENV', 'demo'),
+            'pairs_configured': (config.get('regime_params', {}) or {}).get('forex_assets', ['EURUSD','GBPUSD','USDJPY','XAUUSD']) if connected else [],
+        }
+    except Exception as e:
+        return {'connected': False, 'error': str(e)}
+
+@router.get('/snapshots')
+async def get_forex_snapshots(
+    sb = Depends(get_supabase)
+):
+    """Obtener snapshots de pares Forex."""
+    try:
+        config_res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
+        config = config_res.data[0] if config_res.data else {}
+        pairs = (config.get('regime_params', {}) or {}).get('forex_assets', ['EURUSD','GBPUSD','USDJPY','XAUUSD'])
+        res = sb.table('market_snapshot').select('*').in_('symbol', pairs).execute()
+        return { row['symbol']: row for row in (res.data or []) }
+    except Exception as e:
+        return {}
+
 @router.get('/candles')
 async def get_forex_candles(
     symbol: str = 'EURUSD',
@@ -53,12 +96,8 @@ async def get_forex_candles(
             .order('open_time', desc=True)\
             .limit(300)\
             .execute()
-        
-        # Revertir para que estén en orden ascendente (cronológico)
         candles = res.data or []
         candles.reverse()
-        
-        # Inyectar indicadores calculados al vuelo para evitar huecos en el frontend
         full_candles = calculate_forex_indicators(candles)
         return full_candles
     except Exception as e:
@@ -78,5 +117,5 @@ async def get_forex_positions(
             .order('opened_at', desc=True)\
             .execute()
         return res.data or []
-    except:
+    except Exception as e:
         return []
