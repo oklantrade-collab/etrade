@@ -36,14 +36,11 @@ class DecisionEngine:
         self.fundamental = FundamentalAnalyzer()
         self.context = ContextAnalyzer()
         
-        # Initialize QWEN (Primary) via OpenAI compatibility
-        self.qwen_client = None
-        if settings.qwen_api_key:
+        # Initialize OpenAI (Primary)
+        self.openai_client = None
+        if settings.openai_api_key:
             try:
-                self.qwen_client = OpenAI(
-                    api_key=settings.qwen_api_key,
-                    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-                )
+                self.openai_client = OpenAI(api_key=settings.openai_api_key)
             except: pass
 
         # Initialize Anthropic
@@ -131,34 +128,34 @@ class DecisionEngine:
             is_undervalued = (current_price < intrinsic_price) and (intrinsic_price > 0)
             is_deep_value = current_price <= (intrinsic_price * 0.90)
 
-            # 3. Layer 5: Parallel Core AI Analysis
+            # 3. Layer 5: Parallel Core AI Analysis (OpenAI Primary + Fallbacks)
             results = await asyncio.gather(
-                self._try_qwen(ticker, tech_data, funda_data, context_data),
+                self._try_openai(ticker, tech_data, funda_data, context_data),
                 self._try_gemini(ticker, tech_data, funda_data, context_data),
                 self._try_claude(ticker, tech_data, funda_data, context_data),
                 return_exceptions=True
             )
             
-            qwen_res = results[0] if not isinstance(results[0], Exception) else None
+            openai_res = results[0] if not isinstance(results[0], Exception) else None
             gemini_res = results[1] if not isinstance(results[1], Exception) else None
             claude_res = results[2] if not isinstance(results[2], Exception) else None
             
             scores_ia = []
             rationales = []
-            q_score = float(qwen_res.get("financial_score", 0)) if qwen_res else 0
+            o_score = float(openai_res.get("financial_score", 0)) if openai_res else 0
             g_score = float(gemini_res.get("financial_score", 0)) if gemini_res else 0
             c_score = float(claude_res.get("financial_score", 0)) if claude_res else 0
             
             # Normalización
-            if q_score > 11: q_score /= 10
+            if o_score > 11: o_score /= 10
             if g_score > 11: g_score /= 10
             if c_score > 11: c_score /= 10
             
-            q_score = max(0.0, min(10.0, q_score))
+            o_score = max(0.0, min(10.0, o_score))
             g_score = max(0.0, min(10.0, g_score))
             c_score = max(0.0, min(10.0, c_score))
             
-            if q_score > 0: scores_ia.append(q_score)
+            if o_score > 0: scores_ia.append(o_score)
             if g_score > 0: scores_ia.append(g_score)
             if c_score > 0: scores_ia.append(c_score)
 
@@ -191,15 +188,15 @@ class DecisionEngine:
                 "meta_score": round(final_meta, 0),
                 "decision": final_decision,
                 "ai_rationale": " | ".join(rationales),
-                "qwen_score": q_score,
+                "qwen_score": o_score, # Mantenemos key para compatibilidad frontend pero datos son de OpenAI
                 "gemini_score": g_score,
-                "qwen_summary": qwen_res.get("analysis_summary", "") if qwen_res else "",
+                "qwen_summary": openai_res.get("analysis_summary", "") if openai_res else "",
                 "gemini_summary": gemini_res.get("analysis_summary", "") if gemini_res else "",
                 "claude_summary": claude_res.get("analysis_summary", "") if claude_res else "",
                 "intrinsic_value": round(intrinsic_price, 2),
                 "is_undervalued": is_undervalued,
                 "undervaluation": round(((intrinsic_price - current_price) / intrinsic_price * 100), 1) if is_undervalued and intrinsic_price > 0 else 0,
-                "quadrant": qwen_res.get("quadrant") if qwen_res else (claude_res.get("quadrant") if claude_res else "C"),
+                "quadrant": openai_res.get("quadrant") if openai_res else (claude_res.get("quadrant") if claude_res else "C"),
                 "fundamental_universe": fundamental_universe
             }
             
@@ -215,17 +212,17 @@ class DecisionEngine:
             print(traceback.format_exc())
             return None
 
-    async def _try_qwen(self, ticker, tech, funda, ctx):
-        if not self.qwen_client: return None
+    async def _try_openai(self, ticker, tech, funda, ctx):
+        if not self.openai_client: return None
         try:
             prompt = self._build_prompt(ticker, tech, funda, ctx)
-            response = self.qwen_client.chat.completions.create(
-                model="qwen-plus",
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini", # Usamos mini para balance velocidad/precisión
                 messages=[{"role": "user", "content": prompt}]
             )
             return self._parse_json(response.choices[0].message.content)
         except Exception as e:
-            log_warning(MODULE, f"QWEN error: {e}")
+            log_warning(MODULE, f"OpenAI error: {e}")
             return None
 
     async def _try_claude(self, ticker, tech, funda, ctx):

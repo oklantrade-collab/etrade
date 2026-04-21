@@ -29,6 +29,9 @@ class Settings(BaseModel):
     # Qwen (Alibaba) 
     qwen_api_key: str = os.getenv("QWEN_API_KEY", "")
 
+    # OpenAI (ChatGPT)
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+
     # Alpha Vantage
     alphavantage_api_key: str = os.getenv("ALPHAVANTAGE_API_KEY", "")
 
