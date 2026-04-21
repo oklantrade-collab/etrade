@@ -443,44 +443,55 @@ def check_total_market_risk(
     sb_client=None
 ) -> dict:
     """
-    Check if the total investment in a specific market exceeds the allowed limit.
+    Verifica si el riesgo total acumulado (suma de Stop Losses) excede el límite permitido (ej: 30%).
     """
     if sb_client is None:
         sb_client = get_supabase()
     
-    # 1. Get limit from trading_config
     try:
-        cfg_res = sb_client.table('trading_config').select('regime_params').eq('id', 1).single().execute()
-        params = cfg_res.data.get('regime_params', {})
+        from app.core.supabase_client import get_risk_config
+        config = get_risk_config()
         
-        limit_key = f"max_total_risk_{market}_pct"
-        limit_pct = float(params.get(limit_key, 30)) / 100.0
+        limit_pct = float(config.get(f'forex_max_total_risk_pct' if market=='forex' else 'max_total_risk_crypto_pct', 30.0)) / 100.0
+        max_risk_allowed_usd = capital_total * limit_pct
         
-        max_allowed_usd = capital_total * limit_pct
-        
-        # 2. Calculate current investment
-        current_invested_usd = 0.0
+        current_risk_usd = 0.0
         if market == 'crypto':
-            # Crypto positions (Binance) - usually tracked in positions table
-            res = sb_client.table('paper_trades').select('entry_price, quantity').is_('closed_at', 'null').execute()
+            # Riesgo en Cripto (paper_trades o positions)
+            table = "positions" # Usamos la tabla positions que es el estandar actual
+            res = sb_client.table(table).select('symbol, side, entry_price, sl_price, size').eq('status', 'open').execute()
             for p in (res.data or []):
-                current_invested_usd += float(p.get('entry_price', 0)) * float(p.get('quantity', 0))
+                entry = float(p.get('entry_price', 0))
+                sl = float(p.get('sl_price', entry * 0.95)) # Fallback 5%
+                size = abs(float(p.get('size', 0)))
+                current_risk_usd += abs(entry - sl) * size
         else:
-            # Forex positions
-            res = sb_client.table('forex_positions').select('lots, entry_price').eq('status', 'open').execute()
-            # Approximation: Lots * 100,000 * Price (for currencies) or Lots * 100 * Price (for Gold)
+            # Riesgo en Forex
+            res = sb_client.table('forex_positions').select('symbol, entry_price, sl_price, lots').eq('status', 'open').execute()
             for p in (res.data or []):
-                mul = 100.0 if "XAU" in p.get('symbol', '').upper() else 100000.0
-                current_invested_usd += float(p.get('lots', 0)) * mul * float(p.get('entry_price', 0))
+                symbol = p.get('symbol', '')
+                entry = float(p.get('entry_price', 0))
+                sl = float(p.get('sl_price', entry))
+                lots = abs(float(p.get('lots', 0)))
+                
+                # Pip Calculation
+                is_xau = "XAU" in symbol.upper()
+                is_jpy = "JPY" in symbol.upper()
+                pip_size = 0.01 if (is_xau or is_jpy) else 0.0001
+                pip_val = 1.0 if is_xau else (6.5 if is_jpy else 10.0)
+                
+                pips_risk = abs(entry - sl) / pip_size
+                current_risk_usd += pips_risk * pip_val * lots
 
-        passed = current_invested_usd < max_allowed_usd
+        passed = current_risk_usd < max_risk_allowed_usd
         
         return {
             "passed": passed,
-            "current_usd": round(current_invested_usd, 2),
-            "limit_usd": round(max_allowed_usd, 2),
-            "reason": None if passed else f"Límite {market.upper()} alcanzado (${current_invested_usd:.0f}/${max_allowed_usd:.0f})"
+            "current_usd": round(current_risk_usd, 2),
+            "limit_usd": round(max_risk_allowed_usd, 2),
+            "reason": None if passed else f"Límite Riesgo {market.upper()} alcanzado (${current_risk_usd:.1f}/${max_risk_allowed_usd:.1f})"
         }
     except Exception as e:
-        log_warning("RISK", f"Error checking total risk for {market}: {e}")
+        from app.core.logger import log_warning
+        log_warning("RISK", f"Error check total risk {market}: {e}")
         return {"passed": True, "current_usd": 0, "limit_usd": 0}

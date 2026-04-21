@@ -72,14 +72,42 @@ export default function ForexPositions() {
 
   if (!connected) return <ForexWelcomeScreen />
 
+  // Función auxiliar para calcular Pips y PnL USD
+  const calculatePnL = (pos: any, currentPrice: number) => {
+    if (!currentPrice || currentPrice <= 0) return { pips: 0, usd: 0 }
+    
+    const isLong = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy'
+    const isJPY = pos.symbol.includes('JPY')
+    const isXAU = pos.symbol.includes('XAU')
+    
+    // Tamaño del pip
+    const pipSize = (isJPY || isXAU) ? 0.01 : 0.0001
+    
+    // Cálculo de pips
+    const pips = isLong ? (currentPrice - pos.entry_price) / pipSize : (pos.entry_price - currentPrice) / pipSize
+    
+    // Valor del pip (Estándar para 0.01 lotes)
+    // EURUSD: 0.10 USD | USDJPY: ~0.06 USD | XAUUSD: 1 pip (0.01) = 0.01 USD (si 0.01 lotes = 1 onza)
+    let pipValue = 10.0 // Default 1.0 lote = $10/pip
+    if (isXAU) pipValue = 1.0   // 1.0 lote = $100/pip (pero pips son 0.01, así que $1 por $1 de movimiento)
+    if (isJPY) pipValue = 6.5   // Ajuste para Yen
+    
+    const usd = pips * pipValue * Math.abs(pos.lots)
+    return { pips, usd }
+  }
+
+  const totalUnrealized = positions.reduce((acc, p) => {
+    const snap = snapshots[p.symbol] || {}
+    const cur = parseFloat(snap.price || 0)
+    return acc + calculatePnL(p, cur).usd
+  }, 0)
+
   return (
     <div className="min-h-screen bg-[#020208] text-slate-200 pb-40 relative selection:bg-blue-500/30">
-      {/* GLOW DE FONDO */}
       <div className="absolute top-0 left-0 w-full h-[500px] bg-gradient-to-b from-blue-600/10 to-transparent pointer-events-none" />
       
       <div className="max-w-7xl mx-auto px-6 pt-12 space-y-12 relative z-10">
         
-        {/* HEADER SECTION */}
         <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8">
            <div className="space-y-4">
               <div className="flex items-center gap-3">
@@ -91,7 +119,6 @@ export default function ForexPositions() {
            </div>
         </div>
 
-        {/* STATS CARDS like Crypto */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
             <div className="glass-card !p-6 border-white/5 shadow-xl">
                  <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-1">Active Risk</div>
@@ -100,47 +127,14 @@ export default function ForexPositions() {
             </div>
             <div className="glass-card !p-6 border-white/5 shadow-xl">
                  <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-1">Live PnL</div>
-                 <div className={`text-3xl font-black italic mb-1 ${
-                    positions.reduce((acc, p) => {
-                        const snap = snapshots[p.symbol] || {}
-                        const cur = parseFloat(snap.price || 0)
-                        if (cur <= 0) return acc
-                        const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
-                        const pipSize = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 0.01 : 0.0001
-                        const pipVal = p.symbol.includes('JPY') || p.symbol.includes('XAU') ? 1.0 : 10.0
-                        const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
-                        // Usar valor absoluto de lots para PnL, ya que pips ya considera la dirección
-                        return acc + (pips * pipVal * Math.abs(p.lots))
-                    }, 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                 }`}>
-                    {positions.reduce((acc, p) => {
-                        const snap = snapshots[p.symbol] || {}
-                        const cur = parseFloat(snap.price || 0)
-                        if (cur <= 0) return acc
-                        const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
-                        const pipSize = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 0.01 : 0.0001
-                        const pipVal = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 1.0 : 10.0
-                        const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
-                        return acc + (pips * pipVal * p.lots)
-                    }, 0) >= 0 ? '+' : '-'}${Math.abs(positions.reduce((acc, p) => {
-                        const snap = snapshots[p.symbol] || {}
-                        const cur = parseFloat(snap.price || 0)
-                        if (cur <= 0) return acc
-                        const isLong = p.side.toLowerCase() === 'long' || p.side.toLowerCase() === 'buy'
-                        const pipSize = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 0.01 : 0.0001
-                        const pipVal = (p.symbol.includes('JPY') || p.symbol.includes('XAU')) ? 1.0 : 10.0
-                        const pips = isLong ? (cur - p.entry_price) / pipSize : (p.entry_price - cur) / pipSize
-                        return acc + (pips * pipVal * Math.abs(p.lots))
-                    }, 0)).toFixed(2)}
+                 <div className={`text-3xl font-black italic mb-1 ${totalUnrealized >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {totalUnrealized >= 0 ? '+' : '-'}${Math.abs(totalUnrealized).toFixed(2)}
                  </div>
                  <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
             </div>
         </div>
 
-        {/* TABLE SECTION */}
         <div className="glass-card !p-0 overflow-hidden border-white/10 shadow-3xl bg-white/[0.01] backdrop-blur-3xl rounded-[32px]">
-           
-           {/* TABS */}
            <div className="flex border-b border-white/5 bg-white/[0.02]">
               <button 
                 onClick={() => setActiveTab('open')}
@@ -169,7 +163,7 @@ export default function ForexPositions() {
                         <th className="py-8">ENTRADA</th>
                         <th className="py-8">ACTUAL</th>
                         <th className="py-8">SL / TP</th>
-                        <th className="py-8">PNL (PIPS)</th>
+                        <th className="py-8">RESULTADO</th>
                         <th className="py-8 text-right px-10">ESTRATEGIA</th>
                      </tr>
                   </thead>
@@ -178,11 +172,8 @@ export default function ForexPositions() {
                        positions.map((pos) => {
                          const snap = snapshots[pos.symbol] || {}
                          const curPrice = parseFloat(snap.price || 0)
+                         const pnl = calculatePnL(pos, curPrice)
                          const isLong = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy'
-                         
-                         // Calculo simple de pips
-                         const pipSize = pos.symbol.includes('JPY') ? 0.01 : 0.0001
-                         const pips = curPrice > 0 ? (isLong ? (curPrice - pos.entry_price) / pipSize : (pos.entry_price - curPrice) / pipSize) : 0
                          
                          return (
                            <tr key={pos.id} className="hover:bg-white/[0.03] transition-all group">
@@ -207,26 +198,30 @@ export default function ForexPositions() {
                                  <span className="text-[0.5rem] font-black text-slate-700 ml-1">LOTS</span>
                                </td>
                               <td className="py-8 font-mono text-[0.8rem] text-slate-400">
-                                 {pos.entry_price.toFixed(pos.symbol.includes('JPY') ? 3 : 5)}
+                                 {pos.entry_price.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5)}
                               </td>
                               <td className="py-8 font-mono text-[0.8rem] text-white font-black animate-pulse">
-                                 {curPrice > 0 ? curPrice.toFixed(pos.symbol.includes('JPY') ? 3 : 5) : '---'}
+                                 {curPrice > 0 ? curPrice.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5) : '---'}
                               </td>
                               <td className="py-8">
                                  <div className="space-y-1">
                                     <div className="text-[0.55rem] font-black text-rose-500/50 uppercase flex items-center gap-2">
-                                       <span className="w-1.5 h-1.5 rounded-full bg-rose-500/30" /> SL: {pos.sl_price?.toFixed(pos.symbol.includes('JPY') ? 3 : 5) || '---'}
+                                       <span className="w-1.5 h-1.5 rounded-full bg-rose-500/30" /> SL: {pos.sl_price?.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5) || '---'}
                                     </div>
                                     <div className="text-[0.55rem] font-black text-emerald-500/50 uppercase flex items-center gap-2">
-                                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/30" /> TP: {pos.tp_price?.toFixed(pos.symbol.includes('JPY') ? 3 : 5) || '---'}
+                                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/30" /> TP: {pos.tp_price?.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5) || '---'}
                                     </div>
                                  </div>
                               </td>
                               <td className="py-8 font-mono font-black italic">
-                                 <span className={`text-sm ${pips >= 0 ? 'text-emerald-400 shadow-emerald-500/50' : 'text-rose-400'}`}>
-                                    {pips >= 0 ? '+' : ''}{pips.toFixed(1)}
-                                    <span className="text-[0.6rem] ml-1 opacity-50">PIPS</span>
-                                 </span>
+                                 <div className="flex flex-col">
+                                    <span className={`text-sm ${pnl.usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                       {pnl.usd >= 0 ? '+' : ''}${pnl.usd.toFixed(2)}
+                                    </span>
+                                    <span className={`text-[0.55rem] opacity-50 ${pnl.pips >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                       {pnl.pips >= 0 ? '+' : ''}{pnl.pips.toFixed(1)} PIPS
+                                    </span>
+                                 </div>
                               </td>
                               <td className="py-8 text-right px-10">
                                  <span className="bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em] shadow-[0_0_15px_rgba(99,102,241,0.1)]">
@@ -257,7 +252,6 @@ export default function ForexPositions() {
                        <th className="py-8">LOTAJE</th>
                        <th className="py-8">ENTRADA</th>
                        <th className="py-8">CIERRE</th>
-                       <th className="py-8">PNL (PIPS)</th>
                        <th className="py-8">RESULTADO</th>
                        <th className="py-8 text-right px-10">ESTRATEGIA</th>
                     </tr>
@@ -296,10 +290,10 @@ export default function ForexPositions() {
                                 </span>
                              </td>
                              <td className="py-8 font-mono text-[0.8rem] text-slate-500">
-                                {pos.entry_price.toFixed(pos.symbol.includes('JPY') ? 3 : 5)}
+                                {pos.entry_price.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5)}
                              </td>
                              <td className="py-8 font-mono text-[0.8rem] text-slate-300 font-bold">
-                                {exitPrice.toFixed(pos.symbol.includes('JPY') ? 3 : 5)}
+                                {exitPrice.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5)}
                              </td>
                              <td className="py-8 font-mono font-black italic">
                                 <div className="flex flex-col">
@@ -310,11 +304,6 @@ export default function ForexPositions() {
                                       {isWin ? '+' : ''}{pips.toFixed(1)} PIPS
                                    </span>
                                 </div>
-                             </td>
-                             <td className="py-8">
-                                <span className={`text-[0.55rem] font-black px-3 py-1 rounded-full uppercase tracking-widest ${isWin ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]' : 'bg-rose-500/10 text-rose-500 border border-rose-500/20 shadow-[0_0_10px_rgba(244,63,94,0.1)]'}`}>
-                                   {pos.close_reason ? pos.close_reason.replace('_', ' ') : (isWin ? 'PROFIT' : 'LOSS')}
-                                </span>
                              </td>
                              <td className="py-8 text-right px-10">
                                 <span className="bg-slate-500/10 text-slate-400 border border-white/5 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em]">

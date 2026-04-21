@@ -255,12 +255,25 @@ class StandaloneForexWorker:
         self.client.send(req)
 
     def warmup_all(self):
-        self.log("Preparando datos históricos (15m, 1h, 4h, 1d)...")
-        delay = 0
+        """Carga histórica inicial lenta para evitar saturar la base de datos."""
+        self.log("Preparando datos históricos (Lazy Warmup)...")
+        import time
+        # Marcamos que estamos en fase de arranque para NO guardar historial pesado en DB
+        STATE['is_warming_up'] = True
+        
         for sym in FOREX_SYMBOLS:
-            for tf in ['15m', '1h', '4h', '1d']: 
-                reactor.callLater(delay, self.request_bars, sym, tf, 500)
-                delay += 3.0 # Aumentado de 1.5 a 3.0 para evitar timeouts de cTrader
+            self.log(f"-> Cargando {sym}...")
+            self.request_bars(sym, '15m', 300) # Reducido de 500 a 300
+            time.sleep(3.0) 
+            self.request_bars(sym, '1h', 100)
+            time.sleep(3.0)
+            self.request_bars(sym, '4h', 100)
+            time.sleep(3.0)
+            self.request_bars(sym, '1d', 100)
+            time.sleep(5.0) 
+            
+        self.log("Warmup inicial completado en memoria. El guardado en DB se activará en el siguiente ciclo.")
+        STATE['is_warming_up'] = False
 
     def request_bars(self, symbol, tf, limit=500):
         sid = STATE['symbol_ids'].get(symbol); p = TF_MAP.get(tf)
@@ -311,16 +324,23 @@ class StandaloneForexWorker:
             STATE['candles'][f"{name}_{tf}"] = bars
             threads.deferToThread(self.process_and_save, name, tf, bars)
 
-    def safe_db_execute(self, query):
-        """Ejecutar comando de base de datos con reintentos progresivos"""
-        for i in range(3):
+    def safe_db_execute(self, query, retries=3):
+        """Ejecuta una consulta a Supabase con reintentos para manejar inestabilidad de red."""
+        for i in range(retries):
             try:
                 return query.execute()
             except Exception as e:
-                if i == 2: raise e
-                wait_time = (i + 1) * 5 # 5s, 10s...
-                self.log(f"Reintentando DB ({i+1}/3) en {wait_time}s por error: {e}", "WARNING")
-                time.sleep(wait_time)
+                err_str = str(e)
+                # Si es un error de Gateway o Schema Cache, esperamos más tiempo
+                wait_time = 5 * (i + 1)
+                if "502" in err_str or "503" in err_str or "504" in err_str or "PGRST002" in err_str:
+                    wait_time = 10 * (i + 1)
+                
+                self.log(f"Reintentando DB ({i+1}/{retries}) en {wait_time}s por error: {e}", "WARNING")
+                if i < retries - 1:
+                    time.sleep(wait_time)
+                else:
+                    raise e
         return None
 
     def process_and_save(self, sym, tf, bars):
@@ -333,6 +353,11 @@ class StandaloneForexWorker:
             # Calcular todos los indicadores (MACD 4C, Pinescript, Bandas, SAR)
             df = calculate_all_indicators(df_raw, {})
             
+            # NUEVO: Lazy Warmup. Si estamos arrancando, no guardamos el historial pesado en DB
+            if STATE.get('is_warming_up', False) and len(df) > 10:
+                # self.log(f"   [Lazy Skip DB] {sym} {tf} ({len(df)} velas)")
+                return
+
             rows = []
             for i, row in df.tail(300).iterrows():
                 rows.append({
@@ -451,8 +476,8 @@ class StandaloneForexWorker:
                     fib_bands[f'lower_{i}'] = float(ema20 - (atr * m))
 
             # Calculate SAR from 4h data if available
-            sar_15m = float(last['sar'])
-            sar_4h = sar_15m  # Default to 15m SAR
+            sar_15m = float(last.get('sar') or 0)
+            sar_4h = sar_15m  # Safe fallback
             sar_trend_4h = 0
             key_4h = f"{symbol}_4h"
             data_4h = STATE['candles'].get(key_4h, [])

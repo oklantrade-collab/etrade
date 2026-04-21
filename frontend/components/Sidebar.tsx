@@ -40,12 +40,12 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
     {
       title: 'FOREX',
       items: [
-        { href: '/forex/dashboard', icon: '📊', label: 'Command Center', disabled: !forexConnected },
-        { href: '/forex/strategies', icon: '🧠', label: 'Strategies', disabled: !forexConnected },
-        { href: '/forex/market', icon: '📈', label: 'Market', disabled: !forexConnected },
-        { href: '/forex/signals', icon: '⚡', label: 'Signals', disabled: !forexConnected },
-        { href: '/forex/positions', icon: '📋', label: 'Positions', disabled: !forexConnected },
-        { href: '/forex/orders', icon: '📝', label: 'Orders', disabled: !forexConnected },
+        { href: '/forex/dashboard', icon: '📊', label: 'Command Center' },
+        { href: '/forex/strategies', icon: '🧠', label: 'Strategies' },
+        { href: '/forex/market', icon: '📈', label: 'Market' },
+        { href: '/forex/signals', icon: '⚡', label: 'Signals' },
+        { href: '/forex/positions', icon: '📋', label: 'Positions' },
+        { href: '/forex/orders', icon: '📝', label: 'Orders' },
       ],
     },
     {

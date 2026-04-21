@@ -15,18 +15,25 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 from app.strategy.proactive_exit import evaluate_proactive_exit
 
 # ── Configuración ────────────────────────────────
-FOREX_CONFIG = {
-    'capital_usd':        float(os.getenv('FOREX_CAPITAL', 1000)),
-    'risk_per_trade_pct': float(os.getenv('FOREX_RISK_PCT', 1.0)),
-    'max_open_positions_per_symbol': 4,
-    'mode':               os.getenv('FOREX_MODE', 'paper'),
-}
+def get_forex_config():
+    """Obtiene la configuración de riesgo de Forex desde Supabase"""
+    try:
+        from app.core.supabase_client import get_risk_config
+        config = get_risk_config()
+        return {
+            'capital_usd': float(config.get('forex_capital', 1000.0)),
+            'risk_per_trade_pct': float(config.get('forex_risk_per_trade_pct', 2.0)),
+            'max_total_risk_pct': float(config.get('forex_max_total_risk_pct', 30.0)),
+            'leverage': int(config.get('forex_leverage', 500))
+        }
+    except:
+        return {'capital_usd': 1000.0, 'risk_per_trade_pct': 2.0, 'max_total_risk_pct': 30.0, 'leverage': 500}
 
 PIP_CONFIG = {
     'EURUSD': {'pip': 0.0001, 'pip_val_std': 10.0},
     'GBPUSD': {'pip': 0.0001, 'pip_val_std': 10.0},
-    'USDJPY': {'pip': 0.01,   'pip_val_std': 10.0},
-    'XAUUSD': {'pip': 0.01,   'pip_val_std': 1.0 },
+    'USDJPY': {'pip': 0.01,   'pip_val_std': 6.5},
+    'XAUUSD': {'pip': 0.01,   'pip_val_std': 1.0}, # 1 pip (0.01) = $0.01 USD para 0.01 lotes. 1 lote = $100/punto.
 }
 
 class ForexExecutionService:
@@ -40,13 +47,21 @@ class ForexExecutionService:
         self._open_positions_list = []
         self._load_open_positions()
 
-    def _load_open_positions(self):
-        try:
-            res = self.sb.table('forex_positions').select('*').eq('status', 'open').execute()
-            self._open_positions_list = res.data or []
-            self.log(f'Posiciones abiertas cargadas: {len(self._open_positions_list)}')
-        except Exception as e:
-            self.log(f'Error cargando posiciones: {e}', 'ERROR')
+    def _load_open_positions(self, retries=3):
+        for i in range(retries):
+            try:
+                res = self.sb.table('forex_positions').select('*').eq('status', 'open').execute()
+                self._open_positions_list = res.data or []
+                self.log(f'Posiciones abiertas cargadas: {len(self._open_positions_list)}')
+                return
+            except Exception as e:
+                self.log(f'[WARNING] Reintentando DB ({i+1}/{retries}) en 5s por error: {e}', 'WARNING')
+                if i < retries - 1:
+                    import time
+                    time.sleep(5)
+                else:
+                    self.log(f'[ERROR] Error crítico cargando posiciones tras {retries} intentos: {e}', 'ERROR')
+                    self._open_positions_list = []
 
     def run_evaluation_cycle(self):
         try:
@@ -221,12 +236,21 @@ class ForexExecutionService:
         sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal['rule_code'])
         lots = self._calculate_lot_size(symbol, sl_pips)
 
-        # 3. Validación estricta de riesgo (Máximo $10 o 1% del capital)
-        riesgo_limite = FOREX_CONFIG['capital_usd'] * FOREX_CONFIG['risk_per_trade_pct'] / 100
+        # 3. Validación estricta de riesgo (Máximo $20 o X% del capital)
+        f_config = get_forex_config()
+        riesgo_limite = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
         pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
         riesgo_real = lots * sl_pips * pip_val
 
-        if riesgo_real > (riesgo_limite * 1.2): # Permitimos un pequeño margen por redondeo a 0.01
+        # Verificar Riesgo Total Acumulado (Máximo 30%)
+        total_risk_usd = sum([abs(p['lots']) * abs(p['entry_price'] - (p['sl_price'] or p['entry_price'])) / PIP_CONFIG.get(p['symbol'],{}).get('pip',1.0) * PIP_CONFIG.get(p['symbol'],{}).get('pip_val_std',10.0) for p in self._open_positions_list])
+        max_accumulated = f_config['capital_usd'] * f_config['max_total_risk_pct'] / 100
+        
+        if (total_risk_usd + riesgo_real) > max_accumulated:
+            self.log(f'🚫 RIESGO TOTAL EXCEDIDO (${total_risk_usd:.2f} + ${riesgo_real:.2f} > ${max_accumulated:.2f})', 'WARNING')
+            return
+
+        if riesgo_real > (riesgo_limite * 1.5): # Margen de holgura por el mínimo de 0.01 lotes
             self.log(
                 f'🚫 ABORTANDO {symbol}: Riesgo proyectado ${riesgo_real:.2f} '
                 f'excede el límite de ${riesgo_limite:.2f} '
@@ -240,7 +264,8 @@ class ForexExecutionService:
         else: self._execute_paper_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
 
     def _calculate_lot_size(self, symbol, sl_pips):
-        riesgo = FOREX_CONFIG['capital_usd'] * FOREX_CONFIG['risk_per_trade_pct'] / 100
+        f_config = get_forex_config()
+        riesgo = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
         pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
         lots = round(riesgo / (sl_pips * pip_val), 2) if sl_pips > 0 else 0.01
         return min(max(lots, 0.01), 1.0)
@@ -333,9 +358,9 @@ class ForexExecutionService:
         if price <= 0:
             return False
 
-        # Obtener velas 4H del STATE del worker
+        # Obtener velas 4H del STATE
         key_4h = f'{symbol}_4h'
-        bars_4h = self.worker._STATE['candles'].get(key_4h, [])
+        bars_4h = self.state['candles'].get(key_4h, [])
 
         if len(bars_4h) < 3:
             return False
@@ -411,21 +436,32 @@ class ForexExecutionService:
         try:
             symbol = pos['symbol']
             
-            # Cancelar todos los SL del exchange
-            from app.strategy.dynamic_sl_manager import cancel_all_sl_orders
-            import asyncio
+            # Cancelar todos los SL del exchange (Sincrónico)
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(cancel_all_sl_orders(symbol, pos, self.sb, reason))
-                else:
-                    asyncio.run(cancel_all_sl_orders(symbol, pos, self.sb, reason))
+                # Obtenemos las órdenes SL activas para esta posición
+                sl_res = self.sb.table('sl_orders').select('*').eq('position_id', pos['id']).eq('status', 'active').execute()
+                for sl_order in (sl_res.data or []):
+                    self.sb.table('sl_orders').update({
+                        'status': 'cancelled',
+                        'cancel_reason': reason,
+                        'cancelled_at': datetime.now(timezone.utc).isoformat()
+                    }).eq('id', sl_order['id']).execute()
             except Exception as sl_e:
                 self.log(f'Error cancelando SL: {sl_e}', 'ERROR')
 
             # Usar valor absoluto de lots para el cálculo de PnL ya que pips_pnl ya considera la dirección
-            pnl_usd = pips_pnl * PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0) * abs(float(pos['lots']))
-            self.sb.table('forex_positions').update({'status': 'closed', 'current_price': close_price, 'close_reason': reason, 'pnl_usd': round(pnl_usd, 2), 'pnl_pips': round(pips_pnl, 1), 'closed_at': datetime.now(timezone.utc).isoformat()}).eq('id', pos['id']).execute()
+            pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+            pnl_usd = pips_pnl * pip_val * abs(float(pos['lots']))
+            
+            self.sb.table('forex_positions').update({
+                'status': 'closed', 
+                'current_price': close_price, 
+                'close_reason': reason, 
+                'pnl_usd': round(pnl_usd, 2), 
+                'pnl_pips': round(pips_pnl, 1), 
+                'closed_at': datetime.now(timezone.utc).isoformat()
+            }).eq('id', pos['id']).execute()
+            
             self._open_positions_list = [p for p in self._open_positions_list if p['id'] != pos['id']]
             self.log(f'Cerrada {symbol}: {reason} | PnL: {pips_pnl:.1f} pips | USD: {pnl_usd:.2f}')
         except Exception as e: self.log(f'Error cierre: {e}')

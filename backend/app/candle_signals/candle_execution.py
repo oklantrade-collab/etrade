@@ -309,12 +309,15 @@ def execute_crypto_signal(
             "pair": binance_symbol,
         }
 
-    # ── CHECK 2: Total Market Risk Limit ──
+    # ── CHECK 2: Total Market Risk Limit (30% sum of Stop Losses) ──
     from app.strategy.risk_controls import check_total_market_risk
-    capital_total = float(BOT_STATE.config_cache.get('capital_assigned', 5000))
+    from app.core.supabase_client import get_risk_config
+    risk_config = get_risk_config()
+    capital_total = float(risk_config.get('capital_crypto_futures', 500.0))
+    
     risk_check = check_total_market_risk('crypto', capital_total, sb)
     if not risk_check["passed"]:
-        log_warning(MODULE, f"🚫 RIESGO TOTAL ALCANZADO: {risk_check['reason']}")
+        log_warning(MODULE, f"🚫 RIESGO TOTAL CRIPTO ALCANZADO: {risk_check['reason']}")
         return {
             "success": False,
             "reason": "max_total_risk_reached",
@@ -359,56 +362,48 @@ def execute_crypto_signal(
     qty_display: float | None = None
     entry_display = price
 
+    price = entry_display # usamos el precio actual de la vela o snap
+    dist_sl = abs(price - sl)
+    if dist_sl <= 0: dist_sl = price * 0.02 # fallback safety
+
+    risk_pct = float(risk_config.get('risk_per_operation_pct', 2.0))
+    risk_usd_per_trade = capital_total * (risk_pct / 100.0)
+    quantity_raw = risk_usd_per_trade / dist_sl
+    
+    # Cap by max notional allowed (leverage)
+    leverage = float(risk_config.get('leverage_crypto', 15.0))
+    max_notional = capital_total * leverage
+    quantity = min(quantity_raw, max_notional / price)
+
     if is_paper:
-        # Paper mode: calculate size based on settings (Inversion x Operacion)
-        config = BOT_STATE.config_cache
-        capital = float(config.get('capital_assigned', config.get('capital_crypto_futures', 500)))
-        risk_pct = float(config.get('risk_per_operation_pct', 1.0))
-        leverage = float(config.get('leverage_crypto', 15))
-        
-        target_inv = capital * (risk_pct / 100) # $5
-        target_notional = target_inv * leverage  # $75
-        paper_size = round(target_notional / price, 4)
+        paper_size = round(quantity, 4)
         order_row_id = _save_candle_order_crypto(
             sb, binance_symbol, action, strategy_code, price, pattern, timeframe, "paper", paper_size, sl, tp
         )
         order_uuid = _order_uuid_for_position(order_row_id)
-        if not order_row_id:
-            log_warning(MODULE, f"No se pudo guardar orden paper en Supabase para {binance_symbol}; position sin order_id.")
+        if not order_uuid:
+            log_warning(MODULE, f"No se pudo generar order_uuid para position en {binance_symbol}")
 
         if not _save_candle_position_crypto(
             sb, binance_symbol, action, strategy_code, price, pattern, timeframe, order_uuid, paper_size, sl, tp
         ):
-            log_error(MODULE, f"[PAPER] No se abrió posición en DB para {binance_symbol} — no se notifica Telegram.")
-            return {
-                "success": False,
-                "reason": "crypto_paper_position_not_saved",
-                "pair": binance_symbol,
-            }
+            log_error(MODULE, f"[PAPER] No se abrió posición en DB para {binance_symbol}")
+            return {"success": False, "reason": "db_save_failed"}
 
         qty_display = paper_size
-        log_info(MODULE, f"[PAPER] ✅ Crypto {action} {binance_symbol} @ {price} | Qty: {paper_size} | Strategy: {strategy_code}")
+        log_info(MODULE, f"[PAPER] ✅ SL-BASED Crypto {action} {binance_symbol} @ {price} | Qty: {paper_size} (Risk: ${risk_usd_per_trade})")
     else:
         # Live mode: Binance MARKET order
         try:
-            from app.execution.binance_connector import get_client, get_symbol_info_cached
+            from app.execution.binance_connector import get_client, get_symbol_info_cached, round_step_size
             client = get_client()
-
-            # Get balance and calculate quantity
-            from app.execution.binance_connector import get_account_balance
-            balance = get_account_balance(client, "USDT")
-            max_risk = float(BOT_STATE.config_cache.get("max_risk_per_trade_pct", 2.0)) / 100.0
-            capital_for_trade = balance * max_risk * 10  # leverage adjustment
             
             info = get_symbol_info_cached(client, binance_symbol)
             step_size = info.get("step_size", 0.001)
-            quantity = capital_for_trade / price
-            
-            from app.execution.binance_connector import round_step_size
-            quantity = round_step_size(quantity, step_size)
+            quantity_live = round_step_size(quantity, step_size)
 
-            if quantity <= 0:
-                return {"success": False, "reason": "Cantidad insuficiente"}
+            if quantity_live <= 0:
+                return {"success": False, "reason": "Cantidad insuficiente tras redondeo"}
 
             if action == "BUY":
                 entry_order = client.order_market_buy(symbol=binance_symbol, quantity=quantity)

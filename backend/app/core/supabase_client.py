@@ -2,7 +2,7 @@
 eTrader v2 — Supabase Client
 Provides a singleton Supabase client for all modules.
 """
-from supabase import create_client, Client
+from supabase import create_client, Client, ClientOptions
 from app.core.config import settings
 
 
@@ -17,9 +17,17 @@ def get_supabase() -> Client:
             raise RuntimeError(
                 "SUPABASE_URL and SUPABASE_SERVICE_KEY must be set"
             )
+        # Aumentar timeout por inestabilidad de red en entorno Windows
+        # Nota: http_client se ha removido por incompatibilidad con algunas versiones de SyncClientOptions
+        options = ClientOptions(
+            postgrest_client_timeout=45,
+            storage_client_timeout=45
+        )
+
         _client = create_client(
             settings.supabase_url,
             settings.supabase_service_key,
+            options=options
         )
     return _client
 
