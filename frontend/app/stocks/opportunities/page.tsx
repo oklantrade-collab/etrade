@@ -353,10 +353,10 @@ function AnalysisModal({ stock, onClose }: any) {
                             </div>
                         </div>
 
-                        {/* GOOGLE GEMINI */}
+                        {/* DEEP FINANCIAL (GEMINI) */}
                         <div style={{ background: '#161922', padding: '14px', borderRadius: '12px', border: '1px solid rgba(168,85,247,0.2)' }}>
                             <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px' }}>
-                                <span style={{ fontSize:'10px', color:'#A855F7', fontWeight:950 }}>GOOGLE GEMINI</span>
+                                <span style={{ fontSize:'10px', color:'#A855F7', fontWeight:950 }}>DEEP FINANCIAL ANALYSIS</span>
                                 <span style={{ background:'#A855F7', padding:'2px 8px', borderRadius:'10px', fontSize:'10px', fontWeight:950 }}>
                                     {(stock.gemini_score > 10 ? stock.gemini_score / 10 : (stock.gemini_score || 0)).toFixed(1)}/10
                                 </span>
@@ -366,10 +366,10 @@ function AnalysisModal({ stock, onClose }: any) {
                             </div>
                         </div>
 
-                        {/* QWEB / QWEN */}
+                        {/* CHATGPT PRO */}
                         <div style={{ background: '#161922', padding: '14px', borderRadius: '12px', border: '1px solid rgba(56,189,248,0.2)' }}>
                             <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px' }}>
-                                <span style={{ fontSize:'10px', color:'#38BDF8', fontWeight:950 }}>QWEB AI (PRIMARY)</span>
+                                <span style={{ fontSize:'10px', color:'#38BDF8', fontWeight:950 }}>CHATGPT PRO (PRIMARY)</span>
                                 <span style={{ background:'#38BDF8', padding:'2px 8px', borderRadius:'10px', fontSize:'10px', fontWeight:950 }}>
                                     {(stock.qwen_score > 10 ? stock.qwen_score / 10 : (stock.qwen_score || 0)).toFixed(1)}/10
                                 </span>
