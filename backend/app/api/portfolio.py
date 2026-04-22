@@ -205,8 +205,12 @@ async def get_global_portfolio():
 
         except Exception as e:
             err_str = str(e)
-            # Catch common network/protocol errors including HTTP/2 stream issues
-            retry_msgs = ["PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", "Timeout", "StreamInputs", "state 5"]
+            # Catch common network/protocol errors including HTTP/2 stream issues and Server Disconnects
+            retry_msgs = [
+                "PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", 
+                "Timeout", "StreamInputs", "state 5", "Server disconnected", 
+                "disconnected", "Connection reset"
+            ]
             if any(msg in err_str for msg in retry_msgs):
                 log_warning("portfolio", f"Portfolio connection failed (Attempt {attempt+1}/{max_retries}). Retrying... Error: {err_str}")
                 await asyncio.sleep(retry_delay * (attempt + 1))
@@ -363,8 +367,12 @@ async def get_performance_summary():
             }
         except Exception as e:
             err_str = str(e)
-            # Catch common network/protocol errors including HTTP/2 stream issues
-            retry_msgs = ["PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", "Timeout", "StreamInputs", "state 5"]
+            # Catch common network/protocol errors including HTTP/2 stream issues and Server Disconnects
+            retry_msgs = [
+                "PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", 
+                "Timeout", "StreamInputs", "state 5", "Server disconnected", 
+                "disconnected", "Connection reset"
+            ]
             if any(msg in err_str for msg in retry_msgs):
                 log_warning("portfolio", f"Performance connection failed (Attempt {attempt+1}/{max_retries}). Retrying... Error: {err_str}")
                 await asyncio.sleep(retry_delay * (attempt + 1))
