@@ -443,12 +443,29 @@ def upsert_technical_score(
             },
         }
 
-        # Delete existing and Insert new (Robust fallback for missing DB constraints)
-        sb.table("technical_scores").delete().eq("ticker", ticker).execute()
-        sb.table("technical_scores").insert(row).execute()
-        
-        log_info(MODULE, f"Technical score for {ticker}: {technical_score:.1f} "
-                         f"(MTF: {'✅' if mtf_confirmed else '❌'})")
+        # ── Persistent Upsert (Retry on Timeout, Protocol Error or Busy) ──
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Use atomic upsert (now possible thanks to the UNIQUE constraint on 'ticker')
+                # This is safer than delete+insert as it avoids the "data-less" window.
+                sb.table("technical_scores").upsert(row, on_conflict="ticker").execute()
+                
+                log_info(MODULE, f"Technical score for {ticker}: {technical_score:.1f} "
+                                  f"(MTF: {'✅' if mtf_confirmed else '❌'})")
+                return # Success
+            except Exception as e:
+                err_str = str(e)
+                # Retry on common Supabase/Network errors including HTTP/2 stream issues
+                retry_msgs = ["PGRST002", "schema cache", "PROTOCOL_ERROR", "timeout", "timed out", "10061", "StreamInputs", "state 5"]
+                if any(msg in err_str for msg in retry_msgs):
+                    import time
+                    log_warning(MODULE, f"Supabase busy or timed out for {ticker} (Attempt {attempt+1}/{max_retries}). Retrying in 2s...")
+                    time.sleep(2)
+                    continue
+                else:
+                    log_error(MODULE, f"Final failure upserting {ticker}: {e}")
+                    raise e
 
     except Exception as e:
         log_error(MODULE, f"Error upserting technical score for {ticker}: {e}")

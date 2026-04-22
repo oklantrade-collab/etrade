@@ -110,10 +110,15 @@ class StocksRuleEngine:
         direction = rule["direction"]       # buy | sell
         order_type = rule["order_type"]     # market | limit
 
+        # ── VARIABLES DE CONTROL (Safety Definitions) ─────
+        ia_val = float(context.get("ia_score") or 0)
+        tech_val = float(context.get("tech_score") or 0)
+        fund_val = float(context.get("fundamental_score") or 0)
+        current_price = float(context.get("close") or 0)
+
         # ── CHECK 1: IA Score ─────────────────────────────
         ia_min = float(rule.get("ia_min") or 0)
         if ia_min > 0:
-            ia_val = float(context.get("ia_score", 0))
             ia_ok = ia_val >= ia_min
             checks["ia_score"] = {
                 "passed": ia_ok,
@@ -126,7 +131,6 @@ class StocksRuleEngine:
         # ── CHECK 2: Technical Score ──────────────────────
         tech_min = float(rule.get("tech_score_min") or 0)
         if tech_min > 0:
-            tech_val = float(context.get("tech_score", 0))
             tech_ok = tech_val >= tech_min
             checks["tech_score"] = {
                 "passed": tech_ok,
@@ -137,10 +141,8 @@ class StocksRuleEngine:
                 failures.append(f"Tech {tech_val:.0f} < {tech_min}")
 
         # ── CHECK 2.5: Fundamental Score (Universe) ──────
-        # Solo para empresas del Universe Builder (≥ 70)
         fund_min = float(rule.get("fundamental_score_min") or (70.0 if rule_code == "PRO_BUY_MKT" else 0.0))
         if fund_min > 0:
-            fund_val = float(context.get("fundamental_score", 0))
             fund_ok = fund_val >= fund_min
             checks["fundamental"] = {
                 "passed": fund_ok,
@@ -186,7 +188,7 @@ class StocksRuleEngine:
         elif pine_rule and fib_trig:
             # OR logic: Pine OR Fibonacci
             pine_match = context.get("pine_signal") == pine_rule
-            fib_match = context.get("fib_zone", 0) in fib_trig
+            fib_match = int(context.get("fib_zone") or 0) in fib_trig
             signal_ok = pine_match or fib_match
             checks["pine_or_fib"] = {
                 "passed": signal_ok,
@@ -200,7 +202,7 @@ class StocksRuleEngine:
                 )
 
         elif fib_trig and not pine_rule:
-            fib_ok = context.get("fib_zone", 0) in fib_trig
+            fib_ok = int(context.get("fib_zone") or 0) in fib_trig
             checks["fib_zone"] = {
                 "passed": fib_ok,
                 "value": context.get("fib_zone"),
@@ -231,7 +233,7 @@ class StocksRuleEngine:
                 else "limit_sell_price"
             )
             est_price = context.get(limit_key)
-            price = context.get("price", 0)
+            price = float(context.get("price") or 0)
             trigger = float(rule.get("limit_trigger_pct") or 0.005)
 
             if est_price and float(est_price) > 0:
@@ -259,18 +261,21 @@ class StocksRuleEngine:
                 failures.append("Precio LIMIT estimado no calculado")
 
         # ── CHECK 5: Discount/Value Activation (S02 Specific) ─────
+        smart_limit_price = None
         if rule_code == "S02" or rule_code == "PRO_BUY_LMT":
             # 1. IA Score lower threshold for discount buys
             s02_ia_ok = ia_val >= 6.0
-            checks["ia_score"]["passed"] = s02_ia_ok
-            checks["ia_score"]["required"] = 6.0
+            checks["ia_score_s02"] = {
+                "passed": s02_ia_ok,
+                "value": ia_val,
+                "required": 6.0
+            }
             if not s02_ia_ok:
                 failures.append(f"IA {ia_val:.1f} < 6.0 (S02 requirement)")
             
             # 2. Bollinger Proximity Check
             bb_lower = context.get("bb_lower")
-            current_price = context.get("close", 0)
-            if bb_lower and current_price:
+            if bb_lower and bb_lower > 0 and current_price > 0:
                 # El precio debe estar a max 2% por ENCIMA del suelo (BB Lower)
                 proximity = current_price / bb_lower
                 prox_ok = proximity <= 1.02 
@@ -284,20 +289,19 @@ class StocksRuleEngine:
                     failures.append(f"Price too far from BB Lower: {proximity:.2%} > 102%")
             
             # 3. Fundamental Score lower for discount buys
-            if fund_min > 0:
-                s02_fund_ok = fund_val >= 65.0
-                checks["fundamental"]["passed"] = s02_fund_ok
-                checks["fundamental"]["required"] = 65.0
-                if not s02_fund_ok:
-                    failures.append(f"Fundamental {fund_val:.0f} < 65.0 (S02 requirement)")
+            s02_fund_ok = fund_val >= 65.0
+            checks["fundamental_s02"] = {
+                "passed": s02_fund_ok,
+                "value": fund_val,
+                "required": 65.0
+            }
+            if not s02_fund_ok:
+                failures.append(f"Fundamental {fund_val:.0f} < 65.0 (S02 requirement)")
 
             # 4. Calculus of LIMIT Price (User Formula)
-            intrinsic = context.get("intrinsic_price", 0)
-            if intrinsic > 0 and bb_lower:
-                limit_price = min(bb_lower, intrinsic * 0.95)
-                # También aplicar el 'piso mínimo' de Price * 0.97 como seguridad adicional
-                limit_price = min(limit_price, current_price * 0.97)
-                result["smart_limit_price"] = round(limit_price, 2)
+            intrinsic = float(context.get("intrinsic_price") or 0)
+            if intrinsic > 0 and bb_lower and bb_lower > 0:
+                smart_limit_price = round(min(bb_lower, intrinsic * 0.95, current_price * 0.97), 2)
 
         # ── CHECK 6: Value Deep Discount (S09 Specific) ──────────
         if rule_code == "S09" or rule_code == "PRO_BUY_VALUE":
@@ -313,8 +317,7 @@ class StocksRuleEngine:
                 failures.append(f"Ticker no pertenece a GIANT/LEADER pool (Pool: {pool})")
             
             # 2. Deep Discount Check (Price <= Intrinsic * 0.90)
-            intrinsic = context.get("intrinsic_price", 0)
-            current_price = context.get("close", 0)
+            intrinsic = float(context.get("intrinsic_price") or 0)
             if intrinsic > 0:
                 discount_price = intrinsic * 0.90
                 val_ok = current_price <= discount_price
@@ -330,14 +333,13 @@ class StocksRuleEngine:
                 failures.append("Precio Intrínseco no disponible para evaluación S09")
 
             # 3. Revenue Growth check (>= 20%)
-            # Nota: Esto se valida por el pool, pero re-confirmamos
-            rev_growth = context.get("revenue_growth_yoy", 0) # Necesito que esto esté en context
+            rev_growth = float(context.get("revenue_growth_yoy") or 0)
             if rev_growth < 20:
                 failures.append(f"Revenue Growth {rev_growth}% < 20%")
 
             # 4. Calculus of LIMIT Price (Current Price for immediate fill)
             if len(failures) == 0:
-                result["smart_limit_price"] = current_price # Comprar ya si está barato
+                smart_limit_price = current_price # Comprar ya si está barato
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0
@@ -351,6 +353,9 @@ class StocksRuleEngine:
                     "limit_buy_price" if direction == "buy"
                     else "limit_sell_price"
                 )
+            # Override with smart limit if calculated
+            if smart_limit_price:
+                order_price = smart_limit_price
 
         return {
             "triggered": triggered,

@@ -1,10 +1,14 @@
-from app.core.supabase_client import get_supabase
-import json
 
-def check_config():
-    sb = get_supabase()
-    res = sb.table('trading_config').select('*').eq('id', 1).maybe_single().execute()
-    print(json.dumps(res.data, indent=2))
+import os
+from supabase import create_client, Client
 
-if __name__ == "__main__":
-    check_config()
+url = "https://iriotnsoauqrfsjbqyyp.supabase.co"
+key = os.getenv("SUPABASE_KEY")
+if not key:
+    print("Error: SUPABASE_KEY not found in env")
+    exit(1)
+
+supabase: Client = create_client(url, key)
+
+res = supabase.table("stocks_config").select("*").in_("key", ["total_capital_usd", "risk_per_operation_pct", "capital_assigned"]).execute()
+print(res.data)

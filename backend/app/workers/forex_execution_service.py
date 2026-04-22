@@ -43,9 +43,16 @@ class ForexExecutionService:
         self.state    = state_ref
         self.symbols  = symbols_ref
         self.log      = worker.log
-        self.mode     = FOREX_CONFIG['mode']
+        # Usar variable de entorno directamente para el modo
+        self.mode     = os.getenv('CTRADER_ENV', 'paper')
         self._open_positions_list = []
         self._load_open_positions()
+
+    def _safe_float(self, val, default=0.0):
+        try:
+            if val is None: return default
+            return float(val)
+        except: return default
 
     def _load_open_positions(self, retries=3):
         for i in range(retries):
@@ -74,6 +81,7 @@ class ForexExecutionService:
             risk_config = get_risk_config()
             limit_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
             limit_global = int(risk_config.get('max_total_positions', 16))
+            max_retries = 3
 
             if open_count >= limit_global:
                 self.log(f'Limite global de posiciones alcanzado ({open_count}/{limit_global})')
@@ -85,8 +93,20 @@ class ForexExecutionService:
                 pos_count[s] = pos_count.get(s, 0) + 1
 
             symbols = list(self.state['symbol_ids'].keys()) or self.symbols
-            snaps_res = self.sb.table('market_snapshot').select('*').in_('symbol', symbols).execute()
-            snaps_data = snaps_res.data or []
+            
+            # 3. Obtener snapshots con reintentos por desconexión
+            snaps_data = []
+            for attempt in range(max_retries):
+                try:
+                    snaps_res = self.sb.table('market_snapshot').select('*').in_('symbol', symbols).execute()
+                    snaps_data = snaps_res.data or []
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        self.log(f'Reintentando Market Snapshot ({attempt+1}/{max_retries}): {e}', 'WARNING')
+                        time.sleep(2)
+                    else:
+                        raise e
             
             summary = ", ".join([f"{s}: {pos_count.get(s,0)}" for s in symbols])
             self.log(f'Evaluando {len(snaps_data)} simbolos. Total: {open_count} | {summary} (Limite/Simbolo: {limit_per_symbol})')
@@ -117,21 +137,20 @@ class ForexExecutionService:
             self.log(f'{snap["symbol"]} evaluacion error: {e}', 'ERROR')
 
     def _build_context(self, snap: dict) -> dict:
-        price = float(snap.get('price') or 0)
-        adx = float(snap.get('adx') or 25)
+        price = self._safe_float(snap.get('price'))
+        adx = self._safe_float(snap.get('adx'), 25.0)
         if adx < 20: velocity = 'debil'
         elif adx < 35: velocity = 'moderado'
         elif adx < 50: velocity = 'agresivo'
         else: velocity = 'explosivo'
 
-        mtf_raw = snap.get('mtf_score')
-        mtf_score = float(mtf_raw) if mtf_raw is not None else 0.0
+        mtf_score = self._safe_float(snap.get('mtf_score'))
 
         return {
             'symbol': snap.get('symbol'),
             'price': price,
-            'basis': float(snap.get('basis') or price),
-            'dist_basis_pct': float(snap.get('dist_basis_pct') or 0),
+            'basis': self._safe_float(snap.get('basis'), price),
+            'dist_basis_pct': self._safe_float(snap.get('dist_basis_pct')),
             'adx': adx,
             'adx_velocity': velocity,
             'mtf_score': mtf_score,
@@ -142,10 +161,10 @@ class ForexExecutionService:
             'pinescript_signal': str(snap.get('pinescript_signal') or ''),
             'allow_long_4h': bool(snap.get('allow_long_4h') if snap.get('allow_long_4h') is not None else True),
             'allow_short_4h': bool(snap.get('allow_short_4h') if snap.get('allow_short_4h') is not None else True),
-            'upper_1': float(snap.get('upper_1') or 0),
-            'lower_1': float(snap.get('lower_1') or 0),
-            'upper_6': float(snap.get('upper_6') or 0),
-            'lower_6': float(snap.get('lower_6') or 0),
+            'upper_1': self._safe_float(snap.get('upper_1')),
+            'lower_1': self._safe_float(snap.get('lower_1')),
+            'upper_6': self._safe_float(snap.get('upper_6')),
+            'lower_6': self._safe_float(snap.get('lower_6')),
         }
 
     def _check_rules(self, context: dict, direction: str) -> dict:
@@ -189,12 +208,12 @@ class ForexExecutionService:
             now = datetime.now(timezone.utc)
             
             if (now - opened_at).total_seconds() < 900: # 15 minutos
-                 self.log(f'⏸️ Omitiendo {symbol} {signal["rule_code"]}: Ya se abrió en los últimos 15 min.')
+                 self.log(f'Omitiendo {symbol} {signal["rule_code"]}: Ya se abrio en los ultimos 15 min.')
                  return
             
             # Regla 2: Mejora de precio
-            price = float(snap.get('price', 0))
-            last_entry = float(last_pos['entry_price'])
+            price = self._safe_float(snap.get('price'))
+            last_entry = self._safe_float(last_pos.get('entry_price'))
             if direction == 'long' and price >= last_entry:
                  self.log(f'⏸️ Omitiendo {symbol} {direction.upper()}: Precio {price} >= {last_entry} (No mejora costo)')
                  return
@@ -202,14 +221,14 @@ class ForexExecutionService:
                  self.log(f'⏸️ Omitiendo {symbol} {direction.upper()}: Precio {price} <= {last_entry} (No mejora costo)')
                  return
             
-            self.log(f'💎 Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
+            self.log(f'Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
 
         # Gualdián final: Límite TOTAL por símbolo (Para todas las estrategias)
         total_symbol = len([p for p in self._open_positions_list if p['symbol'] == symbol])
         from app.core.supabase_client import get_risk_config
         max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
         if total_symbol >= max_per_symbol:
-            self.log(f'🚫 LÍMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
+            self.log(f'LIMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
 
         # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
@@ -217,42 +236,50 @@ class ForexExecutionService:
         opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'] == opposite]
         if opp_positions:
             self.log(f'[REVERSIÓN] Cerrando {len(opp_positions)} posiciones {opposite.upper()} por entrada {direction.upper()}')
+            price = self._safe_float(snap.get('price'))
             for p in opp_positions:
-                entry = float(p.get('entry_price', 0))
-                # Usar valor absoluto del lotaje para cálculos de margen/riesgo
-                lots_abs = abs(float(p.get('lots', 0.01)))
+                entry = self._safe_float(p.get('entry_price'))
+                lots_abs = abs(self._safe_float(p.get('lots'), 0.01))
                 pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
                 pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
                 
-                side = p['side'].lower()
+                side = p.get('side', 'long').lower()
                 pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
-                pnl = pips * pip_val * lots_abs
                 self._close_position(p, price, f'netting_{direction}', pips)
             # Recargar posiciones tras cerrar opuestas
             self._load_open_positions()
 
         # 2. Ejecutar nueva señal
-        price = float(snap.get('price', 0))
-        sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal['rule_code'])
+        price = self._safe_float(snap.get('price'))
+        sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal["rule_code"])
         lots = self._calculate_lot_size(symbol, sl_pips)
 
-        # 3. Validación estricta de riesgo (Máximo $20 o X% del capital)
         f_config = get_forex_config()
         riesgo_limite = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
         pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
         riesgo_real = lots * sl_pips * pip_val
 
         # Verificar Riesgo Total Acumulado (Máximo 30%)
-        total_risk_usd = sum([abs(p['lots']) * abs(p['entry_price'] - (p['sl_price'] or p['entry_price'])) / PIP_CONFIG.get(p['symbol'],{}).get('pip',1.0) * PIP_CONFIG.get(p['symbol'],{}).get('pip_val_std',10.0) for p in self._open_positions_list])
+        total_risk_usd = 0
+        for p in self._open_positions_list:
+            try:
+                p_lots = abs(self._safe_float(p.get('lots')))
+                p_entry = self._safe_float(p.get('entry_price'))
+                p_sl = self._safe_float(p.get('sl_price'), p_entry)
+                p_pip_size = PIP_CONFIG.get(p['symbol'], {}).get('pip', 0.0001)
+                p_pip_val = PIP_CONFIG.get(p['symbol'], {}).get('pip_val_std', 10.0)
+                total_risk_usd += p_lots * abs(p_entry - p_sl) / p_pip_size * p_pip_val
+            except: continue
+
         max_accumulated = f_config['capital_usd'] * f_config['max_total_risk_pct'] / 100
         
         if (total_risk_usd + riesgo_real) > max_accumulated:
-            self.log(f'🚫 RIESGO TOTAL EXCEDIDO (${total_risk_usd:.2f} + ${riesgo_real:.2f} > ${max_accumulated:.2f})', 'WARNING')
+            self.log(f'RIESGO TOTAL EXCEDIDO (${total_risk_usd:.2f} + ${riesgo_real:.2f} > ${max_accumulated:.2f})', 'WARNING')
             return
 
         if riesgo_real > (riesgo_limite * 1.5): # Margen de holgura por el mínimo de 0.01 lotes
             self.log(
-                f'🚫 ABORTANDO {symbol}: Riesgo proyectado ${riesgo_real:.2f} '
+                f'ABORTANDO {symbol}: Riesgo proyectado ${riesgo_real:.2f} '
                 f'excede el límite de ${riesgo_limite:.2f} '
                 f'(SL Pips: {sl_pips:.1f}, Lots: {lots})',
                 'WARNING'
@@ -272,14 +299,15 @@ class ForexExecutionService:
 
     def _calculate_sl_tp(self, symbol, direction, entry, snap, rule_code):
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-        u1, l1 = float(snap.get('upper_1') or 0), float(snap.get('lower_1') or 0)
+        u1 = self._safe_float(snap.get('upper_1'))
+        l1 = self._safe_float(snap.get('lower_1'))
         atr = (u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
         
         if direction == 'long':
-            sl = float(snap.get('lower_6') or (entry-50*pip_size)) - atr
+            sl = self._safe_float(snap.get('lower_6'), (entry-50*pip_size)) - atr
             tp = entry + (3 * atr)
         else:
-            sl = float(snap.get('upper_6') or (entry+50*pip_size)) + atr
+            sl = self._safe_float(snap.get('upper_6'), (entry+50*pip_size)) + atr
             tp = entry - (3 * atr)
         return round(sl, 6), round(tp, 6), abs(entry-sl)/pip_size
 
@@ -300,7 +328,7 @@ class ForexExecutionService:
 
     def _execute_paper_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
         self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='paper')
-        self._send_telegram(f'📊 [PAPER] {direction.upper()} {symbol} (Rule: {rule_code})')
+        self._send_telegram(f'[PAPER] {direction.upper()} {symbol} (Rule: {rule_code})')
 
     def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper'):
         try:
@@ -321,7 +349,7 @@ class ForexExecutionService:
             }
             res = self.sb.table('forex_positions').insert(pos).execute()
             if res.data: 
-                self.log(f'✅ Guardada posición {symbol} {direction.upper()} Lots: {final_lots}')
+                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots}')
                 self._open_positions_list.append(res.data[0])
         except Exception as e: self.log(f'Error guardando: {e}')
 
@@ -354,7 +382,7 @@ class ForexExecutionService:
         price_data = self.state['prices'].get(symbol)
         if not price_data:
             return False
-        price = float(price_data.get('mid', 0))
+        price = self._safe_float(price_data.get('mid'))
         if price <= 0:
             return False
 
@@ -368,17 +396,23 @@ class ForexExecutionService:
         # Convertir a DataFrame
         import pandas as pd
         df_4h = pd.DataFrame(bars_4h)
-        df_4h['open_time'] = pd.to_datetime(df_4h['ts'])
+        # Renombrar columnas abreviadas (o,h,l,c) a formato estándar
+        df_4h = df_4h.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'ts': 'open_time'})
+        df_4h['open_time'] = pd.to_datetime(df_4h['open_time'], unit='s')
         df_4h = df_4h.set_index('open_time')
+        
+        # Limpiar datos nulos que causan float() error
+        df_4h = df_4h.dropna(subset=['open', 'high', 'low', 'close'])
         for col in ['open','high','low','close']:
-            df_4h[col] = pd.to_numeric(df_4h[col])
+            if col in df_4h.columns:
+                df_4h[col] = pd.to_numeric(df_4h[col], errors='coerce').fillna(0)
 
         # Adaptar position al formato estandar (en Forex usamos 'lots' -> 'size')
         position_std = {
             'symbol':           symbol,
             'side':             pos['side'],
-            'avg_entry_price':  pos['entry_price'],
-            'size':             pos['lots'],
+            'avg_entry_price':  self._safe_float(pos.get('entry_price')),
+            'size':             self._safe_float(pos.get('lots')),
             'id':               pos['id']
         }
 
@@ -395,7 +429,7 @@ class ForexExecutionService:
 
         pnl = result['pnl']
         self.log(
-            f'🛡️ CIERRE PROACTIVO FOREX {symbol}: '
+            f'[PROACTIVE EXIT] FOREX {symbol}: '
             f'{result["rule_code"]} '
             f'+{pnl["pnl_pct"]:.3f}% '
             f'({pnl["pnl_pips"]:.1f} pips) - {result["reason"]}'
@@ -404,7 +438,7 @@ class ForexExecutionService:
         # Cerrar posición
         self._close_position(pos, price, result['rule_code'], pnl['pnl_pips'])
         self._send_telegram(
-            f"🛡️ CIERRE PROACTIVO FOREX [{symbol}]\n"
+            f"CIERRE PROACTIVO FOREX [{symbol}]\n"
             f"Regla: {result['rule_code']}\n"
             f"Pips: +{pnl['pnl_pips']:.1f}\n"
             f"Razón: {result['reason']}"
@@ -416,13 +450,18 @@ class ForexExecutionService:
         symbol = pos['symbol']
         price_data = self.state['prices'].get(symbol)
         if not price_data: return
-        price = float(price_data.get('mid', 0))
-        side, entry, sl, tp = pos['side'], float(pos['entry_price']), float(pos.get('sl_price') or 0), float(pos.get('tp_price') or 0)
+        price = self._safe_float(price_data.get('mid'))
+        side  = pos['side']
+        entry = self._safe_float(pos.get('entry_price'))
+        sl    = self._safe_float(pos.get('sl_price'))
+        tp    = self._safe_float(pos.get('tp_price'))
+        
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
         pips_pnl = (price - entry) / pip_size if side == 'long' else (entry - price) / pip_size
         
         if snap:
-            u6, l6 = float(snap.get('upper_6') or 0), float(snap.get('lower_6') or 0)
+            u6 = self._safe_float(snap.get('upper_6'))
+            l6 = self._safe_float(snap.get('lower_6'))
             if (side == 'long' and u6 > 0 and price >= u6) or (side == 'short' and l6 > 0 and price <= l6):
                 self._close_position(pos, price, 'tp_band', pips_pnl)
                 return
@@ -451,7 +490,7 @@ class ForexExecutionService:
 
             # Usar valor absoluto de lots para el cálculo de PnL ya que pips_pnl ya considera la dirección
             pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
-            pnl_usd = pips_pnl * pip_val * abs(float(pos['lots']))
+            pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
             
             self.sb.table('forex_positions').update({
                 'status': 'closed', 

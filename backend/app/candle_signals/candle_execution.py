@@ -33,6 +33,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
+from app.strategy.capital_protection import (
+    evaluate_counter_trend_sizing,
+    check_cooldown,
+    PROTECTION_CONFIG
+)
 from app.core.crypto_symbols import (
     normalize_crypto_symbol,
     crypto_symbol_match_variants,
@@ -254,8 +259,23 @@ def execute_crypto_signal(
     if existing_same:
         # Regla 1: 1 compra por vela y estrategia
         # Determinamos si la última compra fue en esta misma vela (TF: 4H o 1D en Crypto)
+        # Parseo robusto de fecha ISO (maneja milisegundos variables y zona horaria)
         last_pos = sorted(existing_same, key=lambda x: x['opened_at'], reverse=True)[0]
-        opened_at = datetime.fromisoformat(last_pos['opened_at'].replace('Z', '+00:00'))
+        raw_date = last_pos['opened_at']
+        try:
+            if '.' in raw_date:
+                base, rest = raw_date.split('.', 1)
+                import re
+                match = re.match(r"(\d+)(.*)", rest)
+                if match:
+                    ms, tz = match.groups()
+                    ms = ms.ljust(6, '0')[:6] 
+                    raw_date = f"{base}.{ms}{tz}"
+            ts = raw_date.replace('Z', '+00:00')
+            opened_at = datetime.fromisoformat(ts)
+        except Exception as de:
+            log_warning(MODULE, f"Date parsing error for {binance_symbol}: {de}. Using fallback.")
+            opened_at = datetime.now(timezone.utc) - timedelta(days=1)
         now = datetime.now(timezone.utc)
         
         # Aproximación del open_time de la vela actual
@@ -750,7 +770,21 @@ def execute_forex_signal(
     if existing_same:
         # Regla 1: 1 por vela
         last_pos = sorted(existing_same, key=lambda x: x['opened_at'], reverse=True)[0]
-        opened_at = datetime.fromisoformat(last_pos['opened_at'].replace('Z', '+00:00'))
+        raw_date = last_pos['opened_at']
+        try:
+            if '.' in raw_date:
+                base, rest = raw_date.split('.', 1)
+                import re
+                match = re.match(r"(\d+)(.*)", rest)
+                if match:
+                    ms, tz = match.groups()
+                    ms = ms.ljust(6, '0')[:6] 
+                    raw_date = f"{base}.{ms}{tz}"
+            ts = raw_date.replace('Z', '+00:00')
+            opened_at = datetime.fromisoformat(ts)
+        except Exception as de:
+            opened_at = datetime.now(timezone.utc) - timedelta(days=1)
+            
         now = datetime.now(timezone.utc)
         
         # En Forex, TF suele ser 4H o 1D en candle_worker, pero detectamos 15m/1H en otros
@@ -981,12 +1015,28 @@ def execute_stocks_signal(
     # Para Stocks solo tenemos BUY signals (Inversiones Pro / BUY)
     # Por lo que no hay "opposite" como tal en short, pero cerramos si estamos refrescando.
     
-    existing_same = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").eq("rule_code", strategy_code).execute().data or []
+    # Para Stocks, usamos group_name como identificador de estrategia
+    group_id = f"Candle Signal {pool_type} {strategy_code}"
+    existing_same = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").eq("group_name", group_id).execute().data or []
     
     if existing_same:
         # Regla 1: 1 por vela
         last_pos = sorted(existing_same, key=lambda x: x['first_buy_at'], reverse=True)[0]
-        opened_at = datetime.fromisoformat(last_pos['first_buy_at'].replace('Z', '+00:00'))
+        raw_date = last_pos['first_buy_at']
+        try:
+            if '.' in raw_date:
+                base, rest = raw_date.split('.', 1)
+                import re
+                match = re.match(r"(\d+)(.*)", rest)
+                if match:
+                    ms, tz = match.groups()
+                    ms = ms.ljust(6, '0')[:6] 
+                    raw_date = f"{base}.{ms}{tz}"
+            ts = raw_date.replace('Z', '+00:00')
+            opened_at = datetime.fromisoformat(ts)
+        except Exception as de:
+            opened_at = datetime.now(timezone.utc) - timedelta(days=1)
+
         now = datetime.now(timezone.utc)
         
         # TF: 4H o 1D
@@ -1068,7 +1118,7 @@ def execute_stocks_signal(
         # Save position
         sb.table("stocks_positions").insert({
             "ticker": ticker,
-            "group_name": f"Candle Signal {pool_type}",
+            "group_name": f"Candle Signal {pool_type} {strategy_code}",
             "direction": "long" if action == "BUY" else "short",
             "shares": final_shares,
             "avg_price": price,
@@ -1215,30 +1265,27 @@ def execute_candle_signal(
 ) -> dict:
     """
     Unified dispatcher — routes candle signals to the correct market executor.
-    
-    Pre-validation:
-      1. Action must be BUY or SELL
-      2. Fibonacci band zone filter:
-         BUY  → zone ∈ {+2,+1,0,-1,-2,-3,-4,-5,-6}  (zone ≤ +2)
-         SELL → zone ∈ {-2,-1,0,+1,+2,+3,+4,+5,+6}  (zone ≥ -2)
-    
-    Execution flow:
-      1. Close ALL active positions for the pair/ticker
-      2. Open 1 new MARKET position in the signal direction
-    
-    Args:
-        market: "crypto", "forex", or "stocks"
-        pair_or_ticker: "BTC/USDT", "EURUSD", "AAPL", etc.
-        pattern: PatternResult from candle_patterns.py
-        timeframe: "4H" or "1D"
-        candle_data: dict with at least {close: float}
-        pool_type: for stocks — "PRO" or "HOT"
-    
-    Returns:
-        dict with {success, action, pair/ticker, strategy}
     """
     if pattern.action not in ("BUY", "SELL"):
         return {"success": False, "reason": f"Action is {pattern.action}, not BUY/SELL"}
+
+    # ── REGLA 7: COOLDOWN PROTECTION ──
+    # Evitar re-entrar si acabamos de cerrar con pérdida recientemente
+    from app.core.memory_store import BOT_STATE
+    last_close = BOT_STATE.last_close_cycles.get(pair_or_ticker, 0)
+    current_cycle = BOT_STATE.current_cycle
+    
+    market_type_map = {
+        'crypto': 'crypto_futures',
+        'forex': 'forex_futures',
+        'stocks': 'stocks_spot'
+    }
+    m_type = market_type_map.get(market, 'crypto_futures')
+    
+    cd_check = check_cooldown(pair_or_ticker, last_close, current_cycle, m_type)
+    if cd_check['in_cooldown']:
+        log_info("PROTECTION", f"🚫 COOLDOWN [{pair_or_ticker}]: {cd_check['reason']}")
+        return {"success": False, "reason": "cooldown_active"}
 
     # ── FIBONACCI BAND ZONE FILTER ──
     fib_zone = _get_fibonacci_zone(market, pair_or_ticker)

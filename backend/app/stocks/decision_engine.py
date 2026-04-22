@@ -38,6 +38,7 @@ class DecisionEngine:
         
         # Initialize OpenAI (Primary)
         self.openai_client = None
+        self.openai_quota_hit_until = None # Timestamp until we skip OpenAI
         if settings.openai_api_key:
             try:
                 self.openai_client = OpenAI(api_key=settings.openai_api_key)
@@ -171,12 +172,12 @@ class DecisionEngine:
                 return fb
 
             final_ia_avg = sum(scores_ia) / len(scores_ia)
-            if qwen_res: rationales.append(f"QWEB ({round(q_score,1)}/10): {qwen_res.get('analysis_summary', '')}")
+            if openai_res: rationales.append(f"CHATGPT ({round(o_score,1)}/10): {openai_res.get('analysis_summary', '')}")
             if gemini_res: rationales.append(f"GEMINI ({round(g_score,1)}/10): {gemini_res.get('analysis_summary', '')}")
             if claude_res: rationales.append(f"CLAUDE ({round(c_score,1)}/10): {claude_res.get('analysis_summary', '')}")
 
             m_scores = []
-            if qwen_res: m_scores.append(float(qwen_res.get("meta_score", 0)))
+            if openai_res: m_scores.append(float(openai_res.get("meta_score", 0)))
             if gemini_res: m_scores.append(float(gemini_res.get("meta_score", 0)))
             if claude_res: m_scores.append(float(claude_res.get("meta_score", 0)))
             final_meta = sum(m_scores) / len(m_scores) if m_scores else 50
@@ -214,6 +215,13 @@ class DecisionEngine:
 
     async def _try_openai(self, ticker, tech, funda, ctx):
         if not self.openai_client: return None
+        
+        # Check quota cooldown
+        import time
+        if self.openai_quota_hit_until and time.time() < self.openai_quota_hit_until:
+            log_warning(MODULE, f"Skipping OpenAI for {ticker} due to recent quota/rate limit.")
+            return None
+
         try:
             prompt = self._build_prompt(ticker, tech, funda, ctx)
             response = self.openai_client.chat.completions.create(
@@ -222,7 +230,12 @@ class DecisionEngine:
             )
             return self._parse_json(response.choices[0].message.content)
         except Exception as e:
-            log_warning(MODULE, f"OpenAI error: {e}")
+            err_str = str(e).lower()
+            if "quota" in err_str or "rate_limit" in err_str or "429" in err_str:
+                log_error(MODULE, f"OpenAI Quota Exceeded/Rate Limit hit. Cooling down for 10 min. Error: {e}")
+                self.openai_quota_hit_until = time.time() + 600 # 10 minutes
+            else:
+                log_warning(MODULE, f"OpenAI error: {e}")
             return None
 
     async def _try_claude(self, ticker, tech, funda, ctx):

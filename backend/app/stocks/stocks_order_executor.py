@@ -58,6 +58,26 @@ def _get_config() -> dict:
         }
 
 
+def _calculate_shares(capital: float, max_pct: float, price: float) -> int:
+    """
+    Calcula la cantidad de acciones basada en riesgo, redondeando a múltiplos de 5.
+    Mínimo 5 acciones.
+    """
+    if price <= 0: return 0
+    
+    target_usd = capital * max_pct
+    raw_shares = target_usd / price
+    
+    # Redondear al múltiplo de 5 inferior más cercano
+    shares = int(raw_shares // 5) * 5
+    
+    # Mínimo absoluto de 5 acciones si el capital lo permite
+    if shares < 5 and target_usd >= (5 * price):
+        shares = 5
+        
+    return shares
+
+
 def _send_telegram_sync(message: str):
     """Best-effort Telegram notification (sync wrapper)."""
     try:
@@ -104,15 +124,11 @@ def execute_market_order(
     if current_investment >= max_allowed_investment:
         return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
 
-    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5) ──
-    capital_op = capital * max_pct
-    raw_shares = capital_op / price
+    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
+    shares = _calculate_shares(capital, max_pct, price)
     
-    # Redondear al múltiplo de 5 inferior más cercano (mínimo 5 si el capital permite)
-    shares = int(raw_shares // 5) * 5
-    
-    if shares <= 0:
-        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital_op:.0f} vs {5*price:.0f} p/lote)"}
+    if shares < 5:
+        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital * max_pct:.0f} vs {5*price:.0f} p/lote)"}
     
     # Validar que no superemos el riesgo total con esta nueva compra
     if current_investment + (shares * price) > max_allowed_investment:
@@ -227,14 +243,11 @@ def place_limit_order(
     if direction == "buy" and current_investment >= max_allowed_investment:
         return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
 
-    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5) ──
-    max_pct = config["max_pct_per_trade"]
-    capital_op = capital * max_pct
-    raw_shares = capital_op / limit_price
-    shares = int(raw_shares // 5) * 5
+    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
+    shares = _calculate_shares(capital, config["max_pct_per_trade"], limit_price)
     
-    if direction == "buy" and shares <= 0:
-        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital_op:.0f} vs {5*limit_price:.0f} p/lote)"}
+    if direction == "buy" and shares < 5:
+        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital * config['max_pct_per_trade']:.0f} vs {5*limit_price:.0f} p/lote)"}
     
     if direction == "buy" and current_investment + (shares * limit_price) > max_allowed_investment:
         remaining_cap = max_allowed_investment - current_investment
@@ -378,17 +391,16 @@ def check_and_fill_pending_limits():
                 .eq("id", order["id"]) \
                 .execute()
 
-            # Position sizing
-            config = _get_config()
-            total_cap = float(config.get("total_capital", 10000))
-            
-            # S09: 3% del capital (Posición más pequeña por ser valor puro)
-            # Otros: Según config (por defecto 10% según otros archivos, pero aquí usaremos 5% o 0.05 como base segura)
-            risk_pct = 0.03 if (order.get("rule_code") == "S09" or order.get("rule_code") == "PRO_BUY_VALUE") else 0.05
-            
-            shares = int((total_cap * risk_pct) / current_price)
-
             if direction == "buy":
+                # Usar la cantidad guardada en la orden o recalcular con la regla del 5
+                shares = int(order.get("shares") or 0)
+                if shares < 5:
+                    shares = _calculate_shares(config["total_capital"], config["max_pct_per_trade"], current_price)
+                
+                if shares < 5:
+                    log_warning(MODULE, f"Cancelando fill para {ticker}: Capital insuficiente para mínimo 5 shares")
+                    continue
+
                 _open_or_update_position(
                     ticker, current_price, shares,
                     order.get("group_name"),

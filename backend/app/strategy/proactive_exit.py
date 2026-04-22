@@ -54,10 +54,14 @@ def analyze_4h_candle(
         last_closed = df_4h.iloc[-2]
         prev        = df_4h.iloc[-3] if len(df_4h) >= 3 else df_4h.iloc[-2]
 
-        open_price  = float(last_closed['open'])
-        close_price = float(last_closed['close'])
-        high_price  = float(last_closed['high'])
-        low_price   = float(last_closed['low'])
+        def _f(v):
+            try: return float(v) if v is not None else 0.0
+            except: return 0.0
+
+        open_price  = _f(last_closed.get('open'))
+        close_price = _f(last_closed.get('close'))
+        high_price  = _f(last_closed.get('high'))
+        low_price   = _f(last_closed.get('low'))
 
         if open_price <= 0:
             return {
@@ -116,9 +120,13 @@ def calculate_position_pnl(
     """
     Calcula el P&L actual de una posición.
     """
-    entry = float(position.get('avg_entry_price', position.get('entry_price', 0)))
+    def _f(v, d=0.0):
+        try: return float(v) if v is not None else d
+        except: return d
+
+    entry = _f(position.get('avg_entry_price', position.get('entry_price', 0)))
     side  = str(position.get('side', 'long')).lower()
-    size  = float(position.get('size', position.get('lots', 1)))
+    size  = _f(position.get('size', position.get('lots', 1)), 1.0)
 
     if entry <= 0 or current_price <= 0:
         return {
@@ -221,7 +229,11 @@ def evaluate_proactive_exit(
     c3_candle = candle_analysis['confirmed']
 
     # C4 opcional: MTF revirtiendo
-    mtf = float(snap.get('mtf_score', 0))
+    def _safe_f(v):
+        try: return float(v) if v is not None else 0.0
+        except: return 0.0
+    
+    mtf = _safe_f(snap.get('mtf_score', 0))
     if is_long:
         c4_mtf = mtf < 0.20
     else:

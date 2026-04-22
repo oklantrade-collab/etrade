@@ -326,12 +326,22 @@ class UniverseBuilder:
             log_info(MODULE, f"Sample row to save: {sample['ticker']} | price={sample['price']} | "
                              f"fund_score={sample['fundamental_score']} | pool={sample['pool_type']}")
 
-        try:
-            # LIMPIEZA TOTAL: Solo queremos ver lo que el escáner acaba de encontrar hoy.
-            # No queremos basura de días anteriores en Inversión Pro.
-            sb.table("watchlist_daily").delete().neq("ticker", "DUMMY").execute() 
-            sb.table("watchlist_daily").insert(rows).execute()
-            log_info(MODULE, f"DB OK: {len(rows)} tickers saved for {today}")
-        except Exception as e:
-            import traceback
-            log_error(MODULE, f"DB insert failed: {e}\n{traceback.format_exc()}")
+        # 3. Guardar con Reintentos (PGRST002/Timeout protection)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # LIMPIEZA TOTAL: Solo queremos ver lo que el escáner acaba de encontrar hoy.
+                # No queremos basura de días anteriores en Inversión Pro.
+                sb.table("watchlist_daily").delete().neq("ticker", "DUMMY").execute() 
+                sb.table("watchlist_daily").insert(rows).execute()
+                log_info(MODULE, f"DB OK: {len(rows)} tickers saved for {today}")
+                return # Exit on success
+            except Exception as e:
+                if "PGRST002" in str(e) or "schema cache" in str(e) or "Timeout" in str(e):
+                    log_warning(MODULE, f"Supabase busy (Attempt {attempt+1}/{max_retries}). Retrying in 1s...")
+                    await asyncio.sleep(1)
+                    continue
+                
+                import traceback
+                log_error(MODULE, f"DB insert failed: {e}\n{traceback.format_exc()}")
+                break

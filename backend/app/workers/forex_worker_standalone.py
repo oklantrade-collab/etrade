@@ -138,7 +138,15 @@ class StandaloneForexWorker:
 
     def log(self, msg, level='INFO'):
         ts = datetime.now().strftime('%H:%M:%S')
-        print(f"[{ts}] [{level}] {msg}"); sys.stdout.flush()
+        try:
+            # Forzar codificación segura para consolas Windows
+            clean_msg = str(msg).encode('utf-8', errors='replace').decode('utf-8')
+            print(f"[{ts}] [{level}] {clean_msg}")
+            sys.stdout.flush()
+        except:
+            # Fallback total: solo texto plano sin formato
+            try: print(f"[{ts}] [{level}] {str(msg).encode('ascii', 'ignore').decode('ascii')}")
+            except: pass
 
     def start(self):
         self.log(f"Iniciando Worker v3.1 (Rutas Windows OK)...")
@@ -255,23 +263,31 @@ class StandaloneForexWorker:
         self.client.send(req)
 
     def warmup_all(self):
-        """Carga histórica inicial lenta para evitar saturar la base de datos."""
+        """Carga histórica inicial no bloqueante para evitar congelar el reactor."""
         self.log("Preparando datos históricos (Lazy Warmup)...")
-        import time
         # Marcamos que estamos en fase de arranque para NO guardar historial pesado en DB
         STATE['is_warming_up'] = True
         
+        delay = 0.5
         for sym in FOREX_SYMBOLS:
-            self.log(f"-> Cargando {sym}...")
-            self.request_bars(sym, '15m', 300) # Reducido de 500 a 300
-            time.sleep(3.0) 
-            self.request_bars(sym, '1h', 100)
-            time.sleep(3.0)
-            self.request_bars(sym, '4h', 100)
-            time.sleep(3.0)
-            self.request_bars(sym, '1d', 100)
-            time.sleep(5.0) 
+            self.log(f"-> Programando carga de {sym}...")
+            # 15m
+            reactor.callLater(delay, self.request_bars, sym, '15m', 300)
+            delay += 2.0
+            # 1h
+            reactor.callLater(delay, self.request_bars, sym, '1h', 100)
+            delay += 1.5
+            # 4h
+            reactor.callLater(delay, self.request_bars, sym, '4h', 100)
+            delay += 1.5
+            # 1d
+            reactor.callLater(delay, self.request_bars, sym, '1d', 100)
+            delay += 2.0
             
+        # Desactivar warmup tras un tiempo prudencial (ej. 30 segundos)
+        reactor.callLater(delay + 5.0, self._finish_warmup)
+
+    def _finish_warmup(self):
         self.log("Warmup inicial completado en memoria. El guardado en DB se activará en el siguiente ciclo.")
         STATE['is_warming_up'] = False
 

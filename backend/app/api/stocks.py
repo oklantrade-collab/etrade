@@ -213,6 +213,12 @@ async def get_stocks_opportunities(
             .execute()
         active_pos_tickers = [p["ticker"] for p in (pos_res.data or [])]
 
+        # 3.7 Get Extended Fundamental Metrics from fundamental_cache
+        funda_res = sb.table("fundamental_cache")\
+            .select("ticker, piotroski_score, piotroski_detail, graham_number, graham_margin, dcf_intrinsic, dcf_upside_pct, altman_z_score, altman_zone, math_score, ia_score, data_source, valuation_status, composite_intrinsic")\
+            .execute()
+        funda_map = {f["ticker"]: f for f in (funda_res.data or [])}
+
         # 4. Get stored prices and volumes from signals_json/watchlist
         price_map = {}
         volume_map = {}
@@ -233,6 +239,7 @@ async def get_stocks_opportunities(
             processed_tickers.add(ticker)
             t = tech_map.get(ticker, {})
             o = opp_map.get(ticker, {})
+            f = funda_map.get(ticker, {})
 
             vol = volume_map.get(ticker, 0)
             result.append({
@@ -272,6 +279,9 @@ async def get_stocks_opportunities(
                 "t02_confirmed": t.get("signals_json", {}).get("t02_confirmed", False),
                 "t03_confirmed": t.get("signals_json", {}).get("t03_confirmed", False),
                 "t04_confirmed": t.get("signals_json", {}).get("t04_confirmed", False),
+                "ai_rationale": t.get("signals_json", {}).get("ai_rationale") or f.get("gemini_summary") or "",
+                "qwen_summary": t.get("signals_json", {}).get("qwen_summary") or f.get("qwen_summary") or "",
+                "gemini_summary": t.get("signals_json", {}).get("gemini_summary") or f.get("gemini_summary") or "",
                 "orders": orders_map.get(ticker, []),
                 # ENRIQUECIMIENTO FUNDAMENTAL (Universe Promotion)
                 "pool_type": w.get("pool_type") or ("CORE" if ticker in active_pos_tickers else ""),
@@ -284,6 +294,22 @@ async def get_stocks_opportunities(
                 "is_pro_member": (w.get("quality_flag") in ["PASS", "✓ PASS"] and bool(w.get("pool_type"))) or (ticker in active_pos_tickers),
                 # Conversión de UTC a Lima (GMT-5) para el Dashboard
                 "last_scan_time": (datetime.fromisoformat((t.get("timestamp") or "").split(".")[0][:19] + "+00:00") - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
+                
+                # VALUATION ENGINE FIELDS
+                "piotroski_score": f.get("piotroski_score"),
+                "piotroski_detail": f.get("piotroski_detail"),
+                "graham_number": f.get("graham_number"),
+                "graham_margin": f.get("graham_margin"),
+                "dcf_intrinsic": f.get("dcf_intrinsic"),
+                "dcf_upside_pct": f.get("dcf_upside_pct"),
+                "altman_z_score": f.get("altman_z_score"),
+                "altman_zone": f.get("altman_zone"),
+                "math_score": f.get("math_score"),
+                "ia_score": f.get("ia_score"),
+                "data_source": f.get("data_source", "none"),
+                "valuation_status": f.get("valuation_status", "unknown"),
+                "composite_intrinsic": f.get("composite_intrinsic"),
+                "margin_of_safety": f.get("margin_of_safety", 0),
             })
 
         # Extra: Add positions that are NOT in watchlist

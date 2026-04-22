@@ -528,7 +528,10 @@ async def run_stocks_candle_cycle():
             if result.get("success"):
                 executed_count += 1
         except Exception as e:
-            log_error(MODULE, f"Stock execution failed for {sig['pair']}: {e}")
+            err_msg = str(e)
+            if "10061" in err_msg:
+                err_msg = f"Connection Refused (10061). If using IB TWS, ensure it is open and API is enabled on port 7497. Original error: {err_msg}"
+            log_error(MODULE, f"Stock execution failed for {sig['pair']}: {err_msg}")
 
     duration = round(time.time() - cycle_start, 1)
     log_info(MODULE,

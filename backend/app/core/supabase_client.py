@@ -20,8 +20,8 @@ def get_supabase() -> Client:
         # Aumentar timeout por inestabilidad de red en entorno Windows
         # Nota: http_client se ha removido por incompatibilidad con algunas versiones de SyncClientOptions
         options = ClientOptions(
-            postgrest_client_timeout=45,
-            storage_client_timeout=45
+            postgrest_client_timeout=60,
+            storage_client_timeout=60
         )
 
         _client = create_client(

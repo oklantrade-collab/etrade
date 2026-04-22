@@ -10,6 +10,8 @@ import json
 import os
 import sys
 from typing import Optional
+import yfinance as yf
+import numpy as np
 
 # Add backend to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -26,66 +28,90 @@ class FundamentalAnalyzer:
 
     async def analyze_ticker(self, ticker: str) -> dict | None:
         """
-        Executes Capa 3 logic for a stock.
+        Executes Capa 3 logic for a stock, fetching all metrics for the Valuation Engine.
         """
-        log_info(MODULE, f"Analyzing fundamentals for {ticker}...")
+        log_info(MODULE, f"Enriching fundamentals for {ticker} via YFinance...")
         
         try:
-            # 1. Fetch info from yfinance
-            info = await self.provider.get_ticker_info(ticker)
+            t = yf.Ticker(ticker)
+            info = t.info
             if not info:
                 return None
 
-            # 2. Determine Mode (A vs B)
-            # Default to B (Growth) if no PE or high Beta
-            pe = info.get("pe_ratio")
-            beta = info.get("beta", 1.0) or 1.0
-            div_yield = info.get("dividend_yield", 0) or 0
-            
-            if pe and pe < 20 and div_yield > 0.01:
-                mode = "A" # Value
-            elif beta > 1.5:
-                mode = "B" # High Beta / Growth
-            else:
-                mode = "B" # Conservative Growth
+            # 1. Fetch deep financials (Balance Sheet, Cash Flow, etc.)
+            # Nota: yfinance es lento aquí, pero es necesario para el modo matemático preciso.
+            # En producción, esto se cachea.
+            try:
+                bs = t.balance_sheet
+                cf = t.cashflow
+                is_stmt = t.financials
+                
+                # Obtener periodos (actual y anterior)
+                cols = bs.columns if bs is not None and len(bs.columns) >= 2 else []
+                has_prev = len(cols) >= 2
+                
+                def get_val(df, label, col_idx=0):
+                    try:
+                        if df is None or label not in df.index: return 0
+                        val = df.loc[label].iloc[col_idx]
+                        return float(val) if not np.isnan(val) else 0
+                    except: return 0
 
-            # 3. Calculate Margin of Safety (for A) or Momentum (for B)
-            price = info.get("current_price", 0)
-            
-            if mode == "A":
-                # Graham Formula simplified for intrinsic value
-                # IV = SQRT(22.5 * Earnings * BookValue)
-                # But here we estimate based on target price (if available)
-                intrinsic = info.get("50d_avg", price) * 1.1 # Placeholder formula
-                margin = ((intrinsic - price) / intrinsic) * 100 if intrinsic > 0 else 0
-            else:
-                intrinsic = info.get("200d_avg", price)
-                margin = ((price - intrinsic) / intrinsic) * 100 if intrinsic > 0 else 0
+                # Mapeo para Piotroski / Graham / Altman
+                f_data = {
+                    'roa': info.get('returnOnAssets', 0),
+                    'roa_prev': get_val(is_stmt, 'Net Income', 1) / get_val(bs, 'Total Assets', 1) if has_prev and get_val(bs, 'Total Assets', 1) > 0 else 0,
+                    'ocf': info.get('operatingCashFlow', 0) or get_val(cf, 'Operating Cash Flow', 0),
+                    'net_income': info.get('netIncome', 0) or get_val(is_stmt, 'Net Income', 0),
+                    'total_assets': info.get('totalAssets', 0) or get_val(bs, 'Total Assets', 0),
+                    'current_assets': info.get('totalCurrentAssets', 0) or get_val(bs, 'Current Assets', 0),
+                    'current_liabilities': info.get('totalCurrentLiabilities', 0) or get_val(bs, 'Current Liabilities', 0),
+                    'long_term_debt': info.get('longTermDebt', 0) or get_val(bs, 'Long Term Debt', 0),
+                    'long_term_debt_prev': get_val(bs, 'Long Term Debt', 1) if has_prev else 0,
+                    'total_liabilities': info.get('totalLiabilitiesNetMinorityInterest', 0) or get_val(bs, 'Total Liabilities Net Minority Interest', 0),
+                    'retained_earnings': get_val(bs, 'Retained Earnings', 0),
+                    'market_cap': info.get('marketCap', 0),
+                    'eps': info.get('trailingEps', 0),
+                    'fcf_per_share': (info.get('freeCashflow', 0) or get_val(cf, 'Free Cash Flow', 0)) / (info.get('sharesOutstanding', 1)),
+                    'book_value_per_share': info.get('bookValue', 0),
+                    'current_ratio': info.get('currentRatio', 0),
+                    'current_ratio_prev': get_val(bs, 'Current Assets', 1) / get_val(bs, 'Current Liabilities', 1) if has_prev and get_val(bs, 'Current Liabilities', 1) > 0 else 0,
+                    'gross_margin': info.get('grossMargins', 0),
+                    'gross_margin_prev': get_val(is_stmt, 'Gross Profit', 1) / get_val(is_stmt, 'Total Revenue', 1) if has_prev and get_val(is_stmt, 'Total Revenue', 1) > 0 else 0,
+                    'asset_turnover': info.get('totalRevenue', 0) / info.get('totalAssets', 1),
+                    'asset_turnover_prev': get_val(is_stmt, 'Total Revenue', 1) / get_val(bs, 'Total Assets', 1) if has_prev and get_val(bs, 'Total Assets', 1) > 0 else 0,
+                    'revenue_growth_yoy': info.get('revenueGrowth', 0.05),
+                    'ebit': info.get('ebitda', 0) * 0.8, # Estimación simple si no hay EBIT
+                    'revenue': info.get('totalRevenue', 0),
+                    'shares_outstanding': info.get('sharesOutstanding', 1),
+                    'shares_outstanding_prev': get_val(bs, 'Ordinary Shares Number', 1) if has_prev else info.get('sharesOutstanding', 1),
+                    'sector': info.get('sector', 'Technology'),
+                    'analyst_rating': max(1, min(10, round(-2.25 * (info.get('recommendationMean') or 3) + 12.25, 1)))
+                }
+                
+                # Cleanup de NaNs y ceros críticos
+                for k, v in f_data.items():
+                    if isinstance(v, float) and np.isnan(v): f_data[k] = 0
+                if f_data['total_assets'] <= 0: f_data['total_assets'] = 1
+                if f_data['shares_outstanding'] <= 0: f_data['shares_outstanding'] = 1
 
-            status = "stable" if abs(margin) < 15 else "volatile"
-            
-            # 4. Prepare result for DB Cache & AI validation
-            result = {
-                "ticker":            ticker,
-                "valuation_mode":    mode,
-                "intrinsic_value":   round(float(intrinsic), 2),
-                "current_price":     round(float(price), 2),
-                "margin_of_safety":  round(float(margin), 2),
-                "valuation_status":  status,
-                "fundamental_score": 0.0, # To be filled by AI validation
-                "mode_b_metrics_json": {
-                    "pe": pe,
-                    "beta": beta,
-                    "yield": div_yield,
-                    "sector": info.get("sector"),
-                    "peg": info.get("peg_ratio"),
-                },
-                "confidence": "medium"
-            }
+                return f_data
 
-            # 5. Save to fundamental_cache
-            await self._save_cache(result)
-            return result
+            except Exception as e:
+                log_warning(MODULE, f"Deep financials fetch failed for {ticker}: {e}. Using info fallback.")
+                # Fallback to basic info if deep financials fail
+                return {
+                    'roa': info.get('returnOnAssets', 0),
+                    'ocf': info.get('operatingCashFlow', 0),
+                    'net_income': info.get('netIncome', 0),
+                    'total_assets': info.get('totalAssets', 1),
+                    'market_cap': info.get('marketCap', 0),
+                    'eps': info.get('trailingEps', 0),
+                    'book_value_per_share': info.get('bookValue', 0),
+                    'sector': info.get('sector', 'Default'),
+                    'revenue_growth_yoy': info.get('revenueGrowth', 0.05),
+                    'analyst_rating': max(1, min(10, round(-2.25 * (info.get('recommendationMean') or 3) + 12.25, 1)))
+                }
 
         except Exception as e:
             log_error(MODULE, f"Fundamental analysis failed for {ticker}: {e}")

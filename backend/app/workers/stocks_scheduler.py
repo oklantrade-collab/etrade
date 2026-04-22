@@ -198,32 +198,28 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         df_1d  = ind_1d["_df"]
 
         # 2b. ADD FIBONACCI BANDS FOR MOVEMENT DETECTION
-        # (Necesarias para classify_movement y smart_limit)
         df_15m = fibonacci_bollinger(df_15m, length=200, mult=3.0)
         df_1d  = fibonacci_bollinger(df_1d,  length=200, mult=3.0)
 
-        # 3. VOLUME FILTER (Min daily volume from config or 500k default)
+        # 3. VOLUME FILTER
         min_vol = float(config.get("min_daily_volume", 500000))
         volume_24h = ind_1d.get("volume", 0)
         if volume_24h < min_vol:
             log_debug(MODULE, f"Skipping {ticker}: volume {volume_24h} < {min_vol}")
             return None
 
-        # 4. TECHNICAL RULES (Sustentación Técnica)
-        # T01: Señal PineScript "B" (4H) + 3 candles (Total 4 candles)
+        # 4. TECHNICAL RULES
         ps_signal_4h = ind_4h.get("last_pinescript_signal")
         ps_age_4h = ind_4h.get("signal_age", 999)
         t01_confirmed = (ps_signal_4h == "Buy" and ps_age_4h <= 3)
 
-        # T02: EMA Alignment (1D): EMA 50 > EMA 200
         ema_50_1d = ind_1d.get("ema_50") or 0.0
         ema_200_1d = ind_1d.get("ema_200") or 999999.0
         t02_confirmed = (ema_50_1d > ema_200_1d)
 
-        # T03: Cierre de vela (4H) Verde
         candle_4h_green = 1 if df_4h.iloc[-1]["close"] > df_4h.iloc[-1]["open"] else 0
 
-        # SCORING (T01: 40pts, T02: 30pts, T03: 20pts, T04: 10pts = 100 max)
+        # SCORING
         base_score = 0.0
         if t01_confirmed:   base_score += 40.0
         if t02_confirmed:   base_score += 30.0
@@ -233,59 +229,88 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         if rsi_val and 40 <= rsi_val <= 70:
             base_score += 10.0
 
-        # 7. AI CONSENSUS ANALYSIS (Qweb + Gemini Average)
-        # OPTIMIZACIÓN: Solo llamar a la IA si el Technical Score es decente (>= 60) o si es PRO
-        technical_threshold = float(config.get("technical_score_threshold", 60))
+        # 5. CAPA 3: UNIFIED ANALYSIS (Math + IA Enrichment)
+        from app.analysis.capa3_fundamentals import analyze_fundamentals
         
-        pro_score = 0.0
-        ai_rationale = ""
-        ai_result = None
-
-        if base_score >= (technical_threshold - 10) or is_pro_member:
-            from app.stocks.decision_engine import DecisionEngine
-            from app.core.supabase_client import get_supabase
-            engine = DecisionEngine()
-            
-            # Recuperar datos fundamentales desde el caché pasado
-            f_score = float(f_data.get("fundamental_score", 0)) if f_data else 0.0
-            a_rating = float(f_data.get("analyst_rating", 0)) if f_data else 0.0
-            p_type = f_data.get("pool_type", "") if f_data else ""
-
-            # Simular watchlist_entry básica para el contexto y actualizar tech_score
-            ind_15m["technical_score"] = base_score
-            wl_entry = {
-                "ticker": ticker,
-                "fundamental_score": f_score,
-                "analyst_rating": a_rating,
-                "pool_type": p_type
-            }
-            
-            ai_result = await engine.execute_full_analysis(ticker, wl_entry, ind_15m)
-        else:
-            log_info(MODULE, f"Skipping AI for {ticker}: Tech Score {base_score} < threshold")
+        # Recuperar metadatos para el análisis
+        a_rating = float(f_data.get("analyst_rating", 0)) if f_data else 0.0
         
-        if ai_result:
-            pro_score = ai_result.get("pro_score", 0.0)
-            ai_rationale = ai_result.get("ai_rationale", "")
-            # Inyectar en señales para el modal (PERSISTENCIA TOTAL)
-            ind_15m["pro_score"] = pro_score
-            ind_15m["ai_rationale"] = ai_rationale
-            ind_15m["qwen_score"] = ai_result.get("qwen_score", 0)
-            ind_15m["gemini_score"] = ai_result.get("gemini_score", 0)
-            ind_15m["qwen_summary"] = ai_result.get("qwen_summary", "")
-            ind_15m["gemini_summary"] = ai_result.get("gemini_summary", "")
-            ind_15m["intrinsic_value"] = ai_result.get("intrinsic_value", 0)
-            ind_15m["undervaluation"] = ai_result.get("undervaluation", 0)
-
-        # 5. CAPTURE LIVE PRICE, VOLUME & MARKET CAP
+        # Obtener Market Cap antes del rationale
         import yfinance as yf
         t_obj = yf.Ticker(ticker)
-        mcap = 0
+        mcap = 0.0
         try:
-            mcap = t_obj.fast_info.get("marketCap", 0)
+            # fast_info puede ser None o no tener el atributo get en algunas versiones de yf
+            info = getattr(t_obj, "fast_info", {})
+            mcap = float(info.get("marketCap") or 0) if info else 0.0
         except:
-            mcap = 0
+            mcap = 0.0
 
+        fundamental_res = await analyze_fundamentals(
+            ticker=ticker,
+            current_price=float(ind_15m.get("close", 0)),
+            ib_data=f_data or {},
+            sector=f_data.get("sector", "Other") if f_data else "Other",
+            analyst_rating=a_rating,
+            technical_score=base_score,
+            supabase=get_supabase()
+        )
+        
+        # Seguridad ante retorno nulo
+        if not fundamental_res:
+            fundamental_res = {"pro_score": 1.0, "explanation": "Error en análisis fundamental", "components": {}}
+
+        pro_score = fundamental_res.get("pro_score") or 0.0
+        
+        # ── 5.5 CONSTRUIR MASTER RATIONALE (Sustento Multi-Capa) ──
+        # Componentes de valoración para formateo seguro
+        comp = fundamental_res.get("components", {})
+        piot_score = comp.get("piotroski", {}).get("score", 0)
+        altman_z = float(comp.get("altman", {}).get("z_score", 0) or 0)
+        graham_val = float(comp.get("graham", {}).get("value", 0) or 0)
+        dcf_val = float(comp.get("dcf", {}).get("value", 0) or 0)
+        intrinsic = float(fundamental_res.get("intrinsic_value", 0) or 0)
+        mos = float(fundamental_res.get("margin_of_safety", 0) or 0)
+        status = fundamental_res.get("valuation_status", "N/A").upper()
+        icon = "🟢" if status == "UNDERVALUED" else "🔴" if status == "OVERVALUED" else "⚪"
+
+        # Capa 1: Universo
+        c1_txt = f"CAPA 1 (Universo): Pool {f_data.get('pool_type', 'STANDARD')} | MCap ${mcap/1e6:.1f}M."
+        
+        # Capa 2: Técnico
+        c2_txt = (
+            f"CAPA 2 (Técnico): T01(Pine)={'OK' if t01_confirmed else 'FAIL'}, "
+            f"T02(EMA)={'OK' if t02_confirmed else 'FAIL'}, "
+            f"T03(Vela)={'OK' if candle_4h_green else 'FAIL'}, "
+            f"T04(RSI)={'OK' if (rsi_val and 40<=rsi_val<=70) else 'FAIL'}."
+        )
+        
+        # Capa 3: Engine
+        c3_txt = (
+            f"CAPA 3 (Engine): {icon} {status} | Intrínseco: ${intrinsic:.2f} (Margen: {mos:+.1f}%) | "
+            f"Piotroski={piot_score}/9, Altman={altman_z:.2f}, Graham=${graham_val:.2f}, DCF=${dcf_val:.2f}."
+        )
+        
+        # Fórmula y Resultado
+        formula_txt = fundamental_res.get("explanation", "Cálculo matemático puro.")
+        master_rationale = f"{c1_txt}\n{c2_txt}\n{c3_txt}\n{formula_txt}"
+        
+        # Inyectar resultados en ind_15m para persistencia y UI
+        ind_15m["pro_score"] = pro_score
+        ind_15m["fundamental_score"] = pro_score * 10
+        ind_15m["math_score"] = fundamental_res.get("math_score")
+        ind_15m["ai_rationale"] = master_rationale
+        ind_15m["qwen_summary"] = fundamental_res.get("qwen_summary", "")
+        ind_15m["gemini_summary"] = fundamental_res.get("gemini_summary", "")
+        ind_15m["intrinsic_value"] = intrinsic
+        ind_15m["margin_of_safety"] = mos
+        ind_15m["undervaluation"] = mos  # Campo que usa el UI para el % arriba a la derecha
+        ind_15m["piotroski_score"] = piot_score
+        ind_15m["intrinsic_price"] = intrinsic
+        ind_15m["is_undervalued"] = (status == "UNDERVALUED")
+        ind_15m["pool_type"] = f_data.get("pool_type", "HOT") if f_data else "HOT"
+
+        # 6. CAPTURE LIVE PRICE
         current_price = float(df_15m["close"].iloc[-1])
         
         # Inject metadata for persistence
@@ -294,7 +319,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["rvol"] = ind_1d.get("rvol", 1.0)
         ind_15m["volume"] = volume_24h
         
-        # 6. SMART LIMITS & MOVEMENT TYPE (15m & 1d)
+        # 7. SMART LIMITS & MOVEMENT TYPE
         movement_15m = classify_movement(df_15m)
         limit_long_15m  = calculate_smart_limit_price(df_15m, 'long',  movement_15m['movement_type'])
         limit_short_15m = calculate_smart_limit_price(df_15m, 'short', movement_15m['movement_type'])
@@ -303,36 +328,17 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         limit_long_1d  = calculate_smart_limit_price(df_1d, 'long',  movement_1d['movement_type'])
         limit_short_1d = calculate_smart_limit_price(df_1d, 'short', movement_1d['movement_type'])
 
-        # 6.5 INYECTAR DATOS PARA S02 (Discount Buy)
-        # Tomamos BB Lower de 1D para el piso de compra
         bb_lower_1d = float(df_1d.iloc[-1].get("bb_lower", current_price * 0.95))
         ind_15m["bb_lower"] = bb_lower_1d
-        ind_15m["intrinsic_price"] = ai_result.get("intrinsic_value", 0) if ai_result else 0
-        ind_15m["is_undervalued"] = ai_result.get("is_undervalued", False) if ai_result else False
-
-        # 7. SAVE TO DB
+        
+        # 8. SAVE TO DB
         from app.analysis.stocks_indicators import upsert_technical_score
         is_acceptable = t01_confirmed and t02_confirmed and candle_4h_green
         
-        # Inyectar HH:MM para el Dashboard
         current_time_str = datetime.now().strftime("%H:%M")
         ind_15m["last_scan_time"] = current_time_str
 
-        # Si es HOT y no tiene datos fundamentales, intentar obtenerlos rápido
-        if not is_pro_member:
-            from app.analysis.fundamental_scorer import FundamentalScorer
-            f_scorer = FundamentalScorer()
-            spy_perf = await f_scorer.get_spy_performance_6m()
-            f_res = await f_scorer.calculate_score(ticker, spy_perf, current_price=current_price)
-            if f_res:
-                ind_15m["fundamental_score"] = f_res.get("fundamental_score", 0)
-                ind_15m["revenue_growth_yoy"] = f_res.get("revenue_growth_yoy", 0)
-                ind_15m["gross_margin"] = f_res.get("gross_margin", 0)
-                ind_15m["pool_type"] = "HOT"
-            else:
-                ind_15m["pool_type"] = "HOT"
-
-        # Inyectar ambos en ind_15m para llevar a signals_json
+        # Inyectar ambos en ind_15m para señales_json
         ind_15m["movement_15m"] = movement_15m["movement_type"]
         ind_15m["fib_zone_15m"] = movement_15m["fib_zone_current"]
         ind_15m["smart_limit_long_15m"] = limit_long_15m.get("limit_price")
@@ -343,7 +349,6 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["smart_limit_long_1d"] = limit_long_1d.get("limit_price")
         ind_15m["smart_limit_short_1d"] = limit_short_1d.get("limit_price")
 
-        # Inyectar componentes confirmados para UI en signals_json
         ind_15m["t01_confirmed"] = t01_confirmed
         ind_15m["t02_confirmed"] = t02_confirmed
         ind_15m["t03_confirmed"] = bool(candle_4h_green)
@@ -351,16 +356,14 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         
         upsert_technical_score(ticker, ind_15m, base_score, is_acceptable, pro_score)
 
-        # 8. SISTEMA DE EJECUCIÓN AUTOMÁTICA (S01-S08)
-        # Evaluamos si alguna regla exige compra/venta inmediata
+        # 9. RULE ENGINE
         from app.stocks.stocks_rule_engine import StocksRuleEngine
         from app.stocks.stocks_order_executor import execute_market_order, place_limit_order
         
         re = StocksRuleEngine.get_instance()
-        # Construir contexto para el motor de reglas
         rule_ctx = re.build_context(
             ticker=ticker,
-            snap=ind_15m, # ind_15m tiene 'price', 'close', 'basis'
+            snap=ind_15m,
             ia_score=pro_score,
             tech_score=base_score,
             fundamental_score=ind_15m.get("fundamental_score", 0),
@@ -372,25 +375,19 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             intrinsic_price=ind_15m["intrinsic_price"],
             pool_type=ind_15m.get("pool_type", "")
         )
-        # Añadir Revenue Growth manualmente al contexto para S09
         rule_ctx["revenue_growth_yoy"] = ind_15m.get("revenue_growth_yoy", 0)
         
-        # 8. SISTEMA DE EJECUCIÓN AUTOMÁTICA (COMPRA/VENTA)
-        re = StocksRuleEngine.get_instance()
-        
-        # 8.1. Evaluar todas las reglas de COMPRA
         buying_results = re.evaluate_all(rule_ctx, direction="buy")
         for res in buying_results:
             if res["triggered"]:
                 log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker}")
                 if res["order_type"] == "market":
                     execute_market_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
-                    break # Solo una orden de compra por ciclo
+                    break
                 elif res["order_type"] == "limit":
                     place_limit_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
                     break
 
-        # 8.2. Evaluar todas las reglas de VENTA (Solo si hay posición abierta)
         if ticker in (await get_open_positions_tickers()):
             selling_results = re.evaluate_all(rule_ctx, direction="sell")
             for res in selling_results:
@@ -398,13 +395,13 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                     log_info(MODULE, f"🔻 SELL RULE TRIGGERED: {res['rule_code']} for {ticker}")
                     if res["order_type"] == "market":
                         execute_market_order(ticker, "sell", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
-                        break # Solo un cierre por ciclo
+                        break
                     elif res["order_type"] == "limit":
                         place_limit_order(ticker, "sell", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
                         break
 
         if is_acceptable:
-            log_info(MODULE, f"🌟 {ticker} BULLISH ALIGNED (SAR+4H+EMA) Score={base_score} | Pro_Score={pro_score}")
+            log_info(MODULE, f"🌟 {ticker} BULLISH Score={base_score} | Pro_Score={pro_score}")
         else:
             log_info(MODULE, f"📊 {ticker} Processed. Score={base_score} | Mov={movement_15m['movement_type']}")
 
@@ -416,18 +413,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             "price": float(current_price),
             "acceptable": is_acceptable,
             "movement_15m": movement_15m["movement_type"],
-            "smart_limit_long_15m": limit_long_15m.get("limit_price"),
-            "smart_limit_short_15m": limit_short_15m.get("limit_price"),
-            "movement_1d": movement_1d["movement_type"],
-            "smart_limit_long_1d": limit_long_1d.get("limit_price"),
-            "smart_limit_short_1d": limit_short_1d.get("limit_price"),
-            "intrinsic_price": ind_15m["intrinsic_price"],
-            "is_undervalued": ind_15m["is_undervalued"],
             "last_scan_time": ind_15m["last_scan_time"],
-            "fundamental_score": ind_15m.get("fundamental_score", 0),
-            "rev_growth": ind_15m.get("revenue_growth_yoy", 0),
-            "gross_margin": ind_15m.get("gross_margin", 0),
-            "pool_type": ind_15m.get("pool_type", "PRO" if is_pro_member else "HOT")
+            "pool_type": ind_15m.get("pool_type", "HOT")
         }
 
     except Exception as e:
