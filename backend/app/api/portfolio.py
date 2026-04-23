@@ -39,12 +39,17 @@ async def get_global_portfolio():
             forex_symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']
             
             # --- 2. CONSULTAS MASIVAS (CONSOLIDADAS) ---
+            # Identificar todos los símbolos necesarios para el snapshot (Crypto + Forex + Stocks abiertos)
+            open_stocks_res = supabase.table('stocks_positions').select('ticker').eq('status', 'open').execute()
+            open_stocks_tickers = [s['ticker'] for s in (open_stocks_res.data or [])]
+            all_snap_symbols = list(set(active_crypto_symbols + forex_symbols + open_stocks_tickers))
+
             async def fetch_data():
                 return await asyncio.gather(
                     asyncio.to_thread(supabase.table('positions').select('*').eq('status', 'open').execute),
                     asyncio.to_thread(supabase.table('forex_positions').select('*').eq('status', 'open').execute),
                     asyncio.to_thread(supabase.table('stocks_positions').select('*').eq('status', 'open').execute),
-                    asyncio.to_thread(supabase.table('market_snapshot').select('*').in_('symbol', list(set(active_crypto_symbols + forex_symbols))).execute),
+                    asyncio.to_thread(supabase.table('market_snapshot').select('*').in_('symbol', all_snap_symbols).execute),
                     asyncio.to_thread(supabase.table('paper_trades').select('total_pnl_usd').gte('closed_at', today_start).execute),
                     asyncio.to_thread(supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').gte('closed_at', today_start).execute),
                     asyncio.to_thread(supabase.table('stocks_positions').select('unrealized_pnl').eq('status', 'closed').gte('updated_at', today_start).execute),
@@ -117,6 +122,7 @@ async def get_global_portfolio():
                     'fibonacci_zone': snap.get('fibonacci_zone', 0),
                     'rule_code': pos.get('rule_code', 'N/A') if pos else 'N/A',
                     'total_investment': round(capital, 2),
+                    'quantity': float(pos.get('size') or 0) if pos else 0,
                     'status': 'active' if pos else 'hold'
                 })
 
@@ -148,6 +154,8 @@ async def get_global_portfolio():
                     'unrealized_pnl_usd': round(upnl_usd, 2),
                     'unrealized_pnl_pct': round(upnl_pct, 2),
                     'total_investment': round(total_inv, 2),
+                    'quantity': abs(float(pos.get('lots') or 0)) if pos else 0,
+                    'fibonacci_zone': snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
                     'rule_code': pos.get('rule_code', 'N/A') if pos else 'N/A',
                     'status': 'active' if pos else 'hold'
                 })
@@ -170,7 +178,8 @@ async def get_global_portfolio():
                     'unrealized_pnl_pct': round(u_pct, 2),
                     'total_investment': round(cap, 2),
                     'quantity': sh,
-                    'rule_code': sp.get('rule_code', 'N/A'),
+                    'fibonacci_zone': market_snaps.get(sp['ticker'], {}).get('fibonacci_zone') if market_snaps.get(sp['ticker'], {}).get('fibonacci_zone') is not None else market_snaps.get(sp['ticker'], {}).get('fibo_zone', 0),
+                    'rule_code': sp.get('pool_type') or sp.get('strategy') or sp.get('rule_code', 'N/A'),
                     'status': 'active'
                 })
 
