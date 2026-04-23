@@ -137,15 +137,25 @@ async def get_global_portfolio():
                 if pos:
                     entry = float(pos.get('entry_price') or 0)
                     lots = float(pos.get('lots') or 0)
-                    pip_size = 0.01 if 'JPY' in sym or 'XAU' in sym else 0.0001
-                    pip_val = 10.0
+                    # Configuración específica por símbolo (P&L real)
+                    pip_params = {
+                        'EURUSD': {'size': 0.0001, 'val': 10.0},
+                        'GBPUSD': {'size': 0.0001, 'val': 10.0},
+                        'USDJPY': {'size': 0.01,   'val': 6.5},
+                        'XAUUSD': {'size': 0.01,   'val': 1.0},
+                    }
+                    p_p = pip_params.get(sym, {'size': 0.0001, 'val': 10.0})
+                    pip_size = p_p['size']
+                    pip_val = p_p['val']
+
                     if entry > 0 and cur_price > 0:
                         side_mult = 1 if str(pos.get('side', '')).lower() in ['long', 'buy'] else -1
                         pips = (cur_price - entry) / pip_size * side_mult
-                        upnl_usd = pips * pip_val * lots
+                        upnl_usd = pips * pip_val * abs(lots)
                         upnl_pct = (pips * pip_size / entry) * 100
-                    mult = 100.0 if 'XAU' in sym else 100000.0
-                    total_inv = (lots * mult * (cur_price or entry)) / lev_forex
+                    
+                    mult_inv = 100.0 if 'XAU' in sym else 100000.0
+                    total_inv = (abs(lots) * mult_inv * (cur_price or entry)) / lev_forex
                 forex_symbols_data.append({
                     'symbol': sym,
                     'side': 'long' if str(pos.get('side', '')).lower() in ['long', 'buy'] else 'short' if pos else None,
