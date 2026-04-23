@@ -224,9 +224,51 @@ export default function ForexPositions() {
                                  </div>
                               </td>
                               <td className="py-8 text-right px-10">
-                                 <span className="bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em] shadow-[0_0_15px_rgba(99,102,241,0.1)]">
-                                    {pos.rule_code || 'FX-CORE'}
-                                 </span>
+                                 <div className="flex items-center justify-end gap-3">
+                                    <span className="bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em] shadow-[0_0_15px_rgba(99,102,241,0.1)]">
+                                       {pos.rule_code || 'FX-CORE'}
+                                    </span>
+                                    <button 
+                                      onClick={async () => {
+                                        if (confirm(`¿Cerrar posición de ${pos.symbol} manualmente? Se enviará al historial.`)) {
+                                          try {
+                                            const res = await fetch(`/api/v1/positions/forex/${pos.id}/close`, { method: 'POST' })
+                                            if (res.ok) {
+                                              fetchData()
+                                            } else {
+                                              alert("Error al cerrar posición")
+                                            }
+                                          } catch (err) {
+                                            console.error("Close error:", err)
+                                          }
+                                        }
+                                      }}
+                                      className="w-8 h-8 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-500 hover:bg-emerald-500 hover:text-white transition-all shadow-lg shadow-emerald-500/10 group-hover:scale-110"
+                                      title="Cerrar Posición (Mover al Historial)"
+                                    >
+                                       <span className="text-xs font-black">✓</span>
+                                    </button>
+                                    <button 
+                                      onClick={async () => {
+                                        if (confirm(`¿ELIMINAR registro de ${pos.symbol} permanentemente? No aparecerá en el historial.`)) {
+                                          try {
+                                            const res = await fetch(`/api/v1/positions/forex/${pos.id}`, { method: 'DELETE' })
+                                            if (res.ok) {
+                                              fetchData()
+                                            } else {
+                                              alert("Error al eliminar registro")
+                                            }
+                                          } catch (err) {
+                                            console.error("Delete error:", err)
+                                          }
+                                        }
+                                      }}
+                                      className="w-8 h-8 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-500 hover:bg-rose-500 hover:text-white transition-all shadow-lg shadow-rose-500/10 group-hover:scale-110"
+                                      title="ELIMINAR Registro (Borrado Permanente)"
+                                    >
+                                       <span className="text-xs font-black">🗑️</span>
+                                    </button>
+                                 </div>
                               </td>
                            </tr>
                          )
@@ -252,6 +294,7 @@ export default function ForexPositions() {
                        <th className="py-8">LOTAJE</th>
                        <th className="py-8">ENTRADA</th>
                        <th className="py-8">CIERRE</th>
+                       <th className="py-8">ESTADO / REASON</th>
                        <th className="py-8">RESULTADO</th>
                        <th className="py-8 text-right px-10">ESTRATEGIA</th>
                     </tr>
@@ -295,6 +338,11 @@ export default function ForexPositions() {
                              <td className="py-8 font-mono text-[0.8rem] text-slate-300 font-bold">
                                 {exitPrice.toFixed(pos.symbol.includes('JPY') || pos.symbol.includes('XAU') ? 3 : 5)}
                              </td>
+                             <td className="py-8">
+                                <span className="text-[0.6rem] font-black text-slate-500 uppercase bg-white/5 px-2 py-1 rounded">
+                                   {pos.close_reason || 'MANUAL / SL'}
+                                </span>
+                             </td>
                              <td className="py-8 font-mono font-black italic">
                                 <div className="flex flex-col">
                                    <span className={`text-sm ${realPnl > 0 ? 'text-emerald-400' : realPnl < 0 ? 'text-rose-400' : 'text-slate-400'}`}>
@@ -315,7 +363,7 @@ export default function ForexPositions() {
                       })
                     ) : (
                       <tr>
-                         <td colSpan={8} className="py-32 text-center">
+                         <td colSpan={9} className="py-32 text-center">
                             <div className="flex flex-col items-center gap-4 opacity-40">
                                <div className="text-4xl">📚</div>
                                <div className="text-[0.7rem] font-black text-slate-500 uppercase tracking-[0.5em] italic">No hay historial de posiciones cerradas</div>

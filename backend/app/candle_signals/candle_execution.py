@@ -44,6 +44,10 @@ from app.core.crypto_symbols import (
     resolve_crypto_position_quantity,
 )
 from app.candle_signals.candle_patterns import PatternResult
+from app.strategy.position_guards import (
+    can_open_position,
+    check_signal_interval,
+)
 
 MODULE = "candle_signal_exec"
 
@@ -263,6 +267,25 @@ def execute_crypto_signal(
     from app.core.memory_store import BOT_STATE
     is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
     binance_symbol = normalize_crypto_symbol(pair)
+
+    # ── GUARD #3: Anti-spam de señales (Corrección #3) ──
+    signal_check = check_signal_interval(binance_symbol, action)
+    if not signal_check['allowed']:
+        log_info(MODULE, f"🚫 SIGNAL GUARD: {signal_check['reason']}")
+        return {"success": False, "reason": "signal_spam_guard", "pair": binance_symbol}
+
+    # ── GUARD #2: Cooldown post-SL + max 1 por símbolo (Corrección #2) ──
+    open_pos_res = sb.table("positions").select("id, symbol, side").eq("status", "open").execute()
+    open_pos_list = open_pos_res.data or []
+    guard_check = can_open_position(
+        symbol=binance_symbol,
+        direction='long' if action == 'BUY' else 'short',
+        market_type='crypto_futures',
+        open_positions=open_pos_list,
+    )
+    if not guard_check['allowed']:
+        log_info(MODULE, f"🚫 POSITION GUARD: {guard_check['reason']}")
+        return {"success": False, "reason": "position_guard", "pair": binance_symbol, "detail": guard_check['reason']}
 
     # Cerrar posiciones: 
     # 1. Forzar cierre de las opuestas (Hedge no permitido)
@@ -786,6 +809,25 @@ def execute_forex_signal(
         f"TF: {timeframe} | Confidence: {pattern.confidence:.0f} | "
         f"Fib Zone: {fib_zone:+d}"
     )
+
+    # ── GUARD #3: Anti-spam de señales Forex (Corrección #3) ──
+    signal_check = check_signal_interval(pair, action)
+    if not signal_check['allowed']:
+        log_info(MODULE, f"🚫 SIGNAL GUARD (FOREX): {signal_check['reason']}")
+        return {"success": False, "reason": "signal_spam_guard", "pair": pair}
+
+    # ── GUARD #2: Cooldown post-SL Forex (Corrección #2) ──
+    open_pos_res = sb.table("forex_positions").select("id, symbol, side").eq("status", "open").execute()
+    open_pos_list = open_pos_res.data or []
+    guard_check = can_open_position(
+        symbol=pair,
+        direction='long' if action == 'BUY' else 'short',
+        market_type='forex_futures',
+        open_positions=open_pos_list,
+    )
+    if not guard_check['allowed']:
+        log_info(MODULE, f"🚫 POSITION GUARD (FOREX): {guard_check['reason']}")
+        return {"success": False, "reason": "position_guard", "pair": pair, "detail": guard_check['reason']}
 
     # ── STEP 1: Hedge OFF (Netting) ──
     # Si hay opuestas, cerramos todo lo de la dirección contraria antes de seguir

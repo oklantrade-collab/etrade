@@ -16,6 +16,11 @@ from app.strategy.capital_protection import (
     calculate_pnl,
     evaluate_all_protections
 )
+from app.strategy.position_guards import (
+    check_time_based_sl,
+    register_sl_event,
+    update_peak_pnl,
+)
 
 MODULE = "POSITION_MONITOR"
 
@@ -358,7 +363,30 @@ async def check_open_positions_5m(
             current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
             closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
             if closed:
+                # Register SL cooldown when closed by protection (SL hit)
+                side = (pos.get('side') or 'long').lower()
+                register_sl_event(norm_symbol, side)
                 events.append({'symbol': norm_symbol, 'event': 'protection_close'})
+                continue
+
+            # 0.1.1 TIME-BASED SL (Corrección #1)
+            # Cierra posiciones zombi que llevan demasiado tiempo sin ganancia
+            time_sl = check_time_based_sl(pos, snap=current_snap_obj)
+            if time_sl.get('should_close'):
+                await _execute_paper_close(pos, price, time_sl['reason'], supabase)
+                register_sl_event(norm_symbol, (pos.get('side') or 'long').lower())
+                events.append({'symbol': norm_symbol, 'event': 'time_based_sl'})
+
+                from app.workers.alerts_service import send_telegram_message
+                await send_telegram_message(
+                    f"🕐 TIME-BASED SL [{norm_symbol}]\n"
+                    f"Tiempo: {time_sl['hours_open']:.1f}h "
+                    f"(máx={time_sl['max_hours']}h)\n"
+                    f"Peak PnL: {time_sl['peak_pnl']:.3f}%\n"
+                    f"Velocidad: {time_sl['velocity']}\n"
+                    f"→ Cerrado para limitar exposición"
+                )
+                log_info(MODULE, time_sl['detail'])
                 continue
 
             # 0.2 ACTUALIZACIÓN DE P&L PARA DASHBOARD
@@ -858,6 +886,12 @@ async def _execute_paper_close(pos, price, reason, supabase):
 
     # Remove from BOT_STATE
     BOT_STATE.positions.pop(symbol, None)
+
+    # Register SL cooldown if closed by any SL mechanism (Corrección #2)
+    sl_reasons = ('sl', 'backstop', 'dynamic_sl', 'time_sl', 'stop_loss')
+    if any(r in reason.lower() for r in sl_reasons):
+        register_sl_event(symbol, side)
+
     log_info(MODULE, f"🏁 FULL CLOSE [{symbol}] ({reason}) at ${price:,.2f} | Total PnL: ${total_pnl:.2f}")
 
 

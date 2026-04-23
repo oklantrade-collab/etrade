@@ -181,13 +181,50 @@ export default function PositionsPage() {
                           </div>
                         </td>
                         <td>
-                          <button 
-                            onClick={() => handleClose(p.id)}
-                            className="btn btn-ghost" 
-                            style={{ padding: '6px 12px', fontSize: '0.75rem', borderColor: 'var(--accent-red)', color: 'var(--accent-red)' }}
-                          >
-                            CLOSE
-                          </button>
+                          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                            <button 
+                              onClick={async () => {
+                                if (confirm(`¿Cerrar posición de ${normalizeCryptoSymbol(p.symbol)} manualmente? Se enviará al historial.`)) {
+                                  try {
+                                    const res = await fetch(`/api/v1/positions/crypto/${p.id}/close`, { method: 'POST' })
+                                    if (res.ok) {
+                                      loadPositions()
+                                      loadClosedPositions()
+                                    } else {
+                                      alert("Error al cerrar posición")
+                                    }
+                                  } catch (err) {
+                                    console.error("Close error:", err)
+                                  }
+                                }
+                              }}
+                              style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', color: '#10B981', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}
+                              title="Cerrar Posición (Historial)"
+                            >
+                               ✓
+                            </button>
+                            <button 
+                              onClick={async () => {
+                                if (confirm(`¿ELIMINAR registro de ${normalizeCryptoSymbol(p.symbol)} permanentemente? No aparecerá en el historial.`)) {
+                                  try {
+                                    const res = await fetch(`/api/v1/positions/crypto/${p.id}`, { method: 'DELETE' })
+                                    if (res.ok) {
+                                      loadPositions()
+                                      loadClosedPositions()
+                                    } else {
+                                      alert("Error al eliminar registro")
+                                    }
+                                  } catch (err) {
+                                    console.error("Delete error:", err)
+                                  }
+                                }
+                              }}
+                              style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.2)', color: '#F43F5E', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}
+                              title="ELIMINAR Registro"
+                            >
+                               🗑️
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -265,6 +302,28 @@ export default function PositionsPage() {
                                ({pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%)
                              </span>
                           </div>
+                        </td>
+                        <td>
+                          <button 
+                            onClick={async () => {
+                              if (confirm(`¿ELIMINAR este registro histórico permanentemente de la DB?`)) {
+                                try {
+                                  const res = await fetch(`/api/v1/positions/crypto/${p.id}`, { method: 'DELETE' })
+                                  if (res.ok) {
+                                    loadClosedPositions()
+                                  } else {
+                                    alert("Error al eliminar registro")
+                                  }
+                                } catch (err) {
+                                  console.error("Delete error:", err)
+                                }
+                              }
+                            }}
+                            style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(244,63,94,0.05)', border: '1px solid rgba(244,63,94,0.1)', color: '#F43F5E', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem' }}
+                            title="Eliminar del Historial"
+                          >
+                             🗑️
+                          </button>
                         </td>
                       </tr>
                     )

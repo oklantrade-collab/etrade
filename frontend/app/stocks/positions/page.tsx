@@ -208,9 +208,54 @@ export default function StocksPositions() {
                       {(pos.unrealized_pnl_pct || 0) >= 0 ? '+' : ''}{(pos.unrealized_pnl_pct || 0).toFixed(2)}%
                     </p>
                   </div>
-                  <div style={{ textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                     <button onClick={() => setSelectedPos(pos)} style={DetailButtonStyle}>Info</button>
-                     <button onClick={() => handleDelete(pos.id, pos.ticker)} style={{ ...DetailButtonStyle, background: 'rgba(255,71,87,0.05)', color: '#FF4757', border: '1px solid rgba(255,71,87,0.1)' }}>×</button>
+                  <div style={{ textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end', minWidth: '120px' }}>
+                     <button 
+                       onClick={() => setSelectedPos(pos)} 
+                       style={{ ...DetailButtonStyle, background: 'rgba(0,123,255,0.05)', color: '#007BFF', border: '1px solid rgba(0,123,255,0.1)' }}
+                       title="Ver Detalles"
+                     >
+                       ℹ️
+                     </button>
+                     <button 
+                       onClick={async () => {
+                         if (confirm(`¿Cerrar posición de ${pos.ticker} manualmente? Se enviará al historial.`)) {
+                           try {
+                             const res = await fetch(`/api/v1/positions/stocks/${pos.id}/close`, { method: 'POST' })
+                             if (res.ok) {
+                               fetchData()
+                             } else {
+                               alert("Error al cerrar posición")
+                             }
+                           } catch (err) {
+                             console.error("Close error:", err)
+                           }
+                         }
+                       }} 
+                       style={{ ...DetailButtonStyle, background: 'rgba(0,200,150,0.05)', color: '#00C896', border: '1px solid rgba(0,200,150,0.1)' }}
+                       title="Cerrar (Historial)"
+                     >
+                       ✓
+                     </button>
+                     <button 
+                       onClick={async () => {
+                         if (confirm(`¿ELIMINAR registro de ${pos.ticker} permanentemente?`)) {
+                           try {
+                             const res = await fetch(`/api/v1/positions/stocks/${pos.id}`, { method: 'DELETE' })
+                             if (res.ok) {
+                               fetchData()
+                             } else {
+                               alert("Error al eliminar registro")
+                             }
+                           } catch (err) {
+                             console.error("Delete error:", err)
+                           }
+                         }
+                       }} 
+                       style={{ ...DetailButtonStyle, background: 'rgba(255,71,87,0.05)', color: '#FF4757', border: '1px solid rgba(255,71,87,0.1)' }}
+                       title="ELIMINAR"
+                     >
+                       🗑️
+                     </button>
                   </div>
                 </div>
               ))}
