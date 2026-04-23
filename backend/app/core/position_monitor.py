@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from app.core.memory_store import BOT_STATE
 from app.core.logger import log_info, log_warning, log_error
 from app.core.crypto_symbols import normalize_crypto_symbol, crypto_symbol_match_variants
+from app.strategy.capital_protection import (
+    ProtectionState,
+    evaluate_all_protections
+)
 
 MODULE = "POSITION_MONITOR"
 
@@ -208,27 +212,27 @@ async def check_open_positions_5m(
             symbol = pos['symbol']
             norm_symbol = normalize_crypto_symbol(symbol)
             
-            # USO DE PRECIO EN TIEMPO REAL SI ES POSIBLE
-            # Si el provider es real, obtenemos el ticker actual para evitar spam por snapshot estático
+            # 0. DETECCIÓN DE PRECIO (ROBUSTA)
+            # Prioridad 1: Binance Ticker (Live). Prioridad 2: Market Snapshot (DB).
+            price = None
             try:
                 ticker = await provider.get_ticker(norm_symbol)
                 price = float(ticker['price'])
             except:
-                # Fallback to snapshot price if ticker fails
-                snap_prices = {r['symbol'].replace("/", ""): float(r['price']) for r in snap_res.data}
-                price = snap_prices.get(norm_symbol)
+                # Fallback to snapshot price
+                snap_row = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), None)
+                if snap_row:
+                    price = float(snap_row.get('price', 0))
             
-            if price is None:
-                log_warning(MODULE, f"Skipping monitor for {norm_symbol}: Price not found")
+            if not price or price <= 0:
+                log_warning(MODULE, f"Skipping monitor for {norm_symbol}: Price not available")
                 continue
             
-            mtf_score = mtf_scores.get(norm_symbol, 0.0)
-            side = (pos.get('side') or '').lower()
-            sl = float(pos.get('sl_price') or pos.get('stop_loss') or 0)
-            tp_p = float(pos.get('tp_partial_price') or 0)
-            tp_f = float(pos.get('tp_full_price') or pos.get('take_profit') or 0)
-            
-            # 0. ACTUALIZACIÓN DE PRECIO EN VIVO Y P&L (Para el Dashboard)
+            # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (7 Reglas)
+            # Aplicar Trailing Stop, Break-Even, etc. antes de los SL/TP tradicionales
+            await _run_protection_crypto(pos, price, supabase)
+
+            # 0.2 ACTUALIZACIÓN DE P&L PARA DASHBOARD
             entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
             is_long = side in ['long', 'buy']
             
@@ -402,6 +406,48 @@ async def check_open_positions_5m(
         log_error(MODULE, f"Error in paper monitoring: {e}")
 
     return events
+
+async def _run_protection_crypto(pos: dict, price: float, supabase):
+    """Aplica el motor de protección de capital a posiciones de Cripto."""
+    symbol = pos['symbol']
+    pos_id = pos['id']
+    
+    # Obtener o inicializar estado en BOT_STATE
+    if not hasattr(BOT_STATE, 'protection_cache'):
+        BOT_STATE.protection_cache = {}
+        
+    if pos_id not in BOT_STATE.protection_cache:
+        BOT_STATE.protection_cache[pos_id] = ProtectionState(
+            symbol=symbol,
+            entry_price=float(pos.get('avg_entry_price') or pos.get('entry_price') or 0),
+            current_sl=float(pos.get('sl_price') or pos.get('stop_loss') or 0),
+            side=pos['side'].lower()
+        )
+    
+    state = BOT_STATE.protection_cache[pos_id]
+    result = evaluate_all_protections(state, price, market_type='crypto_futures')
+    
+    if result['has_action']:
+        action = result['action']
+        if action == 'move_sl':
+            new_sl = result['new_sl']
+            log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({result['reason']})")
+            # Persistencia en DB
+            try:
+                supabase.table('positions').update({
+                    'sl_price': new_sl,
+                    'stop_loss': new_sl,
+                    'sl_update_reason': result['reason']
+                }).eq('id', pos_id).execute()
+                # Actualizar objeto local para el resto del ciclo
+                pos['sl_price'] = new_sl
+                pos['stop_loss'] = new_sl
+            except Exception as e:
+                log_error(MODULE, f"Error updating protection SL for {symbol}: {e}")
+        
+        elif action == 'close_inverse' and result.get('confidence', 0) > 0.8:
+            log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Cierre por señal inversa confirmado")
+            await _execute_paper_close(pos, price, 'inverse_signal', supabase)
 
 async def _execute_paper_open(
     symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
@@ -639,6 +685,8 @@ async def _execute_paper_close(pos, price, reason, supabase):
         reason=reason
     )
 
+    p_rule_code = pos.get('rule_code') or pos.get('rule_entry') or "Cc-Manual"
+    
     supabase.table('paper_trades').insert({
         'symbol': symbol,
         'side': pos['side'],
