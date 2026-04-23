@@ -951,15 +951,19 @@ def execute_forex_signal(
 
 
 def _close_all_positions_forex(pair: str, strategy_code: str, current_price: float, only_side: str = None):
-    """Close active forex positions for a pair. If only_side is set, closes only that side (for netting)."""
+    """Close active forex positions for a pair. Handles synonyms (buy/long, sell/short)."""
     sb = get_supabase()
     try:
-        query = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open")
-        if only_side:
-            query = query.eq("side", only_side.lower())
-        
-        res = query.execute()
+        res = sb.table("forex_positions").select("*").eq("symbol", pair).eq("status", "open").execute()
         positions = res.data or []
+
+        if only_side:
+            side_map = {
+                "long": ["long", "buy"],
+                "short": ["short", "sell"]
+            }
+            targets = side_map.get(only_side.lower(), [only_side.lower()])
+            positions = [p for p in positions if p.get("side", "").lower() in targets]
 
         if not positions:
             return
