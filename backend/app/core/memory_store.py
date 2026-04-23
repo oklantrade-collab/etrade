@@ -33,6 +33,8 @@ class BotState:
     cycle_count_15m: int = 0                                       # Cycle counter for 15m interval
     sl_alerts: Dict[str, Any] = field(default_factory=dict)       # {symbol: alert_state}
     order_lock: asyncio.Lock = field(default_factory=asyncio.Lock) # Lock for atomic order placement
+    last_close_cycles: Dict[str, int] = field(default_factory=dict) # {symbol: cycle_index}
+    current_cycle: int = 0                                          # Global cycle counter
 
 BOT_STATE = BotState()
 

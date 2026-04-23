@@ -427,6 +427,9 @@ async def run_crypto_forex_cycle():
     Single cycle for Crypto + Forex candle signal evaluation.
     Called every 5 minutes.
     """
+    from app.core.memory_store import BOT_STATE
+    BOT_STATE.current_cycle += 1
+    
     cycle_start = time.time()
     log_info(MODULE, "═══ CANDLE SIGNAL CYCLE (Crypto + Forex) START ═══")
 

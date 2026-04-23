@@ -646,6 +646,10 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                     f"  ↳ Cerrada {pos['id'][:8]}... side={pos.get('side')} PnL: {pnl:.4f} ({pnl_pct_row}%) qty={size}",
                 )
 
+                # REGLA 7: Cooldown if closed with loss
+                if pnl < 0:
+                    BOT_STATE.last_close_cycles[binance_symbol] = BOT_STATE.current_cycle
+
             except Exception as e:
                 log_error(MODULE, f"Error cerrando posición {pos.get('id')}: {e}")
 
@@ -989,6 +993,11 @@ def _close_all_positions_forex(pair: str, strategy_code: str, current_price: flo
 
                 log_info(MODULE, f"  ↳ Cerrada forex {pos['id'][:8]}... side={side} PnL: {pnl_usd:.2f} USD ({pips_pnl:.1f} pips)")
 
+                # REGLA 7: Cooldown if closed with loss
+                from app.core.memory_store import BOT_STATE
+                if pnl_usd < 0:
+                    BOT_STATE.last_close_cycles[pair] = BOT_STATE.current_cycle
+
             except Exception as e:
                 log_error(MODULE, f"Error cerrando forex pos {pos.get('id')}: {e}")
 
@@ -1236,6 +1245,11 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
                     f"  ↳ Cerrada {ticker} x{shares:.0f} "
                     f"avg=${avg:.2f} exit=${price:.2f} PnL=${pnl:.2f} ({pnl_pct:.2f}%)"
                 )
+
+                # REGLA 7: Cooldown if closed with loss
+                from app.core.memory_store import BOT_STATE
+                if pnl < 0:
+                    BOT_STATE.last_close_cycles[ticker] = BOT_STATE.current_cycle
             except Exception as e:
                 log_error(MODULE, f"Error cerrando stocks pos {pos.get('id')}: {e}")
 
