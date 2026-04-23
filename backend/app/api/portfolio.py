@@ -119,7 +119,7 @@ async def get_global_portfolio():
                     'current_price': cur_price,
                     'unrealized_pnl_usd': round(upnl_usd, 2),
                     'unrealized_pnl_pct': round(upnl_pct, 2),
-                    'fibonacci_zone': snap.get('fibonacci_zone', 0),
+                    'fibonacci_zone': snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
                     'rule_code': pos.get('rule_code', 'N/A') if pos else 'N/A',
                     'total_investment': round(capital, 2),
                     'quantity': float(pos.get('size') or 0) if pos else 0,
