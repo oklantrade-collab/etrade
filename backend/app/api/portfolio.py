@@ -30,12 +30,12 @@ async def get_global_portfolio():
 
             # --- 1. CONFIGURACIÓN ---
             cfg_res = supabase.table('trading_config').select('*').eq('id', 1).maybe_single().execute()
-            cfg = cfg_res.data if cfg_res else {}
+            cfg = cfg_res.data or {}
             
             lev_crypto = float(cfg.get('leverage_crypto') or 5)
             lev_forex  = float(cfg.get('leverage_forex') or 100)
             lev_stocks = float(cfg.get('leverage_stocks') or 1)
-            active_crypto_symbols = cfg.get('active_symbols') if cfg else ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]
+            active_crypto_symbols = cfg.get('active_symbols') or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]
             forex_symbols = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']
             
             # --- 2. CONSULTAS MASIVAS (CONSOLIDADAS) ---
