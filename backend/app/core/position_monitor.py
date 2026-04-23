@@ -214,6 +214,20 @@ async def check_protections(
     # Asegurar que el SL en el estado coincida con el de la DB por si hubo cambios externos
     state.current_sl = float(position.get('sl_price', position.get('stop_loss', 0)))
 
+    # ── TRACK PEAK P&L (máximo P&L alcanzado durante la vida de la posición) ──
+    entry_p = state.entry_price
+    if entry_p > 0:
+        is_long = state.side in ('long', 'buy')
+        current_pnl_pct = ((current_price - entry_p) / entry_p * 100) if is_long else ((entry_p - current_price) / entry_p * 100)
+        if current_pnl_pct > state.highest_pnl_pct:
+            state.highest_pnl_pct = current_pnl_pct
+            try:
+                supabase.table('positions').update({
+                    'peak_pnl_pct': round(current_pnl_pct, 4)
+                }).eq('id', pos_id).execute()
+            except Exception:
+                pass  # Non-critical, silently continue
+
     # ── CHECK 1: Break-Even ───────────────────
     be = evaluate_break_even(state, current_price)
     if be['action'] == 'activate_be':
@@ -801,6 +815,11 @@ async def _execute_paper_close(pos, price, reason, supabase):
     )
 
     p_rule_code = pos.get('rule_code') or pos.get('rule_entry') or "Cc-Manual"
+    # Enriquecer close_reason con sl_type para análisis post-deploy
+    detailed_reason = reason
+    sl_type = pos.get('sl_type', '')
+    if reason.startswith('sl_') and sl_type and sl_type not in reason:
+        detailed_reason = f"{reason}_{sl_type}"
     
     supabase.table('paper_trades').insert({
         'symbol': symbol,
@@ -809,7 +828,7 @@ async def _execute_paper_close(pos, price, reason, supabase):
         'exit_price': price,
         'total_pnl_usd': round(total_pnl, 4),
         'total_pnl_pct': round(pnl_pct, 4),
-        'close_reason': reason,
+        'close_reason': detailed_reason,
         'closed_at': datetime.now(timezone.utc).isoformat(),
         'mode': 'paper',
         'rule_code': p_rule_code
