@@ -87,11 +87,12 @@ def delete_position_record(market: str, position_id: str):
 
 @router.post("/{market}/{position_id}/close")
 def manual_close_position(market: str, position_id: str):
-    """Move a position to 'closed' status without deleting the record."""
+    """Fetch current price, calculate PnL, and close position."""
     sb = get_supabase()
     now = datetime.now(timezone.utc).isoformat()
+    market_l = market.lower()
     
-    if market.lower() == "crypto":
+    if market_l == "crypto":
         from app.execution.order_manager import close_position
         success = close_position(position_id, reason="MANUAL_CLOSE")
         return {"status": "ok" if success else "error"}
@@ -101,23 +102,63 @@ def manual_close_position(market: str, position_id: str):
         "stocks": "stocks_positions"
     }
     
-    table_name = table_map.get(market.lower())
+    table_name = table_map.get(market_l)
     if not table_name:
         return JSONResponse(status_code=400, content={"error": "Invalid market"})
 
     try:
+        # 1. Get position details
+        pos_res = sb.table(table_name).select("*").eq("id", position_id).single().execute()
+        if not pos_res.data:
+            return JSONResponse(status_code=404, content={"error": "Position not found"})
+        
+        pos = pos_res.data
+        symbol = pos.get("symbol") or pos.get("ticker")
+        side = (pos.get("side") or pos.get("direction") or "buy").lower()
+        entry_price = float(pos.get("entry_price") or pos.get("avg_price") or 0)
+        size = float(pos.get("lots") or pos.get("shares") or 0)
+
+        # 2. Get current price from snapshot
+        snap_res = sb.table("market_snapshot").select("price").eq("symbol", symbol).execute()
+        current_price = float(snap_res.data[0]["price"]) if snap_res.data else entry_price
+
+        # 3. Calculate PnL
+        pnl_usd = 0.0
+        pips = 0.0
+        
+        if market_l == "forex":
+            from app.strategy.capital_protection import PIP_SIZES
+            pip = PIP_SIZES.get(symbol, 0.0001)
+            diff = (current_price - entry_price) if side in ("long", "buy") else (entry_price - current_price)
+            pips = diff / pip
+            
+            # Pip Value logic (Standard 1.0 lot = $10/pip approx)
+            pip_value = 10.0
+            if "JPY" in symbol: pip_value = 6.5
+            if "XAU" in symbol: pip_value = 1.0
+            
+            pnl_usd = pips * pip_value * abs(size)
+        else: # stocks
+            diff = (current_price - entry_price) if side in ("long", "buy") else (entry_price - current_price)
+            pnl_usd = diff * size
+
+        # 4. Update with real data
         update_data = {
             "status": "closed",
             "closed_at": now,
-            "close_reason": "MANUAL_CLOSE"
+            "close_reason": "MANUAL_CLOSE",
+            "current_price": current_price,
+            "pnl_usd": round(pnl_usd, 2)
         }
         
-        # Only add updated_at if the market is stocks (since forex doesn't have it)
-        if market.lower() == "stocks":
+        if market_l == "forex":
+            update_data["pnl_pips"] = round(pips, 1)
+        if market_l == "stocks":
             update_data["updated_at"] = now
+            update_data["unrealized_pnl"] = round(pnl_usd, 2) # used in stocks history
 
-        res = sb.table(table_name).update(update_data).eq("id", position_id).execute()
+        sb.table(table_name).update(update_data).eq("id", position_id).execute()
         
-        return {"status": "closed", "data": res.data}
+        return {"status": "closed", "pnl_usd": pnl_usd, "exit_price": current_price}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
