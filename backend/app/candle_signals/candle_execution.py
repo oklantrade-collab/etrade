@@ -67,32 +67,47 @@ def _order_uuid_for_position(order_id) -> str | None:
     return None
 
 
-def _ensure_crypto_sl_tp(action: str, price: float, sl: float, tp: float) -> tuple[float, float]:
-    """Garantiza SL/TP numéricos válidos para NOT NULL en orders/positions."""
+def _ensure_crypto_sl_tp(
+    price:       float,
+    side:        str,
+    snap:        dict = None,
+    market_type: str  = 'crypto_futures'
+) -> tuple:
+    """
+    Calcula SL backstop amplio usando banda Fibonacci lower_6 cuando está
+    disponible, o 8% como fallback.
+    """
     price = float(price or 0)
-    sl0 = float(sl) if sl is not None else 0.0
-    tp0 = float(tp) if tp is not None else 0.0
-    atr = max(price * 0.02, 1e-8) if price > 0 else 1e-8
-    a = (action or "").upper()
+    side = (side or "buy").lower()
+    
+    if side in ('long', 'buy', 'BUY'):
+        if snap:
+            lower_6 = float(snap.get('lower_6', 0))
+            if lower_6 > 0 and lower_6 < price * 0.95:
+                sl = lower_6 * 0.9995  # 0.05% debajo de lower_6
+            else:
+                sl = price * 0.92      # fallback: 8% abajo
+        else:
+            sl = price * 0.92
 
-    def bad(v: float) -> bool:
-        return (not math.isfinite(v)) or v <= 0
+        # TP en upper_3 o +3%
+        upper_3 = float(snap.get('upper_3', 0)) if snap else 0
+        tp = upper_3 if upper_3 > price * 1.01 else price * 1.03
 
-    if a == "BUY":
-        if price > 0 and (bad(sl0) or sl0 >= price):
-            sl0 = round(price - atr * 2.0, 8)
-        if price > 0 and (bad(tp0) or tp0 <= price):
-            tp0 = round(price + atr * 5.0, 8)
-    else:
-        if price > 0 and (bad(sl0) or sl0 <= price):
-            sl0 = round(price + atr * 2.0, 8)
-        if price > 0 and (bad(tp0) or tp0 >= price):
-            tp0 = round(price - atr * 5.0, 8)
+    else:  # short
+        if snap:
+            upper_6 = float(snap.get('upper_6', 0))
+            if upper_6 > 0 and upper_6 > price * 1.05:
+                sl = upper_6 * 1.0005
+            else:
+                sl = price * 1.08
+        else:
+            sl = price * 1.08
 
-    if bad(sl0) or bad(tp0):
-        sl0 = round(max(sl0, 1e-8), 8)
-        tp0 = round(max(tp0, 1e-8), 8)
-    return sl0, tp0
+        lower_3 = float(snap.get('lower_3', 0)) if snap else 0
+        tp = lower_3 if lower_3 < price * 0.99 else price * 0.97
+
+    return round(sl, 8), round(tp, 8)
 
 
 # ─── FIBONACCI BAND ZONE VALIDATION ──────────────────────────────────────────
@@ -369,7 +384,7 @@ def execute_crypto_signal(
     )
     
     sl = backstop_data['backstop_price']
-    sl, tp = _ensure_crypto_sl_tp(action, price, sl, tp)
+    sl, tp = _ensure_crypto_sl_tp(price, action, snap=current_snap)
     
     log_info('SL_MANAGER',
         f'{binance_symbol}: Backstop SL = '
@@ -445,7 +460,7 @@ def execute_crypto_signal(
             )
             sl_live = backstop_data_live['backstop_price']
 
-            sl_live, tp_live = _ensure_crypto_sl_tp(action, float(avg_price), sl_live, tp)
+            sl_live, tp_live = _ensure_crypto_sl_tp(float(avg_price), action, snap=current_snap)
             order_row_id = _save_candle_order_crypto(
                 sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, "live", quantity, sl_live, tp_live
             )
@@ -646,7 +661,12 @@ def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, 
         sym = normalize_crypto_symbol(binance_symbol)
         price_f = float(price or 0)
         qty_f = float(quantity or 0)
-        sl_f, tp_f = _ensure_crypto_sl_tp(action, price_f, sl, tp)
+        
+        # Obtener snap desde cache si no viene
+        from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+        snap = MARKET_SNAPSHOT_CACHE.get(binance_symbol, {})
+        
+        sl_f, tp_f = _ensure_crypto_sl_tp(price_f, action, snap=snap)
         row = {
             "symbol": sym,
             "side": action,
@@ -684,7 +704,11 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
         # NUEVO: Signo algebraico para la cantidad (Negativo para SELL/SHORT)
         final_qty = abs(qty_f) if action == "BUY" else -abs(qty_f)
         
-        sl_f, tp_f = _ensure_crypto_sl_tp(action, price_f, sl, tp)
+        # Obtener snap desde cache si no viene
+        from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+        snap = MARKET_SNAPSHOT_CACHE.get(binance_symbol, {})
+        
+        sl_f, tp_f = _ensure_crypto_sl_tp(price_f, action, snap=snap)
         oid = _order_uuid_for_position(order_id)
 
         payload = {

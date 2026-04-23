@@ -475,14 +475,27 @@ class StandaloneForexWorker:
                     if price > ema20 + (atr * multipliers[i-1]): zone = i; break
                     if price < ema20 - (atr * multipliers[i-1]): zone = -i; break
 
-            # FIX: Read existing snapshot to preserve fields we don't calculate
-            existing_mtf = None
-            try:
-                existing = sb.table('market_snapshot').select('mtf_score').eq('symbol', symbol).maybe_single().execute()
-                if existing.data:
-                    existing_mtf = existing.data.get('mtf_score')
-            except:
-                pass
+            # --- CALCULO DE MTF SCORE (Multi-Timeframe Trend) ---
+            # Comparamos el precio contra la EMA20 en todos los TFs disponibles
+            mtf_score = 0.0
+            tfs_checked = 0
+            for tf_suffix in ['15m', '1h', '4h', '1d']:
+                tf_key = f"{symbol}_{tf_suffix}"
+                tf_data = STATE['candles'].get(tf_key, [])
+                if len(tf_data) >= 20:
+                    try:
+                        tf_df = pd.DataFrame(tf_data)
+                        tf_ema20 = tf_df['c'].ewm(span=20).mean().iloc[-1]
+                        if price > tf_ema20: mtf_score += 0.25
+                        else: mtf_score -= 0.25
+                        tfs_checked += 1
+                    except: pass
+            
+            # Si no hay datos de 1d/4h, normalizamos el peso (opcional)
+            if tfs_checked > 0:
+                self.log(f"   [MTF] {symbol}: {mtf_score:.2f} (Basado en {tfs_checked} TFs)")
+            else:
+                mtf_score = 0.0
 
             # Calculate Fibonacci band levels
             fib_bands = {}
@@ -518,6 +531,7 @@ class StandaloneForexWorker:
                 'basis': float(ema20),
                 'fibonacci_zone': zone,
                 'dist_basis_pct': round(dist_basis, 4),
+                'mtf_score': float(mtf_score),
                 'sar_4h': float(sar_4h),
                 'sar_trend_4h': sar_trend_4h,
                 'sar_15m': sar_15m,
@@ -528,10 +542,6 @@ class StandaloneForexWorker:
 
             # Add Fibonacci bands
             snap.update(fib_bands)
-
-            # Preserve MTF score if we don't calculate it
-            if existing_mtf is not None:
-                snap['mtf_score'] = existing_mtf
 
             query = sb.table('market_snapshot').upsert(snap, on_conflict='symbol')
             self.safe_db_execute(query)

@@ -13,6 +13,11 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 
 from app.strategy.proactive_exit import evaluate_proactive_exit
+from app.strategy.capital_protection import (
+    ProtectionState,
+    evaluate_all_protections,
+    PROTECTION_CONFIG
+)
 
 # ── Configuración ────────────────────────────────
 def get_forex_config():
@@ -43,6 +48,7 @@ class ForexExecutionService:
         self.state    = state_ref
         self.symbols  = symbols_ref
         self.log      = worker.log
+        self.protection_states = {} # Cache de estados de protección
         # Usar variable de entorno directamente para el modo
         self.mode     = os.getenv('CTRADER_ENV', 'paper')
         self._open_positions_list = []
@@ -370,6 +376,10 @@ class ForexExecutionService:
                 if snap and self._check_proactive_exit_forex(pos, snap):
                     continue # Posición cerrada
 
+                # ── Segundo: Sistema de Protección de Capital (7 Reglas) ──
+                if snap:
+                    self._run_protection_forex(pos, snap)
+
                 self._manage_position(pos, snap)
             except Exception as e: self.log(f'Error gestión: {e}')
 
@@ -446,29 +456,80 @@ class ForexExecutionService:
 
         return True
 
+    def _run_protection_forex(self, pos: dict, snap: dict):
+        """Aplica Trailing Stop, Break-Even, etc."""
+        symbol = pos['symbol']
+        price = self._safe_float(snap.get('price'))
+        if price <= 0: return
+
+        # Obtener o crear estado
+        pos_id = pos['id']
+        if pos_id not in self.protection_states:
+            self.protection_states[pos_id] = ProtectionState(
+                symbol=symbol,
+                entry_price=self._safe_float(pos['entry_price']),
+                current_sl=self._safe_float(pos.get('sl_price')),
+                side=pos['side'].lower()
+            )
+
+        state = self.protection_states[pos_id]
+        # Actualizar precio actual en el estado
+        state.entry_price = self._safe_float(pos['entry_price'])
+        
+        result = evaluate_all_protections(state, price, market_type='forex_futures')
+        
+        if result['has_action']:
+            action = result['action']
+            if action == 'move_sl':
+                new_sl = result['new_sl']
+                self.log(f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({result['reason']})")
+                # Actualizar en DB
+                self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos_id).execute()
+                # Actualizar en memoria
+                pos['sl_price'] = new_sl
+                # Si es LIVE, intentar moverlo en cTrader (opcional según persistencia)
+            elif action == 'close_partial':
+                self.log(f"🛡️ [PROTECTION] {symbol}: Cierre parcial sugerido (No implementado en esta versión)")
+            elif action == 'close_inverse' and result.get('confidence', 0) > 0.8:
+                self.log(f"🛡️ [PROTECTION] {symbol}: Cierre por señal inversa confirmada")
+                self._close_position(pos, price, 'inverse_signal', 0)
+
     def _manage_position(self, pos, snap=None):
         symbol = pos['symbol']
+        # Fallback de precio: Prioridad a tiempo real, luego snapshot
         price_data = self.state['prices'].get(symbol)
-        if not price_data: return
-        price = self._safe_float(price_data.get('mid'))
-        side  = pos['side']
+        price = 0
+        if price_data:
+            price = self._safe_float(price_data.get('mid'))
+        
+        if price <= 0 and snap:
+            price = self._safe_float(snap.get('price'))
+            # self.log(f"Uso de precio Snapshot para {symbol}: {price}")
+
+        if price <= 0: return
+
+        side  = pos['side'].lower()
         entry = self._safe_float(pos.get('entry_price'))
         sl    = self._safe_float(pos.get('sl_price'))
         tp    = self._safe_float(pos.get('tp_price'))
         
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-        pips_pnl = (price - entry) / pip_size if side == 'long' else (entry - price) / pip_size
+        pips_pnl = (price - entry) / pip_size if side in ['long', 'buy'] else (entry - price) / pip_size
         
         if snap:
             u6 = self._safe_float(snap.get('upper_6'))
             l6 = self._safe_float(snap.get('lower_6'))
-            if (side == 'long' and u6 > 0 and price >= u6) or (side == 'short' and l6 > 0 and price <= l6):
+            if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
                 self._close_position(pos, price, 'tp_band', pips_pnl)
                 return
 
-        if (sl > 0 and ((side=='long' and price<=sl) or (side=='short' and price>=sl))) or \
-           (tp > 0 and ((side=='long' and price>=tp) or (side=='short' and price<=tp))):
-            reason = 'sl' if (sl > 0 and ((side=='long' and price<=sl) or (side=='short' and price>=sl))) else 'tp'
+        # Verificación estricta de SL/TP
+        hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
+        hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
+
+        if hit_sl or hit_tp:
+            reason = 'sl' if hit_sl else 'tp'
+            self.log(f"🔥 [EXECUTION] Disparando cierre {reason.upper()} para {symbol} at {price} (SL: {sl}, TP: {tp})")
             self._close_position(pos, price, reason, pips_pnl)
 
     def _close_position(self, pos, close_price, reason, pips_pnl):

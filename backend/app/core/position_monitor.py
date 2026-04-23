@@ -10,6 +10,10 @@ from app.core.logger import log_info, log_warning, log_error
 from app.core.crypto_symbols import normalize_crypto_symbol, crypto_symbol_match_variants
 from app.strategy.capital_protection import (
     ProtectionState,
+    evaluate_break_even,
+    evaluate_trailing_stop,
+    PROTECTION_CONFIG,
+    calculate_pnl,
     evaluate_all_protections
 )
 
@@ -171,6 +175,113 @@ async def check_sl_proximity_alert(
         log_info(MODULE, f"SL Danger Zone RECOVERY for {norm_symbol}: {distance_pct:.1f}%")
         return
 
+# Cache en memoria para estados de protección
+_protection_cache = {}
+
+async def check_protections(
+    symbol:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    supabase
+) -> bool:
+    """
+    Verifica y aplica las protecciones de Break-Even y Trailing Stop.
+    Retorna True si la posición fue cerrada por el SL dinámico.
+    """
+    pos_id = str(position.get('id', symbol))
+
+    # Inicializar estado si no existe
+    if pos_id not in _protection_cache:
+        # Resolver side
+        side_raw = str(position.get('side', 'long')).lower()
+        
+        _protection_cache[pos_id] = ProtectionState(
+            symbol       = symbol,
+            side         = side_raw,
+            entry_price  = float(position.get('avg_entry_price', position.get('entry_price', 0))),
+            current_sl   = float(position.get('sl_price', position.get('stop_loss', 0))),
+            market_type  = 'crypto_futures'
+        )
+        # Campos adicionales no presentes en el constructor base pero necesarios para el flujo
+        state = _protection_cache[pos_id]
+        state.original_sl = float(position.get('sl_backstop_price', position.get('sl_price', 0)))
+        state.remaining_size = float(abs(float(position.get('size', 0))))
+
+    state = _protection_cache[pos_id]
+    state.cycles_open += 1
+    
+    # Asegurar que el SL en el estado coincida con el de la DB por si hubo cambios externos
+    state.current_sl = float(position.get('sl_price', position.get('stop_loss', 0)))
+
+    # ── CHECK 1: Break-Even ───────────────────
+    be = evaluate_break_even(state, current_price)
+    if be['action'] == 'activate_be':
+        new_sl = be['be_price']
+        try:
+            supabase.table('positions').update({
+                'sl_price': new_sl,
+                'stop_loss': new_sl,
+                'sl_type': 'break_even',
+                'sl_dynamic_price': new_sl,
+                'protection_activated': True
+            }).eq('id', pos_id).execute()
+
+            state.be_activated = True
+            state.be_price     = new_sl
+            state.current_sl   = new_sl
+            position['sl_price'] = new_sl # Update local ref
+
+            log_info('PROTECTION', f'🎯 BE [{symbol}]: {be["reason"]}')
+            
+            from app.workers.alerts_service import send_telegram_message
+            await send_telegram_message(
+                f'🎯 BREAK-EVEN ACTIVADO [{symbol}]\n'
+                f'Razón: {be["reason"]}\n'
+                f'SL movido a: {new_sl:.6f}\n'
+                f'Precio actual: {current_price:.6f}'
+            )
+        except Exception as e:
+            log_error(MODULE, f"Error actualizando BE para {symbol}: {e}")
+
+    # ── CHECK 2: Trailing Stop ────────────────
+    trail = evaluate_trailing_stop(state, current_price)
+    if trail['action'] == 'update_sl':
+        new_sl = trail['new_sl']
+        try:
+            supabase.table('positions').update({
+                'sl_price': new_sl,
+                'stop_loss': new_sl,
+                'trailing_sl_price': new_sl,
+                'sl_type': f'trailing_l{trail["new_level"]}',
+                'protection_activated': True
+            }).eq('id', pos_id).execute()
+
+            state.trailing_level = trail['new_level']
+            state.current_sl     = new_sl
+            position['sl_price'] = new_sl # Update local ref
+
+            log_info('PROTECTION', f'📈 TRAIL L{trail["new_level"]} [{symbol}]: {trail["reason"]}')
+        except Exception as e:
+            log_error(MODULE, f"Error actualizando Trail para {symbol}: {e}")
+
+    # ── CHECK 3: SL backstop hit ──────────────
+    sl = state.current_sl
+    side = state.side
+    if sl > 0:
+        sl_hit = (
+            (side in ('long','buy') and current_price <= sl) or
+            (side not in ('long','buy') and current_price >= sl)
+        )
+        if sl_hit:
+            log_info('PROTECTION', f'🔴 SL HIT [{symbol}]: precio={current_price:.6f} sl={sl:.6f}')
+            # Usar la función de cierre existente en el monitor
+            await _execute_paper_close(position, current_price, f'sl_{position.get("sl_type", "backstop")}', supabase)
+            _protection_cache.pop(pos_id, None)
+            return True
+
+    return False
+
 async def check_open_positions_5m(
     provider,
     supabase,
@@ -228,9 +339,13 @@ async def check_open_positions_5m(
                 log_warning(MODULE, f"Skipping monitor for {norm_symbol}: Price not available")
                 continue
             
-            # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (7 Reglas)
-            # Aplicar Trailing Stop, Break-Even, etc. antes de los SL/TP tradicionales
-            await _run_protection_crypto(pos, price, supabase)
+            # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (4 Pasos)
+            # Inyectamos el monitor de protecciones dinámicas (BE, Trailing, Backstop)
+            current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
+            closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
+            if closed:
+                events.append({'symbol': norm_symbol, 'event': 'protection_close'})
+                continue
 
             # 0.2 ACTUALIZACIÓN DE P&L PARA DASHBOARD
             entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
