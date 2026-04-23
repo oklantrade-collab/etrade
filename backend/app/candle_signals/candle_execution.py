@@ -1107,19 +1107,19 @@ def execute_stocks_signal(
 
     # ── STEP 2: Open new position (only if BUY — for SELL we only close) ──
     if action == "BUY":
-        # Load unified config from BOT_STATE
-        from app.core.memory_store import BOT_STATE
-        config = BOT_STATE.config_cache
-        capital = float(config.get('capital_assigned', 500))
-        inv_pct = float(config.get('risk_per_operation_pct', 1.0))
+        # 1. Obtener configuración específica de STOCKS
+        from app.stocks.stocks_order_executor import _get_config, _calculate_shares
+        s_config = _get_config()
         
-        capital_for_trade = capital * (inv_pct / 100) # e.g. $5.00
-        shares = int(capital_for_trade / price)
-        if shares <= 0 and capital_for_trade > 0:
-            shares = 1 # At least 1 share for paper trading
-            
-        if shares <= 0:
-            return {"success": False, "reason": "Capital insuficiente para 1 share"}
+        capital = s_config["total_capital"]           # $5000 de tu pantalla
+        inv_pct = s_config["max_pct_per_trade"]       # 0.02 (2%) de tu pantalla
+        
+        # 2. Calcular shares con la regla profesional (múltiplos de 5)
+        shares = _calculate_shares(capital, inv_pct, price)
+        
+        if shares < 5:
+            log_warning(MODULE, f"🚫 Capital insuficiente para comprar el lote mínimo de 5 acciones de {ticker} (${capital*inv_pct:.0f} vs ${5*price:.0f})")
+            return {"success": False, "reason": "insufficient_capital_for_lot_5"}
 
         # SL/TP
         atr_est = price * 0.02
