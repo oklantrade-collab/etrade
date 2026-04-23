@@ -148,7 +148,7 @@ async def get_global_portfolio():
                     total_inv = (lots * mult * (cur_price or entry)) / lev_forex
                 forex_symbols_data.append({
                     'symbol': sym,
-                    'side': str(pos.get('side', '')).lower() if pos else None,
+                    'side': 'long' if str(pos.get('side', '')).lower() in ['long', 'buy'] else 'short' if pos else None,
                     'avg_entry_price': float(pos.get('entry_price') or 0) if pos else 0,
                     'current_price': cur_price,
                     'unrealized_pnl_usd': round(upnl_usd, 2),
