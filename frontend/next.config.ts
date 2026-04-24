@@ -43,14 +43,9 @@ const nextConfig: NextConfig = {
     ]
   },
 
-  // Redirect de / a /dashboard y manejo de portafolio
+  // Redirect de manejo de portafolio
   async redirects() {
     return [
-      {
-        source: '/',
-        destination: '/dashboard',
-        permanent: false,
-      },
       {
         source: '/portafolio',
         destination: '/portfolio',
@@ -78,10 +73,6 @@ const nextConfig: NextConfig = {
     ]
   },
 
-  // Configuración para ignorar errores de ESLint y TypeScript durante el build en Vercel
-  eslint: {
-    ignoreDuringBuilds: true,
-  },
   typescript: {
     ignoreBuildErrors: true,
   },

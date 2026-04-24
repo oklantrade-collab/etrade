@@ -193,10 +193,10 @@ export default function PortfolioPage() {
                                </td>
                                <td className="font-black text-white italic uppercase tracking-tighter">{a?.symbol || '---'}</td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
-                                  ${a?.entry_price ? a.entry_price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
+                                  ${a?.entry_price ? a.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
                                </td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
-                                  {a?.quantity ? (a.quantity).toFixed(4) : '---'}
+                                  {a?.quantity ? (a.quantity).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : '---'}
                                </td>
                                <td className="font-mono text-[0.6rem] text-slate-500 font-bold uppercase">
                                   {a?.rule || 'S-01'}
@@ -335,8 +335,8 @@ function TableSection({ title, symbols, color }: any) {
                                     </div>
                                  </div>
                               </td>
-                              <td className="font-mono text-xs text-slate-500">${s.avg_entry_price.toLocaleString()}</td>
-                              <td className="font-mono text-xs text-white font-black">${s.current_price.toLocaleString()}</td>
+                              <td className="font-mono text-xs text-slate-500">${s.avg_entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                              <td className="font-mono text-xs text-white font-black">${s.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
                               <td className="font-mono text-xs font-black drop-shadow-sm">
                                  <span style={{ color: s.unrealized_pnl_usd >= 0 ? '#34d399' : '#fb7185' }}>
                                     {s.unrealized_pnl_usd >= 0 ? '+' : ''}${s.unrealized_pnl_usd.toFixed(2)}
@@ -348,10 +348,10 @@ function TableSection({ title, symbols, color }: any) {
                                  </span>
                               </td>
                               <td className="text-center font-mono text-xs text-slate-400">
-                                 ${(s.total_investment || 0).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                                 ${(s.total_investment || 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                               </td>
                               <td className="text-center font-mono text-xs text-slate-400">
-                                 {(s.quantity || 0).toLocaleString(undefined, { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
+                                 {(s.quantity || 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                               </td>
                               <td className="text-center font-black text-slate-400 text-xs uppercase tracking-widest">{s.fibonacci_zone}</td>
                               <td className="text-right px-10 font-mono text-[0.6rem] text-slate-600 font-bold uppercase">{s.rule_code || 'S-01'}</td>
