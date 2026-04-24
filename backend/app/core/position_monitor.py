@@ -862,6 +862,15 @@ async def _execute_paper_close(pos, price, reason, supabase):
         'rule_code': p_rule_code
     }).execute()
     
+    # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
+    try:
+        from app.core.capital_manager import register_realized_pnl
+        # Determinar mercado (heuristicamente por símbolo)
+        market = 'forex' if any(x in symbol for x in ['EUR', 'GBP', 'JPY', 'XAU']) else 'crypto'
+        register_realized_pnl(market, total_pnl)
+    except Exception as cap_e:
+        log_warning(MODULE, f"Error actualizando capital acumulado: {cap_e}")
+
     # ── CANCELAR ÓRDENES HUÉRFANAS ──
     # Al cerrar la posición, cancelar todas las pending_orders y actualizar orders
     try:

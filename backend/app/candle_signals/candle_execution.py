@@ -369,12 +369,12 @@ def execute_crypto_signal(
 
     # ── CHECK 2: Total Market Risk Limit (30% sum of Stop Losses) ──
     from app.strategy.risk_controls import check_total_market_risk
-    from app.core.supabase_client import get_risk_config
-    risk_config = get_risk_config()
-    capital_total = float(risk_config.get('capital_crypto_futures', 500.0))
+    from app.core.capital_manager import get_total_operating_capital
+    capital = get_total_operating_capital('forex')
+    inv_pct = 2.0  # Default 2% for forex risk
+    leverage = 100.0
     
-    risk_check = check_total_market_risk('crypto', capital_total, sb)
-    if not risk_check["passed"]:
+    target_inv = capital * (inv_pct / 100) # e.g. $20.00 if capital is $1000  if not risk_check["passed"]:
         log_warning(MODULE, f"🚫 RIESGO TOTAL CRIPTO ALCANZADO: {risk_check['reason']}")
         return {
             "success": False,
@@ -415,16 +415,18 @@ def execute_crypto_signal(
         f'({backstop_data["source"]}) '
         f'({backstop_data["pct_from_entry"]:.2f}% '
         f'del precio de entrada)'
-    )
-
     qty_display: float | None = None
     entry_display = price
 
-    price = entry_display # usamos el precio actual de la vela o snap
-    dist_sl = abs(price - sl)
-    if dist_sl <= 0: dist_sl = price * 0.02 # fallback safety
+    price = entry_display    # ── STEP 2: Calculate quantity based on risk ──
+    from app.core.capital_manager import get_total_operating_capital
+    capital_total = get_total_operating_capital('crypto')
+    
+    # ── LOG: COMPOUNDING CHECK ──
+    log_info(MODULE, f"💰 CAPITAL OPERATIVO (CRIPTO): ${capital_total:,.2f}")
 
-    risk_pct = float(risk_config.get('risk_per_operation_pct', 2.0))
+    dist_sl = _calculate_sl_distance_crypto(action, price, candle_data)
+    risk_pct = float(risk_config.get('max_risk_per_trade_pct', 5.0)) # Usando el nuevo 5%
     risk_usd_per_trade = capital_total * (risk_pct / 100.0)
     quantity_raw = risk_usd_per_trade / dist_sl
     
@@ -912,15 +914,15 @@ def execute_forex_signal(
     # ── STEP 2: Open new position ──
     mode = os.getenv("FOREX_MODE", "paper")
 
-    # Calculate size based on settings (Unified Inversion rule)
-    from app.core.memory_store import BOT_STATE
-    config = BOT_STATE.config_cache
-    capital = float(config.get('capital_assigned', 500))
-    # Risk % is used as the investment portion per trade
-    inv_pct = float(config.get('risk_per_operation_pct', 1.0))
-    leverage = float(config.get('leverage_forex', 100))
+    # Calculate size based on dynamic capital manager (Interés Compuesto)
+    from app.core.capital_manager import get_total_operating_capital
+    capital = get_total_operating_capital('forex')
     
-    target_inv = capital * (inv_pct / 100) # e.g. $5.00
+    # Risk % is used as the investment portion per trade
+    inv_pct = 2.0 # Usando 2% base para forex compounding
+    leverage = 100.0
+    
+    target_inv = capital * (inv_pct / 100) # e.g. $20.00 if capital is $1000
     
     # Notional = Inversion * Leverage
     target_notional = target_inv * leverage # e.g. $500.00
@@ -1153,15 +1155,13 @@ def execute_stocks_signal(
 
     # ── STEP 2: Open new position (only if BUY — for SELL we only close) ──
     if action == "BUY":
-        # 1. Obtener configuración específica de STOCKS
-        from app.stocks.stocks_order_executor import _get_config, _calculate_shares
-        s_config = _get_config()
-        
-        capital = s_config["total_capital"]           # $5000 de tu pantalla
-        inv_pct = s_config["max_pct_per_trade"]       # 0.02 (2%) de tu pantalla
+        # 1. Obtener capital operativo dinámico (Interés Compuesto)
+        from app.core.capital_manager import get_total_operating_capital
+        capital = get_total_operating_capital('stocks')
+        inv_pct = 2.0  # 2% de porción por trade
         
         # 2. Calcular shares con la regla profesional (múltiplos de 5)
-        shares = _calculate_shares(capital, inv_pct, price)
+        shares = _calculate_shares(capital, inv_pct / 100, price)
         
         if shares < 5:
             log_warning(MODULE, f"🚫 Capital insuficiente para comprar el lote mínimo de 5 acciones de {ticker} (${capital*inv_pct:.0f} vs ${5*price:.0f})")

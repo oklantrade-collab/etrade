@@ -114,6 +114,7 @@ export default function SettingsPage() {
       'min_profit_exit_pct', 'exit_on_signal_reversal', 'use_strategy_engine_v2',
       'capital_forex_futures', 'leverage_forex', 'leverage_stocks', 'pct_for_trading',
       'active_symbols', 'regime_params', 'telegram_enabled', 'ai_enabled', 'ai_mode',
+      'accumulated_profit_crypto', 'accumulated_profit_forex', 'accumulated_profit_stocks',
       'telegram_bot_token', 'telegram_chat_id', 'paper_trading'
     ]
     const riskFields = ['max_risk_per_trade_pct', 'max_open_trades', 'max_positions_per_symbol', 'max_pct_per_trade']
@@ -221,11 +222,15 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
       {/* SECCIÓN GENERAL SIEMPRE VISIBLE */}
       <SettingsSection title="💰 Configuración de Cuenta & Riesgo">
-         <SettingRow label="Capital Total (USD)" value={generalForm.total_capital_usd} type="number" prefix="$" onChange={(v: any) => setGeneralForm({ ...generalForm, total_capital_usd: v })} />
-         <SettingRow label="Max. Tot Riesgo Inv." value={generalForm.max_total_risk_pct || 30} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_total_risk_pct: v })} />
-         <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
-            Límite de exposición: ${(generalForm.total_capital_usd * ((generalForm.max_total_risk_pct || 30) / 100)).toLocaleString()} USD
-         </div>
+          <SettingRow label="Capital asignado (Base)" value={config.capital_stocks_spot || 0} type="number" prefix="$" onChange={(v: any) => onSaveGlobal({ capital_stocks_spot: v })} />
+          <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_stocks || 0} type="number" prefix="$" onChange={(v: any) => onSaveGlobal({ accumulated_profit_stocks: v })} />
+          <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+             Capital Operativo Total: ${( (config.capital_stocks_spot || 0) + (config.accumulated_profit_stocks || 0) ).toLocaleString()} USD
+          </div>
+          <SettingRow label="Max. Tot Riesgo Inv." value={generalForm.max_total_risk_pct || 30} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_total_risk_pct: v })} />
+          <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+             Límite de exposición: ${( ( (config.capital_stocks_spot || 0) + (config.accumulated_profit_stocks || 0) ) * ((generalForm.max_total_risk_pct || 30) / 100)).toLocaleString()} USD
+          </div>
          <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_stocks || 1} type="number" suffix="x" onChange={(v: any) => onSaveGlobal({ leverage_stocks: v })} />
          <SettingRow label="% Inversión por Operación" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSaveGlobal({ pct_for_trading: v })} />
          <SettingRow label="Máximo Riesgo por Trade" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
@@ -314,6 +319,7 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
 const CryptoSettings = ({ config, onSave }: any) => {
   const [form, setForm] = useState({ 
     capital_crypto_futures: config.capital_crypto_futures || 500, 
+    accumulated_profit_crypto: config.accumulated_profit_crypto || 0,
     leverage_crypto: config.leverage_crypto || 15, 
     max_risk_per_trade_pct: config.max_risk_per_trade_pct || 2.0, 
     max_open_trades: config.max_open_trades || 3,
@@ -346,7 +352,11 @@ const CryptoSettings = ({ config, onSave }: any) => {
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
       <StatusBadge label="Binance Futures" status="ACTIVO" color="#F7931A" detail="Paper Trading" />
       <SettingsSection title="💰 Capital & Activos">
-        <SettingRow label="Capital asignado" value={form.capital_crypto_futures} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, capital_crypto_futures: v })} />
+        <SettingRow label="Capital asignado (Base)" value={form.capital_crypto_futures} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, capital_crypto_futures: v })} />
+        <SettingRow label="Ganancia o Profit de la cuenta" value={form.accumulated_profit_crypto} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, accumulated_profit_crypto: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+             Capital Operativo Total: ${( Number(form.capital_crypto_futures) + Number(form.accumulated_profit_crypto) ).toLocaleString()} USD
+        </div>
         <SettingRow label="Apalancamiento (Leverage)" value={form.leverage_crypto} type="number" suffix="x" onChange={(v: any) => setForm({ ...form, leverage_crypto: v })} />
         <SettingRow label="% Inversión (Global Portion)" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSave({ pct_for_trading: v })} />
       <SettingRow label="Criptos Operan" value={form.active_symbols_str} flexInput onChange={(v: any) => setForm({ ...form, active_symbols_str: v })} />
@@ -398,7 +408,11 @@ const ForexSettings = ({ config, onSave }: any) => {
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
       <StatusBadge label="IC Markets / cTrader" status={isConnected ? 'ACTIVO' : 'PENDIENTE'} color={isConnected ? '#00C896' : '#555'} detail="Conexión API" />
       <SettingsSection title="💰 Gestión Forex">
-        <SettingRow label="Capital asignado" value={config.capital_forex_futures} type="number" prefix="$" disabled={!isConnected} onChange={(v: any) => onSave({ capital_forex_futures: v })} />
+        <SettingRow label="Capital asignado (Base)" value={config.capital_forex_futures} type="number" prefix="$" disabled={!isConnected} onChange={(v: any) => onSave({ capital_forex_futures: v })} />
+        <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_forex || 0} type="number" prefix="$" onChange={(v: any) => onSave({ accumulated_profit_forex: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+             Capital Operativo Total: ${( Number(config.capital_forex_futures) + Number(config.accumulated_profit_forex || 0) ).toLocaleString()} USD
+        </div>
         <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_forex || 500} type="number" suffix="x" onChange={(v: any) => onSave({ leverage_forex: v })} />
         <SettingRow label="% Inversión (Global Portion)" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSave({ pct_for_trading: v })} />
         <SettingRow label="Monedas Operan" value={form.forex_symbols_str} flexInput onChange={(v: any) => setForm({ ...form, forex_symbols_str: v })} />

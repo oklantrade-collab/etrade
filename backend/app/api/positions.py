@@ -159,6 +159,13 @@ def manual_close_position(market: str, position_id: str):
 
         sb.table(table_name).update(update_data).eq("id", position_id).execute()
         
+        # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
+        try:
+            from app.core.capital_manager import register_realized_pnl
+            register_realized_pnl(market_l, pnl_usd)
+        except Exception as cap_e:
+            print(f"Error updating accumulated capital: {cap_e}")
+
         return {"status": "closed", "pnl_usd": pnl_usd, "exit_price": current_price}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

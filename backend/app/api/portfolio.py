@@ -154,8 +154,15 @@ async def get_global_portfolio():
                         upnl_usd = pips * pip_val * abs(lots)
                         upnl_pct = (pips * pip_size / entry) * 100
                     
+                    # CORRECCIÓN DE INVERSIÓN (MARGEN):
+                    # Si el par empieza con USD (USDJPY, USDCAD), el notional ya está en dólares.
+                    # Si termina con USD (EURUSD, GBPUSD), el notional es Lotes * 100k * Precio.
                     mult_inv = 100.0 if 'XAU' in sym else 100000.0
-                    total_inv = (abs(lots) * mult_inv * (cur_price or entry)) / lev_forex
+                    if sym.startswith('USD'):
+                        total_inv = (abs(lots) * mult_inv) / lev_forex
+                    else:
+                        total_inv = (abs(lots) * mult_inv * (cur_price or entry)) / lev_forex
+
                 forex_symbols_data.append({
                     'symbol': sym,
                     'side': ('long' if str(pos.get('side', '')).lower() in ['long', 'buy'] else 'short') if pos else None,
