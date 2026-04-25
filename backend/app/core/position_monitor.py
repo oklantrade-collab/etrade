@@ -100,22 +100,24 @@ async def check_sl_proximity_alert(
     current_price: float,
     sl_price:      float,
     danger_threshold_pct: float = 3.0,
-    escalation_drop_pct:  float = 1.0
+    escalation_drop_pct:  float = 1.0,
+    pos_id:        str = ""
 ) -> None:
     """Envía alerta de SL cercano de forma inteligente para evitar spam."""
     # Normalizar símbolo para evitar duplicados por formato (BTC/USDT vs BTCUSDT)
     norm_symbol = symbol.replace("/", "").upper()
+    alert_key = f"{norm_symbol}_{pos_id}" if pos_id else norm_symbol
     
     # Inicialización por símbolo solo si no existe
-    if norm_symbol not in BOT_STATE.sl_alerts:
-        BOT_STATE.sl_alerts[norm_symbol] = {
+    if alert_key not in BOT_STATE.sl_alerts:
+        BOT_STATE.sl_alerts[alert_key] = {
             'in_danger_zone':    False,
             'last_distance_pct': 100.0,
             'last_alert_sent':   None,
             'last_alert_price':  0.0
         }
 
-    state = BOT_STATE.sl_alerts[norm_symbol]
+    state = BOT_STATE.sl_alerts[alert_key]
     distance_pct = abs(current_price - sl_price) / sl_price * 100 if sl_price > 0 else 100
 
     currently_in_danger = distance_pct < danger_threshold_pct
@@ -391,6 +393,12 @@ async def check_open_positions_5m(
 
             # 0.2 ACTUALIZACIÓN DE P&L PARA DASHBOARD
             entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+            side = (pos.get('side') or 'long').lower()
+            sl = float(pos.get('sl_price') or pos.get('stop_loss') or 0)
+            tp_p = float(pos.get('tp_partial_price') or 0)
+            tp_f = float(pos.get('tp_full_price') or pos.get('take_profit') or 0)
+            mtf_score = mtf_scores.get(norm_symbol, 0)
+            
             is_long = side in ['long', 'buy']
             
             from app.core.crypto_symbols import resolve_crypto_position_quantity
@@ -539,7 +547,8 @@ async def check_open_positions_5m(
                 current_price        = price,
                 sl_price             = sl,
                 danger_threshold_pct = 3.0,
-                escalation_drop_pct  = 1.0
+                escalation_drop_pct  = 1.0,
+                pos_id               = str(pos.get('id', ''))
             )
 
             # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
