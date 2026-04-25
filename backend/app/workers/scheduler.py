@@ -1405,8 +1405,8 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
 
             # 1. SI SAR CAMBIÓ → CERRAR POSICIÓN ACTUAL
             if sar_changed_at:
-                position = BOT_STATE.positions.get(symbol)
-                if position:
+                positions = BOT_STATE.get_positions_by_symbol(symbol)
+                for position in positions:
                     side = (position.get('side') or '').lower()
                     
                     # Calcular P&L para el log
@@ -1558,7 +1558,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 context = engine.build_context(snap=snap_for_context, df_15m=df, df_4h=get_memory_df(symbol, "4h"))
 
                 new_signal = None
-                if symbol not in BOT_STATE.positions:
+                if not BOT_STATE.get_positions_by_symbol(symbol):
                     new_signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
                     if new_signal:
                         await engine.log_evaluation(symbol, new_signal, context)
@@ -1580,7 +1580,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                         rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf)
                     elif allowed_direction == 'short' and cur_mtf_score <= -mtf_threshold:
                         direction_checked = 'short'
-                        bearish_action = get_bearish_action(market_type=market_type, has_long_open=symbol in BOT_STATE.positions)
+                        bearish_action = get_bearish_action(market_type=market_type, has_long_open=bool(BOT_STATE.get_positions_by_symbol(symbol)))
                         if bearish_action == 'open_short':
                             rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
                 else:
@@ -1589,7 +1589,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                         rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf)
                     elif cur_mtf_score <= -mtf_threshold:
                         direction_checked = 'short'
-                        bearish_action = get_bearish_action(market_type=market_type, has_long_open=symbol in BOT_STATE.positions)
+                        bearish_action = get_bearish_action(market_type=market_type, has_long_open=bool(BOT_STATE.get_positions_by_symbol(symbol)))
                         if bearish_action == 'open_short':
                             rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
             
@@ -1612,7 +1612,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
 
             # Validar pre-filtros si hay match
             if rule_match and rule_match['direction'] in ['long', 'short']:
-                symbol_positions_count = len([p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol])
+                symbol_positions_count = len(BOT_STATE.get_positions_by_symbol(symbol))
                 max_per_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
                 
                 pre_res = check_pre_filters(
@@ -1844,15 +1844,15 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                        try:
                            if BOT_STATE.config_cache.get('use_strategy_engine_v2'):
                                engine = StrategyEngine.get_instance()
-                               if symbol not in BOT_STATE.positions:
+                               if not BOT_STATE.get_positions_by_symbol(symbol):
                                    context_4h = engine.build_context(snap=snap_ref, df_15m=df, df_4h=df_4h_safe)
                                    signal_4h = engine.get_best_signal(context=context_4h, strategy_type='scalping', cycle='4h')
                                    if signal_4h:
                                       max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
-                                      current_open = len([s for s in BOT_STATE.positions if BOT_STATE.positions[s].get('status') == 'open'])
+                                      current_open = len(BOT_STATE.positions)
                                       
                                       max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 1))
-                                      num_for_symbol = 1 if (symbol in BOT_STATE.positions and BOT_STATE.positions[symbol].get('status') == 'open') else 0
+                                      num_for_symbol = len(BOT_STATE.get_positions_by_symbol(symbol))
 
                                       # Limits are now handled atomically inside _execute_paper_open
                                       from app.core.parameter_guard import get_velocity_config

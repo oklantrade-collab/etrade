@@ -773,7 +773,8 @@ async def _execute_paper_open_unlocked(
     new_pos = res.data[0] if res.data else None
     if new_pos:
         from app.core.memory_store import BOT_STATE
-        BOT_STATE.positions[symbol] = new_pos
+        # Key by pos_id to support multiple positions per symbol
+        BOT_STATE.positions[new_pos.get('id', symbol)] = new_pos
 
     log_info(MODULE, f"🚀 PAPER OPEN [{symbol}] {side.upper()} at ${price:,.2f} (SL: ${data['sl_price']:,.2f}, TP: ${data['tp_full_price']:,.2f})")
     return new_pos
@@ -903,7 +904,12 @@ async def _execute_paper_close(pos, price, reason, supabase):
         log_warning(MODULE, f"Error cancelando órdenes huérfanas de {symbol}: {cancel_e}")
 
     # Remove from BOT_STATE
-    BOT_STATE.positions.pop(symbol, None)
+    pos_id = pos.get('id')
+    if pos_id:
+        BOT_STATE.positions.pop(pos_id, None)
+    else:
+        # Fallback for symbol-only entries
+        BOT_STATE.positions.pop(symbol, None)
 
     # Register SL cooldown if closed by any SL mechanism (Corrección #2)
     sl_reasons = ('sl', 'backstop', 'dynamic_sl', 'time_sl', 'stop_loss')
@@ -938,14 +944,21 @@ async def _handle_unexpected_close(
         reason = 'sl_or_tp_hit'
 
     # Actualizar Supabase
-    await supabase.table('positions').update({
-        'is_open':    False,
-        'close_reason': reason,
-        'closed_at':  datetime.now(timezone.utc).isoformat(),
-    }).eq('symbol', symbol).eq('is_open', True).execute()
-
-    # Limpiar de memoria
-    BOT_STATE.positions.pop(symbol, None)
+    pos_id = position.get('id')
+    if pos_id:
+        await supabase.table('positions').update({
+            'is_open': False,
+            'close_reason': reason,
+            'closed_at': datetime.now(timezone.utc).isoformat(),
+        }).eq('id', pos_id).execute()
+        BOT_STATE.positions.pop(pos_id, None)
+    else:
+        await supabase.table('positions').update({
+            'is_open': False,
+            'close_reason': reason,
+            'closed_at': datetime.now(timezone.utc).isoformat(),
+        }).eq('symbol', symbol).eq('is_open', True).execute()
+        BOT_STATE.positions.pop(symbol, None)
 
     # Alerta Telegram
     from app.workers.alerts_service import send_telegram_message

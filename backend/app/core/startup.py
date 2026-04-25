@@ -60,8 +60,8 @@ async def warm_up(symbols: list[str], timeframes: list[str], provider: BinanceCr
         # Load Open Positions from bot_state
         res_pos = sb.table("bot_state").select("*").eq("is_open", True).execute()
         for p in res_pos.data:
-            # We reconstruct the Position object (or dict) in MEMORY_STORE
-            BOT_STATE.positions[p['symbol']] = p
+            # Key by pos_id to support multiple positions per symbol
+            BOT_STATE.positions[p.get('id', p['symbol'])] = p
             
         # Load Global State (Circuit Breakers)
         res_global = sb.table("bot_global_state").select("*").eq("id", 1).execute()

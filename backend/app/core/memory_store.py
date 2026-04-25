@@ -19,7 +19,7 @@ MARKET_SNAPSHOT_CACHE: Dict[str, dict] = {}
 # ─── WARM DATA (Operational Business State) ───
 @dataclass
 class BotState:
-    positions: Dict[str, Any] = field(default_factory=dict)       # {symbol: Position}
+    positions: Dict[str, Any] = field(default_factory=dict)       # {pos_id: Position}
     cooldowns: Dict[str, Any] = field(default_factory=dict)       # {symbol: expiry_dt}
     circuit_breaker: Dict[str, Any] = field(default_factory=lambda: {
         'triggered': False, 
@@ -35,6 +35,15 @@ class BotState:
     order_lock: asyncio.Lock = field(default_factory=asyncio.Lock) # Lock for atomic order placement
     last_close_cycles: Dict[str, int] = field(default_factory=dict) # {symbol: cycle_index}
     current_cycle: int = 0                                          # Global cycle counter
+
+    def get_positions_by_symbol(self, symbol: str) -> list[dict]:
+        """Helper to get all open positions for a specific symbol."""
+        return [p for p in self.positions.values() if p.get('symbol') == symbol]
+
+    def get_first_position_by_symbol(self, symbol: str) -> Optional[dict]:
+        """Helper for backward compatibility (gets the first/oldest position)."""
+        pos_list = self.get_positions_by_symbol(symbol)
+        return pos_list[0] if pos_list else None
 
 BOT_STATE = BotState()
 

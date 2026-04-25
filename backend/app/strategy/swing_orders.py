@@ -422,7 +422,9 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
 
         res = sb.table('positions').upsert(pos_data).execute()
         if res.data:
-            BOT_STATE.positions[symbol] = res.data[0]
+            # Key by pos_id to support multiple positions per symbol
+            new_pos = res.data[0]
+            BOT_STATE.positions[new_pos.get('id', symbol)] = new_pos
 
         if asyncio.iscoroutinefunction(send_telegram_message):
             await send_telegram_message(

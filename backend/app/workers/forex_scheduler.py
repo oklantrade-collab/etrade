@@ -523,7 +523,8 @@ async def open_forex_position(
         log_error(MODULE, f"Error registrando posicion en DB: {e}")
 
     # Registrar en BOT_STATE
-    BOT_STATE.positions[symbol] = {
+    pos_id = order.get('order_id', f'FX-{int(time.time())}')
+    BOT_STATE.positions[pos_id] = {
         'symbol': symbol,
         'side': direction,
         'avg_entry_price': price,
@@ -572,8 +573,10 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
         sar_phase = sar_data.get('phase', 'neutral')
         sar_changed_at = sar_data.get('changed_at')
 
-        position = BOT_STATE.positions.get(symbol)
-        if position and sar_changed_at:
+        positions = BOT_STATE.get_positions_by_symbol(symbol)
+        for position in positions:
+            sar_changed_at = sar_data.get('changed_at')
+            if position and sar_changed_at:
             side = (position.get('side') or '').lower()
             if (sar_phase == 'short' and side == 'long') or \
                (sar_phase == 'long' and side == 'short'):
@@ -796,7 +799,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
         context = engine.build_context(snap=snap, df_15m=df, df_4h=df_4h, df_5m=df_5m)
 
         # Solo evaluar si no hay posicion abierta
-        if symbol not in BOT_STATE.positions:
+        if not BOT_STATE.get_positions_by_symbol(symbol):
             signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
 
             if signal:
@@ -804,9 +807,9 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
 
                 # Verificar limites de posicion
                 max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
-                current_open = len([s for s in BOT_STATE.positions if BOT_STATE.positions[s].get('status') == 'open'])
+                current_open = len(BOT_STATE.positions)
                 max_per_pair = FOREX_RISK_CONFIG['max_positions_per_pair']
-                has_open = symbol in BOT_STATE.positions
+                has_open = bool(BOT_STATE.get_positions_by_symbol(symbol))
 
                 if current_open >= max_global:
                     log_info('POSITION_LIMIT_FX', f'{symbol}: Limite GLOBAL {max_global} alcanzado')
