@@ -414,6 +414,20 @@ def check_pre_filters(
     if symbol_positions_count >= max_per_symbol:
         reasons.append(f"Max positions for {symbol} reached ({symbol_positions_count}/{max_per_symbol})")
 
+    # Price improvement check (DCA logic) - REQ: "menor que la anterior en el caso de BUY"
+    if symbol_positions_count > 0:
+        from app.core.memory_store import BOT_STATE
+        existing_pos = [p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol]
+        if existing_pos:
+            # Sort by opened_at to find the "last" one
+            sorted_pos = sorted(existing_pos, key=lambda x: x.get('opened_at', ''), reverse=True)
+            last_entry = float(sorted_pos[0].get('entry_price', 0))
+            
+            if direction == "long" and current_price >= last_entry:
+                reasons.append(f"Price improvement required: Current {current_price} >= Last {last_entry} (LONG)")
+            elif direction == "short" and current_price <= last_entry:
+                reasons.append(f"Price improvement required: Current {current_price} <= Last {last_entry} (SHORT)")
+
     # Capital check
     if not capital_sufficient:
         reasons.append("Insufficient operating capital")
