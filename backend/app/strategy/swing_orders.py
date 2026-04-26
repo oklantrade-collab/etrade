@@ -336,8 +336,10 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                 return
 
             # 2. Límite por Símbolo
+            from app.core.crypto_symbols import crypto_symbol_match_variants
             max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
-            sym_pos_res = sb.table('positions').select('id').eq('symbol', symbol).eq('status', 'open').execute()
+            variants = crypto_symbol_match_variants(symbol)
+            sym_pos_res = sb.table('positions').select('id').in_('symbol', variants).eq('status', 'open').execute()
             current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
             
             if current_sym >= max_symbol:
