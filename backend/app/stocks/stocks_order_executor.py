@@ -17,7 +17,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
+from app.core.symbol_state import SymbolStateMachine
 
+sm = SymbolStateMachine.get_instance()
 MODULE = "stocks_order_exec"
 
 
@@ -482,6 +484,9 @@ def _open_or_update_position(
             "status": "open"
         }).execute()
         
+        # Hook into state machine
+        sm.on_position_opened(ticker, "long", {"symbol": ticker, "side": "long", "status": "open"})
+        
         log_info(MODULE, f"📈 Posición ABIERTA: {ticker} x{shares} @ ${price:.2f} | SL/TP created in trade_opportunities")
 
 
@@ -527,3 +532,5 @@ def _close_all_positions(ticker: str, price: float):
             f"avg=${avg:.2f} exit=${price:.2f} "
             f"PnL=${pnl:.2f} ({pnl_pct:.2f}%)"
         )
+        
+    sm.on_position_closed(ticker, "close_all", all_closed=True)

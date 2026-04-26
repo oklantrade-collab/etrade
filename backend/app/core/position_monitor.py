@@ -22,8 +22,10 @@ from app.strategy.position_guards import (
     update_peak_pnl,
 )
 
-MODULE = "POSITION_MONITOR"
+from app.core.symbol_state import SymbolStateMachine
 
+MODULE = "POSITION_MONITOR"
+sm = SymbolStateMachine.get_instance()
 async def check_signal_reversal(
     position:     dict,
     current_mtf:  float,
@@ -775,6 +777,7 @@ async def _execute_paper_open_unlocked(
         from app.core.memory_store import BOT_STATE
         # Key by pos_id to support multiple positions per symbol
         BOT_STATE.positions[new_pos.get('id', symbol)] = new_pos
+        sm.on_position_opened(symbol, side, new_pos)
 
     log_info(MODULE, f"🚀 PAPER OPEN [{symbol}] {side.upper()} at ${price:,.2f} (SL: ${data['sl_price']:,.2f}, TP: ${data['tp_full_price']:,.2f})")
     return new_pos
@@ -843,6 +846,11 @@ async def _execute_paper_close(pos, price, reason, supabase):
         'closed_at': datetime.now(timezone.utc).isoformat(),
         'realized_pnl': round(total_pnl, 4)
     }).eq('id', pos['id']).execute()
+    
+    # Check if there are other open positions for this symbol
+    open_pos = supabase.table('positions').select('id').eq('symbol', symbol).eq('status', 'open').execute()
+    all_closed = len(open_pos.data) == 0 if open_pos.data else True
+    sm.on_position_closed(symbol, reason, all_closed=all_closed)
     
     from app.strategy.dynamic_sl_manager import cancel_all_sl_orders
     await cancel_all_sl_orders(

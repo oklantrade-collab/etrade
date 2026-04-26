@@ -48,6 +48,9 @@ from app.strategy.market_regime import classify_market_risk, update_regime_if_ch
 
 # Strategy Engine
 from app.strategy.strategy_engine import StrategyEngine
+from app.core.symbol_state import SymbolStateMachine
+
+sm = SymbolStateMachine.get_instance()
 
 # Position management
 from app.core.position_sizing import calculate_position_size, can_open_short, calculate_sl_tp
@@ -535,6 +538,7 @@ async def open_forex_position(
         'status': 'open',
         'market_type': 'forex_futures',
     }
+    sm.on_position_opened(symbol, direction, BOT_STATE.positions[pos_id])
 
     # Telegram
     side_emoji = 'LONG' if direction == 'long' else 'SHORT'
@@ -575,32 +579,31 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
         positions = BOT_STATE.get_positions_by_symbol(symbol)
         for position in positions:
-            sar_changed_at = sar_data.get('changed_at')
-            if position and sar_changed_at:
-            side = (position.get('side') or '').lower()
-            if (sar_phase == 'short' and side == 'long') or \
-               (sar_phase == 'long' and side == 'short'):
+            # 4. Smart Exit: SAR Phase Change
+            if sar_changed_at:
+                side = (position.get('side') or '').lower()
+                if (sar_phase == 'short' and side == 'long') or \
+                   (sar_phase == 'long' and side == 'short'):
 
-                await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
-                entry = float(position.get('avg_entry_price', 0))
-                if entry > 0:
-                    if side == 'long':
-                        pnl_pips = (current_price - entry) / PIP_SIZES.get(symbol, 0.0001)
+                    await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
+                    entry = float(position.get('avg_entry_price', 0))
+                    if entry > 0:
+                        if side == 'long':
+                            pnl_pips = (current_price - entry) / PIP_SIZES.get(symbol, 0.0001)
+                        else:
+                            pnl_pips = (entry - current_price) / PIP_SIZES.get(symbol, 0.0001)
                     else:
-                        pnl_pips = (entry - current_price) / PIP_SIZES.get(symbol, 0.0001)
-                else:
-                    pnl_pips = 0
+                        pnl_pips = 0
 
-                await send_telegram_message(
-                    f"FOREX SAR REVERSAL [{symbol}]\n"
-                    f"SAR 4h -> {sar_phase.upper()}\n"
-                    f"Cerrando {side.upper()}: {pnl_pips:+.1f} pips\n"
-                    f"Precio: {current_price:.5f}"
-                )
-                return
+                    await send_telegram_message(
+                        f"FOREX SAR REVERSAL [{symbol}]\n"
+                        f"SAR 4h -> {sar_phase.upper()}\n"
+                        f"Cerrando {side.upper()}: {pnl_pips:+.1f} pips\n"
+                        f"Precio: {current_price:.5f}"
+                    )
+                    continue # Sigue con la siguiente posicion
 
-        # 5. Smart Exit: Signal Reversal
-        if position:
+            # 5. Smart Exit: Signal Reversal
             current_mtf = float(snap.get('mtf_score', 0))
             trading_config = BOT_STATE.config_cache
 
@@ -618,9 +621,9 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                     f"MTF giro: {current_mtf:.4f}\n"
                     f"PnL: {reversal.get('pnl_pct', 0):+.2f}%"
                 )
+                continue
 
-        # 6. SL/TP check (manual for Forex since paper mode)
-        if position:
+            # 6. SL/TP check (manual for Forex since paper mode)
             sl = float(position.get('sl_price', 0))
             tp = float(position.get('tp_partial_price', 0))
             side = (position.get('side') or '').lower()
@@ -634,7 +637,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                         f"Precio: {current_price:.5f}\n"
                         f"SL: {sl:.5f}"
                     )
-                    return
+                    continue
 
             if tp > 0:
                 if (side == 'long' and current_price >= tp) or \
@@ -645,7 +648,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                         f"Precio: {current_price:.5f}\n"
                         f"TP: {tp:.5f}"
                     )
-                    return
+                    continue
 
         # 7. Heartbeat
         try:
@@ -677,6 +680,11 @@ async def forex_cycle_5m():
     try:
         tasks = [_forex_process_symbol_5m(s, provider, sb) for s in symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ── TICK STATE MACHINE (Waiting/Ambiguous) ──
+        for sym in symbols:
+            sm.tick_waiting(sym)
+            sm.tick_ambiguous(sym)
     except Exception as e:
         log_error(MODULE, f"Error global forex 5m: {e}")
 
@@ -798,31 +806,53 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
         df_5m = get_memory_df(symbol, '5m')
         context = engine.build_context(snap=snap, df_15m=df, df_4h=df_4h, df_5m=df_5m)
 
-        # Solo evaluar si no hay posicion abierta
-        if not BOT_STATE.get_positions_by_symbol(symbol):
+        # ── STATE MACHINE & AMBIGUITY CHECK ──
+        from app.core.symbol_state import detect_market_ambiguity
+        snap_for_sm = snap.copy()
+        snap_for_sm.update({'sar_trend_4h': int(last_row.get('sar_trend_4h',0)), 'sar_trend_15m': int(last_row.get('sar_trend_15m',0)), 'fibonacci_zone': int(last_row.get('fib_zone', 0))})
+        ambiguity = detect_market_ambiguity(snap_for_sm)
+        
+        if ambiguity['is_ambiguous']:
+            log_info('AMBIGUOUS_FX', f"{symbol}: {ambiguity['reason']}")
+            sm.set_ambiguous(symbol, ambiguity['reason'])
+        else:
             signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
-
+            
             if signal:
                 await engine.log_evaluation(symbol, signal, context)
 
-                # Verificar limites de posicion
-                max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
+                max_global = int(BOT_STATE.config_cache.get('max_open_trades', 16))
                 current_open = len(BOT_STATE.positions)
-                max_per_pair = FOREX_RISK_CONFIG['max_positions_per_pair']
-                has_open = bool(BOT_STATE.get_positions_by_symbol(symbol))
+                max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
 
                 if current_open >= max_global:
                     log_info('POSITION_LIMIT_FX', f'{symbol}: Limite GLOBAL {max_global} alcanzado')
-                elif has_open:
-                    log_info('POSITION_LIMIT_FX', f'{symbol}: Ya tiene posicion abierta')
                 else:
-                    await open_forex_position(
-                        symbol=symbol,
-                        signal=signal,
-                        price=current_price,
-                        provider=provider,
-                        sb=sb,
-                    )
+                    sm_check = sm.can_open(symbol, signal['direction'], current_price, max_per_pair)
+                    
+                    if not sm_check['allowed']:
+                        log_info('STATE_MACHINE_FX', f"{symbol}: Bloqueado - {sm_check['reason']}")
+                    else:
+                        if sm_check.get('is_flip'):
+                            log_info('FLIP_FX', f"{symbol}: FLIP {signal['direction']} - Cerrando opuestas")
+                            existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
+                            for p in existing_positions:
+                                if p.get('side', '').lower() != signal['direction'].lower():
+                                    try:
+                                        from app.core.position_monitor import _execute_paper_close
+                                        await _execute_paper_close(p, current_price, f"flip_{signal['direction']}_fx", sb)
+                                        sm.on_position_closed(symbol, f"flip_{signal['direction']}_fx", all_closed=True)
+                                    except Exception as e:
+                                        log_error(MODULE, f"Error en flip close para {symbol}: {e}")
+                                        
+                        # Proceder a abrir
+                        await open_forex_position(
+                            symbol=symbol,
+                            signal=signal,
+                            price=current_price,
+                            provider=provider,
+                            sb=sb,
+                        )
             else:
                 # Log near-misses
                 all_results = (
@@ -848,17 +878,35 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                     )
 
                     # Scalping 4h (Aa31/Bb31)
-                    if symbol not in BOT_STATE.positions:
+                    existing_positions_4h = BOT_STATE.get_positions_by_symbol(symbol)
+                    max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                    
+                    if len(existing_positions_4h) < max_per_pair:
                         context_4h = engine.build_context(snap=snap, df_15m=df, df_4h=df_4h_safe)
                         signal_4h = engine.get_best_signal(context=context_4h, strategy_type='scalping', cycle='4h')
                         if signal_4h:
-                            await open_forex_position(
-                                symbol=symbol,
-                                signal=signal_4h,
-                                price=current_price,
-                                provider=provider,
-                                sb=sb,
-                            )
+                            # ── PRICE IMPROVEMENT CHECK (DCA) ──
+                            can_open = True
+                            if existing_positions_4h:
+                                last_pos = sorted(existing_positions_4h, key=lambda x: x.get('opened_at', ''), reverse=True)[0]
+                                last_entry = float(last_pos.get('entry_price') or last_pos.get('avg_entry_price') or 0)
+                                direction = signal_4h['direction']
+                                
+                                if direction == "long" and current_price >= last_entry:
+                                    log_info('DCA_BLOCK_FX_4H', f'{symbol}: No mejora precio LONG ({current_price} >= {last_entry})')
+                                    can_open = False
+                                elif direction == "short" and current_price <= last_entry:
+                                    log_info('DCA_BLOCK_FX_4H', f'{symbol}: No mejora precio SHORT ({current_price} <= {last_entry})')
+                                    can_open = False
+                            
+                            if can_open:
+                                await open_forex_position(
+                                    symbol=symbol,
+                                    signal=signal_4h,
+                                    price=current_price,
+                                    provider=provider,
+                                    sb=sb,
+                                )
             except Exception as swing_e:
                 log_error(MODULE, f'{symbol}/4h swing error: {swing_e}')
 

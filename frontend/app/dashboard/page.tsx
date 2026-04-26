@@ -24,6 +24,8 @@ interface SymbolData {
   }
   regime: string
   ai_sentiment: string
+  symbol_state?: string
+  waiting_cycles?: number
   card_status?: string
   sar_4h?: number
   sar_trend_4h?: number
@@ -178,6 +180,8 @@ export default function DashboardPage() {
           ...newData,
           price: newPrice,
           zone: parseInt(newData.fibonacci_zone ?? info.zone),
+          symbol_state: newData.symbol_state ?? info.symbol_state,
+          waiting_cycles: parseInt(newData.waiting_cycles ?? info.waiting_cycles ?? 0),
           position: newPos
         };
       }
@@ -812,14 +816,36 @@ function SymbolCard({
       <div className="space-y-4">
         <div className="flex justify-between items-end">
            <span className="text-xl font-black font-mono tracking-tighter">${data.price.toLocaleString()}</span>
-           <span 
-             className={`text-[0.6rem] font-bold uppercase tracking-widest px-2 py-0.5 rounded ${
-               data.card_status === 'active' ? 'text-emerald-400' : 
-               data.mtf_score > 0.35 ? 'text-blue-400 bg-blue-500/10' : 'text-slate-500'
-             }`}
-           >
-             {getObservationLabel()}
-           </span>
+           <div className="flex flex-col items-end gap-1">
+             <span 
+               className={`text-[0.6rem] font-bold uppercase tracking-widest px-2 py-0.5 rounded ${
+                 data.card_status === 'active' ? 'text-emerald-400' : 
+                 data.mtf_score > 0.35 ? 'text-blue-400 bg-blue-500/10' : 'text-slate-500'
+               }`}
+             >
+               {getObservationLabel()}
+             </span>
+             
+             {/* STATE MACHINE BADGE */}
+             {(() => {
+                const state = (data.symbol_state || 'neutral').toUpperCase();
+                const STATE_CONFIG: Record<string, {color: string, label: string}> = {
+                  NEUTRAL: { color: 'bg-slate-500/20 text-slate-400 border-slate-500/30', label: 'NEUTRAL' },
+                  LONG: { color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', label: 'LONG' },
+                  SHORT: { color: 'bg-rose-500/20 text-rose-400 border-rose-500/30', label: 'SHORT' },
+                  CLOSING: { color: 'bg-amber-500/20 text-amber-400 border-amber-500/30 animate-pulse', label: 'CLOSING' },
+                  WAITING: { color: 'bg-blue-500/20 text-blue-400 border-blue-500/30', label: 'WAITING' },
+                  AMBIGUOUS: { color: 'bg-purple-500/20 text-purple-400 border-purple-500/30', label: 'AMBIGUOUS' }
+                };
+                const conf = STATE_CONFIG[state] || STATE_CONFIG.NEUTRAL;
+                
+                return (
+                   <span className={`text-[0.55rem] font-black uppercase tracking-widest px-2 py-0.5 rounded border ${conf.color}`}>
+                     {conf.label} {data.waiting_cycles && data.waiting_cycles > 0 ? `(${data.waiting_cycles})` : ''}
+                   </span>
+                );
+             })()}
+           </div>
         </div>
 
         {data.card_status === 'active' && data.position ? (

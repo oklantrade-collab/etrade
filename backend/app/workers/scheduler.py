@@ -57,6 +57,9 @@ from app.analysis.smart_limit import (
 from app.strategy.proactive_exit import (
     evaluate_proactive_exit
 )
+from app.core.symbol_state import SymbolStateMachine, detect_market_ambiguity
+
+sm = SymbolStateMachine.get_instance()
 
 
 MODULE = "v4_scheduler"
@@ -1145,6 +1148,12 @@ async def cycle_5m():
             telegram_bot = None # Will use internal send_telegram from position_monitor
         )
 
+        # ── TICK STATE MACHINE (Waiting/Ambiguous) ──
+        active_symbols = BOT_STATE.config_cache.get('active_symbols', [])
+        for sym in active_symbols:
+            sm.tick_waiting(sym)
+            sm.tick_ambiguous(sym)
+
         # Si hubo cierre inesperado, no procesar más para este símbolo en este ciclo
         # (Though cycle_5m processes ALL symbols now, so we filter by symbol in the loop below)
         
@@ -1627,7 +1636,31 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 if not pre_res['passed']: 
                     blocked_by = "|".join(pre_res['reasons'])
                 else:
-                    # Filtro de correlación
+                    # ── STATE MACHINE & AMBIGUITY CHECK ──
+                    snap_for_sm = regime.copy()
+                    snap_for_sm.update({'price': float(last_row['close']), 'adx': float(last_row.get('adx', 25)), 'mtf_score': cur_mtf_score, 'sar_trend_4h': int(last_row.get('sar_trend_4h',0)), 'sar_trend_15m': int(last_row.get('sar_trend_15m',0)), 'fibonacci_zone': fib_levels.get('zone', 0)})
+                    ambiguity = detect_market_ambiguity(snap_for_sm)
+                    
+                    if ambiguity['is_ambiguous']:
+                        blocked_by = f"market_ambiguous ({ambiguity['reason']})"
+                        sm.set_ambiguous(symbol, ambiguity['reason'])
+                    else:
+                        sm_check = sm.can_open(symbol, rule_match['direction'], float(last_row['close']), max_per_symbol)
+                        
+                        if not sm_check['allowed']:
+                            blocked_by = f"state_machine_block ({sm_check['reason']})"
+                        elif sm_check.get('is_flip'):
+                            # Ejecutar flip: cerrar posiciones opuestas
+                            positions = BOT_STATE.get_positions_by_symbol(symbol)
+                            for p in positions:
+                                if p.get('side', '').lower() != rule_match['direction'].lower():
+                                    try:
+                                        await _execute_paper_close(p, float(last_row['close']), f"flip_{rule_match['direction']}", sb)
+                                        sm.on_position_closed(symbol, f"flip_{rule_match['direction']}", all_closed=True)
+                                    except Exception as e:
+                                        log_error(MODULE, f"Error en flip close para {symbol}: {e}")
+                                    
+                        # Filtro de correlación
                     corr_result = check_correlation_filter(
                         symbol_new     = symbol,
                         direction_new  = rule_match['direction'],

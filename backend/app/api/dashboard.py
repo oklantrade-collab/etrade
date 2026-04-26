@@ -244,6 +244,8 @@ async def get_dashboard_summary():
             'volume_rel':     volume_rel,
             'cur_vol':        cur_vol,
             'vol_ema':        vol_ema,
+            'symbol_state':   snap.get('symbol_state', 'neutral'),
+            'waiting_cycles': int(snap.get('waiting_cycles', 0)),
             'position': {
                 'side':              pos['side'],
                 'avg_entry':         entry_p,

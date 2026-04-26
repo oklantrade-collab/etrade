@@ -35,7 +35,11 @@ from app.workers.market_sweep import run_market_sweep
 from app.analysis.movement_classifier import classify_movement
 from app.analysis.smart_limit import calculate_smart_limit_price
 from app.analysis.fibonacci_bb import fibonacci_bollinger
+from app.analysis.candle_patterns import detect_patterns
 from app.core.market_hours import is_market_open, get_nyc_now
+from app.core.symbol_state import SymbolStateMachine, detect_market_ambiguity
+
+sm = SymbolStateMachine.get_instance()
 
 MODULE = "stocks_scheduler"
 
@@ -310,6 +314,33 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["is_undervalued"] = (status == "UNDERVALUED")
         ind_15m["pool_type"] = f_data.get("pool_type", "HOT") if f_data else "HOT"
 
+        # ── NUEVO: SM MOMENTUM SCORE (Data IB Sentiment Proxy) ──
+        # V1: RVOL (30%)
+        rvol_val = ind_1d.get("rvol", 1.0)
+        v1 = min(max(0, (rvol_val - 1) / 4), 1.0)
+        
+        # V2 & V3: Social Sentiment (IB Generic Ticks 293, 294) 
+        # TODO: Implement real fetch from IB in Sprint 8. Using placeholders for now.
+        s_score = 0.0   # Range -3 to +3
+        sv_score = 5.0  # Range 0 to 10
+        v2 = (s_score + 3) / 6
+        v3 = sv_score / 10
+        
+        # V4: Catalyst (25%)
+        v4 = float(f_data.get("catalyst_score", 5)) / 10 if f_data else 0.5
+        
+        # V5: Technical (15%)
+        v5 = base_score / 100
+        
+        sm_raw = (v1 * 0.30) + (v2 * 0.20) + (v3 * 0.10) + (v4 * 0.25) + (v5 * 0.15)
+        sm_score = round(sm_raw * 10, 1)
+        if f_data and float(f_data.get("catalyst_score", 5)) == 0:
+            sm_score = 1.0 # Golden rule: no catalyst = no momentum
+            
+        ind_15m["sm_score"] = max(1.0, min(sm_score, 10.0))
+        ind_15m["s_score"] = s_score
+        ind_15m["sv_score"] = sv_score
+
         # 6. CAPTURE LIVE PRICE
         current_price = float(df_15m["close"].iloc[-1])
         
@@ -321,6 +352,23 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         
         # 7. SMART LIMITS & MOVEMENT TYPE
         movement_15m = classify_movement(df_15m)
+        
+        # ── NUEVO: SIPV (Candle Patterns) 15m ──
+        sipv_15m = detect_patterns(df_15m, ticker, "15m")
+        sipv_signal_15m = ""
+        if sipv_15m:
+            # Si hay patrones, tomamos el primero (o el más fuerte)
+            # detect_patterns devuelve una lista formateada
+            # En SIPV v2 (app.candle_signals), result.action es lo que importa
+            # Pero detect_patterns lo mapea a bullish/bearish.
+            # Sin embargo, el detector original está disponible.
+            from app.candle_signals.candle_patterns import CandlePatternDetector, CandleOHLC
+            det = CandlePatternDetector(market="stocks")
+            last_c = df_15m.iloc[-1]
+            curr = CandleOHLC(open=float(last_c['open']), high=float(last_c['high']), low=float(last_c['low']), close=float(last_c['close']), volume=float(last_c.get('volume', 0)))
+            hist = [CandleOHLC(open=float(r['open']), high=float(r['high']), low=float(r['low']), close=float(r['close']), volume=float(r.get('volume',0))) for _, r in df_15m.tail(10).iloc[:-1].iterrows()]
+            res_sipv = det.evaluate(curr, history=hist)
+            sipv_signal_15m = res_sipv.action # "BUY", "SELL", or "HOLD"
         limit_long_15m  = calculate_smart_limit_price(df_15m, 'long',  movement_15m['movement_type'])
         limit_short_15m = calculate_smart_limit_price(df_15m, 'short', movement_15m['movement_type'])
 
@@ -343,6 +391,31 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["fib_zone_15m"] = movement_15m["fib_zone_current"]
         ind_15m["smart_limit_long_15m"] = limit_long_15m.get("limit_price")
         ind_15m["smart_limit_short_15m"] = limit_short_15m.get("limit_price")
+
+        # ── NUEVO: ACTUALIZAR MARKET SNAPSHOT (Para Dashboard Portfolio) ──
+        try:
+            ema20 = float(ind_15m.get("ema_20") or ind_15m.get("basis") or current_price)
+            atr = float(ind_15m.get("atr") or (current_price * 0.02))
+            multipliers = [1.0, 1.618, 2.618, 3.618, 4.236, 5.618]
+            zone = 0
+            if atr > 0:
+                for idx in range(6, 0, -1):
+                    if current_price > ema20 + (atr * multipliers[idx-1]): zone = idx; break
+                    if current_price < ema20 - (atr * multipliers[idx-1]): zone = -idx; break
+            
+            snap_data = {
+                'symbol': ticker,
+                'price': float(current_price),
+                'basis': float(ema20),
+                'fibonacci_zone': int(zone),
+                'updated_at': datetime.now(timezone.utc).isoformat(),
+                'exchange': 'stocks',
+                'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None
+            }
+            sb = get_supabase()
+            sb.table('market_snapshot').upsert(snap_data, on_conflict='symbol').execute()
+        except Exception as snap_e:
+            log_warning(MODULE, f"Error updating snapshot for {ticker}: {snap_e}")
 
         ind_15m["movement_1d"] = movement_1d["movement_type"]
         ind_15m["fib_zone_1d"] = movement_1d["fib_zone_current"]
@@ -373,13 +446,48 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             fib_zone=movement_15m["fib_zone_current"],
             bb_lower=bb_lower_1d,
             intrinsic_price=ind_15m["intrinsic_price"],
-            pool_type=ind_15m.get("pool_type", "")
+            pool_type=ind_15m.get("pool_type", ""),
+            sm_score=ind_15m.get("sm_score", 1.0),
+            piotroski_score=ind_15m.get("piotroski_score", 0),
+            sipv_signal=sipv_signal_15m
         )
         rule_ctx["revenue_growth_yoy"] = ind_15m.get("revenue_growth_yoy", 0)
+        rule_ctx["sm_score"] = ind_15m.get("sm_score", 1.0)
+        rule_ctx["piotroski_score"] = ind_15m.get("piotroski_score", 0)
+        rule_ctx["sipv_signal"] = sipv_signal_15m
         
+        # Use 15m PineScript Signal for rules that require it (like HOT_SENTMARKET_BUY)
+        ps_signal_15m = ind_15m.get("last_pinescript_signal")
+        ps_age_15m = ind_15m.get("signal_age", 999)
+        if ps_signal_15m == "Buy" and ps_age_15m <= 1: # Age 0 or 1 for 15m
+             rule_ctx["pine_signal"] = "B" # Map 'Buy' to 'B' as requested
+        elif t01_confirmed:
+             rule_ctx["pine_signal"] = "Buy" # Default 4h signal
+        
+        # ── STATE MACHINE & AMBIGUITY CHECK ──
+        snap_for_sm = {
+            'price': current_price,
+            'adx': ind_15m.get('adx', 25),
+            'mtf_score': base_score / 100, # Use technical score as proxy for MTF in stocks
+            'fibonacci_zone': movement_15m['fib_zone_current'],
+            'sar_trend_15m': 1 if sipv_signal_15m == "BUY" else (-1 if sipv_signal_15m == "SELL" else 0)
+        }
+        ambiguity = detect_market_ambiguity(snap_for_sm)
+        if ambiguity['is_ambiguous']:
+            log_info(MODULE, f"Skipping {ticker}: Market ambiguous ({ambiguity['reason']})")
+            sm.set_ambiguous(ticker, ambiguity['reason'])
+            return None
+
         buying_results = re.evaluate_all(rule_ctx, direction="buy")
         for res in buying_results:
             if res["triggered"]:
+                # Check State Machine
+                max_pos = int(config.get("max_concurrent_positions", 5))
+                sm_check = sm.can_open(ticker, "long", current_price, max_pos)
+                if not sm_check['allowed']:
+                    log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker} BLOCKED BY SM: {sm_check['reason']}")
+                    continue
+
                 log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker}")
                 if res["order_type"] == "market":
                     execute_market_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
@@ -492,6 +600,11 @@ async def run_stocks_cycle(force=False):
         
         # Run all tasks concurrently
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ── TICK STATE MACHINE (Waiting/Ambiguous) ──
+        for ticker in tickers:
+            sm.tick_waiting(ticker)
+            sm.tick_ambiguous(ticker)
         
         results = []
         processed_count = 0
@@ -638,12 +751,12 @@ async def start_stocks_scheduler(force=False):
 
     scheduler = AsyncIOScheduler()
 
-    # 1. HOT BY VOLUME: every 2 minutes during market hours
+    # 1. HOT BY VOLUME: every 5 minutes during market hours
     scheduler.add_job(
         run_stocks_cycle,
-        trigger=IntervalTrigger(minutes=2),
+        trigger=IntervalTrigger(minutes=5),
         id="stocks_hot_cycle",
-        name="Hot by Volume (15m intraday cycle)",
+        name="Hot by Volume (5m intraday cycle)",
         kwargs={"force": force},
         max_instances=1,
         replace_existing=True,
