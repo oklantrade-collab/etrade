@@ -32,6 +32,12 @@ def get_supabase() -> Client:
     return _client
 
 
+def reset_supabase():
+    """Reset the singleton client to force recreation on next use."""
+    global _client
+    _client = None
+
+
 def get_system_config() -> dict:
     """Load all system_config rows from Supabase into a flat dict."""
     sb = get_supabase()

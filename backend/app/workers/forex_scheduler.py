@@ -373,6 +373,44 @@ async def upsert_forex_candles(symbol: str, timeframe: str, df: pd.DataFrame, sb
 #  FOREX POSITION OPENING
 # ══════════════════════════════════════════════════
 
+def calculate_forex_sl_tp(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    snap: dict = None,
+) -> dict:
+    """
+    Calcula SL/TP en precio usando bandas de Fibonacci (Nivel 3/6).
+    """
+    pip_size = PIP_SIZES.get(symbol, 0.0001)
+    
+    if snap:
+        u1 = float(snap.get('upper_1') or 0)
+        l1 = float(snap.get('lower_1') or 0)
+        atr = (u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
+        
+        if direction == 'long':
+            sl = float(snap.get('lower_6') or (entry_price - 50 * pip_size)) - (0.5 * atr)
+            tp = float(snap.get('upper_3') or (entry_price + 3 * atr))
+        else:
+            sl = float(snap.get('upper_6') or (entry_price + 50 * pip_size)) + (0.5 * atr)
+            tp = float(snap.get('lower_3') or (entry_price - 3 * atr))
+    else:
+        # Fallback si no hay snapshot
+        sl_pips = FOREX_RISK_CONFIG['sl_pips_default']
+        tp_pips = sl_pips * FOREX_RISK_CONFIG['tp_rr_ratio']
+        if direction == 'long':
+            sl, tp = entry_price - (sl_pips * pip_size), entry_price + (tp_pips * pip_size)
+        else:
+            sl, tp = entry_price + (sl_pips * pip_size), entry_price - (tp_pips * pip_size)
+
+    return {
+        'sl_price': round(sl, 6),
+        'tp_price': round(tp, 6),
+        'sl_pips': abs(entry_price - sl) / pip_size,
+    }
+
+
 def calculate_forex_lot_size(
     symbol: str,
     capital_usd: float,
@@ -407,33 +445,6 @@ def calculate_forex_lot_size(
     }
 
 
-def calculate_forex_sl_tp(
-    symbol: str,
-    direction: str,
-    entry_price: float,
-    sl_pips: float = 30,
-    tp_pips: float = 60,
-) -> dict:
-    """
-    Calcula SL/TP en precio a partir de pips.
-    """
-    pip_size = PIP_SIZES.get(symbol, 0.0001)
-
-    if direction == 'long':
-        sl_price = entry_price - (sl_pips * pip_size)
-        tp_price = entry_price + (tp_pips * pip_size)
-    else:
-        sl_price = entry_price + (sl_pips * pip_size)
-        tp_price = entry_price - (tp_pips * pip_size)
-
-    return {
-        'sl_price': round(sl_price, 5),
-        'tp_price': round(tp_price, 5),
-        'sl_pips': sl_pips,
-        'tp_pips': tp_pips,
-    }
-
-
 async def open_forex_position(
     symbol: str,
     signal: dict,
@@ -457,24 +468,22 @@ async def open_forex_position(
 
     capital = float(cfg.get('capital_total', 1000))
     risk_pct = FOREX_RISK_CONFIG['max_risk_per_trade'] * 100  # 1%
-    sl_pips = FOREX_RISK_CONFIG['sl_pips_default']
-    tp_pips = sl_pips * FOREX_RISK_CONFIG['tp_rr_ratio']
 
-    # Calcular lot size
+    # 1. Calcular SL/TP usando Fibonacci
+    levels = calculate_forex_sl_tp(
+        symbol=symbol,
+        direction=direction,
+        entry_price=price,
+        snap=MARKET_SNAPSHOT_CACHE.get(symbol)
+    )
+    sl_pips = levels['sl_pips']
+
+    # 2. Calcular lot size basado en riesgo real
     sizing = calculate_forex_lot_size(
         symbol=symbol,
         capital_usd=capital,
         risk_pct=risk_pct,
         sl_pips=sl_pips,
-    )
-
-    # Calcular SL/TP
-    levels = calculate_forex_sl_tp(
-        symbol=symbol,
-        direction=direction,
-        entry_price=price,
-        sl_pips=sl_pips,
-        tp_pips=tp_pips,
     )
 
     # Paper trading check

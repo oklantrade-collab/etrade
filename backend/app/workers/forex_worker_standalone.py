@@ -468,7 +468,7 @@ class StandaloneForexWorker:
 
             ema20 = float(last['basis']); atr = float(last['atr'])
             
-            multipliers = [1.618, 2.618, 3.618, 4.236, 5.618, 6.618]
+            multipliers = [1.0, 1.618, 2.618, 3.618, 4.236, 5.618]
             zone = 0
             if not np.isnan(atr) and atr > 0:
                 for i in range(6, 0, -1):

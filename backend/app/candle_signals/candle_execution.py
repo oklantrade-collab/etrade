@@ -78,8 +78,7 @@ def _ensure_crypto_sl_tp(
     market_type: str  = 'crypto_futures'
 ) -> tuple:
     """
-    Calcula SL backstop amplio usando banda Fibonacci lower_6 cuando está
-    disponible, o 8% como fallback.
+    Calcula SL backstop amplio y dos niveles de TP (parcial y final).
     """
     price = float(price or 0)
     side = (side or "buy").lower()
@@ -94,9 +93,13 @@ def _ensure_crypto_sl_tp(
         else:
             sl = price * 0.92
 
-        # TP en upper_3 o +3%
+        # TP1 en upper_3 o +3%
         upper_3 = float(snap.get('upper_3', 0)) if snap else 0
-        tp = upper_3 if upper_3 > price * 1.01 else price * 1.03
+        tp1 = upper_3 if upper_3 > price * 1.01 else price * 1.03
+        
+        # TP2 en upper_6 o +6%
+        upper_6 = float(snap.get('upper_6', 0)) if snap else 0
+        tp2 = upper_6 if upper_6 > tp1 * 1.01 else tp1 * 1.05
 
     else:  # short
         if snap:
@@ -108,10 +111,15 @@ def _ensure_crypto_sl_tp(
         else:
             sl = price * 1.08
 
+        # TP1 en lower_3 o -3%
         lower_3 = float(snap.get('lower_3', 0)) if snap else 0
-        tp = lower_3 if lower_3 < price * 0.99 else price * 0.97
+        tp1 = lower_3 if lower_3 < price * 0.99 else price * 0.97
+        
+        # TP2 en lower_6 o -6%
+        lower_6 = float(snap.get('lower_6', 0)) if snap else 0
+        tp2 = lower_6 if lower_6 < tp1 * 0.99 else tp1 * 0.95
 
-    return round(sl, 8), round(tp, 8)
+    return round(sl, 8), round(tp1, 8), round(tp2, 8)
 
 
 # ─── FIBONACCI BAND ZONE VALIDATION ──────────────────────────────────────────
@@ -337,10 +345,13 @@ def execute_crypto_signal(
             log_info(MODULE, f"⏸️ Omitiendo SELL {binance_symbol}: Precio {current_price} no es mayor que anterior {last_entry}.")
             return {"success": False, "reason": "price_improvement_required", "pair": binance_symbol}
             
+        # Si ya existe misma estrategia, nos aseguramos de cerrar las OPUESTAS de OTRAS estrategias
+        # (Esto evita tener BUY de una estrategia y SELL de otra al mismo tiempo)
+        _close_all_positions_crypto(binance_symbol, strategy_code, new_signal_action=action, only_opposite=True)
         log_info(MODULE, f"💎 Agregando CAPA {len(existing_same)+1} para {binance_symbol} strategy {strategy_code}")
     else:
-        # Si no hay misma estrategia, procedemos con el cierre de las OPUESTAS (o las mismas si fuera otra estrategia y estamos refrescando)
-        close_meta = _close_all_positions_crypto(binance_symbol, strategy_code, new_signal_action=action)
+        # Si no hay misma estrategia, procedemos con el cierre de las OPUESTAS (o las mismas si fuera refresco)
+        close_meta = _close_all_positions_crypto(binance_symbol, strategy_code, new_signal_action=action, only_opposite=False)
         if close_meta.get("skipped_due_to_invalid_size"):
             log_warning(MODULE, f"🚫 CANDLE SIGNAL abortado {binance_symbol}: tamaño 0.")
             return {"success": False, "reason": "invalid_position_size", "pair": binance_symbol}
@@ -407,7 +418,7 @@ def execute_crypto_signal(
     )
     
     sl = backstop_data['backstop_price']
-    sl, tp = _ensure_crypto_sl_tp(price, action, snap=current_snap)
+    sl, tp1, tp2 = _ensure_crypto_sl_tp(price, action, snap=current_snap)
     
     log_info('SL_MANAGER',
         f'{binance_symbol}: Backstop SL = '
@@ -438,14 +449,14 @@ def execute_crypto_signal(
     if is_paper:
         paper_size = round(quantity, 4)
         order_row_id = _save_candle_order_crypto(
-            sb, binance_symbol, action, strategy_code, price, pattern, timeframe, "paper", paper_size, sl, tp
+            sb, binance_symbol, action, strategy_code, price, pattern, timeframe, "paper", paper_size, sl, tp1, tp2
         )
         order_uuid = _order_uuid_for_position(order_row_id)
         if not order_uuid:
             log_warning(MODULE, f"No se pudo generar order_uuid para position en {binance_symbol}")
 
         if not _save_candle_position_crypto(
-            sb, binance_symbol, action, strategy_code, price, pattern, timeframe, order_uuid, paper_size, sl, tp
+            sb, binance_symbol, action, strategy_code, price, pattern, timeframe, order_uuid, paper_size, sl, tp1, tp2
         ):
             log_error(MODULE, f"[PAPER] No se abrió posición en DB para {binance_symbol}")
             return {"success": False, "reason": "db_save_failed"}
@@ -485,15 +496,15 @@ def execute_crypto_signal(
             )
             sl_live = backstop_data_live['backstop_price']
 
-            sl_live, tp_live = _ensure_crypto_sl_tp(float(avg_price), action, snap=current_snap)
+            sl_live, tp1_live, tp2_live = _ensure_crypto_sl_tp(float(avg_price), action, snap=current_snap)
             order_row_id = _save_candle_order_crypto(
-                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, "live", quantity, sl_live, tp_live
+                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, "live", quantity, sl_live, tp1_live, tp2_live
             )
             order_uuid = _order_uuid_for_position(order_row_id)
             if not order_row_id:
                 log_warning(MODULE, f"No se pudo guardar orden live en Supabase para {binance_symbol}; position sin order_id.")
             if not _save_candle_position_crypto(
-                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, order_uuid, quantity, sl_live, tp_live
+                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, order_uuid, quantity, sl_live, tp1_live, tp2_live
             ):
                 log_error(
                     MODULE,
@@ -529,7 +540,7 @@ def execute_crypto_signal(
     return {"success": True, "action": action, "pair": binance_symbol, "strategy": strategy_code}
 
 
-def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_signal_action: str = None) -> dict:
+def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_signal_action: str = None, only_opposite: bool = False) -> dict:
     """
     Cierra posiciones abiertas del par (formato canónico SOLUSDT, incluye legacy SOL/USDT).
 
@@ -605,47 +616,67 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                 pnl = (entry_price - close_price) * size_abs
                 pnl_pct = ((entry_price - close_price) / entry_price * 100) if entry_price > 0 else 0.0
 
-            previews.append((pos, size, pnl, pnl_pct, close_price))
-
-        eps = 1e-9
-        for _pos, _sz, pnl, pnl_pct, _cpx in previews:
-            # Determinar si es dirección opuesta
             is_opposite = False
             if new_signal_action:
-                p_side = (_pos.get("side") or "").upper()
-                # LONG/BUY vs SHORT/SELL
+                p_side = (pos.get("side") or "").upper()
                 if new_signal_action.upper() == "BUY":
                     is_opposite = p_side in ("SHORT", "SELL")
                 else:
                     is_opposite = p_side in ("LONG", "BUY")
 
+            previews.append((pos, size, pnl, pnl_pct, close_price, is_opposite))
+
+        eps = 1e-9
+        has_opposite = any(preview[5] for preview in previews) # preview[5] is is_opposite
+
+        for _pos, _sz, pnl, pnl_pct, _cpx, is_opposite in previews:
             if is_opposite:
                 log_info(MODULE, f"⚠️ FORZANDO CIERRE por reversión de dirección ({_pos.get('side')} -> {new_signal_action}) en {binance_symbol}")
                 continue # Pasa a cerrar
 
+            # Si hay una reversión en curso, NO bloqueamos el ciclo por posiciones de la MISMA dirección en pérdida
+            # Pero solo las cerramos si tienen profit. Si no tienen profit y es la misma dirección, se quedan como CAPAS.
             if pnl <= eps:
-                out["skipped_due_to_loss"] = True
-                log_info(
-                    MODULE,
-                    f"🚫 No cierre vela {binance_symbol}: PnL no positivo (usd={pnl:.4f}, pct={pnl_pct:.4f}).",
-                )
-                return out
+                if not has_opposite and not only_opposite:
+                    out["skipped_due_to_loss"] = True
+                    log_info(
+                        MODULE,
+                        f"🚫 No cierre vela {binance_symbol}: PnL no positivo (usd={pnl:.4f}, pct={pnl_pct:.4f}).",
+                    )
+                    return out
+                else:
+                    log_info(MODULE, f"ℹ️ Manteniendo capa same-side en pérdida durante reversión: {_pos.get('id')}")
+                    continue
+
             profit_ok = (pnl >= min_usd) or (pnl_pct >= min_pct)
             if not profit_ok:
-                out["skipped_due_to_loss"] = True
-                log_info(
-                    MODULE,
-                    f"🚫 No cierre vela {binance_symbol}: beneficio insuficiente vs umbrales "
-                    f"(usd={pnl:.4f} need>={min_usd} OR pct={pnl_pct:.4f}% need>={min_pct}%).",
-                )
-                return out
+                if not has_opposite and not only_opposite:
+                    out["skipped_due_to_loss"] = True
+                    log_info(
+                        MODULE,
+                        f"🚫 No cierre vela {binance_symbol}: beneficio insuficiente vs umbrales "
+                        f"(usd={pnl:.4f} need>={min_usd} OR pct={pnl_pct:.4f}% need>={min_pct}%).",
+                    )
+                    return out
+                else:
+                    log_info(MODULE, f"ℹ️ Manteniendo capa same-side con bajo profit durante reversión: {_pos.get('id')}")
+                    continue
 
         log_info(
             MODULE,
-            f"🔄 Cerrando {len(previews)} posición(es) de {binance_symbol} (señal vela → {strategy_code})",
+            f"🔄 Cerrando posiciones elegibles de {binance_symbol} (señal vela → {strategy_code})",
         )
 
-        for pos, size, pnl, pnl_pct, close_px in previews:
+        for pos, size, pnl, pnl_pct, close_px, is_opposite in previews:
+            # Re-evaluamos si debe cerrarse
+            should_close = is_opposite
+            if not should_close and not only_opposite:
+                if pnl > eps:
+                    should_close = (pnl >= min_usd) or (pnl_pct >= min_pct)
+            
+            if not should_close:
+                continue
+
             try:
                 # El valor de la inversión (notional) se basa en el tamaño absoluto
                 notional = float(pos.get("entry_price", 0) or 0) * abs(size)
@@ -671,6 +702,21 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                     f"  ↳ Cerrada {pos['id'][:8]}... side={pos.get('side')} PnL: {pnl:.4f} ({pnl_pct_row}%) qty={size}",
                 )
 
+        # ── CANCELAR ÓRDENES HUÉRFANAS ──
+        # Si cerramos algo (o hay reversión), limpiamos pending_orders para evitar ejecuciones contradictorias
+        if out["closed_count"] > 0 or has_opposite:
+            try:
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for sym_v in variants:
+                    sb.table("pending_orders").update({
+                        "status": "cancelled",
+                        "cancelled_at": now_iso,
+                        "updated_at": now_iso
+                    }).eq("symbol", sym_v).eq("status", "pending").execute()
+                log_info(MODULE, f"🧹 Órdenes pendientes canceladas para {binance_symbol}")
+            except Exception as cancel_e:
+                log_warning(MODULE, f"Error cancelando órdenes huérfanas: {cancel_e}")
+
                 # REGLA 7: Cooldown if closed with loss
                 if pnl < 0:
                     BOT_STATE.last_close_cycles[binance_symbol] = BOT_STATE.current_cycle
@@ -684,7 +730,7 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
     return out
 
 
-def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, mode, quantity=0, sl=0.0, tp=0.0):
+def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, mode, quantity=0, sl=0.0, tp1=0.0, tp2=0.0):
     """Save order record for crypto candle signal."""
     try:
         sym = normalize_crypto_symbol(binance_symbol)
@@ -695,7 +741,7 @@ def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, 
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
         snap = MARKET_SNAPSHOT_CACHE.get(binance_symbol, {})
         
-        sl_f, tp_f = _ensure_crypto_sl_tp(price_f, action, snap=snap)
+        sl_f, tp1_f, tp2_f = _ensure_crypto_sl_tp(price_f, action, snap=snap)
         row = {
             "symbol": sym,
             "side": action,
@@ -703,9 +749,9 @@ def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, 
             "status": "open",
             "entry_price": price_f,
             "stop_loss_price": sl_f,
-            "take_profit_price": tp_f,
+            "take_profit_price": tp2_f, # Full TP
             "stop_price": sl_f,
-            "limit_price": tp_f,
+            "limit_price": tp2_f,
             "rule_code": strategy_code,
             "quantity": qty_f,
             "is_paper": mode == "paper",
@@ -720,8 +766,7 @@ def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, 
         log_error(MODULE, f"CRITICAL: Crypto Order save failed to Supabase: {e}")
         return None
 
-
-def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, order_id, quantity=0, sl=0.0, tp=0.0) -> bool:
+def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, order_id, quantity=0, sl=0.0, tp1=0.0, tp2=0.0) -> bool:
     """Save position record for crypto candle signal. Returns True si la fila quedó en Supabase."""
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -737,7 +782,7 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
         snap = MARKET_SNAPSHOT_CACHE.get(binance_symbol, {})
         
-        sl_f, tp_f = _ensure_crypto_sl_tp(price_f, action, snap=snap)
+        sl_f, tp1_f, tp2_f = _ensure_crypto_sl_tp(price_f, action, snap=snap)
         oid = _order_uuid_for_position(order_id)
 
         payload = {
@@ -754,9 +799,9 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
             "sl_dynamic_price": None,
             "highest_price_reached": price_f,
             "lowest_price_reached": price_f,
-            "take_profit": tp_f,
-            "tp_partial_price": tp_f,
-            "tp_full_price": tp_f,
+            "take_profit": tp2_f,
+            "tp_partial_price": tp1_f,
+            "tp_full_price": tp2_f,
             "unrealized_pnl": 0.0,
             "realized_pnl": 0.0,
             "status": "open",

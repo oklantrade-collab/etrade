@@ -29,7 +29,7 @@ export default function StocksPositions() {
       const openData = await openRes.json()
       const closedData = await closedRes.json()
       
-      setPositions(Array.isArray(openData) ? openData : [])
+      setPositions(Array.isArray(openData.positions) ? openData.positions : [])
       setClosedPositions(Array.isArray(closedData) ? closedData : [])
     } catch (err) {
       console.error(err)

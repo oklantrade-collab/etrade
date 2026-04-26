@@ -28,6 +28,30 @@ from app.analysis.fundamental_scorer import FundamentalScorer
 router = APIRouter()
 
 
+def calculate_sm_score(rvol, s_score, sv_score, catalyst_raw, tecnico_raw):
+    """
+    Calcula el Score de Momentum de 1 a 10 según propuesta técnica.
+    Pesos: RVOL(30%), Sentiment(20%), SocVol(10%), Catalyst(25%), Technical(15%)
+    """
+    # Normalización según especificación
+    v1 = min(max(0, (rvol - 1) / 4), 1.0)
+    v2 = (s_score + 3) / 6
+    v3 = sv_score / 10
+    v4 = catalyst_raw / 10
+    
+    # tecnico_raw viene de 0 a 100 en technical_score, normalizar a 0.0 - 1.0
+    v5 = tecnico_raw / 100 
+
+    score_raw = (v1 * 0.30) + (v2 * 0.20) + (v3 * 0.10) + (v4 * 0.25) + (v5 * 0.15)
+    score_final = round(score_raw * 10, 1)
+    
+    # Regla de oro: si no hay catalizador (V4=0), el momentum es bajo
+    if catalyst_raw == 0:
+        return 1.0
+        
+    return max(1.0, min(score_final, 10.0))
+
+
 @router.get("/status")
 async def get_stocks_status(sb=Depends(get_supabase)):
     """Check Stocks module status and configuration."""
@@ -202,9 +226,11 @@ async def get_stocks_opportunities(
         orders_map = {}
         for order in (orders_res.data or []):
             tick = order["ticker"]
-            if tick not in orders_map:
-                orders_map[tick] = []
-            orders_map[tick].append(order)
+            # Solo incluimos órdenes pendientes, o órdenes filled SI la posición sigue abierta
+            if order["status"] == "pending" or tick in active_pos_tickers:
+                if tick not in orders_map:
+                    orders_map[tick] = []
+                orders_map[tick].append(order)
 
         # 3.6 Get active positions to ensure they appear in Opportunities
         pos_res = sb.table("stocks_positions")\
@@ -310,6 +336,15 @@ async def get_stocks_opportunities(
                 "valuation_status": f.get("valuation_status", "unknown"),
                 "composite_intrinsic": f.get("composite_intrinsic"),
                 "margin_of_safety": f.get("margin_of_safety", 0),
+                
+                # MOMENTUM SCORE (SM)
+                "sm_score": calculate_sm_score(
+                    rvol=float(t.get("signals_json", {}).get("rvol", 1.0) if t.get("signals_json") else 1.0),
+                    s_score=float(t.get("signals_json", {}).get("s_score", 0.0) if t.get("signals_json") else 0.0),
+                    sv_score=float(t.get("signals_json", {}).get("sv_score", 5.0) if t.get("signals_json") else 5.0),
+                    catalyst_raw=float(w.get("catalyst_score", 5)),
+                    tecnico_raw=float(t.get("technical_score", 0))
+                )
             })
 
         # Extra: Add positions that are NOT in watchlist
@@ -344,6 +379,13 @@ async def get_stocks_opportunities(
                 "orders": orders_map.get(ticker, []),
                 "is_pro_member": True, # Force to Pro tab
                 "last_scan_time": (datetime.fromisoformat((t.get("timestamp") or "").split(".")[0][:19] + "+00:00") - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
+                "sm_score": calculate_sm_score(
+                    rvol=float(sj.get("rvol", 1.0)),
+                    s_score=float(sj.get("s_score", 0.0)),
+                    sv_score=float(sj.get("sv_score", 5.0)),
+                    catalyst_raw=5, # Fallback for positions
+                    tecnico_raw=float(t.get("technical_score", 0))
+                )
             })
 
         # Sort: by volume desc (User request)

@@ -125,10 +125,12 @@ async def process_swing_orders(
         
         if direction == 'long':
             sl_price = entry * (1 - 0.005)  # 0.5% SL
-            tp_price = basis                 # TP = BASIS
+            tp1_price = basis                # TP1 = BASIS
+            tp2_price = float(snap.get('upper_3', basis * 1.03)) # TP2 = Upper 3
         else:
             sl_price = entry * (1 + 0.005)
-            tp_price = basis
+            tp1_price = basis
+            tp2_price = float(snap.get('lower_3', basis * 0.97))
 
         # ── 6. TTL según calidad y distancia ──
         ttl_hours = 2 if \
@@ -141,7 +143,8 @@ async def process_swing_orders(
             direction     = direction,
             limit_price   = entry,
             sl_price      = sl_price,
-            tp_price      = tp_price,
+            tp1_price     = tp1_price,
+            tp2_price     = tp2_price,
             band_target   = limit_result['band_target'],
             sizing_pct    = limit_result['sizing_pct'],
             movement_type = movement_type,
@@ -235,7 +238,7 @@ async def cancel_swing_order(symbol: str, direction: str, reason: str, sb):
     await cancel_swing_orders(symbol=symbol, direction=direction, reason=reason, sb=sb)
 
 async def create_smart_limit_order(
-    symbol, direction, limit_price, sl_price, tp_price, 
+    symbol, direction, limit_price, sl_price, tp1_price, tp2_price, 
     band_target, sizing_pct, movement_type, signal_quality, 
     fib_zone_entry, ttl_hours, supabase
 ):
@@ -247,8 +250,8 @@ async def create_smart_limit_order(
         'rule_code': 'SMART' if direction == 'long' else 'SMART_S',
         'limit_price': limit_price,
         'sl_price': sl_price,
-        'tp1_price': tp_price,
-        'tp2_price': tp_price,
+        'tp1_price': tp1_price,
+        'tp2_price': tp2_price,
         'band_name': band_target,
         'status': 'pending',
         'mode': 'paper' if BOT_STATE.config_cache.get("paper_trading", True) else 'real',
@@ -344,6 +347,29 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
         except Exception as limit_e:
             log_error('SWING', f"Error validando límites en ejecución: {limit_e}")
             return
+
+        # ── REVERSIÓN FORZADA (Hedge no permitido) ──
+        # Si ejecutamos un Smart Limit y hay posiciones opuestas, cerrarlas primero.
+        try:
+            from app.core.crypto_symbols import crypto_symbol_match_variants
+            opposite_side = 'SHORT' if direction.lower() == 'long' else 'LONG'
+            opp_res = sb.table('positions').select('*').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
+            
+            to_close = []
+            for p in (opp_res.data or []):
+                p_side = (p.get('side') or '').upper()
+                if opposite_side == 'SHORT' and p_side in ('SHORT', 'SELL'):
+                    to_close.append(p)
+                elif opposite_side == 'LONG' and p_side in ('LONG', 'BUY'):
+                    to_close.append(p)
+            
+            if to_close:
+                log_info('SWING', f"🔄 REVERSIÓN: Cerrando {len(to_close)} posiciones opuestas en {symbol} antes de ejecutar {direction.upper()}")
+                from app.execution.order_manager import close_position
+                for p_close in to_close:
+                    close_position(p_close['id'], reason=f"reversal_smart_{direction.lower()}")
+        except Exception as rev_e:
+            log_warning('SWING', f"Error en reversión automática: {rev_e}")
 
         # Continuar con el proceso original si pasó los límites
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE

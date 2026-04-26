@@ -16,6 +16,22 @@ async def analyze_fundamentals(
     """
     Orquestador de Capa 3: Valoración Matemática + Enriquecimiento IA (opcional).
     """
+    # 0. ¿Ya tenemos un análisis de IA para HOY?
+    cached_ia = None
+    if supabase:
+        try:
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            cache_res = supabase.table('fundamental_cache')\
+                .select('ia_score, qwen_summary, gemini_summary, refreshed_at')\
+                .eq('ticker', ticker)\
+                .gte('refreshed_at', today_str)\
+                .execute()
+            
+            if cache_res.data and cache_res.data[0].get('ia_score') is not None:
+                cached_ia = cache_res.data[0]
+                log_info('VALUATION', f"{ticker}: Usando análisis de IA cacheado de hoy.")
+        except Exception as e:
+            log_warning('VALUATION', f"Error consultando caché de IA: {e}")
 
     # 1. ¿Data insuficiente de IB? Enriquecer vía FundamentalAnalyzer (YFinance Deep)
     # Definimos insuficiente si no hay MCAP o ROA (indicadores de datos vacíos)
@@ -76,10 +92,16 @@ async def analyze_fundamentals(
 
     # 3. ¿Llamar a la IA? Solo si el score técnico o matemático lo amerita
     # O si es explícitamente requerido (miembro PRO)
-    should_call_ia = math_result['pro_score'] >= 7.0 or (technical_score or 0) >= 75
+    should_call_ia = (math_result['pro_score'] >= 7.0 or (technical_score or 0) >= 75) and not cached_ia
     
     ia_res = None
-    if should_call_ia:
+    if cached_ia:
+        ia_res = {
+            'pro_score': cached_ia['ia_score'],
+            'qwen_summary': cached_ia['qwen_summary'],
+            'gemini_summary': cached_ia['gemini_summary']
+        }
+    elif should_call_ia:
         try:
             from app.stocks.decision_engine import DecisionEngine
             engine = DecisionEngine()

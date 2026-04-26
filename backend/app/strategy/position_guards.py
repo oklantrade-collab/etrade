@@ -146,19 +146,31 @@ def can_open_position(
     """
     direction_l = direction.lower()
 
-    # ── REGLA 1: Ya hay posición abierta del mismo símbolo ──
+    # ── REGLA 1: Límite por símbolo (Multi-layer support) ──
     if open_positions:
+        from app.core.crypto_symbols import normalize_crypto_symbol
+        norm_symbol = normalize_crypto_symbol(symbol)
+        
+        # Obtenemos el límite de la configuración o usamos 4 por defecto
+        from app.core.supabase_client import get_risk_config
+        try:
+            max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
+        except:
+            max_per_symbol = 4
+
+        count = 0
         for pos in open_positions:
-            pos_symbol = pos.get('symbol', '')
-            if pos_symbol.upper() == symbol.upper():
-                pos_side = (pos.get('side') or '').lower()
-                return {
-                    'allowed': False,
-                    'reason': (
-                        f'{symbol}: ya tiene posición {pos_side} abierta '
-                        f'→ no abrir segunda (máx 1 por símbolo)'
-                    )
-                }
+            if normalize_crypto_symbol(pos.get('symbol', '')) == norm_symbol:
+                count += 1
+        
+        if count >= max_per_symbol:
+            return {
+                'allowed': False,
+                'reason': (
+                    f'{symbol}: ya tiene {count} posiciones abiertas '
+                    f'→ límite alcanzado (máx {max_per_symbol} por símbolo)'
+                )
+            }
 
     # ── REGLA 2: Cooldown general del símbolo post-SL ──
     now = datetime.now(timezone.utc)

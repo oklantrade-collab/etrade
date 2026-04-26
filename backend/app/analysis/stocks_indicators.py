@@ -457,10 +457,12 @@ def upsert_technical_score(
             except Exception as e:
                 err_str = str(e)
                 # Retry on common Supabase/Network errors including HTTP/2 stream issues
-                retry_msgs = ["PGRST002", "schema cache", "PROTOCOL_ERROR", "timeout", "timed out", "10061", "StreamInputs", "state 5"]
+                retry_msgs = ["PGRST002", "schema cache", "PROTOCOL_ERROR", "timeout", "timed out", "10061", "StreamInputs", "state 5", "ConnectionInputs", "ConnectionState"]
                 if any(msg in err_str for msg in retry_msgs):
                     import time
-                    log_warning(MODULE, f"Supabase busy or timed out for {ticker} (Attempt {attempt+1}/{max_retries}). Retrying in 2s...")
+                    from app.core.supabase_client import reset_supabase
+                    reset_supabase()
+                    log_warning(MODULE, f"Supabase connection issue for {ticker} (Attempt {attempt+1}/{max_retries}). Client reset and retrying in 2s...")
                     time.sleep(2)
                     continue
                 else:

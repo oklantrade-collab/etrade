@@ -232,8 +232,8 @@ class DecisionEngine:
         except Exception as e:
             err_str = str(e).lower()
             if "quota" in err_str or "rate_limit" in err_str or "429" in err_str:
-                log_error(MODULE, f"OpenAI Quota Exceeded/Rate Limit hit. Cooling down for 10 min. Error: {e}")
-                self.openai_quota_hit_until = time.time() + 600 # 10 minutes
+                log_warning(MODULE, f"OpenAI Quota Exceeded/Rate Limit hit. Cooling down for 30 min. Error: {e}")
+                self.openai_quota_hit_until = time.time() + 1800 # 30 minutes
             else:
                 log_warning(MODULE, f"OpenAI error: {e}")
             return None

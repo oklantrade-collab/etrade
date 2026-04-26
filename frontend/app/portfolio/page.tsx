@@ -353,7 +353,28 @@ function TableSection({ title, symbols, color }: any) {
                               <td className="text-center font-mono text-xs text-slate-400">
                                  {(s.quantity || 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
                               </td>
-                              <td className="text-center font-black text-slate-400 text-xs uppercase tracking-widest">{s.fibonacci_zone}</td>
+                              <td className="text-center">
+                                 <div className="flex flex-col items-center gap-1">
+                                    <span className={`text-[0.65rem] font-black italic tracking-tighter ${
+                                       s.fibonacci_zone > 0 ? 'text-emerald-400' : 
+                                       s.fibonacci_zone < 0 ? 'text-rose-400' : 
+                                       'text-slate-500'
+                                    }`}>
+                                       {s.fibonacci_zone > 0 ? `ZONA +${s.fibonacci_zone}` : 
+                                        s.fibonacci_zone < 0 ? `ZONA ${s.fibonacci_zone}` : 
+                                        'NEUTRAL (0)'}
+                                    </span>
+                                    <div className="flex gap-0.5">
+                                       {[1,2,3,4,5,6].map(i => (
+                                          <div key={i} className={`w-1 h-1 rounded-full ${
+                                             Math.abs(s.fibonacci_zone) >= i 
+                                             ? (s.fibonacci_zone > 0 ? 'bg-emerald-500 shadow-[0_0_5px_#10b981]' : 'bg-rose-500 shadow-[0_0_5px_#f43f5e]') 
+                                             : 'bg-white/5'
+                                          }`} />
+                                        ))}
+                                    </div>
+                                 </div>
+                              </td>
                               <td className="text-right px-10 font-mono text-[0.6rem] text-slate-600 font-bold uppercase">{s.rule_code || 'S-01'}</td>
                            </tr>
                          )

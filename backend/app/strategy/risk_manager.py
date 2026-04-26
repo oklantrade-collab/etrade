@@ -105,9 +105,11 @@ def validate_signal(
 
     # CHECK 4 — No exceder posiciones por símbolo:
     try:
+        from app.core.crypto_symbols import crypto_symbol_match_variants
+        variants = crypto_symbol_match_variants(signal['symbol'])
         symbol_positions = supabase_client.table('positions') \
             .select('id', count='exact') \
-            .eq('symbol', signal['symbol']) \
+            .in_('symbol', variants) \
             .eq('status', 'open') \
             .execute()
             

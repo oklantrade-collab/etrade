@@ -69,6 +69,9 @@ class StocksRuleEngine:
         bb_lower: float = None,
         intrinsic_price: float = 0.0,
         pool_type: str = "",
+        sm_score: float = 0.0,
+        piotroski_score: int = 0,
+        sipv_signal: str = "",
     ) -> dict:
         """
         Construye el contexto de evaluación para un ticker.
@@ -96,6 +99,9 @@ class StocksRuleEngine:
             "bb_lower": bb_lower,
             "intrinsic_price": intrinsic_price,
             "pool_type": pool_type or "",
+            "sm_score": sm_score,
+            "piotroski_score": piotroski_score,
+            "sipv_signal": sipv_signal,
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -110,10 +116,21 @@ class StocksRuleEngine:
         direction = rule["direction"]       # buy | sell
         order_type = rule["order_type"]     # market | limit
 
+        # ── NUEVO: Soporte para parámetros extendidos vía JSON en 'notes' ──
+        if rule.get("notes") and rule["notes"].strip().startswith("{"):
+            try:
+                import json
+                extra = json.loads(rule["notes"])
+                rule = {**rule, **extra}
+            except: pass
+
         # ── VARIABLES DE CONTROL (Safety Definitions) ─────
         ia_val = float(context.get("ia_score") or 0)
         tech_val = float(context.get("tech_score") or 0)
         fund_val = float(context.get("fundamental_score") or 0)
+        sm_val = float(context.get("sm_score") or 0)
+        piot_val = int(context.get("piotroski_score") or 0)
+        sipv_val = context.get("sipv_signal", "")
         current_price = float(context.get("close") or 0)
 
         # ── CHECK 1: IA Score ─────────────────────────────
@@ -212,6 +229,71 @@ class StocksRuleEngine:
                 failures.append(
                     f'Fib {context.get("fib_zone")} no en {fib_trig}'
                 )
+
+        # ── CHECK 4.5: SM Score (Sentiment Market) ───────
+        sm_min = float(rule.get("sm_min") or 0)
+        if sm_min > 0:
+            sm_ok = sm_val >= sm_min
+            checks["sm_score"] = {
+                "passed": sm_ok,
+                "value": sm_val,
+                "required": sm_min,
+            }
+            if not sm_ok:
+                failures.append(f"SM {sm_val:.1f} < {sm_min}")
+
+        # ── CHECK 4.6: Piotroski Score (F.Score) ─────────
+        f_score_min = float(rule.get("f_score_min") or 0)
+        if f_score_min > 0:
+            f_ok = piot_val >= f_score_min
+            checks["f_score"] = {
+                "passed": f_ok,
+                "value": piot_val,
+                "required": f_score_min,
+            }
+            if not f_ok:
+                failures.append(f"F.Score {piot_val} < {f_score_min}")
+
+        # ── CHECK 4.7: SIPV Signal (Candle Pattern) ──────
+        sipv_req = rule.get("sipv_required", False)
+        sipv_rule = rule.get("sipv_signal")
+        sipv_or_pine = rule.get("sipv_or_pine", False)
+
+        if sipv_or_pine:
+            # Lógica OR: Pine OR SIPV
+            pine_match = context.get("pine_signal") == pine_rule if pine_rule else False
+            sipv_match = sipv_val == sipv_rule if sipv_rule else False
+            signal_ok = pine_match or sipv_match
+            checks["pine_or_sipv"] = {
+                "passed": signal_ok,
+                "pine_val": context.get("pine_signal"),
+                "sipv_val": sipv_val,
+                "required": f"{pine_rule} OR {sipv_rule}"
+            }
+            if not signal_ok:
+                failures.append(f'Ni Pine="{pine_rule}" ni SIPV="{sipv_rule}" presentes')
+        
+        else:
+            # Lógica standard (AND si ambos están activos)
+            if pine_req and pine_rule:
+                pine_ok = context.get("pine_signal") == pine_rule
+                checks["pine_signal"] = {
+                    "passed": pine_ok,
+                    "value": context.get("pine_signal"),
+                    "required": pine_rule,
+                }
+                if not pine_ok:
+                    failures.append(f'Pine "{context.get("pine_signal")}" != "{pine_rule}"')
+
+            if sipv_req and sipv_rule:
+                sipv_ok = sipv_val == sipv_rule
+                checks["sipv_signal"] = {
+                    "passed": sipv_ok,
+                    "value": sipv_val,
+                    "required": sipv_rule,
+                }
+                if not sipv_ok:
+                    failures.append(f'SIPV "{sipv_val}" != "{sipv_rule}"')
 
         # ── CHECK 5: RVOL mínimo ─────────────────────────
         rvol_min = float(rule.get("rvol_min") or 0)

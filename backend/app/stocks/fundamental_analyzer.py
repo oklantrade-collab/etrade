@@ -52,10 +52,22 @@ class FundamentalAnalyzer:
                 
                 def get_val(df, label, col_idx=0):
                     try:
-                        if df is None or label not in df.index: return 0
-                        val = df.loc[label].iloc[col_idx]
+                        if df is None or not hasattr(df, 'index'): return 0
+                        if label not in df.index: return 0
+                        
+                        # Handle Case where df.loc[label] might be a Series
+                        val_row = df.loc[label]
+                        if hasattr(val_row, 'iloc'):
+                            if col_idx < len(val_row):
+                                val = val_row.iloc[col_idx]
+                            else:
+                                val = val_row.iloc[0] if len(val_row) > 0 else 0
+                        else:
+                            val = val_row
+                            
                         return float(val) if not np.isnan(val) else 0
-                    except: return 0
+                    except Exception as e: 
+                        return 0
 
                 # Mapeo para Piotroski / Graham / Altman
                 f_data = {

@@ -2,6 +2,15 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 
+const formatAbbreviated = (num: any) => {
+    const val = parseFloat(num);
+    if (!val || isNaN(val)) return '0.00';
+    if (val >= 1_000_000_000) return (val / 1_000_000_000).toFixed(2) + 'B';
+    if (val >= 1_000_000) return (val / 1_000_000).toFixed(2) + 'M';
+    if (val >= 1_000) return (val / 1_000).toFixed(2) + 'K';
+    return val.toFixed(2);
+};
+
 export default function OpportunitiesIntelligence() {
   const [opportunities, setOpportunities] = useState<any[]>([])
   const [total, setTotal] = useState(0)
@@ -100,10 +109,23 @@ export default function OpportunitiesIntelligence() {
       <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden' }}>
         <div style={{ 
             display: 'grid', 
-            gridTemplateColumns: '70px 85px 75px 75px 75px 75px 70px 125px 65px 95px 35px 35px 1fr', 
+            gridTemplateColumns: '70px 85px 75px 75px 75px 75px 70px 125px 65px 95px 35px 35px 35px 1fr', 
             padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' 
         }}>
-          <span>Ticker</span><span>Pool</span><span>Precio</span><span>Vol</span><span>Rev G.</span><span>F.Score</span><span>Valuation</span><span>Movimiento</span><span>HH:MM</span><span>Orden</span><span>TS</span><span>IA</span><span style={{textAlign:'right'}}>Accion</span>
+          <span title="Ticker de la acción">Ticker</span>
+          <span title="Price Change: Variación del precio desde la apertura del día">% PRC</span>
+          <span title="Precio actual de mercado">Precio</span>
+          <span title="Volumen operado hoy (en millones de acciones)">Vol</span>
+          <span title="Revenue Growth: Crecimiento de ingresos año tras año (YoY)">Rev G.</span>
+          <span title="Fundamental Score: Salud financiera basada en el modelo Piotroski F-Score">F.Score</span>
+          <span title="Estado de valoración intrínseca (Subvalorada/Sobrevalorada)">Valuation</span>
+          <span title="Tipo de movimiento técnico y zona Fibonacci actual">Movimiento</span>
+          <span title="Hora del último escaneo (NYC Time)">HH:MM</span>
+          <span title="Indicador de actividad de órdenes abiertas">Orden</span>
+          <span title="Technical Score: Puntuación de indicadores técnicos (0-100)">TS</span>
+          <span title="Inteligencia Artificial: Score de sentimiento y análisis de catalizadores (0-10)">IA</span>
+          <span title="Sentimiento de Mercado: Score de momentum intradiario (1-10)">SM</span>
+          <span style={{textAlign:'right'}}>Accion</span>
         </div>
         {!loading && displayList.map((opp, i) => ( <ScannerRow key={opp.ticker} index={i} opp={opp} isPro={activeTab === 'VALUE'} onOpenDetails={() => setSelectedStock({ ...opp, isPro: activeTab === 'VALUE' })} /> ))}
         {!loading && displayList.length === 0 && <div style={{ padding: '60px', textAlign: 'center', color: '#444' }}>Monitoreando señales...</div>}
@@ -129,12 +151,17 @@ const OrderActivityIndicator = ({ orders }: { orders: any[] }) => {
   const lastOrder = orders[0]; 
   const isLimit = lastOrder.order_type === 'limit';
   const isBuy = lastOrder.direction === 'buy';
-  const color = isBuy ? '#00C896' : '#FF4757';
-  const label = isLimit ? (lastOrder.status === 'filled' ? 'LIMIT ✓' : 'LIMIT ⏳') : (isBuy ? 'BUY' : 'SELL');
+  const isFilled = lastOrder.status === 'filled';
+  const isCancelled = lastOrder.status === 'cancelled' || lastOrder.status === 'expired';
+  
+  const color = isCancelled ? '#666' : (isBuy ? '#00C896' : '#FF4757');
+  const label = isLimit ? (isFilled ? 'LIMIT ✓' : 'LIMIT ⏳') : (isBuy ? 'BUY' : 'SELL');
+  const statusLabel = isFilled ? '' : (isCancelled ? ' (X)' : ' (?)');
+  
   const bg = isBuy ? 'rgba(0,200,150,0.12)' : 'rgba(255,71,87,0.12)';
   return (
     <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '3px 8px', borderRadius: '4px', background: bg, fontSize: '9px', color: color, fontWeight: 800 }}>
-      {isLimit ? '📍' : '⚡'} {label} {lastOrder.limit_price && <span style={{ fontFamily:'monospace', marginLeft:'2px' }}>${parseFloat(lastOrder.limit_price).toFixed(2)}</span>}
+      {isLimit ? '📍' : '⚡'} {label}{statusLabel} {lastOrder.limit_price && <span style={{ fontFamily:'monospace', marginLeft:'2px' }}>${parseFloat(lastOrder.limit_price).toFixed(2)}</span>}
     </div>
   );
 }
@@ -168,7 +195,7 @@ const ValuationBadge = ({ intrinsic, price, margin, source }: any) => {
   const color = isUnder ? '#00C896' : '#FF4757'
   return (
     <div style={{ fontSize:'11px' }}>
-      <div style={{ color, fontWeight:700 }}>${parseFloat(intrinsic).toFixed(2)}</div>
+      <div style={{ color, fontWeight:700 }}>${formatAbbreviated(intrinsic)}</div>
       <div style={{ color:'#555', fontSize:'10px' }}>
         {margin > 0 ? '+' : ''}{parseFloat(margin).toFixed(1)}%{' '}
         <span style={{ color: source?.includes('ia') ? '#CE93D8' : '#4FC3F7', fontSize:'9px' }}>
@@ -196,7 +223,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
   if (fibZone !== undefined && fibZone !== null && movementDisplay !== '—') movementDisplay = `${movementDisplay} F(${fibZone})`;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '70px 85px 75px 75px 75px 75px 70px 125px 65px 95px 35px 35px 1fr', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: '70px 85px 75px 75px 75px 75px 70px 125px 65px 95px 35px 35px 35px 1fr', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
       <div style={{ display:'flex', alignItems:'center', gap: '4px' }}>
           <span style={{ fontWeight: 900, color: '#FFF', fontSize: '13px' }}>{opp.ticker}</span>
           {(opp.intrinsic_value > opp.price && opp.intrinsic_value > 0) && (
@@ -204,10 +231,9 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
           )}
       </div>
       <div style={{ display:'flex', alignItems:'center', gap:'3px' }}>
-          {opp.pool_type?.includes('GIANT') && <span style={{ fontSize:'7px', background:'#2563EB', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>G</span>}
-          {opp.pool_type?.includes('LEADER') && <span style={{ fontSize:'7px', background:'#D97706', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>L</span>}
-          {opp.pool_type?.includes('HOT') && <span style={{ fontSize:'7px', background:'#EF4444', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>HOT</span>}
-          {!opp.pool_type && <span style={{ fontSize:'7px', background:'#555', padding:'2px 4px', borderRadius:'3px', fontWeight:900 }}>PRO</span>}
+          <span style={{ color:(opp.change_pct || 0) >= 0 ? '#22C55E' : '#EF4444', fontWeight:950, fontSize:'12px' }}>
+            {opp.change_pct > 0 ? '+' : ''}{(opp.change_pct || 0).toFixed(2)}%
+          </span>
       </div>
       <span style={{ fontWeight: 700, fontSize:'12px' }}>${opp.price.toFixed(2)}</span>
       <span style={{ fontWeight: 800, fontSize:'11px', color: '#888' }}>{(opp.volume / 1_000_000).toFixed(2)}M</span>
@@ -222,6 +248,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails }: any) {
       <OrderActivityIndicator orders={opp.orders || []} />
       <span style={{ color: displayScoreTech >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 950, fontSize:'11px' }}>{displayScoreTech}</span>
       <span style={{ color: Number(scoreIA) >= 7.5 ? '#A855F7' : '#22C55E', fontWeight: 950, fontSize:'11px' }}>{scoreIA}</span>
+      <span style={{ color: Number(opp.sm_score) >= 7.5 ? '#FF4757' : (Number(opp.sm_score) >= 5 ? '#F59E0B' : '#666'), fontWeight: 950, fontSize:'11px' }}>{opp.sm_score?.toFixed(1) || '1.0'}</span>
       <div style={{textAlign:'right'}}>
         <button onClick={onOpenDetails} title="Analizar Empresa" style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', color: '#22C55E', width: '28px', height: '28px', borderRadius: '50%', fontSize: '12px', cursor: 'pointer', display: 'inline-flex', justifyContent: 'center', alignItems: 'center', transition: 'all 0.2s' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(34,197,94,0.2)'} onMouseLeave={e => e.currentTarget.style.background = 'rgba(34,197,94,0.1)'} >🔍</button>
       </div>
@@ -294,7 +321,7 @@ function AnalysisModal({ stock, onClose }: any) {
                         </div>
                         <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', fontWeight:700 }}>
                             <span style={{ color:'#888' }}>Market Cap (Capa 1)</span>
-                            <span style={{ color: '#FFF' }}>${(stock.market_cap/1e6).toFixed(0)}M</span>
+                            <span style={{ color: '#FFF' }}>${formatAbbreviated(stock.market_cap)}</span>
                         </div>
                         <div style={{ display:'flex', justifyContent:'space-between', fontSize:'10px', fontWeight:700 }}>
                             <span style={{ color:'#888' }}>RVOL (Relativo)</span>
@@ -319,11 +346,11 @@ function AnalysisModal({ stock, onClose }: any) {
                         </div>
                         <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
                             <div style={{ fontSize:'9px', color:'#AAA', fontWeight:800 }}>GRAHAM NUMBER</div>
-                            <div style={{ fontSize:'16px', color: '#FFF', fontWeight:900 }}>${stock.graham_number?.toFixed(2) || '0.00'}</div>
+                            <div style={{ fontSize:'16px', color: '#FFF', fontWeight:900 }}>${formatAbbreviated(stock.graham_number)}</div>
                         </div>
                         <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
                             <div style={{ fontSize:'9px', color:'#AAA', fontWeight:800 }}>DCF INTRINSIC</div>
-                            <div style={{ fontSize:'16px', color: '#FFF', fontWeight:900 }}>${stock.dcf_intrinsic?.toFixed(2) || '0.00'}</div>
+                            <div style={{ fontSize:'16px', color: '#FFF', fontWeight:900 }}>${formatAbbreviated(stock.dcf_intrinsic)}</div>
                         </div>
                    </div>
                 </div>
@@ -345,6 +372,33 @@ function AnalysisModal({ stock, onClose }: any) {
                                         {stock.data_source?.includes('ia') ? ' Validado por consenso de analistas de Wall Street.' : ' Modo matemático puro activo por redundancia.'}
                                     </>
                                 )}
+                            </div>
+                        </div>
+                        {/* CAPA 6: MOMENTUM (SM) */}
+                        <div style={{ background: 'rgba(239,68,68,0.05)', padding: '16px', borderRadius: '12px', border: '1px solid rgba(239,68,68,0.2)' }}>
+                            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'10px' }}>
+                                <span style={{ fontSize:'10px', color:'#EF4444', fontWeight:950 }}>SCORING DE MOMENTUM INTRADIARIO (IB) - SM</span>
+                                <span style={{ background:'#EF4444', color:'#000', padding:'2px 8px', borderRadius:'10px', fontSize:'10px', fontWeight:950 }}>{stock.sm_score?.toFixed(1) || '1.0'}/10</span>
+                            </div>
+                            <div style={{ fontSize: '11px', color: '#DDD', lineHeight: '1.6' }}>
+                                <div style={{ marginBottom: '8px', fontWeight: 700 }}>Fórmula: (V1*0.3 + V2*0.2 + V3*0.1 + V4*0.25 + V5*0.15) × 10</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                    <div style={{ color: '#AAA' }} title="Relative Volume: Volumen actual comparado con su promedio de 3 meses.">
+                                        • <span style={{ borderBottom: '1px dashed #555', cursor: 'help' }}>RVOL (V1)</span>: <span style={{ color: '#FFF' }}>{stock.rvol?.toFixed(2)}x</span>
+                                    </div>
+                                    <div style={{ color: '#AAA' }} title="Sentiment Score: Tendencia del sentimiento social diario (-3 a +3).">
+                                        • <span style={{ borderBottom: '1px dashed #555', cursor: 'help' }}>S Score (V2)</span>: <span style={{ color: '#FFF' }}>{stock.s_score?.toFixed(1) || '0.0'}</span>
+                                    </div>
+                                    <div style={{ color: '#AAA' }} title="Social Volume Score: Intensidad de la conversación social (0 a 10).">
+                                        • <span style={{ borderBottom: '1px dashed #555', cursor: 'help' }}>SV Score (V3)</span>: <span style={{ color: '#FFF' }}>{stock.sv_score?.toFixed(1) || '5.0'}</span>
+                                    </div>
+                                    <div style={{ color: '#AAA' }} title="Catalyst Score: Relevancia de noticias, reportes o eventos recientes.">
+                                        • <span style={{ borderBottom: '1px dashed #555', cursor: 'help' }}>Catalyst (V4)</span>: <span style={{ color: '#FFF' }}>{stock.catalyst_score}/10</span>
+                                    </div>
+                                    <div style={{ color: '#AAA' }} title="Technical Score: Puntuación basada en indicadores de precio (RSI, EMAs, Velas).">
+                                        • <span style={{ borderBottom: '1px dashed #555', cursor: 'help' }}>Technical (V5)</span>: <span style={{ color: '#FFF' }}>{displayScoreTech}/100</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 

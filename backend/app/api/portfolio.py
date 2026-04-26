@@ -55,7 +55,10 @@ async def get_global_portfolio():
                     asyncio.to_thread(supabase.table('stocks_positions').select('unrealized_pnl').eq('status', 'closed').gte('updated_at', today_start).execute),
                     asyncio.to_thread(supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute),
                     asyncio.to_thread(supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute),
-                    asyncio.to_thread(supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute)
+                    asyncio.to_thread(supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute),
+                    asyncio.to_thread(supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(5).execute),
+                    asyncio.to_thread(supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(5).execute),
+                    asyncio.to_thread(supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(5).execute)
                 )
 
             results = await fetch_data()
@@ -70,6 +73,9 @@ async def get_global_portfolio():
             latest_regime       = results[7]
             all_closed_crypto   = results[8]
             all_closed_forex    = results[9]
+            recent_crypto       = results[10].data or []
+            recent_forex        = results[11].data or []
+            recent_stocks       = results[12].data or []
 
             market_snaps = {row['symbol']: row for row in (snapshot_res.data or [])}
             regime = latest_regime.data[0]['category'] if latest_regime.data else 'riesgo_medio'
@@ -130,7 +136,9 @@ async def get_global_portfolio():
             open_forex_map = {p['symbol']: p for p in (open_forex_pos_res.data or [])}
             forex_symbols_data = []
             for sym in forex_symbols:
-                snap = market_snaps.get(sym, {})
+                # ── CORRECCIÓN ZONA FIBO (FOREX) ──
+                # Intentar buscar con y sin barra (EURUSD vs EUR/USD)
+                snap = market_snaps.get(sym) or market_snaps.get(sym.replace("/", "")) or market_snaps.get(sym[:3] + "/" + sym[3:]) or {}
                 pos = open_forex_map.get(sym)
                 cur_price = float(snap.get('price', 0.0))
                 upnl_usd, upnl_pct, total_inv = 0.0, 0.0, 0.0
@@ -172,7 +180,7 @@ async def get_global_portfolio():
                     'unrealized_pnl_pct': round(upnl_pct, 2),
                     'total_investment': round(total_inv, 2),
                     'quantity': abs(float(pos.get('lots') or 0)) if pos else 0,
-                    'fibonacci_zone': snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
+                    'fibonacci_zone': snap.get('fibonacci_zone', 0) if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
                     'rule_code': pos.get('rule_code', 'N/A') if pos else 'N/A',
                     'status': 'active' if pos else 'hold'
                 })
@@ -180,6 +188,8 @@ async def get_global_portfolio():
             # Mapeo de Stocks
             stocks_symbols_data = []
             for sp in (open_stocks_pos_res.data or []):
+                ticker = sp['ticker']
+                snap = market_snaps.get(ticker) or market_snaps.get(ticker.replace(".US", "")) or {}
                 cur_p = float(sp.get('current_price') or sp.get('avg_price') or 0.0)
                 ent = float(sp.get('avg_price') or 0.0)
                 sh = float(sp.get('shares') or 0)
@@ -187,7 +197,7 @@ async def get_global_portfolio():
                 u_usd = (cur_p - ent) * sh
                 u_pct = ((cur_p - ent) / ent * 100) if ent > 0 else 0
                 stocks_symbols_data.append({
-                    'symbol': sp['ticker'],
+                    'symbol': ticker,
                     'side': 'long',
                     'avg_entry_price': ent,
                     'current_price': cur_p,
@@ -195,15 +205,12 @@ async def get_global_portfolio():
                     'unrealized_pnl_pct': round(u_pct, 2),
                     'total_investment': round(cap, 2),
                     'quantity': sh,
-                    'fibonacci_zone': market_snaps.get(sp['ticker'], {}).get('fibonacci_zone') if market_snaps.get(sp['ticker'], {}).get('fibonacci_zone') is not None else market_snaps.get(sp['ticker'], {}).get('fibo_zone', 0),
+                    'fibonacci_zone': snap.get('fibonacci_zone', 0) if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
                     'rule_code': sp.get('pool_type') or sp.get('strategy') or sp.get('rule_code', 'N/A'),
                     'status': 'active'
                 })
 
-            # Actividad reciente
-            recent_crypto = supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(5).execute().data or []
-            recent_forex = supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(5).execute().data or []
-            recent_stocks = supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(5).execute().data or []
+            # Actividad reciente (Ya cargada en paralelo arriba)
             
             recent_activity = []
             for t in recent_crypto: recent_activity.append({'time': t['closed_at'], 'market': 'Crypto', 'symbol': t['symbol'], 'pnl': float(t['total_pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed'})
@@ -232,17 +239,16 @@ async def get_global_portfolio():
         except Exception as e:
             err_str = str(e)
             # Catch common network/protocol errors including HTTP/2 stream issues and Server Disconnects
-            retry_msgs = [
-                "PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", 
-                "Timeout", "StreamInputs", "state 5", "Server disconnected", 
-                "disconnected", "Connection reset"
-            ]
+            retry_msgs = ["PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", "Timeout", "StreamInputs", "state 5", "Server disconnected", "disconnected", "Connection reset", "pseudo-header", "ConnectionInputs", "ConnectionState"]
             if any(msg in err_str for msg in retry_msgs):
-                log_warning("portfolio", f"Portfolio connection failed (Attempt {attempt+1}/{max_retries}). Retrying... Error: {err_str}")
+                from app.core.supabase_client import reset_supabase
+                reset_supabase()
+                log_warning("portfolio", f"Portfolio connection failed (Attempt {attempt+1}/{max_retries}). Client reset and retrying... Error: {err_str}")
                 await asyncio.sleep(retry_delay * (attempt + 1))
                 continue
             
-            log_error("portfolio", f"Critical Error in get_global_portfolio: {e}")
+            if attempt == max_retries - 1:
+                log_error("portfolio", f"Critical Error in get_global_portfolio after {max_retries} attempts: {e}")
             from fastapi import HTTPException
             raise HTTPException(status_code=500, detail=str(e))
     
@@ -397,10 +403,12 @@ async def get_performance_summary():
             retry_msgs = [
                 "PROTOCOL_ERROR", "ConnectionTerminated", "10061", "10060", 
                 "Timeout", "StreamInputs", "state 5", "Server disconnected", 
-                "disconnected", "Connection reset"
+                "disconnected", "Connection reset", "ConnectionInputs", "ConnectionState"
             ]
             if any(msg in err_str for msg in retry_msgs):
-                log_warning("portfolio", f"Performance connection failed (Attempt {attempt+1}/{max_retries}). Retrying... Error: {err_str}")
+                from app.core.supabase_client import reset_supabase
+                reset_supabase()
+                log_warning("portfolio", f"Performance connection failed (Attempt {attempt+1}/{max_retries}). Client reset and retrying... Error: {err_str}")
                 await asyncio.sleep(retry_delay * (attempt + 1))
                 continue
             

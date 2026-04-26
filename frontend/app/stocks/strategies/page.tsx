@@ -267,6 +267,31 @@ const StocksRuleCard = ({
               Fund≥{rule.fundamental_score_min || (rule.rule_code === 'S01' ? 70 : (rule.rule_code === 'S02' ? 65 : (rule.rule_code === 'S09' ? 70 : 0)))}
             </span>
           )}
+          {(() => {
+              if (!rule.notes || !rule.notes.startsWith('{')) return null;
+              try {
+                  const extra = JSON.parse(rule.notes);
+                  return (
+                      <>
+                        {extra.sm_min > 0 && (
+                            <span style={{ fontSize:'11px', color:'#F59E0B', background:'rgba(245,158,11,0.10)', padding:'2px 8px', borderRadius:'4px' }}>
+                                SM≥{extra.sm_min}
+                            </span>
+                        )}
+                        {extra.f_score_min > 0 && (
+                            <span style={{ fontSize:'11px', color:'#00C896', background:'rgba(0,200,150,0.10)', padding:'2px 8px', borderRadius:'4px' }}>
+                                F.Score≥{extra.f_score_min}
+                            </span>
+                        )}
+                        {extra.sipv_signal && (
+                            <span style={{ fontSize:'11px', color:'#A855F7', background:'rgba(168,85,247,0.10)', padding:'2px 8px', borderRadius:'4px' }}>
+                                {extra.sipv_or_pine ? 'PINE OR SIPV' : `SIPV: ${extra.sipv_signal}`}
+                            </span>
+                        )}
+                      </>
+                  )
+              } catch(e) { return null; }
+          })()}
           {rule.dca_enabled && (
             <span style={{
               fontSize:'11px', color:'#CE93D8',
@@ -369,16 +394,35 @@ const StocksRuleCard = ({
 }
 
 function EditRuleModal({ rule, onSave, onClose }: any) {
-  const [form, setForm] = useState({ ...rule })
+  const [form, setForm] = useState(() => {
+    let base = { ...rule };
+    if (rule.notes && rule.notes.startsWith('{')) {
+        try {
+            const extra = JSON.parse(rule.notes);
+            base = { ...base, ...extra };
+        } catch(e) {}
+    }
+    return base;
+  })
   const [saving, setSaving] = useState(false)
 
   const handleSave = async () => {
     setSaving(true)
     try {
+      // Re-pack extra fields into notes if they exist
+      const extraKeys = ['sm_min', 'f_score_min', 'description', 'sipv_signal', 'sipv_required', 'sipv_or_pine'];
+      const extra: any = {};
+      extraKeys.forEach(k => { if (form[k] !== undefined) extra[k] = form[k]; });
+      
+      const payload = { ...form };
+      if (Object.keys(extra).length > 0) {
+          payload.notes = JSON.stringify(extra);
+      }
+
       const res = await fetch(`/api/v1/stocks/rules/${rule.rule_code}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form)
+        body: JSON.stringify(payload)
       })
       if (res.ok) onSave()
       else alert('Error guardando regla')
@@ -425,6 +469,35 @@ function EditRuleModal({ rule, onSave, onClose }: any) {
           <div>
              <label style={{ fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Limit Trigger %</label>
              <input type="number" step="0.001" value={form.limit_trigger_pct} onChange={e => setForm({...form, limit_trigger_pct: Number(e.target.value)})} style={{ width: '100%', background: '#000', border: '1px solid #333', borderRadius: '8px', padding: '10px', color: '#FFF', marginTop: '5px' }} />
+          </div>
+
+          <div>
+             <label style={{ fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>SM Score Min</label>
+             <input type="number" step="0.1" value={form.sm_min || 0} onChange={e => setForm({...form, sm_min: Number(e.target.value)})} style={{ width: '100%', background: '#000', border: '1px solid #333', borderRadius: '8px', padding: '10px', color: '#F59E0B', marginTop: '5px' }} />
+          </div>
+          <div>
+             <label style={{ fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>F.Score (Piotroski) Min</label>
+             <input type="number" value={form.f_score_min || 0} onChange={e => setForm({...form, f_score_min: Number(e.target.value)})} style={{ width: '100%', background: '#000', border: '1px solid #333', borderRadius: '8px', padding: '10px', color: '#00C896', marginTop: '5px' }} />
+          </div>
+
+          <div>
+             <label style={{ fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>SIPV (Velas) Signal</label>
+             <select value={form.sipv_signal || ''} onChange={e => setForm({...form, sipv_signal: e.target.value, sipv_required: !!e.target.value})} style={{ width: '100%', background: '#000', border: '1px solid #333', borderRadius: '8px', padding: '10px', color: '#A855F7', marginTop: '5px' }}>
+               <option value="">Ninguna</option>
+               <option value="BUY">BUY</option>
+               <option value="SELL">SELL</option>
+               <option value="HOLD">HOLD</option>
+             </select>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginTop: '20px' }}>
+             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <input type="checkbox" checked={form.sipv_required} onChange={e => setForm({...form, sipv_required: e.target.checked})} />
+                <label style={{ fontSize: '11px', fontWeight: 800, color: '#A855F7' }}>SIPV Requerido</label>
+             </div>
+             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <input type="checkbox" checked={form.sipv_or_pine} onChange={e => setForm({...form, sipv_or_pine: e.target.checked})} />
+                <label style={{ fontSize: '11px', fontWeight: 800, color: '#FFB74D' }}>Lógica OR (Pine OR SIPV)</label>
+             </div>
           </div>
 
           <div style={{ gridColumn: 'span 2' }}>

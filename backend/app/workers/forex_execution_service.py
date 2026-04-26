@@ -238,20 +238,21 @@ class ForexExecutionService:
             return
 
         # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
+        # Normalizamos el símbolo para asegurar coincidencia
         opposite = 'short' if direction == 'long' else 'long'
-        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'] == opposite]
+        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == opposite]
         if opp_positions:
             self.log(f'[REVERSIÓN] Cerrando {len(opp_positions)} posiciones {opposite.upper()} por entrada {direction.upper()}')
             price = self._safe_float(snap.get('price'))
             for p in opp_positions:
                 entry = self._safe_float(p.get('entry_price'))
+                # Lots ya es negativo para shorts en _save_position, usamos absoluto para pips
                 lots_abs = abs(self._safe_float(p.get('lots'), 0.01))
                 pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-                pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
                 
                 side = p.get('side', 'long').lower()
                 pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
-                self._close_position(p, price, f'netting_{direction}', pips)
+                self._close_position(p, price, f'reversal_{direction}', pips)
             # Recargar posiciones tras cerrar opuestas
             self._load_open_positions()
 
@@ -309,12 +310,18 @@ class ForexExecutionService:
         l1 = self._safe_float(snap.get('lower_1'))
         atr = (u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
         
+        # Usamos niveles de Fibonacci para consistencia con Crypto
         if direction == 'long':
-            sl = self._safe_float(snap.get('lower_6'), (entry-50*pip_size)) - atr
-            tp = entry + (3 * atr)
+            # SL: Lower 6 - 0.5 * ATR
+            sl = self._safe_float(snap.get('lower_6'), (entry - 50 * pip_size)) - (0.5 * atr)
+            # TP: Upper 3 (Partial Target)
+            tp = self._safe_float(snap.get('upper_3'), entry + (3 * atr))
         else:
-            sl = self._safe_float(snap.get('upper_6'), (entry+50*pip_size)) + atr
-            tp = entry - (3 * atr)
+            # SL: Upper 6 + 0.5 * ATR
+            sl = self._safe_float(snap.get('upper_6'), (entry + 50 * pip_size)) + (0.5 * atr)
+            # TP: Lower 3 (Partial Target)
+            tp = self._safe_float(snap.get('lower_3'), entry - (3 * atr))
+        
         return round(sl, 6), round(tp, 6), abs(entry-sl)/pip_size
 
     def _execute_live_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
