@@ -308,7 +308,7 @@ class ForexExecutionService:
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
         u1 = self._safe_float(snap.get('upper_1'))
         l1 = self._safe_float(snap.get('lower_1'))
-        atr = (u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
+        atr = abs(u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
         
         # Usamos niveles de Fibonacci para consistencia con Crypto
         if direction == 'long':
