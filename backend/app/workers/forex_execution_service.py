@@ -185,15 +185,19 @@ class ForexExecutionService:
         if direction == 'long':
             sar_4h_ok, sar_15m_ok = sar_4h > 0, sar_15m > 0
             mtf_ok, pine_ok = mtf >= 0.25, pine == 'Buy'
+            pine_not_opposite = pine != 'Sell'
+            mtf_directional = mtf > 0  # Al menos momentum positivo
         else:
             sar_4h_ok, sar_15m_ok = sar_4h < 0, sar_15m < 0
             mtf_ok, pine_ok = mtf <= -0.25, pine == 'Sell'
+            pine_not_opposite = pine != 'Buy'
+            mtf_directional = mtf < 0  # Al menos momentum negativo
 
         # Aa22/Bb22: Full confirmation
         results.append({'rule_code': 'Aa22' if direction == 'long' else 'Bb22', 'triggered': (sar_4h_ok and mtf_ok and pine_ok and struct_ok), 'score': 0.8})
 
-        # Aa31/Bb31: SAR alignment
-        results.append({'rule_code': 'Aa31a' if direction == 'long' else 'Bb31a', 'triggered': (sar_4h_ok and sar_15m_ok and struct_ok), 'score': 0.7})
+        # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine
+        results.append({'rule_code': 'Aa31a' if direction == 'long' else 'Bb31a', 'triggered': (sar_4h_ok and sar_15m_ok and pine_not_opposite and mtf_directional and struct_ok), 'score': 0.7})
 
         # Dd Reversal
         fib_reversal = (direction == 'long' and fib_zone <= -2) or (direction == 'short' and fib_zone >= 2)
