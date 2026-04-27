@@ -81,6 +81,13 @@ def sync_closed_positions(supabase, binance_client):
                     'unrealized_pnl': 0.0,
                     'closed_at': datetime.now(timezone.utc).isoformat()
                 }).eq('id', position['id']).execute()
+
+                # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
+                try:
+                    from app.core.capital_manager import register_realized_pnl
+                    register_realized_pnl('crypto', realized_pnl)
+                except Exception as cap_e:
+                    log_warning(MODULE, f"Error updating accumulated capital: {cap_e}")
                 
                 if position.get('order_id'):
                     supabase.table('orders').update({

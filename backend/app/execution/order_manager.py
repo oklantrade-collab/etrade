@@ -280,8 +280,17 @@ def close_all_positions(supabase, client):
                 'close_reason': 'KILL_SWITCH',
                 'closed_at': datetime.utcnow().isoformat()
             }).eq('id', pos['id']).execute()
-        except:
-            pass
+            
+            # Registrar PnL
+            from app.core.capital_manager import register_realized_pnl
+            # Calculamos PnL aproximado para el kill switch (usamos current_price si existe)
+            entry = float(pos.get('entry_price') or 0)
+            curr = float(pos.get('current_price') or entry)
+            qty = float(pos.get('size') or 0)
+            pnl = (curr - entry) * qty if pos.get('side') == 'LONG' else (entry - curr) * qty
+            register_realized_pnl('crypto', pnl)
+        except Exception as e:
+            loguear(logging.WARNING, f"Error updating position or registering pnl for {symbol}: {e}")
 
 def close_position(position_id: str, reason: str = "MANUAL") -> bool:
     from app.core.supabase_client import get_supabase
@@ -368,6 +377,13 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
                 "status": "manual_close",
                 "closed_at": datetime.utcnow().isoformat(),
             }).eq("id", position["order_id"]).execute()
+
+        # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
+        try:
+            from app.core.capital_manager import register_realized_pnl
+            register_realized_pnl('crypto', float(realized_pnl))
+        except Exception as cap_e:
+            log_error("ORDER_MANAGER", f"Error actualizando capital acumulado: {cap_e}")
 
         # ── CANCELAR ÓRDENES HUÉRFANAS ──
         # Cancelar cualquier pending_order y order abierto del símbolo

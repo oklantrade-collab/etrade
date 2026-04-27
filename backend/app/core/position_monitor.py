@@ -835,6 +835,15 @@ async def _execute_paper_partial_close(pos, price, supabase):
     
     log_info(MODULE, f"✅ PARTIAL CLOSE [{symbol}] at ${price:,.2f} | PnL: ${partial_pnl_usd:.2f}")
 
+    # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
+    try:
+        from app.core.capital_manager import register_realized_pnl
+        # Determinar mercado (heuristicamente por símbolo)
+        market = 'forex' if any(x in symbol for x in ['EUR', 'GBP', 'JPY', 'XAU']) else 'crypto'
+        register_realized_pnl(market, partial_pnl_usd)
+    except Exception as cap_e:
+        log_warning(MODULE, f"Error actualizando capital acumulado en partial close: {cap_e}")
+
 async def _execute_paper_close(pos, price, reason, supabase):
     """Cierra la posición completamente en Paper Trading."""
     symbol = pos['symbol']
@@ -961,22 +970,42 @@ async def _handle_unexpected_close(
     elif position.get('sl_price'):
         reason = 'sl_or_tp_hit'
 
+    # Calcular PnL aproximado para registro de capital
+    entry_p = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+    qty = float(position.get('size') or 0)
+    # Intentar obtener precio actual del ticker o snapshot
+    current_p = entry_p
+    try:
+        ticker = await provider.get_ticker(symbol)
+        current_p = float(ticker['price'])
+    except:
+        pass
+    
+    pnl_usd = (current_p - entry_p) * qty if position.get('side', 'long').lower() in ['long', 'buy'] else (entry_p - current_p) * qty
+
     # Actualizar Supabase
     pos_id = position.get('id')
+    update_fields = {
+        'status': 'closed', # Cambiado de is_open: False a status: closed para consistencia
+        'close_reason': reason,
+        'closed_at': datetime.now(timezone.utc).isoformat(),
+        'realized_pnl': round(pnl_usd, 4),
+        'current_price': current_p
+    }
+
     if pos_id:
-        await supabase.table('positions').update({
-            'is_open': False,
-            'close_reason': reason,
-            'closed_at': datetime.now(timezone.utc).isoformat(),
-        }).eq('id', pos_id).execute()
+        await supabase.table('positions').update(update_fields).eq('id', pos_id).execute()
         BOT_STATE.positions.pop(pos_id, None)
     else:
-        await supabase.table('positions').update({
-            'is_open': False,
-            'close_reason': reason,
-            'closed_at': datetime.now(timezone.utc).isoformat(),
-        }).eq('symbol', symbol).eq('is_open', True).execute()
+        await supabase.table('positions').update(update_fields).eq('symbol', symbol).eq('status', 'open').execute()
         BOT_STATE.positions.pop(symbol, None)
+
+    # ── REGISTRAR PN EN CAPITAL ACUMULADO ──
+    try:
+        from app.core.capital_manager import register_realized_pnl
+        register_realized_pnl('crypto', pnl_usd)
+    except Exception as cap_e:
+        log_warning(MODULE, f"Error actualizando capital acumulado en unexpected close: {cap_e}")
 
     # Alerta Telegram
     from app.workers.alerts_service import send_telegram_message
