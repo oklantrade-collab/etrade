@@ -586,6 +586,13 @@ class ForexExecutionService:
                 'closed_at': datetime.now(timezone.utc).isoformat()
             }).eq('id', pos['id']).execute()
             
+            # Registrar profit
+            try:
+                from app.core.capital_manager import register_realized_pnl
+                register_realized_pnl('forex', round(pnl_usd, 2))
+            except Exception as cap_e:
+                self.log(f'Error actualizando capital acumulado forex: {cap_e}', 'ERROR')
+            
             self._open_positions_list = [p for p in self._open_positions_list if p['id'] != pos['id']]
             self.log(f'Cerrada {symbol}: {reason} | PnL: {pips_pnl:.1f} pips | USD: {pnl_usd:.2f}')
         except Exception as e: self.log(f'Error cierre: {e}')

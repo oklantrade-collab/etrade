@@ -264,12 +264,19 @@ class PositionMonitor:
                 "unrealized_pnl_pct": pnl_pct,
                 "updated_at": now
             }).eq("id", trade["id"]).execute()
+            
+            # 3. Registrar profit en capital acumulado
+            try:
+                from app.core.capital_manager import register_realized_pnl
+                register_realized_pnl('stocks', pnl_usd)
+            except Exception as cap_e:
+                log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
 
             emoji = "🟢" if result == "win" else "🔴"
             log_info(MODULE, f"{emoji} CLOSED: {ticker} | {exit_reason} | "
                              f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
 
-            # 3. Send Telegram notification
+            # 4. Send Telegram notification
             await self._notify_close(ticker, result, pnl_usd, pnl_pct, exit_reason)
 
         except Exception as e:
