@@ -136,6 +136,18 @@ class StandaloneForexWorker:
         self.client.setMessageReceivedCallback(self.on_message)
         self.execution = None  # Se inicializa después de auth
 
+    def safe_send(self, req):
+        from twisted.internet import reactor
+        def _send():
+            try:
+                d = self.client.send(req)
+                if hasattr(d, 'addErrback'):
+                    d.addErrback(lambda f: None) # Silence timeout errors
+            except Exception as e:
+                self.log(f"Error sending request: {e}", "ERROR")
+        
+        reactor.callFromThread(_send)
+
     def log(self, msg, level='INFO'):
         ts = datetime.now().strftime('%H:%M:%S')
         try:
@@ -170,7 +182,7 @@ class StandaloneForexWorker:
         """Mantener viva la conexión (Requerido cada 25s)"""
         try:
             req = ProtoOAHeartbeatEvent()
-            self.client.send(req)
+            self.safe_send(req)
         except: pass
 
     def _init_execution_service(self):
@@ -251,16 +263,16 @@ class StandaloneForexWorker:
             self.log(f"Error procesando evento de ejecución: {e}", "ERROR")
 
     def send_app_auth(self):
-        req = ProtoOAApplicationAuthReq(); req.clientId = CLIENT_ID; req.clientSecret = CLIENT_SECRET; self.client.send(req)
+        req = ProtoOAApplicationAuthReq(); req.clientId = CLIENT_ID; req.clientSecret = CLIENT_SECRET; self.safe_send(req)
     def send_acc_auth(self):
-        req = ProtoOAAccountAuthReq(); req.ctidTraderAccountId = ACCOUNT_ID; req.accessToken = ACCESS_TOKEN; self.client.send(req)
+        req = ProtoOAAccountAuthReq(); req.ctidTraderAccountId = ACCOUNT_ID; req.accessToken = ACCESS_TOKEN; self.safe_send(req)
     def load_symbols(self):
-        req = ProtoOASymbolsListReq(); req.ctidTraderAccountId = ACCOUNT_ID; self.client.send(req)
+        req = ProtoOASymbolsListReq(); req.ctidTraderAccountId = ACCOUNT_ID; self.safe_send(req)
 
     def subscribe_spots(self):
         req = ProtoOASubscribeSpotsReq(); req.ctidTraderAccountId = ACCOUNT_ID
         for sid in STATE['symbol_ids'].values(): req.symbolId.append(sid)
-        self.client.send(req)
+        self.safe_send(req)
 
     def warmup_all(self):
         """Carga histórica inicial no bloqueante para evitar congelar el reactor."""
@@ -300,7 +312,7 @@ class StandaloneForexWorker:
         m = tf_mins.get(tf, 15)
         from_ms = now_ms - (m * limit * 60 * 1000)
         req = ProtoOAGetTrendbarsReq(); req.ctidTraderAccountId = ACCOUNT_ID; req.symbolId = sid; req.period = p
-        req.fromTimestamp = from_ms; req.toTimestamp = now_ms; req.count = limit; self.client.send(req)
+        req.fromTimestamp = from_ms; req.toTimestamp = now_ms; req.count = limit; self.safe_send(req)
 
     def handle_spot(self, spot):
         name = next((n for n, sid in STATE['symbol_ids'].items() if sid == spot.symbolId), None)
@@ -544,7 +556,9 @@ class StandaloneForexWorker:
             snap.update(fib_bands)
 
             query = sb.table('market_snapshot').upsert(snap, on_conflict='symbol')
-            self.safe_db_execute(query)
+            threads.deferToThread(self.safe_db_execute, query).addErrback(
+                lambda f: self.log(f"Error async db snapshot: {f.getErrorMessage()}", "ERROR")
+            )
         except Exception as e: 
             self.log(f"Error snap {symbol}:\n{traceback.format_exc()}", "ERROR")
 

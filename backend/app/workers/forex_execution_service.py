@@ -473,17 +473,20 @@ class ForexExecutionService:
         pos_id = pos['id']
         if pos_id not in self.protection_states:
             self.protection_states[pos_id] = ProtectionState(
+                position_id=pos_id,
                 symbol=symbol,
+                side=pos['side'].lower(),
                 entry_price=self._safe_float(pos['entry_price']),
                 current_sl=self._safe_float(pos.get('sl_price')),
-                side=pos['side'].lower()
+                original_sl=self._safe_float(pos.get('sl_price')),
+                market_type='forex_futures'
             )
 
         state = self.protection_states[pos_id]
         # Actualizar precio actual en el estado
         state.entry_price = self._safe_float(pos['entry_price'])
         
-        result = evaluate_all_protections(state, price, market_type='forex_futures')
+        result = evaluate_all_protections(state, price, snap)
         
         if result['has_action']:
             action = result['action']

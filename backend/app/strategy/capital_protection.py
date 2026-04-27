@@ -427,7 +427,7 @@ def check_cooldown(
 def evaluate_all_protections(
     state:         ProtectionState,
     current_price: float,
-    snap:          dict,
+    snap:          Optional[dict] = None,
     inverse_rule:  Optional[str] = None,
 ) -> dict:
     """

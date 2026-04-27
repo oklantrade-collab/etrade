@@ -206,15 +206,16 @@ async def check_protections(
         side_raw = str(position.get('side', 'long')).lower()
         
         _protection_cache[pos_id] = ProtectionState(
+            position_id  = pos_id,
             symbol       = symbol,
             side         = side_raw,
             entry_price  = float(position.get('avg_entry_price', position.get('entry_price', 0))),
             current_sl   = float(position.get('sl_price', position.get('stop_loss', 0))),
+            original_sl  = float(position.get('sl_backstop_price', position.get('sl_price', 0))),
             market_type  = 'crypto_futures'
         )
         # Campos adicionales no presentes en el constructor base pero necesarios para el flujo
         state = _protection_cache[pos_id]
-        state.original_sl = float(position.get('sl_backstop_price', position.get('sl_price', 0)))
         state.remaining_size = float(abs(float(position.get('size', 0))))
 
     state = _protection_cache[pos_id]
@@ -586,14 +587,17 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
         
     if pos_id not in BOT_STATE.protection_cache:
         BOT_STATE.protection_cache[pos_id] = ProtectionState(
+            position_id=pos_id,
             symbol=symbol,
+            side=pos['side'].lower(),
             entry_price=float(pos.get('avg_entry_price') or pos.get('entry_price') or 0),
             current_sl=float(pos.get('sl_price') or pos.get('stop_loss') or 0),
-            side=pos['side'].lower()
+            original_sl=float(pos.get('sl_backstop_price') or pos.get('sl_price') or pos.get('stop_loss') or 0),
+            market_type='crypto_futures'
         )
     
     state = BOT_STATE.protection_cache[pos_id]
-    result = evaluate_all_protections(state, price, market_type='crypto_futures')
+    result = evaluate_all_protections(state, price, None)
     
     if result['has_action']:
         action = result['action']
