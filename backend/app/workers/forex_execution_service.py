@@ -314,13 +314,17 @@ class ForexExecutionService:
         if direction == 'long':
             # SL: Lower 6 - 0.5 * ATR
             sl = self._safe_float(snap.get('lower_6'), (entry - 50 * pip_size)) - (0.5 * atr)
+            if sl >= entry: sl = entry - (10 * pip_size)  # fallback
             # TP: Upper 3 (Partial Target)
             tp = self._safe_float(snap.get('upper_3'), entry + (3 * atr))
+            if tp <= entry: tp = entry + (2 * atr)  # Forzar TP rentable
         else:
             # SL: Upper 6 + 0.5 * ATR
             sl = self._safe_float(snap.get('upper_6'), (entry + 50 * pip_size)) + (0.5 * atr)
+            if sl <= entry: sl = entry + (10 * pip_size)  # fallback
             # TP: Lower 3 (Partial Target)
             tp = self._safe_float(snap.get('lower_3'), entry - (3 * atr))
+            if tp >= entry: tp = entry - (2 * atr)  # Forzar TP rentable
         
         return round(sl, 6), round(tp, 6), abs(entry-sl)/pip_size
 

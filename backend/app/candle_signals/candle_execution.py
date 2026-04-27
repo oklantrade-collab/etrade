@@ -309,15 +309,10 @@ def execute_crypto_signal(
         last_pos = sorted(existing_same, key=lambda x: x['opened_at'], reverse=True)[0]
         raw_date = last_pos['opened_at']
         try:
-            if '.' in raw_date:
-                base, rest = raw_date.split('.', 1)
-                import re
-                match = re.match(r"(\d+)(.*)", rest)
-                if match:
-                    ms, tz = match.groups()
-                    ms = ms.ljust(6, '0')[:6] 
-                    raw_date = f"{base}.{ms}{tz}"
-            ts = raw_date.replace('Z', '+00:00')
+            # Manejar la Z y agregar timezone explícito para evitar datetimes naive
+            ts = str(raw_date).replace('Z', '+00:00')
+            if '+' not in ts and '-' not in ts[10:]: # Si no tiene offset al final
+                ts += '+00:00'
             opened_at = datetime.fromisoformat(ts)
         except Exception as de:
             log_warning(MODULE, f"Date parsing error for {binance_symbol}: {de}. Using fallback.")
