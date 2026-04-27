@@ -44,24 +44,24 @@ async def get_global_portfolio():
             open_stocks_tickers = [s['ticker'] for s in (open_stocks_res.data or [])]
             all_snap_symbols = list(set(active_crypto_symbols + forex_symbols + open_stocks_tickers))
 
-            async def fetch_data():
-                return await asyncio.gather(
-                    asyncio.to_thread(supabase.table('positions').select('*').eq('status', 'open').execute),
-                    asyncio.to_thread(supabase.table('forex_positions').select('*').eq('status', 'open').execute),
-                    asyncio.to_thread(supabase.table('stocks_positions').select('*').eq('status', 'open').execute),
-                    asyncio.to_thread(supabase.table('market_snapshot').select('*').in_('symbol', all_snap_symbols).execute),
-                    asyncio.to_thread(supabase.table('paper_trades').select('total_pnl_usd').gte('closed_at', today_start).execute),
-                    asyncio.to_thread(supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').gte('closed_at', today_start).execute),
-                    asyncio.to_thread(supabase.table('stocks_positions').select('unrealized_pnl').eq('status', 'closed').gte('updated_at', today_start).execute),
-                    asyncio.to_thread(supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute),
-                    asyncio.to_thread(supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute),
-                    asyncio.to_thread(supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute),
-                    asyncio.to_thread(supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(5).execute),
-                    asyncio.to_thread(supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(5).execute),
-                    asyncio.to_thread(supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(5).execute)
+            def fetch_data_sync():
+                return (
+                    supabase.table('positions').select('*').eq('status', 'open').execute(),
+                    supabase.table('forex_positions').select('*').eq('status', 'open').execute(),
+                    supabase.table('stocks_positions').select('*').eq('status', 'open').execute(),
+                    supabase.table('market_snapshot').select('*').in_('symbol', all_snap_symbols).execute(),
+                    supabase.table('paper_trades').select('total_pnl_usd').gte('closed_at', today_start).execute(),
+                    supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').gte('closed_at', today_start).execute(),
+                    supabase.table('stocks_positions').select('unrealized_pnl').eq('status', 'closed').gte('updated_at', today_start).execute(),
+                    supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute(),
+                    supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute(),
+                    supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
+                    supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(5).execute(),
+                    supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(5).execute(),
+                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(5).execute()
                 )
 
-            results = await fetch_data()
+            results = await asyncio.to_thread(fetch_data_sync)
             
             open_crypto_pos_res = results[0]
             open_forex_pos_res  = results[1]
@@ -270,15 +270,15 @@ async def get_performance_summary():
         try:
             supabase = get_supabase()
             
-            # Fetch from all markets (Parallelized)
-            async def fetch_perf():
-                return await asyncio.gather(
-                    asyncio.to_thread(supabase.table('paper_trades').select('id, total_pnl_usd, closed_at, rule_code, mode').eq('mode', 'paper').not_.is_('closed_at', 'null').execute),
-                    asyncio.to_thread(supabase.table('forex_positions').select('id, pnl_usd, closed_at, rule_code').eq('status', 'closed').execute),
-                    asyncio.to_thread(supabase.table('stocks_positions').select('id, ticker, unrealized_pnl, updated_at').eq('status', 'closed').execute)
+            # Fetch from all markets sequentially to avoid thread-safety issues with httpx connection pool
+            def fetch_perf_sync():
+                return (
+                    supabase.table('paper_trades').select('id, total_pnl_usd, closed_at, rule_code, mode').eq('mode', 'paper').not_.is_('closed_at', 'null').execute(),
+                    supabase.table('forex_positions').select('id, pnl_usd, closed_at, rule_code').eq('status', 'closed').execute(),
+                    supabase.table('stocks_positions').select('id, ticker, unrealized_pnl, updated_at').eq('status', 'closed').execute()
                 )
             
-            results_perf = await fetch_perf()
+            results_perf = await asyncio.to_thread(fetch_perf_sync)
             res_crypto = results_perf[0]
             res_forex  = results_perf[1]
             res_stocks = results_perf[2]
