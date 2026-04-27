@@ -492,19 +492,25 @@ class ForexExecutionService:
         
         result = evaluate_all_protections(state, price, snap)
         
-        if result['has_action']:
-            action = result['action']
-            if action == 'move_sl':
-                new_sl = result['new_sl']
-                self.log(f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({result['reason']})")
+        if result.get('has_action') and 'primary' in result:
+            primary = result['primary']
+            action = primary.get('action')
+            
+            if action in ('activate_be', 'update_sl'):
+                new_sl = primary.get('be_price') if action == 'activate_be' else primary.get('new_sl')
+                self.log(f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
                 # Actualizar en DB
                 self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos_id).execute()
                 # Actualizar en memoria
                 pos['sl_price'] = new_sl
-                # Si es LIVE, intentar moverlo en cTrader (opcional según persistencia)
-            elif action == 'close_partial':
+                # Actualizar estado interno de protección
+                state.current_sl = new_sl
+                if action == 'activate_be': state.be_activated = True
+                if action == 'update_sl': state.trailing_level = primary.get('new_level', state.trailing_level)
+                
+            elif action == 'partial_close':
                 self.log(f"🛡️ [PROTECTION] {symbol}: Cierre parcial sugerido (No implementado en esta versión)")
-            elif action == 'close_inverse' and result.get('confidence', 0) > 0.8:
+            elif action == 'close_market':
                 self.log(f"🛡️ [PROTECTION] {symbol}: Cierre por señal inversa confirmada")
                 self._close_position(pos, price, 'inverse_signal', 0)
 

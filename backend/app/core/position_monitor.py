@@ -599,25 +599,31 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
     state = BOT_STATE.protection_cache[pos_id]
     result = evaluate_all_protections(state, price, None)
     
-    if result['has_action']:
-        action = result['action']
-        if action == 'move_sl':
-            new_sl = result['new_sl']
-            log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({result['reason']})")
+    if result.get('has_action') and 'primary' in result:
+        primary = result['primary']
+        action = primary.get('action')
+        
+        if action in ('activate_be', 'update_sl'):
+            new_sl = primary.get('be_price') if action == 'activate_be' else primary.get('new_sl')
+            log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
             # Persistencia en DB
             try:
                 supabase.table('positions').update({
                     'sl_price': new_sl,
                     'stop_loss': new_sl,
-                    'sl_update_reason': result['reason']
+                    'sl_update_reason': primary.get('reason')
                 }).eq('id', pos_id).execute()
                 # Actualizar objeto local para el resto del ciclo
                 pos['sl_price'] = new_sl
                 pos['stop_loss'] = new_sl
+                # Actualizar estado interno
+                state.current_sl = new_sl
+                if action == 'activate_be': state.be_activated = True
+                if action == 'update_sl': state.trailing_level = primary.get('new_level', state.trailing_level)
             except Exception as e:
                 log_error(MODULE, f"Error updating protection SL for {symbol}: {e}")
         
-        elif action == 'close_inverse' and result.get('confidence', 0) > 0.8:
+        elif action == 'close_market':
             log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Cierre por señal inversa confirmado")
             await _execute_paper_close(pos, price, 'inverse_signal', supabase)
 
