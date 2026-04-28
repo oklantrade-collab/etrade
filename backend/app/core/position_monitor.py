@@ -366,6 +366,50 @@ async def check_open_positions_5m(
             # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (4 Pasos)
             # Inyectamos el monitor de protecciones dinámicas (BE, Trailing, Backstop)
             current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
+
+            # ── SLVM: Modo Recuperación (si ya está activo) ──
+            try:
+                from app.strategy.virtual_sl_recovery import (
+                    check_slv_trigger, evaluate_recovery_mode,
+                    activate_recovery_mode_sync, update_recovery_cycle_sync,
+                    finalize_recovery_exit_sync, update_slv_from_bands_sync,
+                )
+
+                if pos.get('recovery_mode'):
+                    # Ya en Modo Recuperación — evaluar salida
+                    mr_result = evaluate_recovery_mode(
+                        position=pos, current_price=price,
+                        snap=current_snap_obj, symbol=norm_symbol,
+                        market_type='crypto_futures',
+                    )
+                    update_recovery_cycle_sync(pos, mr_result, supabase, 'positions')
+                    log_info('SLVM', f'MR [{norm_symbol}] ciclo {mr_result["recovery_cycles"]}: {mr_result["reason"]}')
+
+                    if mr_result['should_close']:
+                        finalize_recovery_exit_sync(pos, mr_result, price, norm_symbol, supabase, 'positions')
+                        await _execute_paper_close(pos, price, f'recovery_{mr_result["exit_type"]}', supabase)
+                        events.append({'symbol': norm_symbol, 'event': f'slvm_{mr_result["exit_type"]}'})
+                        continue
+                    else:
+                        # En MR: trailing sigue activo pero saltamos las señales normales
+                        closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
+                        if closed:
+                            events.append({'symbol': norm_symbol, 'event': 'protection_close_in_mr'})
+                        continue
+
+                # ── SLVM: Verificar si precio tocó el SLV ──
+                if pos.get('slv_price') and check_slv_trigger(pos, price):
+                    activate_recovery_mode_sync(pos, price, norm_symbol, 'crypto_futures', supabase, 'positions')
+                    events.append({'symbol': norm_symbol, 'event': 'slvm_activated'})
+                    continue
+
+                # ── SLVM: Actualizar SLV desde bandas (solo mejora) ──
+                if pos.get('slv_price'):
+                    update_slv_from_bands_sync(pos, current_snap_obj, norm_symbol, 'crypto_futures', supabase, 'positions')
+
+            except Exception as slvm_e:
+                log_warning(MODULE, f'SLVM error for {norm_symbol}: {slvm_e}')
+
             closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
             if closed:
                 # Register SL cooldown when closed by protection (SL hit)
@@ -741,6 +785,24 @@ async def _execute_paper_open_unlocked(
         log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
     sl_dict['sl_price'] = sl_final
 
+    # ── SLVM: Calcular Stop Loss Virtual ──
+    try:
+        from app.strategy.virtual_sl_recovery import calculate_slv
+        from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+        snap_for_slv = MARKET_SNAPSHOT_CACHE.get(symbol, levels or {})
+        slv_data = calculate_slv(
+            entry_price = price,
+            side        = side,
+            symbol      = symbol,
+            snap        = snap_for_slv,
+            market_type = 'crypto_futures',
+        )
+        slv_price = slv_data['slv_price']
+        log_info(MODULE, f'SLVM [{symbol}]: SLV={slv_price:.6f} ({slv_data["distance_pips"]:.1f} pips, {slv_data["source"]})')
+    except Exception as slv_e:
+        log_warning(MODULE, f'SLVM calc error for {symbol}: {slv_e}')
+        slv_price = None
+
     # Persistir
     data = {
         'symbol':           symbol,
@@ -760,7 +822,11 @@ async def _execute_paper_open_unlocked(
         'rule_entry':       rule_code,
         'velocity_entry':   vel_config.get('velocity', 'unknown'),
         'opened_at':        datetime.now(timezone.utc).isoformat(),
-        'mode':             'paper'
+        'mode':             'paper',
+        # ── SLVM Fields ──
+        'slv_price':        slv_price,
+        'recovery_mode':    False,
+        'recovery_cycles':  0,
     }
     
     # Dashboard log (orders table)

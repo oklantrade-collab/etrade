@@ -34,6 +34,7 @@ class OrderExecutor:
     def __init__(self):
         self.ib = get_ib_connection() if IB_AVAILABLE else None
         self.paper_mode = True  # Default safety
+        self.max_daily_loss = 100.0 # Default limit
 
     async def load_config(self):
         """Load execution config from Supabase."""
@@ -47,6 +48,7 @@ class OrderExecutor:
             self.invest_per_trade_pct = float(cfg.get("invest_per_trade_pct", "5.0"))
             self.max_exposure_pct = float(cfg.get("max_total_exposure_pct", "30.0"))
             self.max_positions = int(cfg.get("max_concurrent_positions", "6"))
+            self.max_daily_loss = float(cfg.get("max_daily_loss_usd", "100.0"))
         except Exception as e:
             log_warning(MODULE, f"Config load error, using defaults: {e}")
             self.paper_mode = True
@@ -55,6 +57,7 @@ class OrderExecutor:
             self.invest_per_trade_pct = 5.0
             self.max_exposure_pct = 30.0
             self.max_positions = 6
+            self.max_daily_loss = 100.0
 
     async def execute_pending_opportunities(self) -> list[dict]:
         """

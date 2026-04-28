@@ -464,7 +464,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         # Use 15m PineScript Signal for rules that require it (like HOT_SENTMARKET_BUY)
         ps_signal_15m = ind_15m.get("last_pinescript_signal")
         ps_age_15m = ind_15m.get("signal_age", 999)
-        if ps_signal_15m == "Buy" and ps_age_15m <= 1: # Age 0 or 1 for 15m
+        if ps_signal_15m == "Buy" and ps_age_15m <= 3: # Age 0-3 for 15m (Relaxed from 1 to capture more moves)
              rule_ctx["pine_signal"] = "B" # Map 'Buy' to 'B' as requested
         elif t01_confirmed:
              rule_ctx["pine_signal"] = "Buy" # Default 4h signal

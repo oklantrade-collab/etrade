@@ -112,6 +112,7 @@ def execute_market_order(
 
     price = float(context.get("price", 0))
     if price <= 0:
+        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Invalid price ${price}")
         return {"success": False, "reason": "Precio inválido"}
 
     capital = config["total_capital"]
@@ -124,12 +125,14 @@ def execute_market_order(
     max_allowed_investment = capital * max_total_risk_pct
 
     if current_investment >= max_allowed_investment:
+        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Total risk limit reached (${current_investment:.0f}/${max_allowed_investment:.0f})")
         return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
 
     # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
     shares = _calculate_shares(capital, max_pct, price)
     
     if shares < 5:
+        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Insufficient capital for min batch of 5 (Target: ${capital * max_pct:.0f} vs Need: ${5*price:.0f})")
         return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital * max_pct:.0f} vs {5*price:.0f} p/lote)"}
     
     # Validar que no superemos el riesgo total con esta nueva compra
@@ -138,6 +141,7 @@ def execute_market_order(
         remaining_cap = max_allowed_investment - current_investment
         shares = int(remaining_cap // (price * 5)) * 5
         if shares <= 0:
+            log_warning(MODULE, f"Aborting MARKET order for {ticker}: Adding even 5 shares would exceed Max Total Risk")
             return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
     now = datetime.now(timezone.utc).isoformat()
@@ -453,6 +457,21 @@ def _open_or_update_position(
         sl_price = round(price - (atr_fallback * 2.0), 2)
         tp_price = round(price + (atr_fallback * 2.0 * 2.5), 2)
 
+        # ── SLVM: Calcular Stop Loss Virtual ──
+        slv_price = None
+        try:
+            from app.strategy.virtual_sl_recovery import calculate_slv
+            snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
+            snap_slv = snap_res.data[0] if snap_res.data else {}
+            slv_data = calculate_slv(
+                entry_price=price, side="long", symbol=ticker,
+                snap=snap_slv, market_type='stocks_spot',
+            )
+            slv_price = slv_data['slv_price']
+            log_info(MODULE, f'SLVM [{ticker}]: SLV=${slv_price:.2f} ({slv_data["distance_pips"]:.1f} pips, {slv_data["source"]})')
+        except Exception as slv_e:
+            log_warning(MODULE, f'SLVM calc error for {ticker}: {slv_e}')
+
         # 1. Create Opportunity for tracking
         opp_row = {
             "ticker": ticker,
@@ -481,7 +500,11 @@ def _open_or_update_position(
             "dca_count": 0,
             "first_buy_at": now,
             "updated_at": now,
-            "status": "open"
+            "status": "open",
+            # ── SLVM Fields ──
+            "slv_price": slv_price,
+            "recovery_mode": False,
+            "recovery_cycles": 0,
         }).execute()
         
         # Hook into state machine

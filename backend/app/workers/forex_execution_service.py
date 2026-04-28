@@ -356,6 +356,21 @@ class ForexExecutionService:
             # Aplicar signo algebraico (Negativo para SHORT/SELL)
             final_lots = -abs(float(lots)) if str(direction).lower() == 'short' or str(direction).lower() == 'sell' else abs(float(lots))
             
+            # ── SLVM: Calcular Stop Loss Virtual ──
+            slv_price = None
+            try:
+                from app.strategy.virtual_sl_recovery import calculate_slv
+                snap_res = self.sb.table('market_snapshot').select('*').eq('symbol', symbol).limit(1).execute()
+                snap_slv = snap_res.data[0] if snap_res.data else {}
+                slv_data = calculate_slv(
+                    entry_price=float(entry), side=direction, symbol=symbol,
+                    snap=snap_slv, market_type='forex_futures',
+                )
+                slv_price = slv_data['slv_price']
+                self.log(f'SLVM [{symbol}]: SLV={slv_price:.6f} ({slv_data["distance_pips"]:.1f} pips, {slv_data["source"]})')
+            except Exception as slv_e:
+                self.log(f'SLVM calc error for {symbol}: {slv_e}')
+
             pos = {
                 'symbol': symbol, 
                 'side': direction, 
@@ -366,7 +381,11 @@ class ForexExecutionService:
                 'status': 'open', 
                 'mode': mode, 
                 'rule_code': rule_code, 
-                'opened_at': datetime.now(timezone.utc).isoformat()
+                'opened_at': datetime.now(timezone.utc).isoformat(),
+                # ── SLVM Fields ──
+                'slv_price': slv_price,
+                'recovery_mode': False,
+                'recovery_cycles': 0,
             }
             res = self.sb.table('forex_positions').insert(pos).execute()
             if res.data: 
@@ -386,7 +405,51 @@ class ForexExecutionService:
         for pos in list(self._open_positions_list):
             try: 
                 snap = snaps.get(pos['symbol'])
-                
+                symbol = pos['symbol']
+                price_data = self.state['prices'].get(symbol)
+                price = self._safe_float(price_data.get('mid')) if price_data else 0
+                if price <= 0 and snap:
+                    price = self._safe_float(snap.get('price'))
+
+                # ── SLVM: Modo Recuperación ──
+                try:
+                    from app.strategy.virtual_sl_recovery import (
+                        check_slv_trigger, evaluate_recovery_mode,
+                        activate_recovery_mode_sync, update_recovery_cycle_sync,
+                        finalize_recovery_exit_sync, update_slv_from_bands_sync,
+                    )
+
+                    if pos.get('recovery_mode') and price > 0:
+                        mr_result = evaluate_recovery_mode(
+                            position=pos, current_price=price,
+                            snap=snap or {}, symbol=symbol,
+                            market_type='forex_futures',
+                        )
+                        update_recovery_cycle_sync(pos, mr_result, self.sb, 'forex_positions')
+                        self.log(f'SLVM MR [{symbol}] ciclo {mr_result["recovery_cycles"]}: {mr_result["reason"]}')
+
+                        if mr_result['should_close']:
+                            finalize_recovery_exit_sync(pos, mr_result, price, symbol, self.sb, 'forex_positions')
+                            pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                            pips_pnl = mr_result['pnl_pips']
+                            self._close_position(pos, price, f'recovery_{mr_result["exit_type"]}', pips_pnl)
+                            continue
+                        else:
+                            # En MR: trailing sigue activo
+                            if snap:
+                                self._run_protection_forex(pos, snap)
+                            continue
+
+                    if pos.get('slv_price') and price > 0 and check_slv_trigger(pos, price):
+                        activate_recovery_mode_sync(pos, price, symbol, 'forex_futures', self.sb, 'forex_positions')
+                        continue
+
+                    if pos.get('slv_price') and snap:
+                        update_slv_from_bands_sync(pos, snap, symbol, 'forex_futures', self.sb, 'forex_positions')
+
+                except Exception as slvm_e:
+                    self.log(f'SLVM error for {symbol}: {slvm_e}')
+
                 # ── Primero: Verificar cierre proactivo ──
                 if snap and self._check_proactive_exit_forex(pos, snap):
                     continue # Posición cerrada

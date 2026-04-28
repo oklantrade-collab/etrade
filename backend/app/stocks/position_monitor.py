@@ -92,6 +92,52 @@ class PositionMonitor:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", trade["id"]).execute()
 
+            # ── SLVM: Modo Recuperación ──
+            try:
+                from app.strategy.virtual_sl_recovery import (
+                    check_slv_trigger, evaluate_recovery_mode,
+                    activate_recovery_mode_sync, update_recovery_cycle_sync,
+                    finalize_recovery_exit_sync, update_slv_from_bands_sync,
+                )
+
+                # Map trade to position format for SLVM
+                pos_slvm = dict(trade)
+                pos_slvm['side'] = 'long'
+                pos_slvm['avg_entry_price'] = entry_price
+
+                snap_res_slvm = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
+                snap_slvm = snap_res_slvm.data[0] if snap_res_slvm.data else {}
+
+                if trade.get('recovery_mode'):
+                    # Ya en Modo Recuperación — evaluar salida
+                    mr_result = evaluate_recovery_mode(
+                        position=pos_slvm, current_price=current_price,
+                        snap=snap_slvm, symbol=ticker,
+                        market_type='stocks_spot',
+                    )
+                    update_recovery_cycle_sync(pos_slvm, mr_result, sb, 'stocks_positions')
+                    log_info('SLVM', f'MR [{ticker}] ciclo {mr_result["recovery_cycles"]}: {mr_result["reason"]}')
+
+                    if mr_result['should_close']:
+                        finalize_recovery_exit_sync(pos_slvm, mr_result, current_price, ticker, sb, 'stocks_positions')
+                        await self._close_position(trade, current_price, f'recovery_{mr_result["exit_type"]}')
+                        return
+                    else:
+                        # En MR: protecciones siguen activas pero saltamos señales normales
+                        return
+
+                # Verificar si precio tocó el SLV
+                if trade.get('slv_price') and check_slv_trigger(pos_slvm, current_price):
+                    activate_recovery_mode_sync(pos_slvm, current_price, ticker, 'stocks_spot', sb, 'stocks_positions')
+                    return
+
+                # Actualizar SLV desde bandas (solo mejora)
+                if trade.get('slv_price'):
+                    update_slv_from_bands_sync(pos_slvm, snap_slvm, ticker, 'stocks_spot', sb, 'stocks_positions')
+
+            except Exception as slvm_e:
+                log_warning(MODULE, f'SLVM error for {ticker}: {slvm_e}')
+
             # ── NUEVO: Cierre Proactivo Aa51/Bb51 ──
             closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, sb)
             if closed:
