@@ -26,13 +26,13 @@ def get_forex_config():
         from app.core.supabase_client import get_risk_config
         config = get_risk_config()
         return {
-            'capital_usd': float(config.get('forex_capital', 1000.0)),
-            'risk_per_trade_pct': float(config.get('forex_risk_per_trade_pct', 2.0)),
+            'capital_usd': float(config.get('forex_capital', 5000.0)),
+            'risk_per_trade_pct': float(config.get('forex_risk_per_trade_pct', 1.0)),
             'max_total_risk_pct': float(config.get('forex_max_total_risk_pct', 30.0)),
             'leverage': int(config.get('forex_leverage', 500))
         }
     except:
-        return {'capital_usd': 1000.0, 'risk_per_trade_pct': 2.0, 'max_total_risk_pct': 30.0, 'leverage': 500}
+        return {'capital_usd': 5000.0, 'risk_per_trade_pct': 1.0, 'max_total_risk_pct': 30.0, 'leverage': 500}
 
 PIP_CONFIG = {
     'EURUSD': {'pip': 0.0001, 'pip_val_std': 10.0},
@@ -450,6 +450,8 @@ class ForexExecutionService:
         )
 
         if not result['should_close']:
+            if result.get('rule_code') is None and 'Reversión' in result.get('reason', ''):
+                self.log(f"⚠️ [PROACTIVE EVAL] {symbol}: {result['reason']}", "DEBUG")
             return False
 
         pnl = result['pnl']

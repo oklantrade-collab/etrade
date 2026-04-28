@@ -27,7 +27,7 @@ SL_CONFIG = {
 
     # Trailing SL: distancia desde el máximo
     'trailing_pct_crypto': 0.03,   # 3%
-    'trailing_pct_forex':  0.005,  # 50 pips aprox
+    'trailing_pct_forex':  0.002,  # 20 pips aprox
     'trailing_pct_stocks': 0.04,   # 4%
 
     # Backstop amplio si no hay bandas Fibonacci

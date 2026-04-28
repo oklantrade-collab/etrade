@@ -190,21 +190,6 @@ def evaluate_proactive_exit(
     # ── Calcular P&L actual ───────────────────
     pnl = calculate_position_pnl(position, current_price, market_type)
 
-    # Si no hay ganancia → no cerrar
-    if not pnl['has_profit'] and not pnl['is_urgent']:
-        return {
-            'should_close': False,
-            'rule_code':    None,
-            'reason': (
-                f'Sin ganancia suficiente '
-                f'({pnl["pnl_pct"]:.3f}% < '
-                f'{pnl["threshold"]:.2f}%)'
-            ),
-            'pnl':        pnl,
-            'conditions': {},
-            'urgency':    'none',
-        }
-
     # ── Evaluar las 3 condiciones ─────────────
 
     # C1: PineScript signal
@@ -251,7 +236,15 @@ def evaluate_proactive_exit(
     double_confirmed = (
         (c1_pine and c2_sar) or (c1_pine and c3_candle) or (c2_sar and c3_candle)
     )
+    # Reversión técnica fuerte: Pine + SAR (lo que el usuario reportó)
+    technical_reversal = c1_pine and c2_sar
+    
     urgent_exit = double_confirmed and pnl['is_urgent']
+    
+    # Umbral de pérdida aceptable para cierre técnico preventivo
+    # Evita "acumular mucha pérdida" cuando el mercado se gira claramente
+    max_preventive_loss_pips = -3.0
+    max_preventive_loss_pct  = -0.001 # -0.10%
 
     if triple_confirmed and pnl['has_profit']:
         rule_code   = 'Aa51' if is_long else 'Bb51'
@@ -263,6 +256,21 @@ def evaluate_proactive_exit(
         should_close = True
         urgency     = 'urgent'
         reason      = f'Cierre urgente (2/3 cond + ganancia >1%). P&L: +{pnl["pnl_pct"]:.3f}%'
+    elif technical_reversal:
+        # Si hay confirmación de Pine + SAR, cerramos incluso con ganancia mínima o pérdida pequeña
+        is_forex = market_type == 'forex_futures'
+        loss_ok = (pnl['pnl_pips'] >= max_preventive_loss_pips) if is_forex else (pnl['pnl_pct']/100 >= max_preventive_loss_pct)
+        
+        if pnl['has_profit'] or loss_ok:
+            rule_code   = 'Aa53' if is_long else 'Bb53'
+            should_close = True
+            urgency     = 'normal'
+            reason      = f'Reversión técnica (Pine+SAR). P&L: {pnl["pnl_pips"] if is_forex else pnl["pnl_pct"]} {"pips" if is_forex else "%"}'
+        else:
+            should_close = False
+            rule_code   = None
+            urgency     = 'none'
+            reason      = f'Reversión detectada pero pérdida excede umbral preventivo. Esperando SL/TP.'
     else:
         should_close = False
         rule_code   = None
@@ -278,3 +286,4 @@ def evaluate_proactive_exit(
         'urgency':      urgency,
         'candle':       candle_analysis,
     }
+
