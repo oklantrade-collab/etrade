@@ -163,6 +163,21 @@ class PositionMonitor:
                 }).eq("id", trade["id"]).execute()
                 log_info(MODULE, f"📈 TRAILING STOP ACTIVO: {ticker} SL movido a ${new_trailing:.2f}")
 
+            # ── NUEVO: FLASH EXIT PARA SCALPING (HOT) ──
+            group = str(trade.get("group_name", "")).upper()
+            if "HOT" in group or "SCALPING" in group:
+                highest = safe_float(trade.get("highest_price_reached") or current_price)
+                if current_price > highest:
+                    highest = current_price
+                    sb.table("stocks_positions").update({"highest_price_reached": highest}).eq("id", trade["id"]).execute()
+                
+                # Si el precio retrocede > 1.5% desde el máximo Y estamos en profit mínimo
+                pullback = ((highest - current_price) / highest) * 100
+                if pullback >= 1.5 and current_price > entry_price:
+                    log_warning(MODULE, f"⚡ FLASH EXIT: {ticker} retroceso de {pullback:.1f}% detectado. Cerrando para asegurar profit.")
+                    await self._close_position(trade, current_price, "hot_pullback_exit")
+                    return
+
             log_info(MODULE, f"  {ticker}: ${current_price:.2f} | P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
 
         except Exception as e:

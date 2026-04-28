@@ -112,7 +112,8 @@ class UniverseBuilder:
             tasks = []
             for c in candidates:
                 price = c.get("_price", 100) # Fallback 100 si no hay precio
-                tasks.append(self.f_scorer.calculate_score(c["ticker"], spy_perf, price, u_settings))
+                rvol = c.get("_rvol", 1.0)
+                tasks.append(self.f_scorer.calculate_score(c["ticker"], spy_perf, price, u_settings, rvol=rvol))
             
             f_results = await asyncio.gather(*tasks)
             
@@ -330,9 +331,14 @@ class UniverseBuilder:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                # LIMPIEZA TOTAL: Solo queremos ver lo que el escáner acaba de encontrar hoy.
-                # No queremos basura de días anteriores en Inversión Pro.
-                sb.table("watchlist_daily").delete().neq("ticker", "DUMMY").execute() 
+                # LIMPIEZA SELECTIVA: Borramos lo que el escáner automático encontró hoy, 
+                # PERO preservamos lo que el usuario agregó manualmente (MANUAL_ADD).
+                sb.table("watchlist_daily")\
+                    .delete()\
+                    .eq("date", today)\
+                    .neq("catalyst_type", "MANUAL_ADD")\
+                    .execute() 
+                
                 sb.table("watchlist_daily").insert(rows).execute()
                 log_info(MODULE, f"DB OK: {len(rows)} tickers saved for {today}")
                 return # Exit on success

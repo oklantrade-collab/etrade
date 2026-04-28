@@ -92,6 +92,7 @@ class DecisionEngine:
                 fundamental_universe = float(f_data.get("fundamental_score", fundamental_universe))
                 eps_ttm = float(f_data.get("eps_ttm") or 0)
                 sector = f_data.get("sector", "Other")
+                pool_type = f_data.get("pool_type", "")
                 analyst_consensus = float(f_data.get("analyst_rating", watchlist_entry.get("analyst_rating", 0)) or 0)
             else:
                 analyst_consensus = float(watchlist_entry.get("analyst_rating", 0))
@@ -182,12 +183,21 @@ class DecisionEngine:
             if claude_res: m_scores.append(float(claude_res.get("meta_score", 0)))
             final_meta = sum(m_scores) / len(m_scores) if m_scores else 50
 
-            final_decision = "ENTER" if (final_meta >= 65 and fundamental_universe >= 70) else "WAIT"
+            is_hot = "HOT" in pool_type.upper() or "SCALPING" in pool_type.upper()
+            
+            if is_hot:
+                # REGLA SCALPING: Ignora fundamentales, exige Momentum IA muy alto
+                final_decision = "ENTER" if (final_meta >= 72) else "WAIT"
+                trade_type = "scalping"
+            else:
+                # REGLA PRO: Exige calidad fundamental 70+
+                final_decision = "ENTER" if (final_meta >= 65 and fundamental_universe >= 70) else "WAIT"
+                trade_type = "swing_trade"
 
-            combined = {
                 "pro_score": round(final_ia_avg, 1),
                 "meta_score": round(final_meta, 0),
                 "decision": final_decision,
+                "trade_type": trade_type,
                 "ai_rationale": " | ".join(rationales),
                 "qwen_score": o_score, # Mantenemos key para compatibilidad frontend pero datos son de OpenAI
                 "gemini_score": g_score,

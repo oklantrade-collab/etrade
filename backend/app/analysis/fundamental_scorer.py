@@ -24,7 +24,7 @@ class FundamentalScorer:
             log_error(MODULE, f"Error obteniendo SPY performance: {e}")
             return 0
 
-    async def calculate_score(self, ticker: str, spy_perf_6m: float, current_price: float = 0, settings: dict = None) -> dict:
+    async def calculate_score(self, ticker: str, spy_perf_6m: float, current_price: float = 0, settings: dict = None, rvol: float = 1.0) -> dict:
         """
         Obtiene datos fundamentales y calcula el FUNDAMENTAL_SCORE (0-100).
         """
@@ -110,6 +110,11 @@ class FundamentalScorer:
                 inst_ownership > settings.get("gl_inst_min", 40) and 
                 1 <= current_price <= settings.get("gl_price_max", 500)):
                 pools.append("LEADER")
+
+            # C. SCALPING (HOT) - Momentum Puro
+            # Si tiene un RS Score brutal (>85) o un Spike de Volumen (>2.0), es HOT
+            if rs_score > 85 or rvol > 2.0:
+                pools.append("HOT")
 
             # --- LÓGICA DE CALIDAD Y EXCLUSIÓN (REQUERIMIENTO) ---
             quality_flag = "PASS"

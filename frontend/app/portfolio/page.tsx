@@ -47,6 +47,9 @@ export default function PortfolioPage() {
   const [perf, setPerf] = useState<PerformanceSummary | null>(null)
   const [global, setGlobal] = useState<GlobalPortfolioData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [page, setPage] = useState(0)
+  const ITEMS_PER_PAGE = 10
+  const MAX_HISTORY = 100
 
   useEffect(() => {
     fetchData()
@@ -166,7 +169,7 @@ export default function PortfolioPage() {
         <div className="space-y-8 pt-20 border-t border-white/5">
            <div className="flex justify-between items-center px-4">
               <h3 className="section-label">Actividad Reciente (Liquidaciones)</h3>
-              <span className="text-[0.55rem] font-bold text-slate-600 uppercase">Últimos 10 Movimientos</span>
+              <span className="text-[0.55rem] font-bold text-slate-600 uppercase">Historial (10 por página)</span>
            </div>
            <div className="glass-card !p-0 overflow-hidden border-white/5 shadow-2xl">
               <div className="overflow-x-auto">
@@ -183,7 +186,7 @@ export default function PortfolioPage() {
                        </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
-                       {(global?.recent_activity || []).map((a, i) => {
+                       {(global?.recent_activity || []).slice(0, MAX_HISTORY).slice(page * ITEMS_PER_PAGE, (page + 1) * ITEMS_PER_PAGE).map((a, i) => {
                           const isWin = (a?.pnl || 0) >= 0
                           return (
                             <tr key={i} className="hover:bg-white/[0.04] transition-colors group">
@@ -202,8 +205,12 @@ export default function PortfolioPage() {
                                   {a?.rule || 'S-01'}
                                </td>
                                <td>
-                                  <span className={`px-3 py-1 rounded-full text-[0.55rem] font-black uppercase border italic ${isWin ? 'text-emerald-400 border-emerald-400/20 bg-emerald-400/5' : 'text-rose-400 border-rose-400/20 bg-rose-400/5'}`}>
-                                     {isWin ? 'Profit Consolidado' : 'Stop Ejecutado'}
+                                  <span className={`px-3 py-1 rounded-full text-[0.55rem] font-black uppercase border italic ${
+                                     a.reason && a.reason !== 'closed' ? 'text-blue-400 border-blue-400/20 bg-blue-400/5' :
+                                     isWin ? 'text-emerald-400 border-emerald-400/20 bg-emerald-400/5' : 
+                                     'text-rose-400 border-rose-400/20 bg-rose-400/5'
+                                  }`}>
+                                     {a.reason && a.reason !== 'closed' ? a.reason.replace(/_/g, ' ').toUpperCase() : (isWin ? 'Profit Consolidado' : 'Stop Ejecutado')}
                                   </span>
                                </td>
                                <td className="text-right px-10 font-mono font-black text-sm italic">
@@ -217,6 +224,32 @@ export default function PortfolioPage() {
                     </tbody>
                  </table>
               </div>
+           </div>
+
+           {/* PAGINATION CONTROLS */}
+           <div className="flex justify-center items-center gap-4 pt-4">
+              <button 
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="px-6 py-3 rounded-xl bg-white/5 border border-white/5 text-[0.6rem] font-black uppercase tracking-widest hover:bg-white/10 disabled:opacity-20 transition-all">
+                Anterior
+              </button>
+              <div className="flex gap-2">
+                 {[...Array(Math.ceil(Math.min(global?.recent_activity?.length || 0, MAX_HISTORY) / ITEMS_PER_PAGE))].map((_, i) => (
+                    <button 
+                       key={i}
+                       onClick={() => setPage(i)}
+                       className={`w-8 h-8 rounded-lg text-[0.6rem] font-black flex items-center justify-center transition-all ${page === i ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>
+                       {i + 1}
+                    </button>
+                 ))}
+              </div>
+              <button 
+                onClick={() => setPage(p => Math.min(Math.ceil(Math.min(global?.recent_activity?.length || 0, MAX_HISTORY) / ITEMS_PER_PAGE) - 1, p + 1))}
+                disabled={page >= Math.ceil(Math.min(global?.recent_activity?.length || 0, MAX_HISTORY) / ITEMS_PER_PAGE) - 1}
+                className="px-6 py-3 rounded-xl bg-white/5 border border-white/5 text-[0.6rem] font-black uppercase tracking-widest hover:bg-white/10 disabled:opacity-20 transition-all">
+                Siguiente
+              </button>
            </div>
         </div>
 

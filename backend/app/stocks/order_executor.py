@@ -44,17 +44,17 @@ class OrderExecutor:
             self.paper_mode = cfg.get("paper_mode_active", "true") == "true"
             self.kill_switch = cfg.get("kill_switch_active", "false") == "true"
             self.total_capital = float(cfg.get("total_capital_usd", "5000"))
-            self.max_risk_pct = float(cfg.get("max_risk_per_trade_pct", "1.0"))
-            self.max_positions = int(cfg.get("max_concurrent_positions", "5"))
-            self.max_daily_loss = float(cfg.get("max_daily_loss_usd", "100"))
+            self.invest_per_trade_pct = float(cfg.get("invest_per_trade_pct", "5.0"))
+            self.max_exposure_pct = float(cfg.get("max_total_exposure_pct", "30.0"))
+            self.max_positions = int(cfg.get("max_concurrent_positions", "6"))
         except Exception as e:
             log_warning(MODULE, f"Config load error, using defaults: {e}")
             self.paper_mode = True
             self.kill_switch = False
             self.total_capital = 5000
-            self.max_risk_pct = 1.0
-            self.max_positions = 5
-            self.max_daily_loss = 100
+            self.invest_per_trade_pct = 5.0
+            self.max_exposure_pct = 30.0
+            self.max_positions = 6
 
     async def execute_pending_opportunities(self) -> list[dict]:
         """
@@ -70,9 +70,11 @@ class OrderExecutor:
         sb = get_supabase()
         results = []
 
-        # 1. Check current positions count
-        active_res = sb.table("trades_active").select("id").eq("status", "active").execute()
-        active_count = len(active_res.data or [])
+        # 1. Check current positions count and open tickers
+        active_res = sb.table("stocks_positions").select("ticker").eq("status", "open").execute()
+        open_tickers = [r["ticker"] for r in (active_res.data or [])]
+        active_count = len(open_tickers)
+        
         if active_count >= self.max_positions:
             log_warning(MODULE, f"Max positions reached ({active_count}/{self.max_positions})")
             return []
@@ -96,8 +98,15 @@ class OrderExecutor:
             return []
 
         for opp in pending.data:
+            ticker = opp.get("ticker")
+            if ticker in open_tickers:
+                log_info(MODULE, f"Skipping {ticker}: Position already open.")
+                continue
+                
             result = await self._execute_single(opp)
             results.append(result)
+            # Add to open_tickers to prevent double-buy in the same cycle
+            open_tickers.append(ticker)
 
         return results
 
@@ -128,24 +137,25 @@ class OrderExecutor:
             if entry_price <= 0:
                 return await self._mark_failed(opp_id, "Invalid entry price")
 
-            # Calculate shares
-            risk_per_share = abs(entry_price - stop_loss)
-            if risk_per_share <= 0:
-                return await self._mark_failed(opp_id, "Invalid risk calculation")
-
-            max_risk_usd = self.total_capital * (self.max_risk_pct / 100)
-            calculated_shares = int(max_risk_usd / risk_per_share)
-            max_allowed_shares = int(self.total_capital * 0.2 / entry_price)  # Cap: max 20% of total capital
+            # 2. CALCULAR TAMAÑO POR INVERSIÓN FIJA (5% = $250)
+            invest_amount_usd = self.total_capital * (self.invest_per_trade_pct / 100)
+            shares = int(invest_amount_usd / entry_price)
             
-            shares = min(calculated_shares, max_allowed_shares)
+            # 3. VERIFICAR LÍMITE DE EXPOSICIÓN TOTAL (30% = $1500)
+            current_exposure_res = sb.table("stocks_positions").select("avg_price, shares").eq("status", "open").execute()
+            current_exposure = sum(float(p["avg_price"] or 0) * int(p["shares"] or 0) for p in (current_exposure_res.data or []))
+            
+            if (current_exposure + (shares * entry_price)) > (self.total_capital * (self.max_exposure_pct / 100)):
+                log_warning(MODULE, f"Trade blocked: Total exposure would exceed {self.max_exposure_pct}% limit.")
+                return await self._mark_failed(opp_id, "Max Exposure Reached")
 
             if shares <= 0:
-                return await self._mark_failed(opp_id, f"Capital/Risk constraints limit shares to 0. Min required for 1 share safe exposure: ${entry_price:.2f}")
+                return await self._mark_failed(opp_id, "Capital insufficient for 1 share")
 
             if self.paper_mode:
-                return await self._paper_execute(opp_id, ticker, entry_price, stop_loss, target_1, shares)
+                return await self._paper_execute(opp, ticker, entry_price, stop_loss, target_1, shares)
             else:
-                return await self._ib_execute(opp_id, ticker, entry_price, stop_loss, target_1, shares)
+                return await self._ib_execute(opp, ticker, entry_price, stop_loss, target_1, shares)
 
         except Exception as e:
             log_error(MODULE, f"Execution failed for {ticker}: {e}")
@@ -166,32 +176,32 @@ class OrderExecutor:
         except Exception as e:
             log_warning(MODULE, f"Telegram notification failed: {e}")
 
-    async def _paper_execute(self, opp_id, ticker, entry, sl, tp, shares) -> dict:
+    async def _paper_execute(self, opp, ticker, entry, sl, tp, shares) -> dict:
         """Simulate order execution in paper mode."""
         sb = get_supabase()
         now = datetime.now(timezone.utc).isoformat()
+        opp_id = opp["id"]
 
-        # Create active trade (paper)
+        # Create active trade (paper) in stocks_positions
         trade = {
             "ticker": ticker,
             "shares": shares,
-            "entry_price": entry,
+            "avg_price": entry,
             "stop_loss": sl,
-            "target_1": tp,
-            "entry_time": now,
-            "status": "active",
-            "opportunity_id": opp_id,
+            "take_profit": tp,
+            "first_buy_at": now,
+            "status": "open",
             "unrealized_pnl": 0.0,
+            "group_name": "HOT" if "HOT" in str(opp.get("quadrant", "")) else "PRO"
         }
 
         try:
-            res = sb.table("trades_active").insert(trade).execute()
+            res = sb.table("stocks_positions").insert(trade).execute()
             trade_id = res.data[0]["id"] if res.data else None
 
             # Update opportunity status
             sb.table("trade_opportunities").update({
                 "status": "executed",
-                "updated_at": now,
             }).eq("id", opp_id).execute()
 
             log_info(MODULE, f"📝 PAPER TRADE: {ticker} BUY {shares}x @ ${entry:.2f} "
@@ -213,11 +223,12 @@ class OrderExecutor:
             log_error(MODULE, f"Paper trade insert failed: {e}")
             return {"status": "error", "ticker": ticker, "error": str(e)}
 
-    async def _ib_execute(self, opp_id, ticker, entry, sl, tp, shares) -> dict:
+    async def _ib_execute(self, opp, ticker, entry, sl, tp, shares) -> dict:
         """Execute real bracket order on IB TWS."""
+        opp_id = opp["id"]
         if not self.ib or not self.ib.connected:
             log_warning(MODULE, f"IB not connected, falling back to paper for {ticker}")
-            return await self._paper_execute(opp_id, ticker, entry, sl, tp, shares)
+            return await self._paper_execute(opp, ticker, entry, sl, tp, shares)
 
         try:
             result = self.ib.place_bracket_order(
@@ -239,23 +250,22 @@ class OrderExecutor:
             trade = {
                 "ticker": ticker,
                 "shares": shares,
-                "entry_price": entry,
+                "avg_price": entry,
                 "stop_loss": sl,
-                "target_1": tp,
-                "entry_time": now,
-                "status": "active",
-                "opportunity_id": opp_id,
+                "take_profit": tp,
+                "first_buy_at": now,
+                "status": "open",
                 "ib_parent_id": result["parent_id"],
                 "ib_stop_id": result["stop_id"],
                 "ib_target_id": result["target_id"],
+                "group_name": "PRO"
             }
 
-            res = sb.table("trades_active").insert(trade).execute()
+            res = sb.table("stocks_positions").insert(trade).execute()
             trade_id = res.data[0]["id"] if res.data else None
 
             sb.table("trade_opportunities").update({
                 "status": "executed",
-                "updated_at": now,
             }).eq("id", opp_id).execute()
 
             log_info(MODULE, f"🔴 LIVE TRADE: {ticker} BUY {shares}x @ ${entry:.2f} "
@@ -279,7 +289,6 @@ class OrderExecutor:
         sb = get_supabase()
         sb.table("trade_opportunities").update({
             "status": "rejected",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", opp_id).execute()
         log_warning(MODULE, f"Opportunity {opp_id} rejected: {reason}")
         return {"status": "rejected", "reason": reason}

@@ -1,4 +1,5 @@
 from fastapi import APIRouter
+import asyncio
 from datetime import datetime, timezone, timedelta
 from app.core.supabase_client import get_supabase
 try:
@@ -7,6 +8,7 @@ except ImportError:
     MEMORY_STORE = {}
 
 router = APIRouter()
+DB_LOCK = asyncio.Lock()
 
 @router.get("/global")
 async def get_global_portfolio():
@@ -56,12 +58,13 @@ async def get_global_portfolio():
                     supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute(),
                     supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute(),
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
-                    supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(5).execute(),
-                    supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(5).execute(),
-                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(5).execute()
+                    supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(50).execute(),
+                    supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
+                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute()
                 )
 
-            results = await asyncio.to_thread(fetch_data_sync)
+            async with DB_LOCK:
+                results = await asyncio.to_thread(fetch_data_sync)
             
             open_crypto_pos_res = results[0]
             open_forex_pos_res  = results[1]
@@ -213,9 +216,9 @@ async def get_global_portfolio():
             # Actividad reciente (Ya cargada en paralelo arriba)
             
             recent_activity = []
-            for t in recent_crypto: recent_activity.append({'time': t['closed_at'], 'market': 'Crypto', 'symbol': t['symbol'], 'pnl': float(t['total_pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed'})
-            for t in recent_forex: recent_activity.append({'time': t['closed_at'], 'market': 'Forex', 'symbol': t['symbol'], 'pnl': float(t['pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed'})
-            for t in recent_stocks: recent_activity.append({'time': t['updated_at'], 'market': 'Stocks', 'symbol': t['ticker'], 'pnl': float(t['unrealized_pnl'] or 0), 'entry_price': t['avg_price'], 'quantity': t['shares'], 'status': 'closed'})
+            for t in recent_crypto: recent_activity.append({'time': t['closed_at'], 'market': 'Crypto', 'symbol': t['symbol'], 'pnl': float(t['total_pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
+            for t in recent_forex: recent_activity.append({'time': t['closed_at'], 'market': 'Forex', 'symbol': t['symbol'], 'pnl': float(t['pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
+            for t in recent_stocks: recent_activity.append({'time': t['updated_at'], 'market': 'Stocks', 'symbol': t['ticker'], 'pnl': float(t['unrealized_pnl'] or 0), 'entry_price': t['avg_price'], 'quantity': t['shares'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
             recent_activity.sort(key=lambda x: x['time'], reverse=True)
 
             return {
@@ -278,7 +281,8 @@ async def get_performance_summary():
                     supabase.table('stocks_positions').select('id, ticker, unrealized_pnl, updated_at').eq('status', 'closed').execute()
                 )
             
-            results_perf = await asyncio.to_thread(fetch_perf_sync)
+            async with DB_LOCK:
+                results_perf = await asyncio.to_thread(fetch_perf_sync)
             res_crypto = results_perf[0]
             res_forex  = results_perf[1]
             res_stocks = results_perf[2]

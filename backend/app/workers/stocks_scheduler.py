@@ -237,7 +237,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         from app.analysis.capa3_fundamentals import analyze_fundamentals
         
         # Recuperar metadatos para el análisis
-        a_rating = float(f_data.get("analyst_rating", 0)) if f_data else 0.0
+        a_rating = 0.0
+        if f_data and isinstance(f_data, dict):
+            a_rating = float(f_data.get("analyst_rating", 0) or 0)
         
         # Obtener Market Cap antes del rationale
         import yfinance as yf
@@ -253,8 +255,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         fundamental_res = await analyze_fundamentals(
             ticker=ticker,
             current_price=float(ind_15m.get("close", 0)),
-            ib_data=f_data or {},
-            sector=f_data.get("sector", "Other") if f_data else "Other",
+            ib_data=f_data if (f_data and isinstance(f_data, dict)) else {},
+            sector=f_data.get("sector", "Other") if (f_data and isinstance(f_data, dict)) else "Other",
             analyst_rating=a_rating,
             technical_score=base_score,
             supabase=get_supabase()
@@ -269,17 +271,21 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         # ── 5.5 CONSTRUIR MASTER RATIONALE (Sustento Multi-Capa) ──
         # Componentes de valoración para formateo seguro
         comp = fundamental_res.get("components", {})
-        piot_score = comp.get("piotroski", {}).get("score", 0)
-        altman_z = float(comp.get("altman", {}).get("z_score", 0) or 0)
-        graham_val = float(comp.get("graham", {}).get("value", 0) or 0)
-        dcf_val = float(comp.get("dcf", {}).get("value", 0) or 0)
+        ia_ia = comp.get("ia", {}).get("score", 5.0) if comp else 5.0
+        ia_math = comp.get("math", {}).get("score", 5.0) if comp else 5.0
+        c4_txt = f"CAPA 4 (IA Score): {pro_score:.1f} (Math: {ia_math:.1f}, IA: {ia_ia:.1f})."
+        piot_score = comp.get("piotroski", {}).get("score", 0) if comp else 0
+        altman_z = float(comp.get("altman", {}).get("z_score", 0) or 0) if comp else 0.0
+        graham_val = float(comp.get("graham", {}).get("value", 0) or 0) if comp else 0.0
+        dcf_val = float(comp.get("dcf", {}).get("value", 0) or 0) if comp else 0.0
         intrinsic = float(fundamental_res.get("intrinsic_value", 0) or 0)
         mos = float(fundamental_res.get("margin_of_safety", 0) or 0)
         status = fundamental_res.get("valuation_status", "N/A").upper()
         icon = "🟢" if status == "UNDERVALUED" else "🔴" if status == "OVERVALUED" else "⚪"
 
         # Capa 1: Universo
-        c1_txt = f"CAPA 1 (Universo): Pool {f_data.get('pool_type', 'STANDARD')} | MCap ${mcap/1e6:.1f}M."
+        pool_val = f_data.get('pool_type', 'STANDARD') if (f_data and isinstance(f_data, dict)) else 'STANDARD'
+        c1_txt = f"CAPA 1 (Universo): Pool {pool_val} | MCap ${mcap/1e6:.1f}M."
         
         # Capa 2: Técnico
         c2_txt = (
@@ -409,7 +415,6 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 'basis': float(ema20),
                 'fibonacci_zone': int(zone),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
-                'exchange': 'stocks',
                 'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None
             }
             sb = get_supabase()

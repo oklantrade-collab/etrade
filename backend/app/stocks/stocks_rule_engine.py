@@ -159,6 +159,12 @@ class StocksRuleEngine:
 
         # ── CHECK 2.5: Fundamental Score (Universe) ──────
         fund_min = float(rule.get("fundamental_score_min") or (70.0 if rule_code == "PRO_BUY_MKT" else 0.0))
+        
+        # BYPASS para Scalping/HOT
+        is_hot = "HOT" in str(context.get("pool_type", "")).upper()
+        if is_hot:
+            fund_min = 0.0
+            
         if fund_min > 0:
             fund_ok = fund_val >= fund_min
             checks["fundamental"] = {
@@ -244,6 +250,10 @@ class StocksRuleEngine:
 
         # ── CHECK 4.6: Piotroski Score (F.Score) ─────────
         f_score_min = float(rule.get("f_score_min") or 0)
+        
+        if is_hot:
+            f_score_min = 0.0
+            
         if f_score_min > 0:
             f_ok = piot_val >= f_score_min
             checks["f_score"] = {

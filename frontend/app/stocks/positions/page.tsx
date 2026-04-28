@@ -220,7 +220,7 @@ export default function StocksPositions() {
                        onClick={async () => {
                          if (confirm(`¿Cerrar posición de ${pos.ticker} manualmente? Se enviará al historial.`)) {
                            try {
-                             const res = await fetch(`/api/v1/positions/stocks/${pos.id}/close`, { method: 'POST' })
+                             const res = await fetch(`/api/v1/stocks/positions/${pos.id}/close`, { method: 'POST' })
                              if (res.ok) {
                                fetchData()
                              } else {
@@ -240,7 +240,7 @@ export default function StocksPositions() {
                        onClick={async () => {
                          if (confirm(`¿ELIMINAR registro de ${pos.ticker} permanentemente?`)) {
                            try {
-                             const res = await fetch(`/api/v1/positions/stocks/${pos.id}`, { method: 'DELETE' })
+                             const res = await fetch(`/api/v1/stocks/positions/${pos.id}`, { method: 'DELETE' })
                              if (res.ok) {
                                fetchData()
                              } else {

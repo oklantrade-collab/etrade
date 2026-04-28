@@ -216,6 +216,13 @@ async def get_stocks_opportunities(
             if o["ticker"] not in opp_map:
                 opp_map[o["ticker"]] = o
 
+        # 3.1 Get active positions to ensure they appear in Opportunities
+        pos_res = sb.table("stocks_positions")\
+            .select("ticker")\
+            .eq("status", "open")\
+            .execute()
+        active_pos_tickers = [p["ticker"] for p in (pos_res.data or [])]
+
         # 3.5 Get active orders
         orders_res = sb.table("stocks_orders")\
             .select("*")\
@@ -231,13 +238,6 @@ async def get_stocks_opportunities(
                 if tick not in orders_map:
                     orders_map[tick] = []
                 orders_map[tick].append(order)
-
-        # 3.6 Get active positions to ensure they appear in Opportunities
-        pos_res = sb.table("stocks_positions")\
-            .select("ticker")\
-            .eq("status", "open")\
-            .execute()
-        active_pos_tickers = [p["ticker"] for p in (pos_res.data or [])]
 
         # 3.7 Get Extended Fundamental Metrics from fundamental_cache
         funda_res = sb.table("fundamental_cache")\
@@ -423,19 +423,22 @@ async def get_stocks_positions():
 
         # Enriquecer con precios actuales desde technical_scores (más frecuentes que watchlist)
         tickers = [p["ticker"] for p in positions]
-        tech_res = sb.table("technical_scores")\
-            .select("ticker, signals_json")\
-            .in_("ticker", tickers)\
-            .execute()
-        
         price_map = {}
-        for tr in (tech_res.data or []):
-            sj = tr.get("signals_json") or {}
-            if "price" in sj:
-                try:
-                    price_map[tr["ticker"]] = float(sj["price"] or 0)
-                except:
-                    price_map[tr["ticker"]] = 0.0
+        try:
+            tech_res = sb.table("technical_scores")\
+                .select("ticker, signals_json")\
+                .in_("ticker", tickers)\
+                .execute()
+            
+            for tr in (tech_res.data or []):
+                sj = tr.get("signals_json") or {}
+                if "price" in sj:
+                    try:
+                        price_map[tr["ticker"]] = float(sj["price"] or 0)
+                    except:
+                        pass
+        except Exception as tech_err:
+            log_warning("stocks_api", f"Could not fetch live prices for positions: {tech_err}")
 
         for pos in positions:
             ticker = pos["ticker"]
@@ -448,15 +451,16 @@ async def get_stocks_positions():
             unrealized_pnl = (cur_price - avg_entry) * shares
             unrealized_pnl_pct = ((cur_price - avg_entry) / avg_entry * 100) if avg_entry > 0 else 0
 
-            # ── ENRIQUECIMIENTO EXTRA PARA DETALLE ──
-            # 1. Traer Company y Sector desde watchlist (Uso select("*") para evitar error si faltan columnas)
-            wl_info = sb.table("watchlist_daily").select("*").eq("ticker", ticker).order("date", desc=True).limit(1).execute().data
-            if wl_info:
-                pos["company_name"] = wl_info[0].get("company_name") or wl_info[0].get("name") or ticker
-                pos["sector"] = wl_info[0].get("sector") or "Finance"
-            else:
-                pos["company_name"] = ticker
-                pos["sector"] = "Finance"
+            # 1. Traer Company y Sector desde watchlist (Uso try para no bloquear si falla)
+            pos["company_name"] = ticker
+            pos["sector"] = "Finance"
+            try:
+                wl_info = sb.table("watchlist_daily").select("company_name, sector").eq("ticker", ticker).order("date", desc=True).limit(1).execute().data
+                if wl_info:
+                    pos["company_name"] = wl_info[0].get("company_name") or ticker
+                    pos["sector"] = wl_info[0].get("sector") or "Finance"
+            except:
+                pass
 
             # 2. Traer SL/TP desde Trade Opportunities
             opp_info = sb.table("trade_opportunities").select("stop_loss, target_1").eq("ticker", ticker).order("created_at", desc=True).limit(1).execute().data
@@ -475,10 +479,15 @@ async def get_stocks_positions():
             pos["unrealized_pnl_pct"] = round(unrealized_pnl_pct, 2)
             pos["total_cost"] = round(avg_entry * shares, 2)
 
-        return positions
+        return {"positions": positions}
     except Exception as e:
         log_error("stocks_api", f"Error in get_stocks_positions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/positions/{position_id}/close")
+async def close_stocks_position_manual(position_id: str):
+    """Manual close of a position (calls the DELETE logic)."""
+    return await delete_stocks_position(position_id)
 
 @router.delete("/positions/{position_id}")
 async def delete_stocks_position(position_id: str):
@@ -913,3 +922,111 @@ async def save_universe_settings(settings: dict):
             status_code=500, 
             detail={"message": str(e), "traceback": err_stack}
         )
+
+# ── SPRINT 8: MANUAL WATCHLIST MANAGEMENT ──
+
+@router.post("/watchlist")
+async def add_to_pro_watchlist(data: dict, sb=Depends(get_supabase)):
+    """Add a ticker to today's PRO watchlist manually."""
+    ticker = data.get("ticker", "").upper().strip()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Ticker is required")
+        
+    try:
+        import yfinance as yf
+        stock = yf.Ticker(ticker)
+        # Fetching info can be slow, but needed for name/sector
+        info = stock.info
+        
+        if not info or 'symbol' not in info:
+             # Fallback check
+             if not info.get('regularMarketPrice') and not info.get('currentPrice'):
+                 raise Exception(f"Ticker {ticker} not found on Yahoo Finance")
+
+        company_name = info.get("longName") or info.get("shortName") or ticker
+        sector = info.get("sector") or "Technology"
+        price = info.get("regularMarketPrice") or info.get("currentPrice") or 0
+        
+        today = date.today().isoformat()
+        
+        # Insert/Update into watchlist_daily (Solo columnas existentes)
+        entry = {
+            "date": today,
+            "ticker": ticker,
+            "price": price,
+            "pool_type": "PRO_MANUAL",
+            "quality_flag": "PASS",
+            "catalyst_type": "MANUAL_ADD",
+            "catalyst_score": 7,
+            "fundamental_score": 70
+        }
+        
+        # Robust Upsert: Buscar si ya existe para esta fecha/ticker
+        res = sb.table("watchlist_daily")\
+            .select("id")\
+            .eq("date", today)\
+            .eq("ticker", ticker)\
+            .execute()
+
+        if res and res.data and len(res.data) > 0:
+            sb.table("watchlist_daily").update(entry).eq("id", res.data[0]["id"]).execute()
+        else:
+            sb.table("watchlist_daily").insert(entry).execute()
+        
+        # Trigger technical scan so it appears immediately with price data
+        from app.workers.stocks_scheduler import process_ticker, get_stocks_config
+        config = get_stocks_config()
+        # We run it in background to not block the response too long, 
+        # but the user expects data, so let's await it.
+        await process_ticker(ticker, config)
+        
+        return {"status": "ok", "ticker": ticker, "company_name": company_name}
+    except Exception as e:
+        log_error("stocks_api", f"Error adding ticker {ticker}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/watchlist/{ticker}")
+async def remove_from_pro_watchlist(ticker: str, sb=Depends(get_supabase)):
+    """Remove a ticker from today's PRO watchlist or mark it as rejected."""
+    ticker = ticker.upper().strip()
+    today = date.today().isoformat()
+    
+    try:
+        # Check if it's an active position first
+        pos = sb.table("stocks_positions").select("id").eq("ticker", ticker).eq("status", "open").execute()
+        if pos.data:
+            return {"status": "error", "message": "No se puede eliminar una posición activa de la lista. Ciérrela primero."}
+
+        # Update watchlist to hide it from PRO
+        sb.table("watchlist_daily").update({
+            "pool_type": None,
+            "quality_flag": "REJECTED"
+        }).eq("date", today).eq("ticker", ticker).execute()
+        
+        return {"status": "ok", "message": f"{ticker} eliminado de la lista PRO"}
+    except Exception as e:
+        log_error("stocks_api", f"Error removing ticker {ticker}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/search")
+async def search_ticker(q: str):
+    """Search for a ticker and return basic info."""
+    q = q.upper().strip()
+    try:
+        import yfinance as yf
+        stock = yf.Ticker(q)
+        info = stock.info
+        
+        if not info or ('longName' not in info and 'shortName' not in info):
+            return {"found": False}
+            
+        return {
+            "found": True,
+            "ticker": q,
+            "company_name": info.get("longName") or info.get("shortName"),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "price": info.get("regularMarketPrice") or info.get("currentPrice")
+        }
+    except Exception as e:
+        return {"found": False, "error": str(e)}

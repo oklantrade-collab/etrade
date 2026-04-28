@@ -189,7 +189,7 @@ class SymbolStateMachine:
         try:
             sb = get_supabase()
             res = sb.table('market_snapshot').select('symbol_state, waiting_cycles, flip_pending').eq('symbol', symbol).maybe_single().execute()
-            if res.data:
+            if res and res.data:
                 ctx = self.get(symbol)
                 state_str = res.data.get('symbol_state', 'neutral')
                 try:

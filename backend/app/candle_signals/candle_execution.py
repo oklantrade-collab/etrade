@@ -354,24 +354,21 @@ def execute_crypto_signal(
             log_info(MODULE, f"🚫 CANDLE SIGNAL omitido {binance_symbol}: posición previa en pérdida.")
             return {"success": False, "reason": "candle_signal_requires_profit_exit", "pair": binance_symbol}
 
-    # ── CHECK 1: Limit per symbol (Compliance with Cant. Operación x Par/Cripto) ──
     from app.core.supabase_client import get_risk_config
     risk_config = get_risk_config()
     max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+
+    # ── CHECK 1: Limit per symbol (Ya validado por can_open_position arriba, pero reforzamos con dato fresco) ──
+    if not guard_check['allowed']:
+        return {"success": False, "reason": "max_positions_reached", "detail": guard_check['reason']}
     
-    # Contar TODAS las posiciones abiertas de este símbolo (no solo de esta estrategia)
-    total_open_symbol = sb.table("positions").select("id", count='exact').eq("symbol", binance_symbol).eq("status", "open").execute().count
-    
-    if total_open_symbol >= max_per_symbol:
-        log_warning(
-            MODULE,
-            f"🚫 LÍMITE ALCANZADO para {binance_symbol}: {total_open_symbol}/{max_per_symbol} posiciones abiertas totales."
-        )
-        return {
-            "success": False,
-            "reason": "max_positions_per_symbol_reached",
-            "pair": binance_symbol,
-        }
+    # Doble check de seguridad absoluta
+    if len(open_pos_list) >= max_per_symbol and any(p.get('symbol') == binance_symbol for p in open_pos_list):
+         # Solo bloqueamos si las posiciones abiertas SON del mismo símbolo
+         symbol_count = sum(1 for p in open_pos_list if p.get('symbol') == binance_symbol)
+         if symbol_count >= max_per_symbol:
+            log_warning(MODULE, f"🚫 BLOQUEO DE SEGURIDAD: {binance_symbol} ya tiene {symbol_count} capas. Límite: {max_per_symbol}")
+            return {"success": False, "reason": "max_layers_reached", "pair": binance_symbol}
 
     # ── CHECK 2: Total Market Risk Limit (30% sum of Stop Losses) ──
     from app.strategy.risk_controls import check_total_market_risk
