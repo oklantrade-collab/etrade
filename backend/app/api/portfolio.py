@@ -236,7 +236,7 @@ async def get_global_portfolio():
                     'forex':  {'symbols': forex_symbols_data, 'positions': len(open_forex_pos_res.data or [])},
                     'stocks': {'symbols': stocks_symbols_data, 'positions': len(open_stocks_pos_res.data or [])}
                 },
-                'recent_activity': recent_activity[:10]
+                'recent_activity': recent_activity[:100]
             }
 
         except Exception as e:
