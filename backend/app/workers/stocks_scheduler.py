@@ -212,6 +212,26 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             log_debug(MODULE, f"Skipping {ticker}: volume {volume_24h} < {min_vol}")
             return None
 
+        # 3b. GAP PROTECTION FILTER (Anti-IFRX & Anti-Falling Knife)
+        gap_pct = float(f_data.get("gap_pct", 0) if f_data else 0)
+        today_open = float(df_1d.iloc[-1]["open"])
+        current_price = float(df_15m.iloc[-1]["close"])
+
+        # Case 1: Gap Up Trap (Price opens high and starts falling)
+        if gap_pct > 5.0 and current_price < today_open:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap ({gap_pct}%). Price below open (${current_price} < ${today_open}).")
+            return None
+
+        # Case 2: Falling Knife (Price gaps down and stays down)
+        if gap_pct < -5.0 and current_price <= today_open:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Falling Knife ({gap_pct}%). No bounce from open yet.")
+            return None
+
+        # Case 3: Extreme Extension
+        if gap_pct > 12.0:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Gap ({gap_pct}%). High reversal risk.")
+            return None
+
         # 4. TECHNICAL RULES
         ps_signal_4h = ind_4h.get("last_pinescript_signal")
         ps_age_4h = ind_4h.get("signal_age", 999)
@@ -349,6 +369,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
 
         # 6. CAPTURE LIVE PRICE
         current_price = float(df_15m["close"].iloc[-1])
+        ind_15m["price"] = current_price
         
         # Inject metadata for persistence
         ind_15m["change_pct"] = ind_1d.get("change_pct", 0.0)
@@ -469,13 +490,18 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         elif t01_confirmed:
              rule_ctx["pine_signal"] = "Buy" # Default 4h signal
         
-        # ── STATE MACHINE & AMBIGUITY CHECK ──
+        # ── STATE MACHINE SYNC & AMBIGUITY CHECK ──
+        # Sync positions with state machine for accurate can_open/can_close logic
+        all_pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+        sm.sync_from_positions(ticker, all_pos_res.data or [])
+
         snap_for_sm = {
             'price': current_price,
             'adx': ind_15m.get('adx', 25),
             'mtf_score': base_score / 100, # Use technical score as proxy for MTF in stocks
             'fibonacci_zone': movement_15m['fib_zone_current'],
-            'sar_trend_15m': 1 if sipv_signal_15m == "BUY" else (-1 if sipv_signal_15m == "SELL" else 0)
+            'sar_trend_15m': 1 if sipv_signal_15m == "BUY" else (-1 if sipv_signal_15m == "SELL" else 0),
+            'sar_trend_4h': 1 if ps_signal_4h == "Buy" else (-1 if ps_signal_4h == "Sell" else 0)
         }
         ambiguity = detect_market_ambiguity(snap_for_sm)
         if ambiguity['is_ambiguous']:

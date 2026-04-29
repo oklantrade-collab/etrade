@@ -24,6 +24,7 @@ from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
 from app.stocks.universe_builder import UniverseBuilder
 from app.analysis.fundamental_scorer import FundamentalScorer
+from dateutil.parser import parse as parse_dt
 
 router = APIRouter()
 
@@ -62,7 +63,8 @@ async def get_stocks_status(sb=Depends(get_supabase)):
 
         paper_mode = config.get("paper_mode_active", "true") == "true"
         kill_switch = config.get("kill_switch_active", "false") == "true"
-        capital = float(config.get("total_capital_usd", 0))
+        capital = float(config.get("total_capital_usd", 5000))
+        max_risk_pct = float(config.get("max_total_risk_pct", 60))
 
         # Check if IB is configured
         import os
@@ -80,6 +82,7 @@ async def get_stocks_status(sb=Depends(get_supabase)):
             "paper_mode":     paper_mode,
             "kill_switch":    kill_switch,
             "capital_usd":    capital,
+            "max_risk_pct":   max_risk_pct,
             "has_ib":         has_ib,
             "has_yfinance":   has_yfinance,
             "data_source":    "yfinance" if has_yfinance else "none",
@@ -319,7 +322,7 @@ async def get_stocks_opportunities(
                 "analyst_rating": w.get("analyst_rating", 0),
                 "is_pro_member": (w.get("quality_flag") in ["PASS", "✓ PASS"] and bool(w.get("pool_type"))) or (ticker in active_pos_tickers),
                 # Conversión de UTC a Lima (GMT-5) para el Dashboard
-                "last_scan_time": (datetime.fromisoformat((t.get("timestamp") or "").split(".")[0][:19] + "+00:00") - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
+                "last_scan_time": (parse_dt(t["timestamp"]) - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
                 
                 # VALUATION ENGINE FIELDS
                 "piotroski_score": f.get("piotroski_score"),
@@ -378,7 +381,7 @@ async def get_stocks_opportunities(
                 "fib_zone_15m": sj.get("fib_zone_15m"),
                 "orders": orders_map.get(ticker, []),
                 "is_pro_member": True, # Force to Pro tab
-                "last_scan_time": (datetime.fromisoformat((t.get("timestamp") or "").split(".")[0][:19] + "+00:00") - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
+                "last_scan_time": (parse_dt(t["timestamp"]) - timedelta(hours=5)).strftime("%H:%M") if t.get("timestamp") else "—:—",
                 "sm_score": calculate_sm_score(
                     rvol=float(sj.get("rvol", 1.0)),
                     s_score=float(sj.get("s_score", 0.0)),
@@ -403,14 +406,16 @@ async def get_stocks_opportunities(
             "market_status": mstatus
         }
     except Exception as e:
+        log_error("stocks_api", f"Error in get_stocks_opportunities: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/positions")
 async def get_stocks_positions():
-    """Get active stock positions from the industrialised table."""
+    """Get active stock positions with bulk query optimization."""
     sb = get_supabase()
     try:
+        # 1. Fetch all open positions
         res = sb.table("stocks_positions")\
             .select("*")\
             .eq("status", "open")\
@@ -419,69 +424,65 @@ async def get_stocks_positions():
         
         positions = res.data or []
         if not positions:
-            return []
+            return {"positions": []}
 
-        # Enriquecer con precios actuales desde technical_scores (más frecuentes que watchlist)
         tickers = [p["ticker"] for p in positions]
+
+        # 2. BULK FETCH: Technical Scores (Prices)
         price_map = {}
         try:
-            tech_res = sb.table("technical_scores")\
-                .select("ticker, signals_json")\
-                .in_("ticker", tickers)\
-                .execute()
-            
+            tech_res = sb.table("technical_scores").select("ticker, signals_json").in_("ticker", tickers).execute()
             for tr in (tech_res.data or []):
                 sj = tr.get("signals_json") or {}
-                if "price" in sj:
-                    try:
-                        price_map[tr["ticker"]] = float(sj["price"] or 0)
-                    except:
-                        pass
-        except Exception as tech_err:
-            log_warning("stocks_api", f"Could not fetch live prices for positions: {tech_err}")
+                if "price" in sj: price_map[tr["ticker"]] = float(sj["price"] or 0)
+        except: pass
 
+        # 3. BULK FETCH: Watchlist Info (Names/Sectors)
+        wl_map = {}
+        try:
+            # We get the most recent entries for these tickers
+            wl_res = sb.table("watchlist_daily").select("ticker, company_name, sector").in_("ticker", tickers).order("date", desc=True).execute()
+            for w in (wl_res.data or []):
+                if w["ticker"] not in wl_map: wl_map[w["ticker"]] = w
+        except: pass
+
+        # 4. BULK FETCH: Trade Opportunities (SL/TP)
+        opp_map = {}
+        try:
+            opp_res = sb.table("trade_opportunities").select("ticker, stop_loss, target_1").in_("ticker", tickers).order("created_at", desc=True).execute()
+            for o in (opp_res.data or []):
+                if o["ticker"] not in opp_map: opp_map[o["ticker"]] = o
+        except: pass
+
+        # 5. ASSEMBLE (Zero extra queries inside this loop!)
         for pos in positions:
             ticker = pos["ticker"]
-            # Prioridad: technical_scores -> stocks_positions.current_price -> avg_price
             cur_price = price_map.get(ticker) or float(pos.get("current_price") or pos.get("avg_price") or 0)
             avg_entry = float(pos.get("avg_price") or 0)
             shares = float(pos.get("shares") or 0)
 
-            # Recalcular P&L
-            unrealized_pnl = (cur_price - avg_entry) * shares
-            unrealized_pnl_pct = ((cur_price - avg_entry) / avg_entry * 100) if avg_entry > 0 else 0
-
-            # 1. Traer Company y Sector desde watchlist (Uso try para no bloquear si falla)
-            pos["company_name"] = ticker
-            pos["sector"] = "Finance"
-            try:
-                wl_info = sb.table("watchlist_daily").select("company_name, sector").eq("ticker", ticker).order("date", desc=True).limit(1).execute().data
-                if wl_info:
-                    pos["company_name"] = wl_info[0].get("company_name") or ticker
-                    pos["sector"] = wl_info[0].get("sector") or "Finance"
-            except:
-                pass
-
-            # 2. Traer SL/TP desde Trade Opportunities
-            opp_info = sb.table("trade_opportunities").select("stop_loss, target_1").eq("ticker", ticker).order("created_at", desc=True).limit(1).execute().data
-            if opp_info:
-                pos["sl_price"] = opp_info[0].get("stop_loss")
-                pos["tp_price"] = opp_info[0].get("target_1")
-
-            # 3. Side: En stocks solo operamos LONG (BUY). 
-            # Mostramos 'buy' siempre que la posición esté abierta, 
-            # independientemente de si la última orden fue un cierre parcial o total anterior.
-            pos["order_type"] = "market"
-            pos["side"] = "buy"  # Stocks are always Long in this model
-
+            pos["company_name"] = wl_map.get(ticker, {}).get("company_name") or ticker
+            pos["sector"] = wl_map.get(ticker, {}).get("sector") or "Finance"
+            
+            opp = opp_map.get(ticker, {})
+            pos["sl_price"] = opp.get("stop_loss")
+            pos["tp_price"] = opp.get("target_1")
+            
+            pos["side"] = "buy"
             pos["current_price"] = cur_price
-            pos["unrealized_pnl"] = round(unrealized_pnl, 2)
-            pos["unrealized_pnl_pct"] = round(unrealized_pnl_pct, 2)
+            pos["unrealized_pnl"] = round((cur_price - avg_entry) * shares, 2)
+            pos["unrealized_pnl_pct"] = round(((cur_price - avg_entry) / avg_entry * 100), 2) if avg_entry > 0 else 0
             pos["total_cost"] = round(avg_entry * shares, 2)
 
         return {"positions": positions}
+
     except Exception as e:
         log_error("stocks_api", f"Error in get_stocks_positions: {e}")
+        # Intentar una segunda vez tras un pequeño respiro si es error de conexión
+        if "disconnected" in str(e).lower() or "timeout" in str(e).lower():
+            await asyncio.sleep(1)
+            # Recursión simple para reintento (máximo 1 vez para seguridad)
+            return await get_stocks_positions()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/positions/{position_id}/close")
@@ -714,9 +715,9 @@ async def run_full_pipeline():
         for c in candidates[:5]:  # Max 5 per pipeline run
             ticker = c["ticker"]
             # Technical sync
-            await process_ticker(ticker, config)
+            tech_data = await process_ticker(ticker, config)
             # AI Decision
-            decision = await engine.execute_full_analysis(ticker, c)
+            decision = await engine.execute_full_analysis(ticker, c, tech_data)
             if decision:
                 decisions.append({"ticker": ticker, "decision": decision.get("decision"), "meta_score": decision.get("meta_score")})
         log.append(f"Decisions: {len(decisions)} analyzed")

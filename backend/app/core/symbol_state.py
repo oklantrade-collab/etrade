@@ -91,6 +91,8 @@ class SymbolStateMachine:
             else:
                 # DCA / Accumulation allowed if < max_positions and price is better
                 if len(ctx.open_positions) < max_positions:
+                    if not ctx.open_positions:
+                        return {'allowed': True, 'reason': 'Estado LONG pero sin posiciones en memoria (sincronizando)'}
                     last_pos = sorted(ctx.open_positions, key=lambda x: x.get('opened_at', ''), reverse=True)[0]
                     last_entry = float(last_pos.get('entry_price') or last_pos.get('avg_entry_price') or 0)
                     if current_price < last_entry:
@@ -105,6 +107,8 @@ class SymbolStateMachine:
             else:
                 # DCA / Accumulation
                 if len(ctx.open_positions) < max_positions:
+                    if not ctx.open_positions:
+                        return {'allowed': True, 'reason': 'Estado SHORT pero sin posiciones en memoria (sincronizando)'}
                     last_pos = sorted(ctx.open_positions, key=lambda x: x.get('opened_at', ''), reverse=True)[0]
                     last_entry = float(last_pos.get('entry_price') or last_pos.get('avg_entry_price') or 0)
                     if current_price > last_entry:
@@ -114,7 +118,7 @@ class SymbolStateMachine:
                 return {'allowed': False, 'reason': f'Límite de {max_positions} posiciones SHORT alcanzado'}
 
         if state in (SymbolState.CLOSING, SymbolState.WAITING, SymbolState.AMBIGUOUS):
-            return {'allowed': False, 'reason': f'Estado {state.value} (Waiting: {ctx.waiting_cycles}, Ambiguous: {ctx.ambiguous_cycles})'}
+            return {'allowed': False, 'reason': f'Estado {state.value} (Waiting: {ctx.waiting_cycles}, Ambiguous: {getattr(ctx, "ambiguous_cycles", 0)})'}
 
         return {'allowed': False, 'reason': f'Estado desconocido: {state}'}
 

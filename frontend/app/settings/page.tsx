@@ -232,8 +232,7 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
              Límite de exposición: ${( ( (config.capital_stocks_spot || 0) + (config.accumulated_profit_stocks || 0) ) * ((generalForm.max_total_risk_pct || 30) / 100)).toLocaleString()} USD
           </div>
          <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_stocks || 1} type="number" suffix="x" onChange={(v: any) => onSaveGlobal({ leverage_stocks: v })} />
-         <SettingRow label="% Inversión por Operación" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSaveGlobal({ pct_for_trading: v })} />
-         <SettingRow label="Máximo Riesgo por Trade" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
+         <SettingRow label="% Inversión por Operación" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
          <SettingToggle label="Paper Trading Active" value={generalForm.paper_mode_active === true || generalForm.paper_mode_active === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, paper_mode_active: v })} />
          <div style={{ padding:'8px 18px' }}>
             <button onClick={() => onSaveGeneral(generalForm)} style={{ width:'100%', padding:'8px', borderRadius:'6px', background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', color:'#FFF', fontSize:'11px', cursor:'pointer' }}>Actualizar General</button>

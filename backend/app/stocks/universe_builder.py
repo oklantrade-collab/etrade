@@ -136,10 +136,10 @@ class UniverseBuilder:
                 if "LEADER" in pt: counts["GROWTH_LEADER"] += 1
             
             log_info(MODULE, f"✅ Universe Sweep Complete: {counts}")
-            return counts
+            return candidates
         else:
             log_warning(MODULE, "No candidates found after all scanners")
-            return {"FUTURE_GIANT": 0, "GROWTH_LEADER": 0, "TOTAL": 0}
+            return []
 
     # ─── 1. IB Scanner (Primary) ───────────────────────────────
     async def _scan_ib(self, max_price, min_price, min_market_cap, min_volume, max_results) -> list[dict]:
@@ -257,6 +257,28 @@ class UniverseBuilder:
             log_error(MODULE, f"Yahoo Screener failed: {e}")
             return []
 
+    async def _calculate_gap(self, ticker: str, current_price: float) -> float:
+        """
+        Calculates the gap percentage from yesterday's close.
+        (CurrentPrice - PrevClose) / PrevClose
+        """
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            # Fetch only today and yesterday
+            hist = t.history(period="2d")
+            if len(hist) < 2:
+                return 0.0
+            
+            prev_close = hist['Close'].iloc[-2]
+            if prev_close <= 0:
+                return 0.0
+            
+            gap = (current_price - prev_close) / prev_close
+            return round(gap * 100, 2)
+        except Exception:
+            return 0.0
+
     # ─── 3. Alpha Vantage Fallback ─────────────────────────────
     async def _scan_alphavantage_fallback(self, max_price: float) -> list[dict]:
         try:
@@ -318,7 +340,8 @@ class UniverseBuilder:
                 "eps_growth_qoq": round(float(c.get("eps_growth_qoq", 0) or 0), 2),
                 "rs_score_6m": round(float(c.get("rs_score_6m", 0) or 0), 2),
                 "inst_ownership_pct": round(float(c.get("inst_ownership_pct", 0) or 0), 2),
-                "market_cap_mln": round(float(c.get("market_cap_mln", 0) or 0), 2)
+                "market_cap_mln": round(float(c.get("market_cap_mln", 0) or 0), 2),
+                "gap_pct": round(float(c.get("_change_pct", 0) or 0), 2)  # Proxy for opening gap
             })
 
         # Log sample for debugging

@@ -3,7 +3,10 @@ eTrader v4.5 — Context Analyzer (Resilient QWEN)
 """
 import json, os, sys, asyncio
 from datetime import date
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from app.core.logger import log_info, log_error
 from app.core.supabase_client import get_supabase

@@ -194,6 +194,7 @@ class DecisionEngine:
                 final_decision = "ENTER" if (final_meta >= 65 and fundamental_universe >= 70) else "WAIT"
                 trade_type = "swing_trade"
 
+            combined = {
                 "pro_score": round(final_ia_avg, 1),
                 "meta_score": round(final_meta, 0),
                 "decision": final_decision,

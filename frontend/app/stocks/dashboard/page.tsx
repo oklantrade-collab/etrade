@@ -142,17 +142,27 @@ export default function StocksDashboard() {
                   <div style={{ fontSize: '24px', fontWeight: 950, color: '#F59E0B' }}>${positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
               </div>
               <div style={{ borderLeft: '1px solid rgba(255,255,255,0.05)', paddingLeft: '40px' }}>
-                  <div style={{ fontSize: '10px', fontWeight: 900, color: '#555', letterSpacing: '0.1em', marginBottom: '8px', textTransform:'uppercase' }}>Available Funds</div>
-                  <div style={{ fontSize: '24px', fontWeight: 950, color: '#22C55E' }}>${(parseFloat(status.capital_usd || 5000) - positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0)).toLocaleString(undefined, {minimumFractionDigits: 2})}</div>
+                  <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', letterSpacing: '0.1em', marginBottom: '8px', textTransform:'uppercase' }}>Trading Enabled (60% Limit)</div>
+                  <div style={{ fontSize: '24px', fontWeight: 950, color: '#22C55E' }}>
+                      ${(
+                          (parseFloat(status.capital_usd || 5000) * (status.max_risk_pct || 60) / 100) - 
+                          positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0)
+                      ).toLocaleString(undefined, {minimumFractionDigits: 2})}
+                  </div>
               </div>
           </div>
           <div style={{ width: '200px' }}>
                 <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px', fontSize:'10px', fontWeight:900, color:'#444' }}>
-                    <span>EXPOSURE</span>
+                    <span>RISK EXPOSURE ({status.max_risk_pct || 60}%)</span>
                     <span>{((positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0) / parseFloat(status.capital_usd || 5000)) * 100).toFixed(1)}%</span>
                 </div>
                 <div style={{ width:'100%', height:'6px', background:'rgba(255,255,255,0.03)', borderRadius:'10px', overflow:'hidden' }}>
-                    <div style={{ width: `${(positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0) / parseFloat(status.capital_usd || 5000)) * 100}%`, height:'100%', background:'#22C55E', boxShadow:'0 0 10px rgba(34,197,94,0.4)' }}></div>
+                    <div style={{ 
+                        width: `${Math.min(100, (positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0) / (parseFloat(status.capital_usd || 5000) * (status.max_risk_pct || 60) / 100)) * 100)}%`, 
+                        height:'100%', 
+                        background: (positions.reduce((acc, p) => acc + (parseFloat(p.avg_price || 0) * parseInt(p.shares || 0)), 0) > (parseFloat(status.capital_usd || 5000) * (status.max_risk_pct || 60) / 100)) ? '#FF4757' : '#22C55E', 
+                        boxShadow: '0 0 10px rgba(34,197,94,0.4)' 
+                    }}></div>
                 </div>
           </div>
       </div>

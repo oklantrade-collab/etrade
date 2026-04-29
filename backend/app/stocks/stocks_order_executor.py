@@ -43,13 +43,6 @@ def _get_config() -> dict:
             "max_total_risk_pct": pct_max_total,
             "max_positions": int(cfg.get("max_concurrent_positions", 5)),
         }
-
-        return {
-            "paper_mode": str(cfg.get("paper_mode_active", "true")).lower() == "true",
-            "total_capital": float(cfg.get("total_capital_usd", 5000)),
-            "max_pct_per_trade": pct,
-            "max_positions": int(cfg.get("max_concurrent_positions", 5)),
-        }
     except Exception as e:
         log_warning(MODULE, f"Config load error: {e}")
         return {

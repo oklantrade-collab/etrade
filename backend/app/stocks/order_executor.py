@@ -45,8 +45,8 @@ class OrderExecutor:
             self.paper_mode = cfg.get("paper_mode_active", "true") == "true"
             self.kill_switch = cfg.get("kill_switch_active", "false") == "true"
             self.total_capital = float(cfg.get("total_capital_usd", "5000"))
-            self.invest_per_trade_pct = float(cfg.get("invest_per_trade_pct", "5.0"))
-            self.max_exposure_pct = float(cfg.get("max_total_exposure_pct", "30.0"))
+            self.max_pct_per_trade = float(cfg.get("max_pct_per_trade", "5.0"))
+            self.max_exposure_pct = float(cfg.get("max_total_risk_pct", "30.0"))
             self.max_positions = int(cfg.get("max_concurrent_positions", "6"))
             self.max_daily_loss = float(cfg.get("max_daily_loss_usd", "100.0"))
         except Exception as e:
@@ -141,7 +141,7 @@ class OrderExecutor:
                 return await self._mark_failed(opp_id, "Invalid entry price")
 
             # 2. CALCULAR TAMAÑO POR INVERSIÓN FIJA (5% = $250)
-            invest_amount_usd = self.total_capital * (self.invest_per_trade_pct / 100)
+            invest_amount_usd = self.total_capital * (self.max_pct_per_trade / 100)
             shares = int(invest_amount_usd / entry_price)
             
             # 3. VERIFICAR LÍMITE DE EXPOSICIÓN TOTAL (30% = $1500)

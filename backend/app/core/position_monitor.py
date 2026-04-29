@@ -706,33 +706,46 @@ async def _execute_paper_open(
         # 2. Límite GLOBAL (max_open_trades) y SÍMBOLO usando LOCK para atomicidad
         max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
         
-        # Consultar DB directamente para conteo global exacto
-        pos_res = supabase.table('positions').select('id').eq('status', 'open').execute()
-        current_global = len(pos_res.data) if pos_res.data else 0
-        
-        if current_global >= max_global:
-            log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
+        # --- NUEVO: Bloqueo de símbolo en memoria para evitar RACE CONDITIONS ---
+        if BOT_STATE.opening_locks.get(symbol):
+            log_warning(MODULE, f"🛑 BLOQUEO DE SEGURIDAD: {symbol} ya está en proceso de apertura. Abortando duplicado.")
             return None
-
-        # 3. Límite POR SÍMBOLO
-        from app.core.supabase_client import get_risk_config
-        risk_config = get_risk_config()
-        max_symbol = int(risk_config.get('max_positions_per_symbol', 4))
         
-        # Contar posiciones abiertas para este símbolo específico
-        sym_pos_res = supabase.table('positions').select('id').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
-        current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
+        BOT_STATE.opening_locks[symbol] = True
+        
+        try:
+            # Consultar DB directamente para conteo global exacto
+            pos_res = supabase.table('positions').select('id').eq('status', 'open').execute()
+            current_global = len(pos_res.data) if pos_res.data else 0
+            
+            if current_global >= max_global:
+                log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
+                BOT_STATE.opening_locks[symbol] = False
+                return None
 
-        if current_sym >= max_symbol:
-            log_info(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} posiciones por símbolo alcanzado ({current_sym}).")
-            return None
+            # 3. Límite POR SÍMBOLO
+            from app.core.supabase_client import get_risk_config
+            risk_config = get_risk_config()
+            max_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+            
+            # Contar posiciones abiertas para este símbolo específico
+            sym_pos_res = supabase.table('positions').select('id').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
+            current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
 
-        # Si pasamos los límites, procedemos a abrir (dentro del lock o justo después)
-        # Lo mantenemos dentro del lock para que el 'count' de la siguiente tarea sea correcto
-        res = await _execute_paper_open_unlocked(
-            symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
-        )
-        return res
+            if current_sym >= max_symbol:
+                log_info(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} posiciones por símbolo alcanzado ({current_sym}).")
+                BOT_STATE.opening_locks[symbol] = False
+                return None
+
+            # Si pasamos los límites, procedemos a abrir (dentro del lock o justo después)
+            # Lo mantenemos dentro del lock para que el 'count' de la siguiente tarea sea correcto
+            res = await _execute_paper_open_unlocked(
+                symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
+            )
+            return res
+        finally:
+            # SIEMPRE liberar el bloqueo de apertura al terminar (éxito o error)
+            BOT_STATE.opening_locks[symbol] = False
 
 async def _execute_paper_open_unlocked(
     symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
