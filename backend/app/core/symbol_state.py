@@ -205,6 +205,35 @@ class SymbolStateMachine:
         except Exception as e:
             log_error('STATE_MACHINE', f'Error cargando estado para {symbol}: {e}')
 
+    def cleanup_zombie_states(self, symbol: str, active_positions: list):
+        """
+        Detecta y corrige inconsistencias (estados zombies).
+        Si el estado es LONG/SHORT pero no hay posiciones reales o tienen precio 0, resetea.
+        """
+        ctx = self.get(symbol)
+        if ctx.state in (SymbolState.LONG, SymbolState.SHORT):
+            # Si no hay posiciones reales pasadas por el scheduler
+            if not active_positions:
+                log_info('STATE_MACHINE', f'?? RESET: {symbol} estaba en {ctx.state.value} sin posiciones reales. Reseteando a NEUTRAL.')
+                ctx.transition_to(SymbolState.NEUTRAL, 'Cleanup: No active positions found')
+                self.save_to_db(symbol)
+                return True
+            
+            # Si hay posiciones pero la última tiene precio 0
+            last_pos = sorted(active_positions, key=lambda x: x.get('opened_at', ''), reverse=True)[0]
+            price = float(last_pos.get('entry_price') or last_pos.get('avg_entry_price') or 0)
+            if price <= 0:
+                log_info('STATE_MACHINE', f'?? RESET: {symbol} tiene posición con precio 0.0. Posible señal huérfana. Reseteando.')
+                ctx.transition_to(SymbolState.NEUTRAL, 'Cleanup: Zero price position detected')
+                # Opcionalmente marcar la posición como error en la DB
+                try:
+                    sb = get_supabase()
+                    sb.table('stocks_positions').update({'status': 'error', 'sl_close_reason': 'zero_price_cleanup'}).eq('id', last_pos['id']).execute()
+                except: pass
+                self.save_to_db(symbol)
+                return True
+        return False
+
 
 def detect_market_ambiguity(snap: dict) -> dict:
     flags = []

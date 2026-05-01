@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 import os
 import pandas as pd
 import numpy as np
+from datetime import datetime, timezone, timedelta
 from app.core.supabase_client import get_supabase
 
 router = APIRouter()
@@ -119,3 +120,113 @@ async def get_forex_positions(
         return res.data or []
     except Exception as e:
         return []
+
+@router.get('/dashboard/summary')
+async def get_forex_dashboard(
+    sb = Depends(get_supabase)
+):
+    """
+    Retorna todos los datos del dashboard
+    desde Supabase (lectura local, sin cTrader).
+    Tiempo de respuesta: < 50ms
+    """
+    # Snapshots actuales
+    snaps_res = sb.table('market_snapshot')\
+        .select('*')\
+        .in_('symbol', [
+            'EURUSD','GBPUSD',
+            'USDJPY','XAUUSD'
+        ])\
+        .execute()
+    snapshots = {
+        s['symbol']: s
+        for s in (snaps_res.data or [])
+    }
+
+    # Posiciones abiertas
+    pos_res = sb.table('forex_positions')\
+        .select('*')\
+        .eq('status', 'open')\
+        .execute()
+    positions = pos_res.data or []
+
+    # P&L del día
+    today = datetime.now(timezone.utc)\
+        .replace(hour=0, minute=0, second=0)\
+        .isoformat()
+    pnl_res = sb.table('forex_positions')\
+        .select('realized_pnl,symbol')\
+        .gte('closed_at', today)\
+        .eq('status', 'closed')\
+        .execute()
+    daily_pnl = sum(
+        float(r.get('realized_pnl', 0) or 0)
+        for r in (pnl_res.data or [])
+    )
+
+    return {
+        'snapshots':      snapshots,
+        'positions':      positions,
+        'daily_pnl':      round(daily_pnl, 2),
+        'timestamp':      datetime.now(
+            timezone.utc
+        ).isoformat(),
+    }
+
+@router.get('/dashboard/positions')
+async def get_positions_live_forex(
+    sb = Depends(get_supabase)
+):
+    """
+    Posiciones con P&L calculado desde Supabase.
+    """
+    pos_res = sb.table('forex_positions')\
+        .select('*')\
+        .eq('status', 'open')\
+        .order('opened_at', desc=True)\
+        .execute()
+    positions = pos_res.data or []
+
+    # Enriquecer con precio actual
+    snaps_res = sb.table('market_snapshot')\
+        .select('symbol,price,fibonacci_zone')\
+        .execute()
+    price_map = {
+        s['symbol']: s
+        for s in (snaps_res.data or [])
+    }
+
+    from app.strategy.forex_adaptive_exit import _pip_size
+
+    for pos in positions:
+        symbol = pos.get('symbol', '')
+        snap   = price_map.get(symbol, {})
+        price  = float(snap.get('price', 0))
+        entry  = float(pos.get(
+            'avg_entry_price', 0
+        ) or pos.get('entry_price', 0) or 0)
+        side   = str(pos.get('side', 'long'))
+
+        if price > 0 and entry > 0:
+            pip = _pip_size(symbol)
+            if side in ('long', 'buy'):
+                pnl_pips = (price - entry) / pip
+            else:
+                pnl_pips = (entry - price) / pip
+            
+            pnl_pct = pnl_pips * pip / entry * 100 if entry > 0 else 0
+
+            pos['current_price'] = price
+            pos['unrealized_pnl_pct'] = round(pnl_pct, 4)
+            pos['unrealized_pnl_pips'] = round(pnl_pips, 1)
+            pos['fib_zone'] = snap.get(
+                'fibonacci_zone', 0
+            )
+
+    return {
+        'positions':  positions,
+        'count':      len(positions),
+        'timestamp':  datetime.now(
+            timezone.utc
+        ).isoformat(),
+    }

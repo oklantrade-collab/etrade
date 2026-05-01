@@ -58,6 +58,14 @@ from app.strategy.proactive_exit import (
     evaluate_proactive_exit
 )
 from app.core.symbol_state import SymbolStateMachine, detect_market_ambiguity
+from app.core.safety_manager import (
+    register_heartbeat, validate_signal, check_circuit_breaker,
+    register_sl_event, reset_sl_counter, check_all_heartbeats
+)
+from app.strategy.macro_filter import fetch_macro_context
+from app.strategy.crypto_adaptive_exit import (
+    evaluate_crypto_tp, evaluate_crypto_sl, close_all_crypto_positions
+)
 
 sm = SymbolStateMachine.get_instance()
 
@@ -767,8 +775,10 @@ async def check_proactive_exit_crypto(
 
 
 async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
-
     """Auxiliar para procesar un símbolo en el ciclo 5m (Paralelo)."""
+    # ── Heartbeat ─────────────────────────────
+    register_heartbeat('crypto_scheduler_5m')
+    
     cycle_start = time.time()
     try:
         # 1. Update prices (Use persistent provider)
@@ -878,8 +888,34 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                 )
                 return # Detener procesamiento para este símbolo en este ciclo
 
-        # ── NUEVO: Cierre Proactivo Aa51/Bb51 ──
+        # ── NUEVO: Cierre Proactivo / Adaptativo v5.0 ──
         if position:
+            # 1. TP Adaptativo v5
+            tp_res = evaluate_crypto_tp(symbol, [position], current_price, snap, df_5m)
+            if tp_res['should_close']:
+                await close_all_crypto_positions(
+                    symbol, [position], current_price, 
+                    tp_res['close_reason'], tp_res['pnl'], sb, is_tp=True
+                )
+                reset_sl_counter(symbol, position.get('side', 'long'))
+                return
+
+            # 2. SL Adaptativo / SLV v5
+            sl_res = evaluate_crypto_sl(symbol, [position], current_price, snap, df_5m)
+            if sl_res['should_close']:
+                await close_all_crypto_positions(
+                    symbol, [position], current_price,
+                    sl_res.get('exit_type', 'sl_v5'), sl_res['pnl_pips'], sb, is_tp=False
+                )
+                register_sl_event(symbol, position.get('side', 'long'))
+                return
+            elif sl_res.get('slv_triggered'):
+                # Activar modo recuperación si no estaba activo
+                if not position.get('recovery_mode'):
+                    from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
+                    activate_recovery_mode_sync(position, current_price, symbol, 'crypto_futures', sb)
+            
+            # 3. Fallback Proactivo Aa51 (Legacy)
             closed = await check_proactive_exit_crypto(symbol, current_price, snap, sb)
             if closed:
                 return # Posición cerrada
@@ -1222,12 +1258,7 @@ async def sync_db_config_to_memory():
 
             BOT_STATE.config_cache = current
             
-            # --- AGREGAR: Cargar risk_config también para unificar config_cache ---
-            risk_res = sb.table("risk_config").select("*").maybe_single().execute()
-            if risk_res.data:
-                BOT_STATE.config_cache.update(risk_res.data)
-                
-            log_info(MODULE, "Configuration (Trading + Risk) synced from Supabase.")
+            log_info(MODULE, f"Risk config synced from Supabase.")
     except Exception as e:
         log_error(MODULE, f"Failed to sync config from DB: {e}")
 
@@ -1249,6 +1280,15 @@ def load_config_to_memory():
 
 async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
     """Procesamiento asíncrono para UN símbolo en el ciclo 15m (Parallel)."""
+    # ── 1. Heartbeat & Safety Manager ─────────
+    register_heartbeat('crypto_scheduler_15m')
+    
+    # ── 2. Circuit Breaker Global ────────────
+    cb = await check_circuit_breaker(sb, 'crypto_futures')
+    if cb['active']:
+        log_info('SAFETY', f'Ciclo omitido por Circuit Breaker: {cb["reason"]}')
+        return
+
     t0 = time.time()
     error_msg = None
     raw_indicators = {}
@@ -1602,6 +1642,25 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                         if bearish_action == 'open_short':
                             rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
             
+            if not rule_match:
+                blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
+            else:
+                # ── 3. Validar Señal (Zombie Check) ──────
+                v_signal = validate_signal(symbol, float(last_row['close']), last_row.name if hasattr(last_row, 'name') else None)
+                if not v_signal['valid']:
+                    blocked_by = f"safety_block ({v_signal['reason']})"
+                    rule_match = None
+
+            # ── 4. Filtro Macro (BTC Compass) ─────────
+            if rule_match and not blocked_by:
+                macro = await fetch_macro_context('crypto_futures', symbol, sb)
+                if (rule_match['direction'] == 'long' and not macro['allow_long']) or \
+                   (rule_match['direction'] == 'short' and not macro['allow_short']):
+                    blocked_by = f"macro_filter ({macro['reason']})"
+                    rule_match = None
+                elif macro.get('reduce_sizing'):
+                    log_info('MACRO', f'{symbol}: Reduciendo sizing por contexto macro cauteloso')
+
             # ── LOG 4: RESULTADO EVALUACIÓN DE REGLAS ──
             if rule_match and rule_match.get('direction'):
                 log_info('ENTRY_EVAL',
@@ -1618,6 +1677,23 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
 
             if not rule_match:
                 blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
+            else:
+                # ── 3. Validar Señal (Zombie Check) ──────
+                v_signal = validate_signal(symbol, float(last_row['close']), last_row.name if hasattr(last_row, 'name') else None)
+                if not v_signal['valid']:
+                    blocked_by = f"safety_block ({v_signal['reason']})"
+                    rule_match = None
+
+            # ── 4. Filtro Macro (BTC Compass) ─────────
+            if rule_match and not blocked_by:
+                macro = await fetch_macro_context('crypto_futures', symbol, sb)
+                if (rule_match['direction'] == 'long' and not macro['allow_long']) or \
+                   (rule_match['direction'] == 'short' and not macro['allow_short']):
+                    blocked_by = f"macro_filter ({macro['reason']})"
+                    rule_match = None
+                elif macro.get('reduce_sizing'):
+                    log_info('MACRO', f'{symbol}: Reduciendo sizing por contexto macro cauteloso')
+                    # Opcional: ajustar sizing aquí si se desea
 
             # Validar pre-filtros si hay match
             if rule_match and rule_match['direction'] in ['long', 'short']:
@@ -2046,6 +2122,12 @@ async def main():
             log_error(MODULE, f"Error en limpieza diaria: {e}")
     
     scheduler.add_job(daily_cleanup_job, CronTrigger(hour=3, minute=0), id='daily_cleanup', replace_existing=True)
+    
+    # 7. Heartbeat Check (Every 5 minutes)
+    async def heartbeat_check_job():
+        await check_all_heartbeats()
+    
+    scheduler.add_job(heartbeat_check_job, CronTrigger(minute='*/5'), id='heartbeat_check', replace_existing=True)
     
     log_info(MODULE, "v4 Scheduler Started. Running initial cycles...")
     

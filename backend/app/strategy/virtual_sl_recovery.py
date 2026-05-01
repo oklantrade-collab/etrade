@@ -295,7 +295,46 @@ def evaluate_recovery_mode(
             ),
         }
 
-    # ── SALIDA 4: Timeout ─────────────────────
+    # ── SALIDA 3.5: Cierre por Pánico / Aceleración Bajista ──
+    # Si la pérdida supera el SL Virtual (ej. -2%) y vemos fuerte presión en contra
+    current_loss_pct = abs(pnl_pips * pip_size / entry_price * 100) if entry_price > 0 else 0
+    
+    # Tolerancia mínima antes de evaluar pánico (ej. 1.5% o la mitad del Hard Stop)
+    max_loss_hard = float(position.get('sl_max_loss_hard') or cfg.get('sl_max_loss_hard', 10.0))
+    panic_threshold = min(max_loss_hard * 0.4, 2.0) # Evaluamos pánico si cae > 2% o 40% del Hard Stop
+    
+    if current_loss_pct >= panic_threshold:
+        panic_signal = _detect_panic_acceleration(snap, side)
+        if panic_signal['detected']:
+            return {
+                'should_close':     True,
+                'action':           'close_panic',
+                'exit_type':        'momentum_panic',
+                'pnl_pips':         round(pnl_pips, 1),
+                'new_lowest':       new_lowest,
+                'recovery_cycles':  new_cycle,
+                'reason': (
+                    f'MR: Aceleración en contra detectada ({panic_signal["reason"]}). '
+                    f'Cierre predictivo al {pnl_pips:.1f} pips para evitar Hard Stop.'
+                ),
+            }
+
+    # ── SALIDA 4: Hard Stop (Seguridad Máxima) ──
+    if current_loss_pct >= max_loss_hard:
+        return {
+            'should_close':     True,
+            'action':           'close_hard_stop',
+            'exit_type':        'hard_stop',
+            'pnl_pips':         round(pnl_pips, 1),
+            'new_lowest':       new_lowest,
+            'recovery_cycles':  new_cycle,
+            'reason': (
+                f'MR: Hard Stop alcanzado ({current_loss_pct:.1f}% >= {max_loss_hard}%). '
+                f'Cerrando inmediatamente para proteger capital.'
+            ),
+        }
+
+    # ── SALIDA 5: Timeout ─────────────────────
     if recovery_cycles >= max_cycles:
         return {
             'should_close':     True,
@@ -325,6 +364,44 @@ def evaluate_recovery_mode(
     }
 
 
+def _detect_panic_acceleration(
+    snap: dict,
+    side: str
+) -> dict:
+    """
+    Evalúa si hay una aceleración fuerte en contra del trade.
+    Combina Momentum (MTF), Fuerza de tendencia (ADX) y Acción de precio (PineScript).
+    """
+    pine = str(snap.get('pinescript_signal', '') or '')
+    mtf = float(snap.get('mtf_score', 0) or 0)
+    adx = float(snap.get('adx', 0) or 0)
+    macd_h = float(snap.get('macd_histogram', 0) or snap.get('macd_hist', 0) or 0)
+
+    detected = False
+    reason = ""
+
+    if side in ('long', 'buy'):
+        # Para LONG, pánico es caída fuerte
+        if mtf < -0.4 and adx > 25 and pine in ('Sell', 'S', 'Strong Sell'):
+            detected = True
+            reason = f"Fuerte presión bajista (MTF: {mtf:.2f}, ADX: {adx:.1f})"
+        elif mtf < -0.6:
+            detected = True
+            reason = f"Colapso de Momentum (MTF: {mtf:.2f})"
+    else:
+        # Para SHORT, pánico es subida fuerte
+        if mtf > 0.4 and adx > 25 and pine in ('Buy', 'B', 'Strong Buy'):
+            detected = True
+            reason = f"Fuerte presión alcista (MTF: {mtf:.2f}, ADX: {adx:.1f})"
+        elif mtf > 0.6:
+            detected = True
+            reason = f"Explosión de Momentum (MTF: {mtf:.2f})"
+
+    return {
+        'detected': detected,
+        'reason': reason
+    }
+
 def _detect_micro_reversal(
     snap:        dict,
     side:        str,
@@ -332,7 +409,7 @@ def _detect_micro_reversal(
 ) -> dict:
     """
     Detecta señales de micro-reversión en 5m.
-    Necesita ≥ 2 señales confirmando giro favorable.
+    Necesita >= 2 señales confirmando giro favorable.
     """
     signals_found = []
 

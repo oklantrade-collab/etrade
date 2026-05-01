@@ -18,6 +18,8 @@ from app.strategy.capital_protection import (
     evaluate_all_protections,
     PROTECTION_CONFIG
 )
+from app.strategy.forex_adaptive_exit import evaluate_forex_tp, evaluate_forex_sl
+from app.core.safety_manager import register_sl_event, reset_sl_counter
 
 # ── Configuración ────────────────────────────────
 def get_forex_config():
@@ -457,6 +459,29 @@ class ForexExecutionService:
                 # ── Segundo: Sistema de Protección de Capital (7 Reglas) ──
                 if snap:
                     self._run_protection_forex(pos, snap)
+
+                # ── Tercero: Cierre Adaptativo v5.0 ──
+                if snap:
+                    # 1. TP Adaptativo
+                    tp_res = evaluate_forex_tp(symbol, pos, price, snap)
+                    if tp_res['should_close']:
+                        self.log(f"🎯 [ADAPTIVE TP] {symbol}: {tp_res['close_reason']} (PnL: {tp_res['pnl_pips']:.1f} pips)")
+                        self._close_position(pos, price, tp_res['close_reason'], tp_res['pnl_pips'])
+                        reset_sl_counter(symbol, pos['side'])
+                        continue
+
+                    # 2. SL Adaptativo / SLV
+                    sl_res = evaluate_forex_sl(symbol, pos, price, snap)
+                    if sl_res['should_close']:
+                        self.log(f"🛡️ [ADAPTIVE SL] {symbol}: {sl_res.get('exit_type', 'sl_v5')} (PnL: {sl_res['pnl_pips']:.1f} pips)")
+                        self._close_position(pos, price, sl_res.get('exit_type', 'sl_v5'), sl_res['pnl_pips'])
+                        register_sl_event(symbol, pos['side'])
+                        continue
+                    elif sl_res.get('slv_triggered'):
+                         # Ya se maneja en el bloque SLVM arriba, pero aseguramos coherencia
+                         if not pos.get('recovery_mode'):
+                             from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
+                             activate_recovery_mode_sync(pos, price, symbol, 'forex_futures', self.sb, 'forex_positions')
 
                 self._manage_position(pos, snap)
             except Exception as e: self.log(f'Error gestión: {e}')

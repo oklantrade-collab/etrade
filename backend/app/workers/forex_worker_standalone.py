@@ -66,6 +66,7 @@ else:
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+from app.core.safety_manager import register_heartbeat, check_circuit_breaker
 
 from twisted.internet import reactor, threads, task
 from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
@@ -422,6 +423,9 @@ class StandaloneForexWorker:
             self.log(f"Error procesando {sym} ({tf}):\n{traceback.format_exc()}", "ERROR")
 
     def run_cycle(self):
+        # ── Heartbeat ─────────────────────────────
+        register_heartbeat('forex_worker')
+        
         STATE['cycle_count'] = STATE.get('cycle_count', 0) + 1
         cycle = STATE['cycle_count']
         delay = 0
