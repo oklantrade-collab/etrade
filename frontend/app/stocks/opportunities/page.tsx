@@ -40,7 +40,7 @@ export default function OpportunitiesIntelligence() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 10000)
+    const interval = setInterval(fetchData, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -212,8 +212,7 @@ export default function OpportunitiesIntelligence() {
         {!loading && displayList.length === 0 && <div style={{ padding: '60px', textAlign: 'center', color: '#444' }}>Monitoreando señales...</div>}
       </div>
 
-      {selectedStock && <AnalysisModal stock={selectedStock} onClose={() => setSelectedStock(null)} />}
-      
+
       {showAddModal && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, backdropFilter: 'blur(5px)' }}>
             <div style={{ background: '#161922', width: '400px', borderRadius: '20px', border: '1px solid #22C55E', padding: '30px', boxShadow: '0 0 30px rgba(34,197,94,0.2)' }}>
@@ -265,8 +264,10 @@ export default function OpportunitiesIntelligence() {
       )}
 
       {selectedStock && <AnalysisModal stock={selectedStock} onClose={() => setSelectedStock(null)} />}
+
       <Link href="/stocks/universe" style={{ display: 'inline-block', marginTop: '20px', color: '#22C55E', textDecoration: 'none', fontWeight: 800, fontSize: '11px' }}>← VOLVER AL UNIVERSE BUILDER</Link>
     </div>
+
   )
 }
 
@@ -468,7 +469,19 @@ function AnalysisModal({ stock, onClose }: any) {
   const iv = stock.composite_intrinsic || 0;
 
   return (
-    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.95)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(10px)' }}>
+    <div style={{ 
+      position: 'fixed', 
+      top: 0, 
+      left: 0, 
+      width: '100%', 
+      height: '100%', 
+      background: 'rgba(0,0,0,0.95)', 
+      display: 'flex', 
+      alignItems: 'center', 
+      justifyContent: 'center', 
+      zIndex: 1000, 
+      backdropFilter: 'blur(10px)' 
+    }}>
       <div style={{ background: '#0F1117', width: '95%', maxWidth: '1150px', borderRadius: '24px', border: '1px solid #22C55E', overflow: 'hidden', maxHeight: '95vh', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(34,197,94,0.2)' }}>
         
         {/* HEADER */}

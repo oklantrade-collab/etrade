@@ -20,7 +20,7 @@ export default function StocksDashboard() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 15000) 
+    const interval = setInterval(fetchData, 45000) 
     return () => clearInterval(interval)
   }, [])
 

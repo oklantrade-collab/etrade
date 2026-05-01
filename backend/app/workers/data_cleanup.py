@@ -43,12 +43,12 @@ CANDLE_RETENTION = {
 
 # ── Retención por tiempo (días) de tablas de logs ──
 TIME_RETENTION = {
-    "system_logs":          {"days": 2,  "time_col": "created_at"},
-    "pilot_diagnostics":    {"days": 1,  "time_col": "timestamp"},
-    "strategy_evaluations": {"days": 7,  "time_col": "created_at"},
-    "volume_spikes":        {"days": 14, "time_col": "detected_at"},
-    "signals_log":          {"days": 14, "time_col": "detected_at"},
-    "db_cleanup_log":       {"days": 90, "time_col": "executed_at"},
+    "system_logs":          {"days": 1,  "time_col": "created_at"},
+    "pilot_diagnostics":    {"days": 0.25,  "time_col": "timestamp"},
+    "strategy_evaluations": {"days": 3,  "time_col": "created_at"},
+    "volume_spikes":        {"days": 7, "time_col": "detected_at"},
+    "signals_log":          {"days": 7, "time_col": "detected_at"},
+    "db_cleanup_log":       {"days": 30, "time_col": "executed_at"},
 }
 
 # ── Tablas opcionales (pueden no existir aún) ──
@@ -173,15 +173,15 @@ async def cleanup_database() -> dict:
     # 2.2 Tablas base (Padres)
     parent_tables = {
         "volume_spikes":        {"days": 7,  "time_col": "detected_at"},
-        "signals_log":          {"days": 14, "time_col": "detected_at"},
-        "system_logs":          {"days": 2,  "time_col": "created_at"},
-        "pilot_diagnostics":    {"days": 1,  "time_col": "timestamp"},
-        "strategy_evaluations": {"days": 7,  "time_col": "created_at"},
-        "db_cleanup_log":       {"days": 90, "time_col": "executed_at"},
-        "technical_indicators": {"days": 2,  "time_col": "timestamp"},
-        "market_regime_history":{"days": 30, "time_col": "evaluated_at"},
-        "cron_cycles":          {"days": 2,  "time_col": "started_at"},
-        "news_sentiment":       {"days": 30, "time_col": "analyzed_at"},
+        "signals_log":          {"days": 7, "time_col": "detected_at"},
+        "system_logs":          {"days": 1,  "time_col": "created_at"},
+        "pilot_diagnostics":    {"days": 0.25,  "time_col": "timestamp"},
+        "strategy_evaluations": {"days": 3,  "time_col": "created_at"},
+        "db_cleanup_log":       {"days": 30, "time_col": "executed_at"},
+        "technical_indicators": {"days": 1,  "time_col": "timestamp"},
+        "market_regime_history":{"days": 14, "time_col": "evaluated_at"},
+        "cron_cycles":          {"days": 1,  "time_col": "started_at"},
+        "news_sentiment":       {"days": 14, "time_col": "analyzed_at"},
     }
 
     for table_name, config in parent_tables.items():
