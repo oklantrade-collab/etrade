@@ -478,6 +478,8 @@ def _open_or_update_position(
         sb.table("trade_opportunities").insert(opp_row).execute()
 
         # 2. Insert Position
+        slv_hs_pips = calculate_hard_stop_pips(ticker, 'stocks_spot', snap_slv)
+        
         sb.table("stocks_positions").insert({
             "ticker": ticker,
             "group_name": group_name,
@@ -496,6 +498,7 @@ def _open_or_update_position(
             "status": "open",
             # ── SLVM Fields ──
             "slv_price": slv_price,
+            "slv_hard_stop_pips": slv_hs_pips,
             "recovery_mode": False,
             "recovery_cycles": 0,
         }).execute()
