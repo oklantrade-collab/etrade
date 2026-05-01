@@ -347,6 +347,21 @@ def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, s
     except Exception as e:
         log_error('SLVM', f"Error finalizing recovery exit: {e}")
 
+def update_recovery_cycle_sync(position: dict, mr_result: dict, sb, table='positions'):
+    """Actualiza el contador de ciclos de recuperación en la DB."""
+    try:
+        sb.table(table).update({
+            'recovery_cycles': mr_result.get('recovery_cycles', 0)
+        }).eq('id', position['id']).execute()
+    except Exception as e:
+        log_error('SLVM', f"Error updating recovery cycles: {e}")
+
+def update_slv_from_bands_sync(position: dict, snap: dict, symbol: str, market_type: str, sb, table='positions'):
+    """Actualiza dinámicamente el precio del SLV siguiendo las bandas de Fibonacci si se mueven a favor."""
+    # Implementación opcional para trailing del SLV inicial
+    # Por ahora lo dejamos como stub para no romper compatibilidad si el servicio lo llama
+    pass
+
 def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market_type: str = 'crypto_futures') -> dict:
     """Calcula el precio del SLV inicial basado en la configuración."""
     config = SLVM_CONFIG.get(market_type, SLVM_CONFIG['crypto_futures'])

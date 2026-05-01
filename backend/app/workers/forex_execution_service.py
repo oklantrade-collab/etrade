@@ -173,6 +173,10 @@ class ForexExecutionService:
             'lower_1': self._safe_float(snap.get('lower_1')),
             'upper_6': self._safe_float(snap.get('upper_6')),
             'lower_6': self._safe_float(snap.get('lower_6')),
+            'ema_3': self._safe_float(snap.get('ema_3')),
+            'ema_9': self._safe_float(snap.get('ema_9')),
+            'ema_20': self._safe_float(snap.get('ema_20')),
+            'bb_expanding': bool(snap.get('bb_expanding', False)),
         }
 
     def _check_rules(self, context: dict, direction: str) -> dict:
@@ -195,11 +199,32 @@ class ForexExecutionService:
             pine_not_opposite = pine != 'Buy'
             mtf_directional = mtf < 0  # Al menos momentum negativo
 
-        # Aa22/Bb22: Full confirmation
-        results.append({'rule_code': 'Aa22' if direction == 'long' else 'Bb22', 'triggered': (sar_4h_ok and mtf_ok and pine_ok and struct_ok), 'score': 0.8})
+        # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine (RESTORED - No restrictive)
+        results.append({
+            'rule_code': 'Aa31a' if direction == 'long' else 'Bb31a', 
+            'triggered': (sar_4h_ok and sar_15m_ok and pine_not_opposite and mtf_directional and struct_ok), 
+            'score': 0.7
+        })
 
-        # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine
-        results.append({'rule_code': 'Aa31a' if direction == 'long' else 'Bb31a', 'triggered': (sar_4h_ok and sar_15m_ok and pine_not_opposite and mtf_directional and struct_ok), 'score': 0.7})
+        # NUEVA REGLA: HOT_MOMENTUM (Específica y Quirúrgica)
+        ema3, ema9, ema20 = context.get('ema_3'), context.get('ema_9'), context.get('ema_20')
+        bb_exp = context.get('bb_expanding', False)
+        
+        hot_triggered = False
+        if ema3 and ema9 and ema20:
+            if direction == 'long':
+                # LONG: EMA3 > EMA9 > EMA20 + Bollinger abriéndose
+                hot_triggered = (ema3 > ema9 > ema20) and bb_exp and (-6 <= fib_zone <= 3)
+            else:
+                # SHORT: EMA3 < EMA9 < EMA20 + Bollinger comprimiéndose/abriéndose para caída
+                # El usuario mencionó "comprimir" para SHORT. Implementamos ambas señales de fuerza.
+                hot_triggered = (ema3 < ema9 < ema20) and (not bb_exp or abs(mtf) > 0.5) and (-6 <= fib_zone <= 3)
+
+        results.append({
+            'rule_code': 'Aa_HOT' if direction == 'long' else 'Bb_HOT',
+            'triggered': hot_triggered,
+            'score': 0.95 # Alta prioridad
+        })
 
         # Dd Reversal
         fib_reversal = (direction == 'long' and fib_zone <= -2) or (direction == 'short' and fib_zone >= 2)
@@ -434,7 +459,7 @@ class ForexExecutionService:
                             finalize_recovery_exit_sync(pos, mr_result, price, symbol, self.sb, 'forex_positions')
                             pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
                             pips_pnl = mr_result['pnl_pips']
-                            self._close_position(pos, price, f'recovery_{mr_result["exit_type"]}', pips_pnl)
+                            self._close_position(pos, price, f'recovery_{mr_result["exit_type"]}', pips_pnl, mr_result=mr_result)
                             continue
                         else:
                             # En MR: trailing sigue activo
@@ -644,7 +669,7 @@ class ForexExecutionService:
             self.log(f"🔥 [EXECUTION] Disparando cierre {reason.upper()} para {symbol} at {price} (SL: {sl}, TP: {tp})")
             self._close_position(pos, price, reason, pips_pnl)
 
-    def _close_position(self, pos, close_price, reason, pips_pnl):
+    def _close_position(self, pos, close_price, reason, pips_pnl, mr_result=None):
         try:
             symbol = pos['symbol']
             
@@ -665,14 +690,26 @@ class ForexExecutionService:
             pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
             pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
             
-            self.sb.table('forex_positions').update({
+            update_data = {
                 'status': 'closed', 
                 'current_price': close_price, 
                 'close_reason': reason, 
                 'pnl_usd': round(pnl_usd, 2), 
                 'pnl_pips': round(pips_pnl, 1), 
                 'closed_at': datetime.now(timezone.utc).isoformat()
-            }).eq('id', pos['id']).execute()
+            }
+            
+            # ── SLVM V2 Audit Logging ──
+            if mr_result:
+                update_data.update({
+                    'slv_hard_stop_trigger': mr_result.get('exit_type'),
+                    'slv_hard_stop_pips': mr_result.get('hs_pips'),
+                    'slv_v1_open': mr_result.get('v1_open'),
+                    'v2_close_prev': mr_result.get('v2_close_prev'),
+                    'slv_timeframe_trigger': '5m_service'
+                })
+
+            self.sb.table('forex_positions').update(update_data).eq('id', pos['id']).execute()
             
             # Registrar profit
             try:
