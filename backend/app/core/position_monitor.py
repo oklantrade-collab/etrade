@@ -809,7 +809,12 @@ async def _execute_paper_open_unlocked(
             market_type = 'crypto_futures',
         )
         slv_price = slv_data['slv_price']
-        log_info(MODULE, f'SLVM [{symbol}]: SLV={slv_price:.6f} ({slv_data["distance_pips"]:.1f} pips, {slv_data["source"]})')
+        
+        # Calcular Hard Stop inicial para auditoría
+        from app.strategy.virtual_sl_recovery import calculate_hard_stop_pips
+        slv_hs_pips = calculate_hard_stop_pips(symbol, 'crypto_futures', snap_for_slv)
+        
+        log_info(MODULE, f'SLVM [{symbol}]: SLV={slv_price:.6f} (HS: {slv_hs_pips:.1f} pips, {slv_data["source"]})')
     except Exception as slv_e:
         log_warning(MODULE, f'SLVM calc error for {symbol}: {slv_e}')
         slv_price = None
@@ -836,6 +841,7 @@ async def _execute_paper_open_unlocked(
         'mode':             'paper',
         # ── SLVM Fields ──
         'slv_price':        slv_price,
+        'slv_hard_stop_pips': slv_hs_pips if slv_price else None,
         'recovery_mode':    False,
         'recovery_cycles':  0,
     }

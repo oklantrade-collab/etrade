@@ -515,6 +515,18 @@ async def open_forex_position(
         log_error(MODULE, f"Error abriendo posicion: {order['error']}")
         return
 
+    # 3. Calcular SLV y Hard Stop inicial
+    from app.strategy.virtual_sl_recovery import calculate_slv, calculate_hard_stop_pips
+    slv_data = calculate_slv(
+        entry_price = price,
+        side        = direction,
+        symbol      = symbol,
+        snap        = MARKET_SNAPSHOT_CACHE.get(symbol, {}),
+        market_type = 'forex_futures'
+    )
+    slv_price = slv_data['slv_price']
+    slv_hs_pips = calculate_hard_stop_pips(symbol, 'forex_futures', MARKET_SNAPSHOT_CACHE.get(symbol, {}))
+
     # Registrar en Supabase
     try:
         sb.table('positions').insert({
@@ -523,6 +535,8 @@ async def open_forex_position(
             'avg_entry_price':  price,
             'size':             sizing['lotes'],
             'sl_price':         levels['sl_price'],
+            'slv_price':        slv_price,
+            'slv_hard_stop_pips': slv_hs_pips,
             'tp_partial_price': levels['tp_price'],
             'rule_code':        rule_code,
             'status':           'open',
@@ -542,6 +556,8 @@ async def open_forex_position(
         'avg_entry_price': price,
         'size': sizing['lotes'],
         'sl_price': levels['sl_price'],
+        'slv_price': slv_price,
+        'slv_hard_stop_pips': slv_hs_pips,
         'tp_partial_price': levels['tp_price'],
         'rule_code': rule_code,
         'status': 'open',
@@ -588,6 +604,16 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
         positions = BOT_STATE.get_positions_by_symbol(symbol)
         for position in positions:
+            # --- SLVM v2 (Recovery & Hard Stop) ---
+            from app.strategy.virtual_sl_recovery import process_symbol_5m_with_slvm_v2
+            await process_symbol_5m_with_slvm_v2(
+                symbol        = symbol,
+                current_price = current_price,
+                snap          = snap,
+                sb            = sb,
+                market_type   = 'forex_futures'
+            )
+
             # 4. Smart Exit: SAR Phase Change
             if sar_changed_at:
                 side = (position.get('side') or '').lower()

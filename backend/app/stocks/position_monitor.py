@@ -17,7 +17,7 @@ from typing import Optional
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from app.core.logger import log_info, log_error, log_warning
+from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.core.supabase_client import get_supabase
 from app.strategy.proactive_exit import evaluate_proactive_exit
 from app.strategy.dynamic_sl_manager import evaluate_sl_action
@@ -115,21 +115,27 @@ class PositionMonitor:
                 snap_slvm = snap_res_slvm.data[0] if snap_res_slvm.data else {}
 
                 if trade.get('recovery_mode'):
-                    # Ya en Modo Recuperación — evaluar salida
-                    mr_result = evaluate_recovery_mode(
-                        position=pos_slvm, current_price=current_price,
-                        snap=snap_slvm, symbol=ticker,
-                        market_type='stocks_spot',
+                    # Ya en Modo Recuperación — evaluar salida V2
+                    from app.strategy.virtual_sl_recovery import evaluate_recovery_mode_v2
+                    mr_result = evaluate_recovery_mode_v2(
+                        position      = pos_slvm,
+                        current_price = current_price,
+                        snap          = snap_slvm,
+                        symbol        = ticker,
+                        market_type   = 'stocks_spot',
                     )
-                    update_recovery_cycle_sync(pos_slvm, mr_result, sb, 'stocks_positions')
-                    log_info('SLVM', f'MR [{ticker}] ciclo {mr_result["recovery_cycles"]}: {mr_result["reason"]}')
-
+                    
                     if mr_result['should_close']:
+                        # Logging y cierre
+                        from app.strategy.virtual_sl_recovery import finalize_recovery_exit_sync
                         finalize_recovery_exit_sync(pos_slvm, mr_result, current_price, ticker, sb, 'stocks_positions')
                         await self._close_position(trade, current_price, f'recovery_{mr_result["exit_type"]}')
                         return
                     else:
-                        # En MR: protecciones siguen activas pero saltamos señales normales
+                        # Actualizar ciclos
+                        sb.table('stocks_positions').update({
+                            'recovery_cycles': mr_result.get('recovery_cycles', trade.get('recovery_cycles', 0))
+                        }).eq('id', trade['id']).execute()
                         return
 
                 # Verificar si precio tocó el SLV
@@ -224,10 +230,10 @@ class PositionMonitor:
                     highest = current_price
                     sb.table("stocks_positions").update({"highest_price_reached": highest}).eq("id", trade["id"]).execute()
                 
-                # Si el precio retrocede > 1.5% desde el máximo Y estamos en profit mínimo
+                # Ajuste: Retroceso de 2.5% (antes 1.5%) y Profit Mínimo de 1% (antes > 0)
                 pullback = ((highest - current_price) / highest) * 100
-                if pullback >= 1.5 and current_price > entry_price:
-                    log_warning(MODULE, f"⚡ FLASH EXIT: {ticker} retroceso de {pullback:.1f}% detectado. Cerrando para asegurar profit.")
+                if pullback >= 2.5 and pnl_pct >= 1.0:
+                    log_warning(MODULE, f"⚡ FLASH EXIT: {ticker} retroceso de {pullback:.1f}% detectado con profit de {pnl_pct:.2f}%. Cerrando.")
                     await self._close_position(trade, current_price, "hot_pullback_exit")
                     return
 
@@ -263,32 +269,50 @@ class PositionMonitor:
             
             # CALCULAR ZONA EN TIEMPO REAL (Evita delay del scanner de 5 min)
             basis = float(snap.get('basis') or current_price)
-            # Intentar obtener ATR del snapshot o de technical_scores
-            atr = float(snap.get('atr') or 0)
-            if atr <= 0:
-                # Fallback: buscar en technical_scores
-                score_res = sb.table('technical_scores').select('atr').eq('ticker', ticker).order('timestamp', desc=True).limit(1).execute()
-                atr = float(score_res.data[0]['atr'] if score_res.data else (current_price * 0.02))
+            atr = 0.0
+            try:
+                # Intentar obtener ATR del snapshot o de technical_scores (si existe)
+                atr = float(snap.get('atr') or 0)
+                if atr <= 0:
+                    # Fallback: estimación basada en 2% del precio (volatilidad promedio)
+                    atr = current_price * 0.02
+            except:
+                atr = current_price * 0.02
             
             fib_zone = calculate_fibonacci_zone(current_price, basis, atr)
             log_debug(MODULE, f"Real-time Fib Zone for {ticker}: {fib_zone} (Price: {current_price}, Basis: {basis}, ATR: {atr})")
 
-            if fib_zone >= 5:
-                # Verificar vela 15m actual o anterior
-                if not hist_15m.empty:
+            if fib_zone >= 5 and pnl_pct >= 0.8:
+                # Verificar patrón de reversión en vela 15m
+                if not hist_15m.empty and len(hist_15m) >= 2:
                     last_15 = hist_15m.iloc[-1]
-                    is_bearish_15 = last_15['Close'] < last_15['Open']
-                    if is_bearish_15:
-                        log_warning(MODULE, f"🔴 VELA BAJISTA 15m en ZONA {fib_zone} para {ticker}. Cerrando al MARKET.")
-                        await self._close_position(position, current_price, f"EXT_BEARISH_15M")
-                        return True
+                    prev_15 = hist_15m.iloc[-2]
+                    
+                    is_bearish_now = last_15['Close'] < last_15['Open']
+                    is_bullish_prev = prev_15['Close'] > prev_15['Open']
+                    
+                    if is_bearish_now and is_bullish_prev:
+                        # Verificar si hubo señal BUY de SIPV recientemente
+                        has_buy_signal = False
+                        try:
+                            # Buscamos en signals_log el último registro para este ticker
+                            sig_res = sb.table('signals_log').select('signal_type').eq('symbol', ticker).order('detected_at', desc=True).limit(1).execute()
+                            if sig_res.data and str(sig_res.data[0].get('signal_type', '')).upper() == 'BUY':
+                                has_buy_signal = True
+                        except:
+                            has_buy_signal = True # Fallback a True si falla la consulta para no perder el cierre si el patrón es claro
+                        
+                        if has_buy_signal:
+                            log_warning(MODULE, f"🔴 PATRÓN REVERSIÓN 15m (Verde->Roja) en ZONA {fib_zone} para {ticker} (PnL: {pnl_pct:.2f}%). Cerrando.")
+                            await self._close_position(position, current_price, f"EXT_BEARISH_15M")
+                            return True
                 
                 # Verificar vela 5m
                 if not hist_5m.empty:
                     last_5 = hist_5m.iloc[-1]
                     is_bearish_5 = last_5['Close'] < last_5['Open']
                     if is_bearish_5:
-                        log_warning(MODULE, f"🔴 VELA BAJISTA 5m en ZONA {fib_zone} para {ticker}. Cerrando al MARKET.")
+                        log_warning(MODULE, f"🔴 VELA BAJISTA 5m en ZONA {fib_zone} para {ticker} (PnL: {pnl_pct:.2f}%). Cerrando.")
                         await self._close_position(position, current_price, f"EXT_BEARISH_5M")
                         return True
 
@@ -348,12 +372,13 @@ class PositionMonitor:
                 "shares": shares,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
-                "entry_date": trade.get("entry_time"),
+                "entry_date": trade.get("entry_time") or trade.get("first_buy_at"),
                 "exit_date": now,
                 "pnl_usd": pnl_usd,
                 "pnl_pct": pnl_pct,
                 "result": result,
                 "exit_reason": exit_reason,
+                "strategy": trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL"
             }
             sb.table("trades_journal").insert(journal_entry).execute()
 

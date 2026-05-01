@@ -900,20 +900,15 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                 reset_sl_counter(symbol, position.get('side', 'long'))
                 return
 
-            # 2. SL Adaptativo / SLV v5
-            sl_res = evaluate_crypto_sl(symbol, [position], current_price, snap, df_5m)
-            if sl_res['should_close']:
-                await close_all_crypto_positions(
-                    symbol, [position], current_price,
-                    sl_res.get('exit_type', 'sl_v5'), sl_res['pnl_pips'], sb, is_tp=False
-                )
-                register_sl_event(symbol, position.get('side', 'long'))
-                return
-            elif sl_res.get('slv_triggered'):
-                # Activar modo recuperación si no estaba activo
-                if not position.get('recovery_mode'):
-                    from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
-                    activate_recovery_mode_sync(position, current_price, symbol, 'crypto_futures', sb)
+            # 2. SL Adaptativo / SLV v5 (Recovery & Hard Stop)
+            from app.strategy.virtual_sl_recovery import process_symbol_5m_with_slvm_v2
+            await process_symbol_5m_with_slvm_v2(
+                symbol        = symbol,
+                current_price = current_price,
+                snap          = snap,
+                sb            = sb,
+                market_type   = 'crypto_futures'
+            )
             
             # 3. Fallback Proactivo Aa51 (Legacy)
             closed = await check_proactive_exit_crypto(symbol, current_price, snap, sb)
