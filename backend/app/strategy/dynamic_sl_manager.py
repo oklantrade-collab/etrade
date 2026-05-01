@@ -446,24 +446,37 @@ def evaluate_sl_action(
                 'sl_price': existing_dynamic,
             }
 
-    # ── CHECK 2.5: Trailing SL hit (asegurar ganancia o limitar pérdida) ─
-    if trailing_sl > 0:
-        trailing_hit = (
-            (side in ('long','buy') and
-             current_price <= trailing_sl) or
-            (side not in ('long','buy') and
-             current_price >= trailing_sl)
-        )
-        if trailing_hit:
-            return {
-                'action':  'trigger_dynamic_sl', # Reutilizamos acción para simplificar monitor
-                'reason':  (
-                    f'Trailing/Active SL hit: '
-                    f'precio={current_price:.6f} '
-                    f'sl={trailing_sl:.6f}'
-                ),
                 'sl_price': trailing_sl,
             }
+
+    # ── NUEVO: Bloqueo de Ganancia en Zonas Extremas (UPPER_5/6) ──
+    # Si estamos en zona 5 o 6 y la vela es alcista, movemos SL a la banda
+    fib_zone = int(snap.get('fibonacci_zone', 0))
+    if side in ('long', 'buy') and fib_zone >= 5:
+        upper_5 = float(snap.get('upper_5') or 0)
+        upper_6 = float(snap.get('upper_6') or 0)
+        
+        # Si cerramos por encima de UPPER_6 y es alcista, SL a UPPER_6
+        if fib_zone >= 6 and current_price > upper_6 and upper_6 > trailing_sl:
+            # Necesitamos verificar si la vela es alcista (usando snap o df_15m)
+            # Como proxy, si el precio actual es mayor al basis (EMA20), es señal de fuerza
+            is_bullish = current_price > float(snap.get('basis', 0))
+            if is_bullish:
+                return {
+                    'action': 'update_trailing',
+                    'sl_price': upper_6,
+                    'reason': f'Vela alcista > UPPER_6 confirmada. Bloqueando ganancia en ${upper_6:.2f}'
+                }
+        
+        # Si cerramos por encima de UPPER_5 y es alcista, SL a UPPER_5
+        if fib_zone >= 5 and current_price > upper_5 and upper_5 > trailing_sl:
+            is_bullish = current_price > float(snap.get('basis', 0))
+            if is_bullish:
+                return {
+                    'action': 'update_trailing',
+                    'sl_price': upper_5,
+                    'reason': f'Vela alcista > UPPER_5 confirmada. Bloqueando ganancia en ${upper_5:.2f}'
+                }
 
     # ── CHECK 3: Detectar señal SIPV ──────────
     sipv = detect_sipv_exit_signal(

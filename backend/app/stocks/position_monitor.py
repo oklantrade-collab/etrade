@@ -240,23 +240,45 @@ class PositionMonitor:
         try:
             import yfinance as yf
             t = yf.Ticker(ticker)
-            # Para Stocks usamos velas diarias (1D) o de 1H como equivalente al 4H de Crypto
-            # Vamos a usar 1H para velocidad de reacción
-            hist = t.history(period="15d", interval="1h")
+            hist_1h = t.history(period="15d", interval="1h")
             
-            if hist.empty or len(hist) < 3:
+            if hist_1h.empty or len(hist_1h) < 3:
                 return False
 
             import pandas as pd
             df_4h = pd.DataFrame()
-            df_4h['open'] = hist['Open']
-            df_4h['high'] = hist['High']
-            df_4h['low'] = hist['Low']
-            df_4h['close'] = hist['Close']
+            df_4h['open'] = hist_1h['Open']
+            df_4h['high'] = hist_1h['High']
+            df_4h['low'] = hist_1h['Low']
+            df_4h['close'] = hist_1h['Close']
+
+            # ── NUEVO: Análisis de velas 5m/15m para Salida en Zonas Extremas ──
+            hist_15m = t.history(period="5d", interval="15m")
+            hist_5m = t.history(period="2d", interval="5m")
 
             # Recuperar snapshot de base de datos
             snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
             snap = snap_res.data[0] if snap_res.data else {}
+            fib_zone = int(snap.get('fibonacci_zone', 0))
+
+            if fib_zone >= 5:
+                # Verificar vela 15m actual o anterior
+                if not hist_15m.empty:
+                    last_15 = hist_15m.iloc[-1]
+                    is_bearish_15 = last_15['Close'] < last_15['Open']
+                    if is_bearish_15:
+                        log_warning(MODULE, f"🔴 VELA BAJISTA 15m en ZONA {fib_zone} para {ticker}. Cerrando al MARKET.")
+                        await self._close_position(position, current_price, f"EXT_BEARISH_15M")
+                        return True
+                
+                # Verificar vela 5m
+                if not hist_5m.empty:
+                    last_5 = hist_5m.iloc[-1]
+                    is_bearish_5 = last_5['Close'] < last_5['Open']
+                    if is_bearish_5:
+                        log_warning(MODULE, f"🔴 VELA BAJISTA 5m en ZONA {fib_zone} para {ticker}. Cerrando al MARKET.")
+                        await self._close_position(position, current_price, f"EXT_BEARISH_5M")
+                        return True
 
             position_std = {
                 'symbol':          ticker,
