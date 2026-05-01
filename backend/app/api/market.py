@@ -66,6 +66,36 @@ def get_candles(
     )
     # Return in ascending order for charting
     candles = sorted(result.data, key=lambda x: x["open_time"])
+
+    # Fallback for Stocks (yfinance)
+    if not candles and len(symbol_clean) <= 5:
+        try:
+            import yfinance as yf
+            import pandas as pd
+            
+            # Map timeframe to yfinance format
+            yf_tf = timeframe
+            if timeframe == "1d": yf_tf = "1d"
+            elif timeframe == "1h": yf_tf = "1h"
+            elif timeframe == "15m": yf_tf = "15m"
+            
+            ticker = yf.Ticker(symbol_clean)
+            df = ticker.history(period="60d", interval=yf_tf)
+            
+            if not df.empty:
+                for idx, row in df.iterrows():
+                    candles.append({
+                        "open_time": idx.isoformat(),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": float(row["Close"]),
+                        "volume": float(row["Volume"]),
+                        "basis": 0, "upper_6": 0, "lower_6": 0 # Default indicators
+                    })
+        except Exception as e:
+            print(f"YFinance fallback error: {e}")
+
     return {"candles": candles, "symbol": symbol, "timeframe": timeframe}
 
 @router.get("/trade-events/{symbol:path}")

@@ -57,8 +57,8 @@ async def warm_up(symbols: list[str], timeframes: list[str], provider: BinanceCr
     
     # --- PHASE 1: Recover Business State (WARM) ---
     try:
-        # Load Open Positions from bot_state
-        res_pos = sb.table("bot_state").select("*").eq("is_open", True).execute()
+        # Load Open Positions from 'positions' table (v4 standard)
+        res_pos = sb.table("positions").select("*").eq("status", "open").execute()
         for p in res_pos.data:
             # Key by pos_id to support multiple positions per symbol
             BOT_STATE.positions[p.get('id', p['symbol'])] = p
@@ -68,9 +68,9 @@ async def warm_up(symbols: list[str], timeframes: list[str], provider: BinanceCr
         if res_global.data:
             BOT_STATE.global_state = res_global.data[0]
             
-        log_info(MODULE, f"Phase 1 Complete: {len(BOT_STATE.positions)} positions recovered from 'bot_state'.")
+        log_info(MODULE, f"Phase 1 Complete: {len(BOT_STATE.positions)} positions recovered from 'positions' table.")
     except Exception as e:
-        log_error(MODULE, f"Error recovering state from bot_state: {e}")
+        log_error(MODULE, f"Error recovering state from positions table: {e}")
 
     # --- PHASE 2: Reconstruct Indicators (HOT) ---
     tasks = []

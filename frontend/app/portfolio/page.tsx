@@ -119,9 +119,37 @@ export default function PortfolioPage() {
 
         {/* SEGMENTOS DE MERCADO */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 pt-8">
-           <MarketBox title="CRIPTO" icon="₿" data={perf?.by_market?.crypto} regime={global?.markets?.crypto?.regime} />
-           <MarketBox title="FOREX" icon="¥" data={perf?.by_market?.forex} regime={global?.markets?.forex?.regime} />
-           <MarketBox title="ACCIONES" icon="🏛️" data={perf?.by_market?.stocks || {}} regime="RIESGO CONTROLADO" locked={activeStocks.length === 0} />
+           <MarketBox 
+              title="CRIPTO" 
+              icon="₿" 
+              data={perf?.by_market?.crypto} 
+              sipv={{
+                symbol: "BTCUSDT",
+                signal: global?.markets?.crypto?.sipv_signal || "ESPERANDO",
+                action: global?.markets?.crypto?.sipv_action || "HOLD"
+              }}
+           />
+           <MarketBox 
+              title="FOREX" 
+              icon="¥" 
+              data={perf?.by_market?.forex} 
+              sipv={{
+                symbol: "DXY",
+                signal: global?.markets?.forex?.sipv_signal || "ESPERANDO",
+                action: global?.markets?.forex?.sipv_action || "HOLD"
+              }}
+           />
+           <MarketBox 
+              title="ACCIONES" 
+              icon="🏛️" 
+              data={perf?.by_market?.stocks || {}} 
+              sipv={{
+                symbol: "VIX",
+                signal: global?.markets?.stocks?.sipv_signal || "ESPERANDO",
+                action: global?.markets?.stocks?.sipv_action || "HOLD"
+              }}
+              locked={activeStocks.length === 0} 
+           />
         </div>
 
         {/* TABLAS DE EJECUCIÓN */}
@@ -295,16 +323,29 @@ function PerfCard({ title, val, trades, wr, color }: any) {
   )
 }
 
-function MarketBox({ title, icon, data, regime, locked }: any) {
+function MarketBox({ title, icon, data, sipv, locked }: any) {
   const isPositive = (data?.pnl_usd || 0) >= 0
+  
+  const actionColor = 
+    sipv?.action === 'BUY' ? 'text-emerald-500' :
+    sipv?.action === 'SELL' ? 'text-rose-500' :
+    'text-amber-500';
+
   return (
     <div className={`glass-card flex flex-col items-center gap-6 text-center ${locked ? 'opacity-30 grayscale' : 'hover:border-white/10'}`}>
        <div className="text-4xl bg-white/5 w-16 h-16 flex items-center justify-center rounded-2xl group-hover:scale-110 transition-transform">
           {icon}
        </div>
-       <div className="space-y-1">
+       <div className="space-y-2">
           <h4 className="text-[0.7rem] font-black italic uppercase text-white tracking-widest">{title}</h4>
-          <span className="text-[0.5rem] font-black text-amber-500 uppercase tracking-[0.2em]">{regime || 'RIESGO MEDIO'}</span>
+          <div className="flex flex-col gap-1 items-center">
+            <span className="text-[0.45rem] font-bold text-slate-500 uppercase tracking-widest opacity-80">
+              {sipv?.symbol} (Segun el SIPV)
+            </span>
+            <span className={`text-[0.7rem] font-black uppercase tracking-[0.2em] ${actionColor}`}>
+              {sipv?.signal || 'ESPERANDO'}
+            </span>
+          </div>
        </div>
        {!locked && (
          <div className="w-full pt-4 space-y-6">

@@ -1,6 +1,7 @@
 "use client"
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
+import TradeMarkerChart from '@/components/TradeMarkerChart'
 
 export default function StocksDashboard() {
   const [loading, setLoading] = useState(true)
@@ -14,6 +15,8 @@ export default function StocksDashboard() {
   const [regime, setRegime] = useState<any>({ regime: 'sideways', sm_avg: 4.5 })
   const [positions, setPositions] = useState<any[]>([])
   const [opportunities, setOpportunities] = useState<any[]>([])
+  const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
 
   useEffect(() => {
     fetchData()
@@ -182,7 +185,7 @@ export default function StocksDashboard() {
             {positions.length === 0 ? (
               <EmptyState icon="🛰️" text="No active positions. Scanning deep universe for high-conviction entries..." />
             ) : (
-              positions.map((pos, idx) => <PositionRow key={pos.id || `pos-${pos.ticker}-${idx}`} pos={pos} />)
+              positions.map((pos, idx) => <PositionRow key={pos.id || `pos-${pos.ticker}-${idx}`} pos={pos} onOpenChart={(ticker: string) => { setSelectedTicker(ticker); setShowChart(true); }} />)
             )}
           </div>
         </div>
@@ -206,6 +209,7 @@ export default function StocksDashboard() {
         </div>
 
       </div>
+      {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
     </div>
   )
 }
@@ -232,7 +236,7 @@ function StatusRow({ label, val, color }: any) {
     )
 }
 
-function PositionRow({ pos }: any) {
+function PositionRow({ pos, onOpenChart }: any) {
     const pnl = parseFloat(pos.unrealized_pnl || 0)
     const pnlColor = pnl >= 0 ? '#22C55E' : '#FF4757'
     
@@ -247,12 +251,82 @@ function PositionRow({ pos }: any) {
                     <div style={{ fontSize:'11px', color:'#666', fontWeight:800 }}>Entry: <span style={{color:'#CCC'}}>${parseFloat(pos.avg_price || 0).toFixed(2)}</span> • Shares: <span style={{color:'#22C55E'}}>{pos.shares}</span></div>
                 </div>
             </div>
-            <div style={{ textAlign:'right' }}>
-                <div style={{ fontSize:'18px', fontWeight:950, color:pnlColor }}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</div>
-                <div style={{ fontSize:'10px', color:'#444', fontWeight:900, marginTop:'4px' }}>MOS: {pos.margin_of_safety || '0'}%</div>
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+                <button 
+                    onClick={() => onOpenChart(pos.ticker)}
+                    style={{ background: '#38BDF8', color: '#000', border: 'none', padding: '8px 14px', borderRadius: '10px', fontSize: '10px', fontWeight: 950, cursor: 'pointer', marginRight: '20px', display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s' }}
+                    onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
+                    onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+                >
+                    VER GRÁFICO 📊
+                </button>
+                <div style={{ textAlign:'right' }}>
+                    <div style={{ fontSize:'18px', fontWeight:950, color:pnlColor }}>{pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}</div>
+                    <div style={{ fontSize:'10px', color:'#444', fontWeight:900, marginTop:'4px' }}>MOS: {pos.margin_of_safety || '0'}%</div>
+                </div>
             </div>
         </div>
     )
+}
+
+function TradingViewWidget({ symbol }: { symbol: string }) {
+  const containerId = `tv-chart-${symbol}`;
+  const containerRef = useRef<HTMLDivElement>(null);
+  
+  useEffect(() => {
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => {
+      if ((window as any).TradingView && containerRef.current) {
+        new (window as any).TradingView.widget({
+          "autosize": true,
+          "symbol": symbol,
+          "interval": "D",
+          "timezone": "Etc/UTC",
+          "theme": "dark",
+          "style": "1",
+          "locale": "es",
+          "toolbar_bg": "#161922",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "container_id": containerId,
+          "backgroundColor": "#0F1117",
+          "gridColor": "rgba(255, 255, 255, 0.05)",
+          "hide_side_toolbar": false,
+          "studies": [
+            "BB@tv-basicstudies",
+            "MAExp@tv-basicstudies",
+            "MAExp@tv-basicstudies"
+          ],
+          "overrides": {
+            "mainSeriesProperties.style": 1,
+          }
+        });
+      }
+    };
+    document.head.appendChild(script);
+  }, [symbol, containerId]);
+
+  return (
+    <div ref={containerRef} id={containerId} style={{ height: '450px', width: '100%', borderRadius: '16px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }} />
+  );
+}
+
+function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }) {
+  return (
+    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, backdropFilter: 'blur(5px)' }}>
+        <div style={{ background: '#0F1117', width: '90%', height: '85%', borderRadius: '24px', border: '1px solid #38BDF8', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(56,189,248,0.2)' }}>
+            <div style={{ padding: '15px 25px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <h3 style={{ margin: 0, color: '#FFF', fontSize: '16px', fontWeight: 900 }}>GRÁFICO TÉCNICO: {symbol}</h3>
+                <button onClick={onClose} style={{ background: '#EF4444', border: 'none', color: '#FFF', padding: '6px 15px', borderRadius: '8px', fontSize: '10px', fontWeight: 900, cursor: 'pointer' }}>CERRAR GRÁFICO</button>
+            </div>
+            <div style={{ flex: 1, background: '#000' }}>
+                <TradingViewWidget symbol={symbol} />
+            </div>
+        </div>
+    </div>
+  )
 }
 
 function RadarRow({ opp }: any) {

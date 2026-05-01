@@ -10,6 +10,7 @@ export const metadata: Metadata = {
 import { Toaster } from 'react-hot-toast';
 
 import AppContainer from "@/components/AppContainer";
+import ThemeCustomizer from "@/components/ThemeCustomizer";
 
 export default function RootLayout({
   children,
@@ -18,7 +19,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="es" suppressHydrationWarning>
-      <body className="bg-[#05070a] text-slate-200">
+      <body>
+        <ThemeCustomizer />
         <Toaster position="bottom-right" toastOptions={{ style: { background: '#0f172a', color: '#fff', border: '1px solid #1e293b' } }} />
         <AppContainer>
            {children}

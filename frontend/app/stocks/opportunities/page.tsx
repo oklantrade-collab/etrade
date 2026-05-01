@@ -1,6 +1,8 @@
 "use client"
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
+import TradeMarkerChart from '@/components/TradeMarkerChart'
+import toast from 'react-hot-toast'
 
 const formatAbbreviated = (num: any) => {
     const val = parseFloat(num);
@@ -453,11 +455,13 @@ function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }
 
 function AnalysisModal({ stock, onClose }: any) {
   const [showChart, setShowChart] = useState(false);
+
   let displayScoreTech = 0;
   if (stock.t01_confirmed) displayScoreTech += 40;
   if (stock.t02_confirmed) displayScoreTech += 30;
   if (stock.t03_confirmed) displayScoreTech += 20;
   if (stock.t04_confirmed) displayScoreTech += 10;
+  
   const rawIA = stock.pro_score || 0;
   const iaAvg = (rawIA > 10 ? rawIA / 10 : rawIA).toFixed(1);
   const uv = stock.margin_of_safety || 0;
@@ -465,8 +469,6 @@ function AnalysisModal({ stock, onClose }: any) {
 
   return (
     <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.95)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, backdropFilter: 'blur(10px)' }}>
-      {showChart && <ChartModal symbol={stock.ticker} onClose={() => setShowChart(false)} />}
-      
       <div style={{ background: '#0F1117', width: '95%', maxWidth: '1150px', borderRadius: '24px', border: '1px solid #22C55E', overflow: 'hidden', maxHeight: '95vh', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(34,197,94,0.2)' }}>
         
         {/* HEADER */}
@@ -480,10 +482,10 @@ function AnalysisModal({ stock, onClose }: any) {
           </div>
           <div style={{ display: 'flex', gap: '15px', alignItems:'center' }}>
             <button 
-                onClick={() => setShowChart(true)}
-                style={{ background: '#38BDF8', color: '#000', border: 'none', padding: '10px 20px', borderRadius: '12px', fontSize: '11px', fontWeight: 950, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
+                onClick={() => setShowChart(!showChart)}
+                style={{ background: showChart ? '#FF4757' : '#38BDF8', color: '#000', border: 'none', padding: '10px 20px', borderRadius: '12px', fontSize: '11px', fontWeight: 950, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px' }}
             >
-                <span>VER GRÁFICO</span>
+                <span>{showChart ? 'CERRAR GRÁFICO' : 'VER GRÁFICO'}</span>
                 <span style={{ fontSize: '14px' }}>📊</span>
             </button>
 
@@ -500,6 +502,8 @@ function AnalysisModal({ stock, onClose }: any) {
             <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '36px', height: '36px', borderRadius: '50%', cursor: 'pointer' }}>✕</button>
           </div>
         </div>
+
+        {showChart && <ChartModal symbol={stock.ticker} onClose={() => setShowChart(false)} />}
 
         <div style={{ flex: 1, padding: '25px 30px', overflowY: 'auto', display: 'grid', gridTemplateColumns: '380px 1fr', gap: '30px', minHeight: '300px' }}>
             {/* IZQUIERDA: CAPA 1 & 2 (TÉCNICO Y UNIVERSO) */}
@@ -576,7 +580,32 @@ function AnalysisModal({ stock, onClose }: any) {
                             
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
                                 {/* Columna 1: Universo y Técnico */}
-                                <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+                                    <div>
+                                        <div style={{ fontSize:'9px', color:'#A855F7', fontWeight:950, textTransform:'uppercase', marginBottom:'8px' }}>NIVELES OPERATIVOS (ESTRATEGIA 3-BLOQUES)</div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                                            <div style={{ background: 'rgba(34,197,94,0.1)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(34,197,94,0.2)' }}>
+                                                <div style={{ fontSize: '8px', color: '#22C55E', fontWeight: 900 }}>ENTRADA</div>
+                                                <div style={{ fontSize: '13px', color: '#FFF', fontWeight: 950 }}>${(stock.entry_price || 0).toFixed(2)}</div>
+                                            </div>
+                                            <div style={{ background: 'rgba(239,68,68,0.1)', padding: '10px', borderRadius: '10px', border: '1px solid rgba(239,68,68,0.2)' }}>
+                                                <div style={{ fontSize: '8px', color: '#EF4444', fontWeight: 900 }}>STOP LOSS</div>
+                                                <div style={{ fontSize: '13px', color: '#FFF', fontWeight: 950 }}>${(stock.stop_loss || 0).toFixed(2)}</div>
+                                            </div>
+                                            <div style={{ background: 'rgba(255,215,0,0.1)', padding: '8px', borderRadius: '8px' }}>
+                                                <div style={{ fontSize: '7px', color: '#FFD700', fontWeight: 900 }}>TP1 (50%)</div>
+                                                <div style={{ fontSize: '12px', color: '#FFF', fontWeight: 900 }}>${(stock.tp_block1_price || stock.target_1 || 0).toFixed(2)}</div>
+                                            </div>
+                                            <div style={{ background: 'rgba(255,255,255,0.05)', padding: '8px', borderRadius: '8px' }}>
+                                                <div style={{ fontSize: '7px', color: '#AAA', fontWeight: 900 }}>TP2 (25%)</div>
+                                                <div style={{ fontSize: '12px', color: '#FFF', fontWeight: 900 }}>${(stock.tp_block2_price || 0).toFixed(2)}</div>
+                                            </div>
+                                            <div style={{ background: 'rgba(56,189,248,0.1)', padding: '8px', borderRadius: '8px', border: '1px solid rgba(56,189,248,0.2)', gridColumn: 'span 2' }}>
+                                                <div style={{ fontSize: '7px', color: '#38BDF8', fontWeight: 900 }}>TP3 TRAILING (25%)</div>
+                                                <div style={{ fontSize: '12px', color: '#FFF', fontWeight: 900 }}>${(stock.tp_block3_price || 0).toFixed(2)}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
                                     <div>
                                         <div style={{ fontSize:'9px', color:'#666', fontWeight:800, textTransform:'uppercase', marginBottom:'4px' }}>ESTRUCTURA DE MERCADO (C1 & C2)</div>
                                         <div style={{ fontSize:'11px', color:'#DDD', display:'flex', flexDirection:'column', gap:'4px' }}>

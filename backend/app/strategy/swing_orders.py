@@ -62,6 +62,24 @@ async def process_swing_orders(
     if timeframe != '15m':
         return # Solo Smart Limit en 15m para este módulo
 
+    # --- PROACTIVE LIMIT CHECK (Correction #10) ---
+    try:
+        max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 4))
+        # Use memory store if synced, or query DB directly for absolute safety
+        from app.core.crypto_symbols import crypto_symbol_match_variants
+        variants = crypto_symbol_match_variants(symbol)
+        
+        res_open = sb.table('positions').select('id', count='exact').in_('symbol', variants).eq('status', 'open').execute()
+        current_count = res_open.count or 0
+        
+        if current_count >= max_per_symbol:
+            log_info('SWING_LIMIT', f"{symbol}: Proactive block. {current_count} positions already open (max {max_per_symbol}).")
+            # Also cancel any existing pending orders for this symbol to avoid execution
+            await cancel_swing_orders(symbol, timeframe='15m', reason='limit_reached_proactive', sb=sb)
+            return
+    except Exception as e:
+        log_error('SWING_LIMIT', f"Error in proactive limit check for {symbol}: {e}")
+
     for direction in ['long', 'short']:
         # ── 1. Clasificar movimiento ──────────
         movement = classify_movement(

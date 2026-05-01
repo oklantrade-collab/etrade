@@ -460,10 +460,8 @@ class ForexExecutionService:
                 if snap:
                     self._run_protection_forex(pos, snap)
 
-                # ── Tercero: Cierre Adaptativo v5.0 ──
-                if snap:
                     # 1. TP Adaptativo
-                    tp_res = evaluate_forex_tp(symbol, pos, price, snap)
+                    tp_res = evaluate_forex_tp(symbol, [pos], price, snap)
                     if tp_res['should_close']:
                         self.log(f"🎯 [ADAPTIVE TP] {symbol}: {tp_res['close_reason']} (PnL: {tp_res['pnl_pips']:.1f} pips)")
                         self._close_position(pos, price, tp_res['close_reason'], tp_res['pnl_pips'])
@@ -471,7 +469,7 @@ class ForexExecutionService:
                         continue
 
                     # 2. SL Adaptativo / SLV
-                    sl_res = evaluate_forex_sl(symbol, pos, price, snap)
+                    sl_res = evaluate_forex_sl(symbol, [pos], price, snap)
                     if sl_res['should_close']:
                         self.log(f"🛡️ [ADAPTIVE SL] {symbol}: {sl_res.get('exit_type', 'sl_v5')} (PnL: {sl_res['pnl_pips']:.1f} pips)")
                         self._close_position(pos, price, sl_res.get('exit_type', 'sl_v5'), sl_res['pnl_pips'])

@@ -303,12 +303,14 @@ export default function TradeMarkerChart({
       const slPrice = activePosition.sl_price;
       const tp1Price = activePosition.tp_partial || activePosition.tp_partial_price || activePosition.tp_price;
       const tp2Price = activePosition.tp_full || activePosition.tp_full_price;
+      const tp3Price = activePosition.tp_3 || activePosition.tp_3_price;
 
       const lines = [
         entryPrice ? { price: entryPrice, color: '#00C896', title: `Entry $${entryPrice.toLocaleString()}` } : null,
         slPrice ? { price: slPrice, color: '#FF4757', title: `SL $${slPrice.toLocaleString()}` } : null,
         tp1Price ? { price: tp1Price, color: '#FFD700', title: `TP1 $${tp1Price.toLocaleString()}` } : null,
         tp2Price ? { price: tp2Price, color: '#ffffff', title: `TP2 $${tp2Price.toLocaleString()}` } : null,
+        tp3Price ? { price: tp3Price, color: '#38BDF8', title: `TP3 $${tp3Price.toLocaleString()}` } : null,
       ].filter(l => l !== null);
 
       lines.forEach((l: any) => {

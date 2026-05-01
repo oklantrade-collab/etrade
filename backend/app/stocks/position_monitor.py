@@ -40,6 +40,10 @@ class PositionMonitor:
         """Main cycle: check every active position."""
         sb = get_supabase()
         
+        # Load global stocks config
+        config_res = sb.table("stocks_config").select("key, value").execute()
+        stocks_config = {r["key"]: r["value"] for r in (config_res.data or [])}
+
         active = sb.table("stocks_positions")\
             .select("*")\
             .eq("status", "open")\
@@ -51,9 +55,9 @@ class PositionMonitor:
         log_info(MODULE, f"Monitoring {len(active.data)} active positions...")
 
         for trade in active.data:
-            await self._check_position(trade)
+            await self._check_position(trade, stocks_config)
 
-    async def _check_position(self, trade: dict):
+    async def _check_position(self, trade: dict, stocks_config: dict):
         """Check a single position for exit conditions."""
         ticker = trade["ticker"]
         
@@ -104,6 +108,7 @@ class PositionMonitor:
                 pos_slvm = dict(trade)
                 pos_slvm['side'] = 'long'
                 pos_slvm['avg_entry_price'] = entry_price
+                pos_slvm['sl_max_loss_hard'] = stocks_config.get('sl_max_loss_hard', 10.0)
 
                 snap_res_slvm = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
                 snap_slvm = snap_res_slvm.data[0] if snap_res_slvm.data else {}
@@ -212,8 +217,9 @@ class PositionMonitor:
             # ── NUEVO: FLASH EXIT PARA SCALPING (HOT) ──
             group = str(trade.get("group_name", "")).upper()
             if "HOT" in group or "SCALPING" in group:
-                highest = safe_float(trade.get("highest_price_reached") or current_price)
-                if current_price > highest:
+                db_highest = trade.get("highest_price_reached")
+                highest = safe_float(db_highest or current_price)
+                if db_highest is None or current_price > highest:
                     highest = current_price
                     sb.table("stocks_positions").update({"highest_price_reached": highest}).eq("id", trade["id"]).execute()
                 

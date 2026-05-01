@@ -38,6 +38,20 @@ from app.analysis.fibonacci_bb import fibonacci_bollinger
 from app.analysis.candle_patterns import detect_patterns
 from app.core.market_hours import is_market_open, get_nyc_now
 from app.core.symbol_state import SymbolStateMachine, detect_market_ambiguity
+from app.stocks.stocks_tp_manager import (
+    calculate_tp_blocks,
+    evaluate_tp_blocks,
+    execute_partial_sell,
+)
+from app.stocks.stocks_adaptive_tp import (
+    evaluate_adaptive_tp,
+    fetch_macro_data,
+)
+from app.stocks.stocks_adaptive_sl import (
+    load_sl_config,
+    evaluate_adaptive_sl,
+    execute_adaptive_sl_close,
+)
 
 sm = SymbolStateMachine.get_instance()
 
@@ -130,7 +144,7 @@ async def get_watchlist(config: dict) -> list[str]:
             log_info(MODULE, f"Watchlist from DB (today + positions): {len(ticker_list)} tickers")
             return ticker_list
 
-        # Fallback: most recent watchlist (last 3 days)
+        # 3. Fallback: most recent watchlist (last 3 days)
         recent_date = (date.today() - timedelta(days=3)).isoformat()
         res_recent = sb.table("watchlist_daily")\
             .select("ticker, date")\
@@ -140,7 +154,7 @@ async def get_watchlist(config: dict) -> list[str]:
             .order("catalyst_score", desc=True)\
             .limit(500)\
             .execute()
-
+        
         if res_recent.data and len(res_recent.data) > 0:
             # Get tickers from the most recent date available
             latest_date = res_recent.data[0]["date"]
@@ -173,25 +187,65 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         provider = YFinanceProvider()
         
         # 1. DOWNLOAD MULTI-TIMEFRAME DATA (Optimized periods)
+        df_5m  = await provider.get_ohlcv(ticker, interval="5m",  period="5d")
         df_15m = await provider.get_ohlcv(ticker, interval="15m", period="60d")
         df_4h  = await provider.get_ohlcv(ticker, interval="4h",  period="120d")
         df_1d  = await provider.get_ohlcv(ticker, interval="1d",  period="365d")
 
         # ROBUST NULL CHECK — skip ticker entirely if any timeframe fails
+        if df_5m is None or df_5m.empty or len(df_5m) < 10:
+            log_warning(MODULE, f"Skipping {ticker}: no 5m data")
+            return None
         if df_15m is None or df_15m.empty or len(df_15m) < 10:
             log_warning(MODULE, f"Skipping {ticker}: no 15m data")
             return None
         if df_1d is None or df_1d.empty or len(df_1d) < 10:
             log_warning(MODULE, f"Skipping {ticker}: no 1d data")
             return None
-        if df_4h is None or df_4h.empty or len(df_4h) < 2:
-            log_warning(MODULE, f"Skipping {ticker}: no 4h/1h data")
-            return None
 
         # 2. CALCULATE INDICATORS
+        ind_5m  = calculate_stock_indicators(df_5m,  "5m",  ticker)
         ind_15m = calculate_stock_indicators(df_15m, "15m", ticker)
         ind_4h  = calculate_stock_indicators(df_4h,  "4h",  ticker)
         ind_1d  = calculate_stock_indicators(df_1d,  "1d",  ticker)
+
+        if not ind_5m or not ind_15m:
+            return None
+
+        # ── DETECCIÓN: BOLLINGER EXPLOSION (Sugerencia Usuario) ──
+        # Detectamos si las bandas se están "abriendo" (Upper sube, Lower baja)
+        df_5m_calc = ind_5m["_df"]
+        if len(df_5m_calc) >= 3:
+            last_5 = df_5m_calc.iloc[-1]
+            prev_5 = df_5m_calc.iloc[-2]
+            
+            upper_expanding = last_5["bb_upper"] > prev_5["bb_upper"]
+            lower_expanding = last_5["bb_lower"] < prev_5["bb_lower"]
+            price_breakout  = last_5["close"] > last_5["bb_upper"]
+            volume_spike    = last_5["rvol"] > 2.0
+            
+            if upper_expanding and lower_expanding and price_breakout and volume_spike:
+                log_info(MODULE, f"🚀 BOLLINGER EXPLOSION detected in {ticker} (5m)!")
+                # Configurar targets específicos solicitados:
+                # B1: Upper_6 (15m) | B2: Bollinger Upper (Upper_5 15m) | B3: Trailing
+                fib_15m = fibonacci_bollinger(df_15m)
+                last_fib = fib_15m.iloc[-1]
+                
+                tp1 = float(last_fib["upper_6"])
+                tp2 = float(last_fib["upper_5"])
+                sl  = float(last_5["bb_middle"]) # SL en la base de las bandas
+                
+                # Crear oportunidad automática
+                from app.analysis.opportunity_service import create_stock_opportunity
+                await create_stock_opportunity(
+                    ticker=ticker,
+                    entry_price=float(last_5["close"]),
+                    sl=sl,
+                    tp1=tp1,
+                    tp2=tp2,
+                    reason="BOLLINGER_EXPLOSION_5M",
+                    strength="STRONG"
+                )
 
         if not ind_15m or not ind_4h or not ind_1d:
             log_warning(MODULE, f"Skipping {ticker}: indicator calculation failed")
@@ -490,10 +544,12 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         elif t01_confirmed:
              rule_ctx["pine_signal"] = "Buy" # Default 4h signal
         
-        # ── STATE MACHINE SYNC & AMBIGUITY CHECK ──
         # Sync positions with state machine for accurate can_open/can_close logic
         all_pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
         sm.sync_from_positions(ticker, all_pos_res.data or [])
+        
+        # ── NUEVO: AUTO-CLEANUP DE ESTADOS ZOMBIES ──
+        sm.cleanup_zombie_states(ticker, all_pos_res.data or [])
 
         snap_for_sm = {
             'price': current_price,
@@ -578,9 +634,17 @@ async def run_stocks_cycle(force=False):
 
         # Check market hours
         is_open, status_text = is_market_open()
-        if not force and not is_open:
-            log_info(MODULE, f"Cycle skipped: Market is {status_text}")
+        
+        # Determine if we should run anyway (e.g. if we have open positions to monitor)
+        open_tickers = await get_open_positions_tickers()
+        has_positions = len(open_tickers) > 0
+        
+        if not force and not is_open and not has_positions:
+            log_info(MODULE, f"Cycle skipped: Market is {status_text} and no active positions")
             return
+        
+        if not is_open and has_positions:
+            log_info(MODULE, f"Market is {status_text}, but running cycle to monitor {len(open_tickers)} active positions")
 
         # ── CAPA 0: Dynamic Scanner — Refresh universe every cycle ──
         scanner_max_price = float(config.get("scanner_max_price", 20))
@@ -767,6 +831,123 @@ async def run_pro_cycle():
         log_error(MODULE, f"PRO scoring cycle failed: {e}")
 
 
+async def _get_timeframe_df_for_tp(ticker: str, interval: str = '15m', period: str = '5d') -> pd.DataFrame:
+    """Helper to get timeframe OHLCV DataFrame for adaptive TP analysis."""
+    try:
+        from app.data.yfinance_provider import YFinanceProvider
+        provider = YFinanceProvider()
+        df = await provider.get_ohlcv(ticker, interval=interval, period=period)
+        return df
+    except Exception as e:
+        log_warning(MODULE, f"TP: Cannot get {interval} df for {ticker}: {e}")
+        return None
+
+async def _get_daily_df_for_tp(ticker: str) -> pd.DataFrame:
+    """Helper to get daily OHLCV DataFrame for ATR calculation in TP manager."""
+    try:
+        from app.data.yfinance_provider import YFinanceProvider
+        provider = YFinanceProvider()
+        df = await provider.get_ohlcv(ticker, interval="1d", period="60d")
+        return df
+    except Exception as e:
+        log_warning(MODULE, f"TP: Cannot get daily df for {ticker}: {e}")
+        return None
+
+
+async def run_stocks_tp_cycle():
+    """
+    Ciclo de gestión de TP para stocks.
+    Corre cada 5m en horario de mercado.
+    Evalúa los 3 bloques de Take Profit para cada posición abierta.
+    """
+    sb = get_supabase()
+    
+    try:
+        from app.data.ib_provider import IBProvider
+    except ImportError:
+        from data.ib_provider import IBProvider
+        
+    ib_provider = IBProvider()
+    await ib_provider.connect()
+
+    try:
+        pos_res = sb.table('stocks_positions').select('*').eq('status', 'open').execute()
+        positions = pos_res.data or []
+        if not positions:
+            return
+
+        log_info(MODULE, f"📊 TP Cycle: evaluando {len(positions)} posiciones abiertas")
+        macro = await fetch_macro_data(sb)
+        sl_config = await load_sl_config(sb)
+
+        for pos in positions:
+            ticker = pos['ticker']
+            try:
+                snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
+                snap = snap_res.data[0] if snap_res.data else {}
+                price = float(snap.get('price') or 0)
+                if price <= 0: continue
+
+                # Inicializar TPs si faltan
+                if not pos.get('tp_block1_price'):
+                    df_daily = await _get_daily_df_for_tp(ticker)
+                    tp_data = calculate_tp_blocks(
+                        ticker=ticker,
+                        entry_price=float(pos.get('avg_price') or pos.get('entry_price') or 0),
+                        total_shares=int(pos.get('shares') or 0),
+                        snap=snap,
+                        df_daily=df_daily,
+                    )
+                    if 'error' not in tp_data:
+                        sb.table('stocks_positions').update({
+                            'tp_block1_price': tp_data['tp_block1_price'],
+                            'tp_block2_price': tp_data['tp_block2_price'],
+                            'tp_block1_shares': tp_data['tp_block1_shares'],
+                            'tp_block2_shares': tp_data['tp_block2_shares'],
+                            'tp_block3_shares': tp_data['tp_block3_shares'],
+                            'shares_remaining': int(pos.get('shares') or 0),
+                            'tp_atr_14': tp_data['atr_14'],
+                            'tp_trailing_high': price,
+                        }).eq('id', pos['id']).execute()
+                        pos.update(tp_data)
+                        pos['shares_remaining'] = int(pos.get('shares') or 0)
+                        pos['tp_trailing_high'] = price
+
+                df_daily = await _get_daily_df_for_tp(ticker)
+                result = evaluate_tp_blocks(pos, price, snap, df_daily)
+                
+                # Actualizar trailing high
+                if float(result.get('new_trail_high') or 0) > float(pos.get('tp_trailing_high') or 0):
+                    sb.table('stocks_positions').update({
+                        'tp_trailing_high': result['new_trail_high'],
+                        'tp_trailing_sl': result.get('b3_trail_sl', 0),
+                    }).eq('id', pos['id']).execute()
+
+                action = result['action']
+                if action.startswith('execute_'):
+                    await execute_partial_sell(
+                        ticker=ticker,
+                        position=pos,
+                        block=result['block'],
+                        shares=result['shares'],
+                        price=price,
+                        action=action,
+                        new_sl=result.get('new_sl', 0),
+                        new_trail_high=result['new_trail_high'],
+                        b3_trail_sl=result['b3_trail_sl'],
+                        supabase=sb,
+                        ib_provider=ib_provider,
+                    )
+
+            except Exception as e:
+                log_error(MODULE, f'{ticker} TP error: {e}')
+    except Exception as e:
+        log_error(MODULE, f'TP cycle failed: {e}')
+    finally:
+        try: await ib_provider.disconnect()
+        except: pass
+
+
 async def start_stocks_scheduler(force=False):
     """
     Start the stocks scheduler using APScheduler.
@@ -789,6 +970,16 @@ async def start_stocks_scheduler(force=False):
         id="stocks_hot_cycle",
         name="Hot by Volume (5m intraday cycle)",
         kwargs={"force": force},
+        max_instances=1,
+        replace_existing=True,
+    )
+
+    # 1b. TP MANAGER: every 5 minutes during market hours
+    scheduler.add_job(
+        run_stocks_tp_cycle,
+        trigger=IntervalTrigger(minutes=5),
+        id="stocks_tp_cycle",
+        name="Stocks TP Manager (3 Blocks, 5m)",
         max_instances=1,
         replace_existing=True,
     )
@@ -836,7 +1027,8 @@ async def start_stocks_scheduler(force=False):
     is_open, status_txt = is_market_open()
     log_info(MODULE, f"Stocks scheduler started (Market: {status_txt}). Tasks: Hot(15m) + Pro(16:05ET) + Sweep(16:01ET)")
 
-    # Run first cycle immediately
+    # Run first cycles immediately
+    asyncio.create_task(run_stocks_tp_cycle())
     await run_stocks_cycle(force=force)
 
     # Keep running

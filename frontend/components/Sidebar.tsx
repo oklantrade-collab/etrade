@@ -82,10 +82,10 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       <div className="sidebar-logo flex items-center justify-between">
         <div>
           <h1 className="text-xl font-black italic tracking-tighter">eTrader</h1>
-          <span className="text-[0.6rem] uppercase tracking-widest font-bold text-slate-500">Multimarket v4.5</span>
+          <span className="text-[0.6rem] uppercase tracking-widest font-bold text-[var(--text-muted)]">Multimarket v4.5</span>
         </div>
         {onClose && (
-          <button onClick={onClose} className="md:hidden p-2 text-slate-400 hover:text-white">
+          <button onClick={onClose} className="md:hidden p-2 text-[var(--text-muted)] hover:text-[var(--text-primary)]">
             ✕
           </button>
         )}
@@ -94,7 +94,7 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       <nav className="sidebar-nav pt-4 pb-10">
         {sections.map((section, sidx) => (
           <div key={sidx} className="mb-6">
-            <h3 className="px-5 mb-2 text-[0.6rem] font-black text-slate-500 uppercase tracking-[0.2em]">
+            <h3 className="px-5 mb-2 text-[0.6rem] font-black text-[var(--text-muted)] uppercase tracking-[0.2em]">
               {section.title}
             </h3>
             <div className={`space-y-0.5 ${section.disabled ? 'opacity-40 cursor-not-allowed' : ''}`}>
@@ -118,11 +118,11 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
         ))}
       </nav>
 
-      <div className="mt-auto border-t border-slate-800 p-5 bg-slate-900/40">
+      <div className="mt-auto border-t border-[var(--border-color)] p-5 bg-[var(--bg-secondary)]">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-[0.65rem] font-bold text-slate-400 uppercase tracking-widest">
+            <span className="text-[0.65rem] font-bold text-[var(--text-muted)] uppercase tracking-widest">
               System Live
             </span>
           </div>

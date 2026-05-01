@@ -714,9 +714,9 @@ async def _execute_paper_open(
         BOT_STATE.opening_locks[symbol] = True
         
         try:
-            # Consultar DB directamente para conteo global exacto
-            pos_res = supabase.table('positions').select('id').eq('status', 'open').execute()
-            current_global = len(pos_res.data) if pos_res.data else 0
+            # Consultar DB directamente para conteo global exacto (Sin limite)
+            global_res = supabase.table('positions').select('id', count='exact').eq('status', 'open').limit(0).execute()
+            current_global = global_res.count or 0
             
             if current_global >= max_global:
                 log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
@@ -724,13 +724,11 @@ async def _execute_paper_open(
                 return None
 
             # 3. Límite POR SÍMBOLO
-            from app.core.supabase_client import get_risk_config
-            risk_config = get_risk_config()
-            max_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
             
-            # Contar posiciones abiertas para este símbolo específico
-            sym_pos_res = supabase.table('positions').select('id').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
-            current_sym = len(sym_pos_res.data) if sym_pos_res.data else 0
+            # Contar posiciones abiertas para este símbolo específico (Exacto)
+            sym_pos_res = supabase.table('positions').select('id', count='exact').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').limit(0).execute()
+            current_sym = sym_pos_res.count or 0
 
             if current_sym >= max_symbol:
                 log_info(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} posiciones por símbolo alcanzado ({current_sym}).")

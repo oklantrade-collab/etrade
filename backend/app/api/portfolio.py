@@ -60,7 +60,8 @@ async def get_global_portfolio():
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
                     supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(50).execute(),
                     supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
-                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute()
+                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute(),
+                    supabase.table('risk_config').select('max_open_trades, max_positions_per_symbol').limit(1).execute()
                 )
 
             async with DB_LOCK:
@@ -214,27 +215,62 @@ async def get_global_portfolio():
                 })
 
             # Actividad reciente (Ya cargada en paralelo arriba)
-            
             recent_activity = []
             for t in recent_crypto: recent_activity.append({'time': t['closed_at'], 'market': 'Crypto', 'symbol': t['symbol'], 'pnl': float(t['total_pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
             for t in recent_forex: recent_activity.append({'time': t['closed_at'], 'market': 'Forex', 'symbol': t['symbol'], 'pnl': float(t['pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
             for t in recent_stocks: recent_activity.append({'time': t['updated_at'], 'market': 'Stocks', 'symbol': t['ticker'], 'pnl': float(t['unrealized_pnl'] or 0), 'entry_price': t['avg_price'], 'quantity': t['shares'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
             recent_activity.sort(key=lambda x: x['time'], reverse=True)
+            
+            # --- 4. SIPV SIGNALS (BTC, DXY, VIX) ---
+            sipv_res = supabase.table('candle_signals') \
+                .select('pair, pattern_name, action') \
+                .in_('pair', ['BTCUSDT', 'DXY', 'VIX']) \
+                .order('created_at', desc=True) \
+                .execute()
+            
+            sipv_map = {}
+            for s in (sipv_res.data or []):
+                if s['pair'] not in sipv_map:
+                    sipv_map[s['pair']] = {
+                        'signal': s['pattern_name'].upper() if s['pattern_name'] else 'HOLD',
+                        'action': s['action'].upper() if s['action'] else 'HOLD'
+                    }
+
+            # --- 5. LIMITS & RISK ---
+            risk_res = supabase.table('risk_config').select('max_open_trades, max_positions_per_symbol').limit(1).execute()
+            risk_cfg = risk_res.data[0] if risk_res.data else {'max_open_trades': 3, 'max_positions_per_symbol': 3}
 
             return {
                 'daily': {
                     'pnl_usd': round(daily_pnl, 2), 'win_rate': round(win_rate, 1),
                     'open_positions': len(open_crypto_pos_res.data or []) + len(open_forex_pos_res.data or []) + len(open_stocks_pos_res.data or []),
                     'risk_global': regime,
+                    'max_open_trades': risk_cfg.get('max_open_trades', 3),
+                    'max_positions_per_symbol': risk_cfg.get('max_positions_per_symbol', 3)
                 },
                 'summary': {
                     'total_pnl_usd': round(sum(p['unrealized_pnl_usd'] for p in symbols_data + forex_symbols_data + stocks_symbols_data), 2),
                     'avg_roi_pct': round(sum(p['unrealized_pnl_pct'] for p in symbols_data + forex_symbols_data + stocks_symbols_data) / max(1, len(symbols_data + forex_symbols_data + stocks_symbols_data)), 2),
                 },
                 'markets': {
-                    'crypto': {'symbols': symbols_data, 'positions': len(open_crypto_pos_res.data or [])},
-                    'forex':  {'symbols': forex_symbols_data, 'positions': len(open_forex_pos_res.data or [])},
-                    'stocks': {'symbols': stocks_symbols_data, 'positions': len(open_stocks_pos_res.data or [])}
+                    'crypto': {
+                        'symbols': symbols_data, 
+                        'positions': len(open_crypto_pos_res.data or []),
+                        'sipv_signal': sipv_map.get('BTCUSDT', {}).get('signal', 'HOLD'),
+                        'sipv_action': sipv_map.get('BTCUSDT', {}).get('action', 'HOLD')
+                    },
+                    'forex':  {
+                        'symbols': forex_symbols_data, 
+                        'positions': len(open_forex_pos_res.data or []),
+                        'sipv_signal': sipv_map.get('DXY', {}).get('signal', 'HOLD'),
+                        'sipv_action': sipv_map.get('DXY', {}).get('action', 'HOLD')
+                    },
+                    'stocks': {
+                        'symbols': stocks_symbols_data, 
+                        'positions': len(open_stocks_pos_res.data or []),
+                        'sipv_signal': sipv_map.get('VIX', {}).get('signal', 'HOLD'),
+                        'sipv_action': sipv_map.get('VIX', {}).get('action', 'HOLD')
+                    }
                 },
                 'recent_activity': recent_activity[:100]
             }

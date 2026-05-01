@@ -290,3 +290,64 @@ def get_ib_connection() -> IBConnection | None:
     if _ib_instance is None:
         _ib_instance = IBConnection()
     return _ib_instance
+# ── IBProvider Wrapper (Unified Interface) ────────────────
+class IBProvider:
+    """
+    Async-friendly wrapper for IBConnection to be used by
+    Stocks TP Manager and other services.
+    """
+    def __init__(self):
+        self.conn = get_ib_connection()
+
+    async def connect(self):
+        if not self.conn:
+            raise RuntimeError("IB API not available")
+        if not self.conn.connected:
+            return self.conn.connect_tws()
+        return True
+
+    async def disconnect(self):
+        if self.conn:
+            self.conn.disconnect_tws()
+
+    async def place_order(
+        self,
+        ticker: str,
+        direction: str,
+        shares: int,
+        order_type: str = 'market',
+        price: float = None,
+        reason: str = ''
+    ) -> dict:
+        """
+        Simplified order placement for exits/TPs.
+        """
+        if not self.conn or not self.conn.connected:
+            return {"success": False, "error": "Not connected to IB"}
+
+        contract = self.conn.us_stock_contract(ticker)
+        order = Order()
+        order.action = direction.upper() # BUY/SELL
+        order.totalQuantity = int(shares)
+        
+        if order_type.lower() == 'market':
+            order.orderType = "MKT"
+        elif order_type.lower() == 'limit' and price:
+            order.orderType = "LMT"
+            order.lmtPrice = round(price, 2)
+        else:
+            return {"success": False, "error": f"Unsupported order type: {order_type}"}
+
+        order.transmit = True
+        order_id = self.conn.get_next_order_id()
+        
+        log_info(MODULE, f"🚀 Executing {order_type} {direction} {shares}x {ticker} (Reason: {reason})")
+        self.conn.placeOrder(order_id, contract, order)
+        
+        return {
+            "success": True,
+            "order_id": order_id,
+            "ticker": ticker,
+            "shares": shares,
+            "price": price
+        }

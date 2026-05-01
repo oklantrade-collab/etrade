@@ -17,7 +17,7 @@ export default function AppContainer({ children }: { children: React.ReactNode }
     pathname.startsWith('/auth')
 
   if (isAuthPage) {
-    return <div className="min-h-screen bg-[#05070a]">{children}</div>
+    return <div className="min-h-screen">{children}</div>
   }
 
   return (

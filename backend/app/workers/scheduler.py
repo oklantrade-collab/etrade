@@ -1223,44 +1223,67 @@ scheduler = AsyncIOScheduler()
 
 # Sync Configuration from Supabase (Requirement 2 & Problem 2)
 async def sync_db_config_to_memory():
-    """Reads trading_config from DB and updates BOT_STATE.config_cache."""
+    """Reads trading_config and risk_config from DB and updates BOT_STATE.config_cache."""
     try:
         sb = get_supabase()
+        
+        # 1. Load trading_config
         res = sb.table("trading_config").select("*").eq("id", 1).maybe_single().execute()
-        if res.data:
-            db_cfg = res.data
-            
-            # Problem 2: Recalculate capital_operativo automatically
-            cap_total = float(db_cfg.get("capital_total") or 500)
-            pct_trade = float(db_cfg.get("pct_for_trading") or 20)
-            cap_op = cap_total * (pct_trade / 100.0) * 0.90
-            
-            # Update DB if it differs significantly (Problem 2)
-            if abs(float(db_cfg.get("capital_operativo", 0)) - cap_op) > 0.01:
-                log_info(MODULE, f"Recalculating capital_operativo: {cap_op}")
-                sb.table("trading_config").update({"capital_operativo": cap_op}).eq("id", 1).execute()
-                db_cfg["capital_operativo"] = cap_op
+        db_cfg = res.data or {}
+        
+        # 2. Load risk_config (Critical for limits)
+        from app.core.supabase_client import get_risk_config
+        risk_cfg = get_risk_config()
+        
+        # Merge configs
+        combined_cfg = {**db_cfg, **risk_cfg}
+        
+        # Problem 2: Recalculate capital_operativo automatically
+        cap_total = float(combined_cfg.get("capital_total") or 500)
+        pct_trade = float(combined_cfg.get("pct_for_trading") or 20)
+        cap_op = cap_total * (pct_trade / 100.0) * 0.90
+        
+        # Update DB if it differs significantly
+        if abs(float(combined_cfg.get("capital_operativo", 0)) - cap_op) > 0.01:
+            log_info(MODULE, f"Recalculating capital_operativo: {cap_op}")
+            sb.table("trading_config").update({"capital_operativo": cap_op}).eq("id", 1).execute()
+            combined_cfg["capital_operativo"] = cap_op
 
-            # Update BOT_STATE.config_cache
-            # Merge with existing file config (file config takes precedence for local overrides)
-            current = BOT_STATE.config_cache or {}
-            current.update(db_cfg)
-            
-            # Force symbols_active from active_symbols field (Problem 4 format)
-            active_s = db_cfg.get("active_symbols")
-            if active_s:
-                if isinstance(active_s, str):
-                    try:
-                        active_s = json.loads(active_s)
-                    except:
-                        active_s = [s.strip() for s in active_s.split(",") if s.strip()]
-                current["symbols_active"] = active_s
+        # Update BOT_STATE.config_cache
+        current = BOT_STATE.config_cache or {}
+        current.update(combined_cfg)
+        
+        # Force symbols_active format
+        active_s = combined_cfg.get("active_symbols")
+        if active_s:
+            if isinstance(active_s, str):
+                try:
+                    active_s = json.loads(active_s)
+                except:
+                    active_s = [s.strip() for s in active_s.split(",") if s.strip()]
+            current["symbols_active"] = active_s
 
-            BOT_STATE.config_cache = current
-            
-            log_info(MODULE, f"Risk config synced from Supabase.")
+        BOT_STATE.config_cache = current
+        log_info(MODULE, f"Config (Trading + Risk) synced from Supabase. Limits: Global={current.get('max_open_trades')}, Symbol={current.get('max_positions_per_symbol')}")
     except Exception as e:
         log_error(MODULE, f"Failed to sync config from DB: {e}")
+
+async def sync_positions_to_memory():
+    """Synchronize BOT_STATE.positions with the 'positions' table in Supabase."""
+    try:
+        sb = get_supabase()
+        res = sb.table("positions").select("*").eq("status", "open").execute()
+        
+        # Clear current and rebuild to ensure closed ones are removed
+        new_positions = {}
+        for p in res.data:
+            pos_id = str(p.get('id', p['symbol']))
+            new_positions[pos_id] = p
+            
+        BOT_STATE.positions = new_positions
+        log_info(MODULE, f"Positions synced: {len(BOT_STATE.positions)} active trades in memory.")
+    except Exception as e:
+        log_error(MODULE, f"Failed to sync positions to memory: {e}")
 
 # Load Pilot Config (Requirement 2: Ensure fail-safe to Paper)
 def load_config_to_memory():

@@ -95,11 +95,13 @@ export default function SettingsPage() {
     if (section === 'stocks_general') {
         try {
             for (const key of Object.keys(data)) {
-                await supabase.from('stocks_config').update({ value: data[key] }).eq('key', key);
+                await supabase.from('stocks_config').update({ value: String(data[key]) }).eq('key', key);
             }
             setSaved(true);
+            // Pequeña espera para asegurar consistencia en Supabase antes de recargar
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await loadConfig();
             setTimeout(() => setSaved(false), 2000);
-            loadConfig();
             return;
         } catch (err) { 
             console.error(err); 
@@ -159,8 +161,8 @@ export default function SettingsPage() {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
         <div>
-          <h1 style={{ fontSize: '24px', fontWeight: 700, color: '#FFF', margin: 0 }}>⚙️ Configuración</h1>
-          <p style={{ color: '#555', fontSize: '12px', marginTop: '4px', letterSpacing:'1px', textTransform:'uppercase' }}>Multimarket Intelligence v4.5</p>
+          <h1 style={{ fontSize: '24px', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>⚙️ Configuración</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '12px', marginTop: '4px', letterSpacing:'1px', textTransform:'uppercase' }}>Multimarket Intelligence v4.5</p>
         </div>
         {saved && <div style={{ background: 'rgba(0,200,150,0.15)', border: '1px solid #00C896', borderRadius:'8px', padding: '8px 16px', color: '#00C896', fontSize: '13px' }}>✓ Guardado</div>}
       </div>
@@ -211,7 +213,16 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
   const [showUniverse, setShowUniverse] = useState(false)
 
   useEffect(() => { if (settings) setForm({ ...settings }) }, [settings])
-  useEffect(() => { if (stocksConfig) setGeneralForm({ ...stocksConfig }) }, [stocksConfig])
+  useEffect(() => { 
+    if (stocksConfig && config) {
+      setGeneralForm({ 
+        ...stocksConfig,
+        capital_stocks_spot: config.capital_stocks_spot,
+        accumulated_profit_stocks: config.accumulated_profit_stocks,
+        leverage_stocks: config.leverage_stocks
+      }) 
+    } 
+  }, [stocksConfig, config])
 
   if (!form.fg_mcap_min && form.fg_mcap_min !== 0) return <div style={{ padding: '20px', color: '#555' }}>Initializing engine...</div>
 
@@ -220,23 +231,33 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
+      <StatusBadge label="Stocks Industrial" status="ACTIVO" color="#22C55E" detail="Estrategia Fibonacci + AI" />
+
       {/* SECCIÓN GENERAL SIEMPRE VISIBLE */}
       <SettingsSection title="💰 Configuración de Cuenta & Riesgo">
-          <SettingRow label="Capital asignado (Base)" value={config.capital_stocks_spot || 0} type="number" prefix="$" onChange={(v: any) => onSaveGlobal({ capital_stocks_spot: v })} />
-          <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_stocks || 0} type="number" prefix="$" onChange={(v: any) => onSaveGlobal({ accumulated_profit_stocks: v })} />
+          <SettingRow label="Capital asignado (Base)" value={generalForm.capital_stocks_spot ?? 0} type="number" prefix="$" onChange={(v: any) => setGeneralForm({ ...generalForm, capital_stocks_spot: v })} />
+          <SettingRow label="Ganancia o Profit de la cuenta" value={generalForm.accumulated_profit_stocks ?? 0} type="number" prefix="$" onChange={(v: any) => setGeneralForm({ ...generalForm, accumulated_profit_stocks: v })} />
           <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
-             Capital Operativo Total: ${( (config.capital_stocks_spot || 0) + (config.accumulated_profit_stocks || 0) ).toLocaleString()} USD
+             Capital Operativo Total: ${( Number(generalForm.capital_stocks_spot || 0) + Number(generalForm.accumulated_profit_stocks || 0) ).toLocaleString()} USD
           </div>
           <SettingRow label="Max. Tot Riesgo Inv." value={generalForm.max_total_risk_pct || 30} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_total_risk_pct: v })} />
           <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
-             Límite de exposición: ${( ( (config.capital_stocks_spot || 0) + (config.accumulated_profit_stocks || 0) ) * ((generalForm.max_total_risk_pct || 30) / 100)).toLocaleString()} USD
+             Límite de exposición: ${( ( Number(generalForm.capital_stocks_spot || 0) + Number(generalForm.accumulated_profit_stocks || 0) ) * ((generalForm.max_total_risk_pct || 30) / 100)).toLocaleString()} USD
           </div>
-         <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_stocks || 1} type="number" suffix="x" onChange={(v: any) => onSaveGlobal({ leverage_stocks: v })} />
+         <SettingRow label="Apalancamiento (Leverage)" value={generalForm.leverage_stocks ?? 1} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, leverage_stocks: v })} />
          <SettingRow label="% Inversión por Operación" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
          <SettingToggle label="Paper Trading Active" value={generalForm.paper_mode_active === true || generalForm.paper_mode_active === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, paper_mode_active: v })} />
-         <div style={{ padding:'8px 18px' }}>
-            <button onClick={() => onSaveGeneral(generalForm)} style={{ width:'100%', padding:'8px', borderRadius:'6px', background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.1)', color:'#FFF', fontSize:'11px', cursor:'pointer' }}>Actualizar General</button>
-         </div>
+      </SettingsSection>
+
+      <SettingsSection title="🛡️ Stop Loss Adaptativo">
+        <div style={{ padding: '0 20px 10px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Protección inteligente: Si el precio toca el SLV, entra en Modo Recuperación por 2h.
+        </div>
+        <SettingRow label="Stop Loss absoluto (Hard Stop)" value={generalForm.sl_max_loss_hard} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, sl_max_loss_hard: v })} />
+        <SettingRow label="Pérdida para Modo Recuperación" value={generalForm.sl_close_threshold} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, sl_close_threshold: v })} />
+        <SettingRow label="Pérdida máx. antes de pánico" value={generalForm.sl_wait_threshold} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, sl_wait_threshold: v })} />
+        <SettingRow label="Días máx. en espera" value={generalForm.sl_max_wait_days} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, sl_max_wait_days: v })} />
+        <SettingToggle label="Detectar clímax de volumen" value={generalForm.sl_volume_climax_enabled === true || generalForm.sl_volume_climax_enabled === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, sl_volume_climax_enabled: v })} />
       </SettingsSection>
 
       {/* UNIVERSE BUILDER COMO BOTÓN DESPLEGABLE */}
@@ -276,6 +297,8 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
 
       {showUniverse && (
         <div style={{ display:'flex', flexDirection:'column', gap:'16px', animation: 'fadeIn 0.3s ease' }}>
+          {/* Se han movido las secciones de SL fuera de aquí para mayor visibilidad */}
+          
           <SettingsSection title="💎 Filtro FUTURE GIANT">
             <SettingRow label="Market Cap mínimo" value={form.fg_mcap_min} type="number" suffix="M" onChange={(v: any) => setForm({ ...form, fg_mcap_min: v })} />
             <SettingRow label="Market Cap máximo" value={form.fg_mcap_max} type="number" suffix="M" onChange={(v: any) => setForm({ ...form, fg_mcap_max: v })} />
@@ -308,6 +331,24 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
           </div>
         </div>
       )}
+
+      <SaveButton onSave={() => {
+          const { capital_stocks_spot, accumulated_profit_stocks, leverage_stocks, ...rest } = generalForm;
+          
+          // 1. Guardar cambios en trading_config (Capital y Leverage)
+          const globalUpdate: any = {};
+          if (capital_stocks_spot !== undefined) globalUpdate.capital_stocks_spot = capital_stocks_spot;
+          if (accumulated_profit_stocks !== undefined) globalUpdate.accumulated_profit_stocks = accumulated_profit_stocks;
+          if (leverage_stocks !== undefined) globalUpdate.leverage_stocks = leverage_stocks;
+          
+          if (Object.keys(globalUpdate).length > 0) {
+              onSaveGlobal(globalUpdate);
+          }
+          
+          // 2. Guardar todos los campos de stocks_config (incluyendo Max Tot Riesgo)
+          onSaveGeneral(rest);
+      }} />
+
     </div>
   )
 }
@@ -353,7 +394,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
       <SettingsSection title="💰 Capital & Activos">
         <SettingRow label="Capital asignado (Base)" value={form.capital_crypto_futures} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, capital_crypto_futures: v })} />
         <SettingRow label="Ganancia o Profit de la cuenta" value={form.accumulated_profit_crypto} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, accumulated_profit_crypto: v })} />
-        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+        <div style={{ padding: '4px 20px', color: 'var(--text-muted)', fontSize: '11px', fontStyle: 'italic' }}>
              Capital Operativo Total: ${( Number(form.capital_crypto_futures) + Number(form.accumulated_profit_crypto) ).toLocaleString()} USD
         </div>
         <SettingRow label="Apalancamiento (Leverage)" value={form.leverage_crypto} type="number" suffix="x" onChange={(v: any) => setForm({ ...form, leverage_crypto: v })} />
@@ -366,7 +407,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
         <SettingRow label="Max. Tot Riesgo Inv." value={form.max_total_risk_crypto_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_total_risk_crypto_pct: v })} />
         <SettingRow label="Cant. Operación x Cripto" value={form.max_positions_per_symbol} type="number" onChange={(v: any) => setForm({ ...form, max_positions_per_symbol: v })} />
         <SettingRow label="Inversión x Operación (Risk %)" value={form.max_risk_per_trade_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_risk_per_trade_pct: v })} />
-        <div style={{ padding: '8px 18px', color: '#666', fontSize: '11px' }}>
+        <div style={{ padding: '8px 18px', color: 'var(--text-muted)', fontSize: '11px' }}>
           Equivale a approx. ${(form.capital_crypto_futures * (form.max_risk_per_trade_pct / 100)).toFixed(2)} USD por cada compra/venta.
         </div>
       </SettingsSection>
@@ -409,7 +450,7 @@ const ForexSettings = ({ config, onSave }: any) => {
       <SettingsSection title="💰 Gestión Forex">
         <SettingRow label="Capital asignado (Base)" value={config.capital_forex_futures} type="number" prefix="$" disabled={!isConnected} onChange={(v: any) => onSave({ capital_forex_futures: v })} />
         <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_forex || 0} type="number" prefix="$" onChange={(v: any) => onSave({ accumulated_profit_forex: v })} />
-        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+        <div style={{ padding: '4px 20px', color: 'var(--text-muted)', fontSize: '11px', fontStyle: 'italic' }}>
              Capital Operativo Total: ${( Number(config.capital_forex_futures) + Number(config.accumulated_profit_forex || 0) ).toLocaleString()} USD
         </div>
         <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_forex || 500} type="number" suffix="x" onChange={(v: any) => onSave({ leverage_forex: v })} />
@@ -430,10 +471,100 @@ const ForexSettings = ({ config, onSave }: any) => {
 
 const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
   const [form, setForm] = useState({ telegram_enabled: config.telegram_enabled ?? true, ai_enabled: config.ai_enabled ?? true, paper_trading: config.paper_trading ?? true })
+  const [theme, setTheme] = useState<any>({
+    bgColor: '#0a0e17',
+    bgImage: '',
+    titleFont: 'Inter',
+    headerFont: 'Inter',
+    contentFont: 'Inter',
+    contentColor: '#e2e8f0'
+  })
+
+  useEffect(() => {
+    const saved = localStorage.getItem('app_theme_custom')
+    if (saved) setTheme(JSON.parse(saved))
+  }, [])
+
+  const saveTheme = () => {
+    localStorage.setItem('app_theme_custom', JSON.stringify(theme))
+    window.dispatchEvent(new Event('themeUpdated'))
+    alert("🎨 Apariencia actualizada correctamente.")
+  }
+
+  const resetTheme = () => {
+    localStorage.removeItem('app_theme_custom')
+    window.dispatchEvent(new Event('themeUpdated'))
+    setTheme({
+        bgColor: '#0a0e17',
+        bgImage: '',
+        titleFont: 'Inter',
+        headerFont: 'Inter',
+        contentFont: 'Inter',
+        contentColor: '#e2e8f0'
+    })
+    alert("♻️ Estilos restablecidos a valores de fábrica.")
+  }
+
+  const fontOptions = ['Inter', 'Roboto', 'Montserrat', 'Oswald', 'Outfit', 'JetBrains Mono', 'Poppins', 'Lato', 'Playfair Display']
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
-      <SettingsSection title="📱 Alertas"><SettingToggle label="Telegram Activado" value={form.telegram_enabled} onChange={(v: any) => setForm({ ...form, telegram_enabled: v })} /></SettingsSection>
-      <SettingsSection title="🧠 Algoritmo Core"><div style={{ padding: '12px 18px' }}><button onClick={onOpenRules} style={{ width: '100%', padding: '10px', background: 'rgba(79,195,247,0.1)', border: '1px solid rgba(79,195,247,0.3)', borderRadius: '8px', color: '#4FC3F7', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}>⚙️ EDITAR REGLAS (RULE ENGINE)</button></div></SettingsSection>
+      <SettingsSection title="📱 Alertas">
+        <SettingToggle label="Telegram Activado" value={form.telegram_enabled} onChange={(v: any) => setForm({ ...form, telegram_enabled: v })} />
+      </SettingsSection>
+      
+      <SettingsSection title="🧠 Algoritmo Core">
+        <div style={{ padding: '12px 18px' }}>
+            <button onClick={onOpenRules} style={{ width: '100%', padding: '10px', background: 'rgba(79,195,247,0.1)', border: '1px solid rgba(79,195,247,0.3)', borderRadius: '8px', color: '#4FC3F7', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}>⚙️ EDITAR REGLAS (RULE ENGINE)</button>
+        </div>
+      </SettingsSection>
+
+      <SettingsSection title="🎨 Apariencia (Customización UI)">
+        <div style={{ padding: '10px 18px', display:'flex', alignItems:'center', gap:'16px' }}>
+            <div style={{ flex:1, color:'var(--text-secondary)', fontSize:'13px' }}>Color Fondo (Background)</div>
+            <div style={{ display:'flex', gap:'8px' }}>
+                <button 
+                    onClick={() => setTheme({ ...theme, bgColor: '#0a0e17', contentColor: '#e2e8f0' })}
+                    style={{ padding:'6px 12px', borderRadius:'6px', background:'#0a0e17', color:'#FFF', border:'1px solid #333', fontSize:'10px', fontWeight:900, cursor:'pointer' }}
+                >DARK</button>
+                <button 
+                    onClick={() => setTheme({ ...theme, bgColor: '#ffffff', contentColor: '#1e293b' })}
+                    style={{ padding:'6px 12px', borderRadius:'6px', background:'#FFF', color:'#000', border:'1px solid #CCC', fontSize:'10px', fontWeight:900, cursor:'pointer' }}
+                >LIGHT</button>
+                <input type="color" value={theme.bgColor} onChange={(e) => setTheme({ ...theme, bgColor: e.target.value })} style={{ width:'30px', height:'30px', border:'none', background:'none', cursor:'pointer' }} />
+            </div>
+        </div>
+        <SettingRow label="Imagen Fondo (URL)" value={theme.bgImage} flexInput onChange={(v: any) => setTheme({ ...theme, bgImage: v })} />
+        
+        <div style={{ padding: '10px 18px', display:'flex', alignItems:'center', gap:'16px' }}>
+            <div style={{ flex:1, color:'var(--text-secondary)', fontSize:'13px' }}>Tipografía Títulos</div>
+            <select value={theme.titleFont} onChange={(e) => setTheme({ ...theme, titleFont: e.target.value })} style={SelectStyle}>
+                {fontOptions.map(f => <option key={f} value={f} style={{ color: '#000' }}>{f}</option>)}
+            </select>
+        </div>
+
+        <div style={{ padding: '10px 18px', display:'flex', alignItems:'center', gap:'16px' }}>
+            <div style={{ flex:1, color:'var(--text-secondary)', fontSize:'13px' }}>Tipografía Columnas (Tablas)</div>
+            <select value={theme.headerFont} onChange={(e) => setTheme({ ...theme, headerFont: e.target.value })} style={SelectStyle}>
+                {fontOptions.map(f => <option key={f} value={f} style={{ color: '#000' }}>{f}</option>)}
+            </select>
+        </div>
+
+        <div style={{ padding: '10px 18px', display:'flex', alignItems:'center', gap:'16px' }}>
+            <div style={{ flex:1, color:'var(--text-secondary)', fontSize:'13px' }}>Tipografía Contenido</div>
+            <select value={theme.contentFont} onChange={(e) => setTheme({ ...theme, contentFont: e.target.value })} style={SelectStyle}>
+                {fontOptions.map(f => <option key={f} value={f} style={{ color: '#000' }}>{f}</option>)}
+            </select>
+        </div>
+
+        <SettingRow label="Color de Texto Contenido" value={theme.contentColor} type="color" onChange={(v: any) => setTheme({ ...theme, contentColor: v })} />
+        
+        <div style={{ padding:'12px 18px', display:'flex', gap:'12px' }}>
+            <button onClick={resetTheme} style={{ flex:1, padding:'10px', background:'rgba(255,255,255,0.05)', border:'1px solid var(--border-color)', color:'var(--text-primary)', fontSize:'11px', fontWeight:700, borderRadius:'8px', cursor:'pointer' }}>RESTABLECER</button>
+            <button onClick={saveTheme} style={{ flex:1, padding:'10px', background:'rgba(79,195,247,0.1)', border:'1px solid rgba(79,195,247,0.3)', borderRadius:'8px', color:'#4FC3F7', fontSize:'11px', fontWeight:700, cursor:'pointer' }}>APLICAR ESTILOS</button>
+        </div>
+      </SettingsSection>
+
       <SaveButton onSave={() => onSave(form)} />
     </div>
   )
@@ -450,12 +581,12 @@ const StatusBadge = ({ label, status, color, detail }: any) => (
   </div>
 )
 const SettingsSection = ({ title, children }: any) => (
-  <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '10px', overflow: 'hidden' }}><div style={{ padding: '12px 18px', borderBottom: '1px solid rgba(255,255,255,0.04)', color: '#444', fontSize: '10px', fontWeight: 900, textTransform: 'uppercase' }}>{title}</div>{children}</div>)
+  <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-color)', borderRadius: '10px', overflow: 'hidden' }}><div style={{ padding: '12px 18px', borderBottom: '1px solid var(--border-color)', color: 'var(--text-muted)', fontSize: '10px', fontWeight: 900, textTransform: 'uppercase' }}>{title}</div>{children}</div>)
 const SettingRow = ({ label, value, type, prefix, suffix, onChange, disabled, flexInput }: any) => (
   <div style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', gap: '16px', opacity: disabled ? 0.3 : 1 }}>
-    <div style={{ flex: flexInput ? '0 0 150px' : 1, color: '#CCC', fontSize: '13px' }}>{label}</div>
+    <div style={{ flex: flexInput ? '0 0 150px' : 1, color: 'var(--text-secondary)', fontSize: '13px' }}>{label}</div>
     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flex: flexInput ? 1 : 'none' }}>
-      {prefix && <span style={{ color:'#555', fontSize:'13px' }}>{prefix}</span>}
+      {prefix && <span style={{ color:'var(--text-muted)', fontSize:'13px' }}>{prefix}</span>}
       <input 
         type={type || 'text'} 
         value={value} 
@@ -465,21 +596,32 @@ const SettingRow = ({ label, value, type, prefix, suffix, onChange, disabled, fl
           width: flexInput ? '100%' : '100px', 
           padding: '6px 10px', 
           background: 'rgba(255,255,255,0.05)', 
-          border: '1px solid rgba(255,255,255,0.10)', 
+          border: '1px solid var(--border-color)', 
           borderRadius: '6px', 
-          color: '#FFF', 
+          color: 'var(--text-primary)', 
           fontSize: '13px', 
           textAlign: flexInput ? 'left' : 'right', 
           outline:'none' 
         }} 
       />
-      {suffix && <span style={{ color:'#555', fontSize:'13px' }}>{suffix}</span>}
+      {suffix && <span style={{ color:'var(--text-muted)', fontSize:'13px' }}>{suffix}</span>}
     </div>
   </div>
 )
 const SettingToggle = ({ label, value, onChange }: any) => (
-  <div style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', gap: '16px' }}><div style={{ flex:1, color:'#CCC', fontSize:'13px' }}>{label}</div>
+  <div style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', gap: '16px' }}><div style={{ flex:1, color:'var(--text-secondary)', fontSize:'13px' }}>{label}</div>
     <div onClick={() => onChange(!value)} style={{ width: '40px', height: '20px', borderRadius: '10px', background: value ? '#00C896' : '#222', position: 'relative', cursor: 'pointer' }}><div style={{ position: 'absolute', top: '2px', left: value ? '22px' : '2px', width: '16px', height: '16px', borderRadius:'50%', background: '#FFF' }} /></div>
   </div>
 )
 const SaveButton = ({ onSave }: any) => (<div style={{ padding: '8px 18px' }}><button onClick={onSave} style={{ width: '100%', padding: '14px', borderRadius: '10px', background: 'linear-gradient(135deg, #00C896, #00A878)', color: '#000', fontSize: '13px', fontWeight: 700, cursor: 'pointer', border:'none' }}>💾 Guardar Cambios</button></div>)
+
+const SelectStyle = {
+    padding: '6px 10px',
+    background: 'rgba(255,255,255,0.05)',
+    border: '1px solid var(--border-color)',
+    borderRadius: '6px',
+    color: 'var(--text-primary)',
+    fontSize: '13px',
+    outline: 'none',
+    cursor: 'pointer'
+}
