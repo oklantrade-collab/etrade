@@ -21,6 +21,7 @@ from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
 from app.strategy.proactive_exit import evaluate_proactive_exit
 from app.strategy.dynamic_sl_manager import evaluate_sl_action
+from app.analysis.fibonacci_utils import calculate_fibonacci_zone
 
 
 MODULE = "position_monitor"
@@ -259,7 +260,18 @@ class PositionMonitor:
             # Recuperar snapshot de base de datos
             snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
             snap = snap_res.data[0] if snap_res.data else {}
-            fib_zone = int(snap.get('fibonacci_zone', 0))
+            
+            # CALCULAR ZONA EN TIEMPO REAL (Evita delay del scanner de 5 min)
+            basis = float(snap.get('basis') or current_price)
+            # Intentar obtener ATR del snapshot o de technical_scores
+            atr = float(snap.get('atr') or 0)
+            if atr <= 0:
+                # Fallback: buscar en technical_scores
+                score_res = sb.table('technical_scores').select('atr').eq('ticker', ticker).order('timestamp', desc=True).limit(1).execute()
+                atr = float(score_res.data[0]['atr'] if score_res.data else (current_price * 0.02))
+            
+            fib_zone = calculate_fibonacci_zone(current_price, basis, atr)
+            log_debug(MODULE, f"Real-time Fib Zone for {ticker}: {fib_zone} (Price: {current_price}, Basis: {basis}, ATR: {atr})")
 
             if fib_zone >= 5:
                 # Verificar vela 15m actual o anterior

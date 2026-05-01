@@ -488,6 +488,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 'symbol': ticker,
                 'price': float(current_price),
                 'basis': float(ema20),
+                'atr': float(atr),
                 'fibonacci_zone': int(zone),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None

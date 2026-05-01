@@ -12,7 +12,10 @@ from app.core.supabase_client import get_supabase
 from dateutil.parser import parse as parse_dt
 from app.core.market_hours import is_market_open, get_nyc_now
 
-router = APIRouter()
+# CACHE LOCAL PARA REDUCIR EGRESS
+METADATA_CACHE = {}
+LAST_DATA_CACHE = {"data": None, "timestamp": 0}
+CACHE_TTL = 5  # 5 segundos de gracia para el Dashboard
 
 
 @router.get("/opportunities")
@@ -34,9 +37,9 @@ async def get_stocks_opportunities():
         # 2. Get today's date in Lima/NYC (same for stocks purposes usually)
         today = get_nyc_now().date().isoformat()
 
-        # 3. Fetch Watchlist
+        # 3. Fetch Watchlist (Solo columnas necesarias)
         wl_res = sb.table("watchlist_daily")\
-            .select("*")\
+            .select("ticker, company_name, pool_type, revenue_growth_yoy, analyst_rating")\
             .eq("date", today)\
             .order("catalyst_score", desc=True)\
             .execute()
@@ -46,7 +49,7 @@ async def get_stocks_opportunities():
             # Fallback to last 2 days if today is empty
             yesterday = (get_nyc_now() - timedelta(days=2)).date().isoformat()
             wl_res = sb.table("watchlist_daily")\
-                .select("*")\
+                .select("ticker, company_name, pool_type, revenue_growth_yoy, analyst_rating")\
                 .gte("date", yesterday)\
                 .order("date", desc=True)\
                 .order("catalyst_score", desc=True)\
@@ -59,9 +62,9 @@ async def get_stocks_opportunities():
 
         tickers = [w["ticker"] for w in watchlist]
 
-        # 4. Fetch Technical Scores (Bulk)
+        # 4. Fetch Technical Scores (Columnas clave)
         tech_res = sb.table("technical_scores")\
-            .select("*")\
+            .select("ticker, price, change_pct, volume, rvol, piotroski_score, pro_score, sm_score, timestamp, t01_confirmed, t02_confirmed, t03_confirmed, t04_confirmed, movement_15m, fib_zone_15m, movement_1d, fib_zone_1d, intrinsic_value, margin_of_safety, is_undervalued")\
             .in_("ticker", tickers)\
             .order("timestamp", desc=True)\
             .execute()
@@ -176,9 +179,9 @@ async def get_stocks_positions():
     """
     sb = get_supabase()
     try:
-        # 1. Fetch all open positions
+        # 1. Fetch all open positions (Columnas específicas)
         res = sb.table("stocks_positions")\
-            .select("*")\
+            .select("id, ticker, status, shares, avg_price, current_price, unrealized_pnl, unrealized_pnl_pct, stop_loss, take_profit, trailing_sl_price, sl_dynamic_price, highest_price_reached, sl_type, recovery_mode, slv_price")\
             .eq("status", "open")\
             .order("first_buy_at", desc=True)\
             .execute()
@@ -225,6 +228,69 @@ async def get_stocks_positions():
 
     except Exception as e:
         log_error("stocks_api", f"Error in get_stocks_positions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/status")
+async def get_stocks_status():
+    """Get overall status of the stocks engine."""
+    sb = get_supabase()
+    try:
+        # Get capital from config
+        config_res = sb.table("stocks_config").select("*").execute()
+        config = {r["key"]: r["value"] for r in (config_res.data or [])}
+        
+        # Get universe size (watchlist)
+        today = get_nyc_now().date().isoformat()
+        wl_res = sb.table("watchlist_daily").select("ticker", count="exact").eq("date", today).execute()
+        universe_size = wl_res.count if wl_res.count is not None else 0
+        
+        return {
+            "capital_usd": float(config.get("total_capital", 5000)),
+            "universe_size": universe_size,
+            "paper_mode": config.get("execution_mode", "paper") == "paper",
+            "max_risk_pct": float(config.get("max_risk_pct", 60))
+        }
+    except Exception as e:
+        log_error("stocks_api", f"Error in get_stocks_status: {e}")
+        return {"capital_usd": 5000, "universe_size": 0, "paper_mode": True}
+
+@router.get("/regime")
+async def get_stocks_regime():
+    """Get current market sentiment and regime."""
+    sb = get_supabase()
+    try:
+        # Get latest market regime from technical_scores avg
+        today = get_nyc_now().date().isoformat()
+        res = sb.table("technical_scores")\
+            .select("sm_score")\
+            .gte("timestamp", today)\
+            .execute()
+        
+        scores = [float(r["sm_score"]) for r in (res.data or []) if r.get("sm_score")]
+        avg_sm = sum(scores) / len(scores) if scores else 4.2
+        
+        regime = "sideways"
+        if avg_sm > 6.0: regime = "bull"
+        elif avg_sm < 3.5: regime = "bear"
+        
+        return {
+            "regime": regime,
+            "sm_avg": avg_sm
+        }
+    except:
+        return {"regime": "sideways", "sm_avg": 4.2}
+
+@router.post("/pipeline")
+async def trigger_stocks_pipeline():
+    """Manual trigger for the stocks scan pipeline."""
+    try:
+        from app.workers.stocks_scheduler import run_stocks_cycle
+        # Run in background to avoid timeout
+        asyncio.create_task(run_stocks_cycle())
+        return {"status": "triggered", "message": "Stocks pipeline cycle started in background"}
+    except Exception as e:
+        log_error("stocks_api", f"Error triggering pipeline: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/journal")
