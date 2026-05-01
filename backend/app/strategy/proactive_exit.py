@@ -15,6 +15,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from app.core.logger import log_info, log_error
+from app.core.market_hours import get_nyc_now
+from datetime import time
 
 # ── Umbrales de ganancia mínima ───────────────
 MIN_PROFIT_THRESHOLDS = {
@@ -186,6 +188,33 @@ def evaluate_proactive_exit(
     """
     side = str(position.get('side', 'long')).lower()
     is_long = side in ('long', 'buy')
+    
+    # ── NUEVO: Protección Fin de Día (EOD) ──
+    try:
+        nyc_now = get_nyc_now()
+        current_time = nyc_now.time()
+        # Cerrar todo lo HOT/Scalping en los últimos 5 min para evitar GAPs nocturnos
+        if time(15, 55) <= current_time <= time(16, 5):
+            return {
+                'should_close': True,
+                'rule_code':    'AaEOD' if is_long else 'BbEOD',
+                'reason':       'Protección EOD: Cierre preventivo antes del fin de jornada para evitar GAPs.',
+                'pnl':          calculate_position_pnl(position, current_price, market_type),
+                'urgency':      'urgent'
+            }
+    except Exception as e:
+        log_error(MODULE, f"Error en protección EOD: {e}")
+
+    # ── NUEVO: Protección por Zona Extrema (UPPER_6) ──
+    fib_zone = int(snap.get('fibonacci_zone', 0))
+    if (is_long and fib_zone >= 5) or (not is_long and fib_zone <= -5):
+        return {
+            'should_close': True,
+            'rule_code':    'AaEXT' if is_long else 'BbEXT',
+            'reason':       f'Zona Extrema detectada (Zona {fib_zone}). Precio sobre-extendido, asegurando profit.',
+            'pnl':          calculate_position_pnl(position, current_price, market_type),
+            'urgency':      'urgent'
+        }
 
     # ── Calcular P&L actual ───────────────────
     pnl = calculate_position_pnl(position, current_price, market_type)
