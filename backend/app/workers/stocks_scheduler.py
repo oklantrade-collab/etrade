@@ -47,6 +47,10 @@ from app.stocks.stocks_adaptive_tp import (
     evaluate_adaptive_tp,
     fetch_macro_data,
 )
+from app.stocks.stocks_adaptive_tp_v2 import (
+    evaluate_stock_tp_v2,
+    check_overnight_protection,
+)
 from app.stocks.stocks_adaptive_sl import (
     load_sl_config,
     evaluate_adaptive_sl,
@@ -94,6 +98,7 @@ def get_stocks_config() -> dict:
         log_warning(MODULE, f"Error loading stocks_config: {e}")
         return {
             "total_capital_usd": 5000,
+            "min_daily_volume": 1000000,
             "paper_mode_active": True,
             "kill_switch_active": False,
         }
@@ -179,7 +184,7 @@ async def get_watchlist(config: dict) -> list[str]:
     return default_tickers
 
 
-async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, is_pro_member: bool = False) -> dict | None:
+async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, is_pro_member: bool = False, market_open: bool = True) -> dict | None:
     from app.data.yfinance_provider import YFinanceProvider
     from app.analysis.stocks_indicators import calculate_stock_indicators
 
@@ -224,7 +229,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             price_breakout  = last_5["close"] > last_5["bb_upper"]
             volume_spike    = last_5["rvol"] > 2.0
             
-            if upper_expanding and lower_expanding and price_breakout and volume_spike:
+            if market_open and upper_expanding and lower_expanding and price_breakout and volume_spike:
                 log_info(MODULE, f"🚀 BOLLINGER EXPLOSION detected in {ticker} (5m)!")
                 # Configurar targets específicos solicitados:
                 # B1: Upper_6 (15m) | B2: Bollinger Upper (Upper_5 15m) | B3: Trailing
@@ -488,13 +493,26 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 'symbol': ticker,
                 'price': float(current_price),
                 'basis': float(ema20),
-                'atr': float(atr),
                 'fibonacci_zone': int(zone),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None
             }
+            # Solo incluir atr si la tabla lo soporta (evitar PGRST204)
+            if 'atr' in str(ind_15m.keys()): # Hint: This is a hack, better to handle the error
+                 snap_data['atr'] = float(atr)
+
             sb = get_supabase()
-            sb.table('market_snapshot').upsert(snap_data, on_conflict='symbol').execute()
+            try:
+                sb.table('market_snapshot').upsert(snap_data, on_conflict='symbol').execute()
+            except Exception as snap_upsert_e:
+                err_str = str(snap_upsert_e).lower()
+                if "column" in err_str and ("atr" in err_str or "bb_expanding" in err_str):
+                    # Limpieza de columnas nuevas que fallan por cache de schema
+                    for col in ['atr', 'bb_expanding']:
+                        if col in snap_data: del snap_data[col]
+                    sb.table('market_snapshot').upsert(snap_data, on_conflict='symbol').execute()
+                else:
+                    raise snap_upsert_e
         except Exception as snap_e:
             log_warning(MODULE, f"Error updating snapshot for {ticker}: {snap_e}")
 
@@ -508,12 +526,31 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["t03_confirmed"] = bool(candle_4h_green)
         ind_15m["t04_confirmed"] = (rsi_val is not None and 40 <= rsi_val <= 70)
         
+        # ── DETECCIÓN DE EXPANSIÓN BOLLINGER (5m & 15m) ──
+        bb_expanding_15m = False
+        df_15m_calc = ind_15m["_df"]
+        if len(df_15m_calc) >= 2:
+            l15 = df_15m_calc.iloc[-1]
+            p15 = df_15m_calc.iloc[-2]
+            bb_expanding_15m = l15["bb_upper"] > p15["bb_upper"] and l15["bb_lower"] < p15["bb_lower"]
+
+        bb_expanding_5m = False
+        df_5m_calc = ind_5m["_df"]
+        if len(df_5m_calc) >= 2:
+            l5 = df_5m_calc.iloc[-1]
+            p5 = df_5m_calc.iloc[-2]
+            bb_expanding_5m = l5["bb_upper"] > p5["bb_upper"] and l5["bb_lower"] < p5["bb_lower"]
+
+        bb_expanding = bb_expanding_15m or bb_expanding_5m
+        ind_15m["bb_expanding"] = bb_expanding
+        
         upsert_technical_score(ticker, ind_15m, base_score, is_acceptable, pro_score)
 
         # 9. RULE ENGINE
         from app.stocks.stocks_rule_engine import StocksRuleEngine
         from app.stocks.stocks_order_executor import execute_market_order, place_limit_order
         
+
         re = StocksRuleEngine.get_instance()
         rule_ctx = re.build_context(
             ticker=ticker,
@@ -530,7 +567,12 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             pool_type=ind_15m.get("pool_type", ""),
             sm_score=ind_15m.get("sm_score", 1.0),
             piotroski_score=ind_15m.get("piotroski_score", 0),
-            sipv_signal=sipv_signal_15m
+            sipv_signal=sipv_signal_15m,
+            # Nuevos datos para HOT_CANDLE
+            ema_3=ind_15m.get("ema_3"),
+            ema_9=ind_15m.get("ema_9"),
+            ema_20=ind_15m.get("ema_20"),
+            bb_expanding=bb_expanding
         )
         rule_ctx["revenue_growth_yoy"] = ind_15m.get("revenue_growth_yoy", 0)
         rule_ctx["sm_score"] = ind_15m.get("sm_score", 1.0)
@@ -566,35 +608,52 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             sm.set_ambiguous(ticker, ambiguity['reason'])
             return None
 
-        buying_results = re.evaluate_all(rule_ctx, direction="buy")
-        for res in buying_results:
-            if res["triggered"]:
-                # Check State Machine
-                max_pos = int(config.get("max_concurrent_positions", 5))
-                sm_check = sm.can_open(ticker, "long", current_price, max_pos)
-                if not sm_check['allowed']:
-                    log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker} BLOCKED BY SM: {sm_check['reason']}")
-                    continue
-
-                log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker}")
-                if res["order_type"] == "market":
-                    execute_market_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
-                    break
-                elif res["order_type"] == "limit":
-                    place_limit_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
-                    break
-
-        if ticker in (await get_open_positions_tickers()):
-            selling_results = re.evaluate_all(rule_ctx, direction="sell")
-            for res in selling_results:
+        # 9. EVALUATE BUY RULES (Only if market is open)
+        if market_open:
+            buying_results = re.evaluate_all(rule_ctx, direction="buy")
+            for res in buying_results:
                 if res["triggered"]:
-                    log_info(MODULE, f"🔻 SELL RULE TRIGGERED: {res['rule_code']} for {ticker}")
+                    # Check State Machine
+                    max_pos = int(config.get("max_concurrent_positions", 5))
+                    sm_check = sm.can_open(ticker, "long", current_price, max_pos)
+                    if not sm_check['allowed']:
+                        log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker} BLOCKED BY SM: {sm_check['reason']}")
+                        continue
+
+                    log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker}")
                     if res["order_type"] == "market":
-                        execute_market_order(ticker, "sell", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
+                        execute_market_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
                         break
                     elif res["order_type"] == "limit":
-                        place_limit_order(ticker, "sell", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
+                        place_limit_order(ticker, "buy", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
                         break
+
+        # 10. EVALUATE SELL RULES (Only for open positions > 6 min)
+        open_pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+        open_pos = open_pos_res.data[0] if open_pos_res.data else None
+        
+        if open_pos:
+            entry_time_str = open_pos.get("first_buy_at") or open_pos.get("entry_time")
+            age_mins = 0.0
+            if entry_time_str:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                    age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+                except: pass
+            
+            if age_mins >= 6.0:
+                selling_results = re.evaluate_all(rule_ctx, direction="sell")
+                for res in selling_results:
+                    if res["triggered"]:
+                        log_info(MODULE, f"🔻 SELL RULE TRIGGERED: {res['rule_code']} for {ticker} (Age: {age_mins:.1f}m)")
+                        if res["order_type"] == "market":
+                            execute_market_order(ticker, "sell", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
+                            break
+                        elif res["order_type"] == "limit":
+                            place_limit_order(ticker, "sell", res["rule_code"], rule_ctx, re.rules[res["rule_code"]])
+                            break
+            else:
+                log_debug(MODULE, f"Skipping sell rules for {ticker}: age {age_mins:.1f} < 6.0m")
 
         if is_acceptable:
             log_info(MODULE, f"🌟 {ticker} BULLISH Score={base_score} | Pro_Score={pro_score}")
@@ -692,7 +751,7 @@ async def run_stocks_cycle(force=False):
         f_cache = {r["ticker"]: r for r in (f_data_res.data or [])}
         watchlist_pro = [t for t, d in f_cache.items() if d.get("pool_type") and ("GIANT" in d["pool_type"] or "LEADER" in d["pool_type"])]
 
-        tasks = [process_ticker(ticker, config, f_cache.get(ticker), is_pro_member=(ticker in watchlist_pro)) for ticker in tickers]
+        tasks = [process_ticker(ticker, config, f_cache.get(ticker), is_pro_member=(ticker in watchlist_pro), market_open=is_open) for ticker in tickers]
         
         # Run all tasks concurrently
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
@@ -784,7 +843,7 @@ async def run_pro_cycle():
             return
 
         log_info(MODULE, f"📊 PRO cycle: Analyzing {len(tickers)} tickers (1D timeframe)...")
-        tasks = [process_ticker(ticker, config, is_pro_member=True) for ticker in tickers]
+        tasks = [process_ticker(ticker, config, is_pro_member=True, market_open=False) for ticker in tickers]
         results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
         results = []
@@ -855,98 +914,140 @@ async def _get_daily_df_for_tp(ticker: str) -> pd.DataFrame:
         return None
 
 
-async def run_stocks_tp_cycle():
+async def run_stocks_tp_v2_cycle():
     """
-    Ciclo de gestión de TP para stocks.
+    Ciclo principal de TP v2 para Stocks.
     Corre cada 5m en horario de mercado.
-    Evalúa los 3 bloques de Take Profit para cada posición abierta.
     """
     sb = get_supabase()
-    
-    try:
-        from app.data.ib_provider import IBProvider
-    except ImportError:
-        from data.ib_provider import IBProvider
-        
-    ib_provider = IBProvider()
-    await ib_provider.connect()
+    pos_res = sb\
+        .table('stocks_positions')\
+        .select('*')\
+        .eq('status', 'open')\
+        .execute()
 
-    try:
-        pos_res = sb.table('stocks_positions').select('*').eq('status', 'open').execute()
-        positions = pos_res.data or []
-        if not positions:
-            return
+    positions = pos_res.data or []
 
-        log_info(MODULE, f"📊 TP Cycle: evaluando {len(positions)} posiciones abiertas")
-        macro = await fetch_macro_data(sb)
-        sl_config = await load_sl_config(sb)
+    for pos in positions:
+        ticker = pos['ticker']
 
-        for pos in positions:
-            ticker = pos['ticker']
-            try:
-                snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
-                snap = snap_res.data[0] if snap_res.data else {}
-                price = float(snap.get('price') or 0)
-                if price <= 0: continue
+        try:
+            snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
+            snap = snap_res.data[0] if snap_res.data else {}
+            price = float(snap.get('price') or snap.get('close', 0))
+            if price <= 0:
+                continue
 
-                # Inicializar TPs si faltan
-                if not pos.get('tp_block1_price'):
-                    df_daily = await _get_daily_df_for_tp(ticker)
-                    tp_data = calculate_tp_blocks(
-                        ticker=ticker,
-                        entry_price=float(pos.get('avg_price') or pos.get('entry_price') or 0),
-                        total_shares=int(pos.get('shares') or 0),
-                        snap=snap,
-                        df_daily=df_daily,
-                    )
-                    if 'error' not in tp_data:
-                        sb.table('stocks_positions').update({
-                            'tp_block1_price': tp_data['tp_block1_price'],
-                            'tp_block2_price': tp_data['tp_block2_price'],
-                            'tp_block1_shares': tp_data['tp_block1_shares'],
-                            'tp_block2_shares': tp_data['tp_block2_shares'],
-                            'tp_block3_shares': tp_data['tp_block3_shares'],
-                            'shares_remaining': int(pos.get('shares') or 0),
-                            'tp_atr_14': tp_data['atr_14'],
-                            'tp_trailing_high': price,
-                        }).eq('id', pos['id']).execute()
-                        pos.update(tp_data)
-                        pos['shares_remaining'] = int(pos.get('shares') or 0)
-                        pos['tp_trailing_high'] = price
+            df_15m = await _get_timeframe_df_for_tp(ticker, '15m', '60d')
+            df_5m  = await _get_timeframe_df_for_tp(ticker, '5m', '5d')
+            df_4h  = await _get_timeframe_df_for_tp(ticker, '4h', '120d')
+            rvol   = float(snap.get('rvol', 1.0))
+            sar_15m = int(snap.get('sar_trend_15m', 1))
 
-                df_daily = await _get_daily_df_for_tp(ticker)
-                result = evaluate_tp_blocks(pos, price, snap, df_daily)
-                
-                # Actualizar trailing high
-                if float(result.get('new_trail_high') or 0) > float(pos.get('tp_trailing_high') or 0):
-                    sb.table('stocks_positions').update({
-                        'tp_trailing_high': result['new_trail_high'],
-                        'tp_trailing_sl': result.get('b3_trail_sl', 0),
-                    }).eq('id', pos['id']).execute()
+            # ── Protección anti-gap overnight ──
+            entry   = float(pos.get('avg_price', 0))
+            gain    = (price - entry) / entry * 100 \
+                      if entry > 0 else 0
+            ag = check_overnight_protection(
+                pos, price, gain
+            )
+            if ag.get('apply'):
+                log_info('TP_v2',
+                    f'{ticker}: {ag["reason"]}'
+                )
+                await execute_partial_sell(
+                    ticker=ticker, position=pos,
+                    block='anti_gap', shares=ag['shares_to_sell'],
+                    price=price, action='anti_gap', new_sl=0, new_trail_high=price,
+                    supabase=sb, ib_provider=None
+                )
+                sb\
+                    .table('stocks_positions')\
+                    .update({'anti_gap_applied': True})\
+                    .eq('id', pos['id'])\
+                    .execute()
+                continue
 
-                action = result['action']
-                if action.startswith('execute_'):
-                    await execute_partial_sell(
-                        ticker=ticker,
-                        position=pos,
-                        block=result['block'],
-                        shares=result['shares'],
-                        price=price,
-                        action=action,
-                        new_sl=result.get('new_sl', 0),
-                        new_trail_high=result['new_trail_high'],
-                        b3_trail_sl=result['b3_trail_sl'],
-                        supabase=sb,
-                        ib_provider=ib_provider,
-                    )
+            # ── TP Adaptativo v2 ───────────────
+            result = evaluate_stock_tp_v2(
+                ticker, pos, price, snap,
+                df_15m, df_5m, df_4h,
+                rvol, sar_15m
+            )
 
-            except Exception as e:
-                log_error(MODULE, f'{ticker} TP error: {e}')
-    except Exception as e:
-        log_error(MODULE, f'TP cycle failed: {e}')
-    finally:
-        try: await ib_provider.disconnect()
-        except: pass
+            action = result.get('action', 'hold')
+            log_info('TP_v2',
+                f'{ticker}: {action} — '
+                f'{result.get("reason","")[:80]}'
+            )
+
+            # Actualizar estado en BD
+            sb\
+                .table('stocks_positions')\
+                .update({
+                    'ema3_15m':    result.get(
+                        'ema', {}
+                    ).get('ema3', 0),
+                    'ema9_15m':    result.get(
+                        'ema', {}
+                    ).get('ema9', 0),
+                    'ema_trend_15m': result.get(
+                        'ema', {}
+                    ).get('trend', ''),
+                    'current_fib_band': result.get(
+                        'fib', {}
+                    ).get('band', 0),
+                    'mid_band_price': result.get(
+                        'fib', {}
+                    ).get('mid_band', 0),
+                    'sl_last_evaluated': 'now()',
+                })\
+                .eq('id', pos['id'])\
+                .execute()
+
+            # Ejecutar según acción
+            shares = result.get('shares', 0)
+
+            if action == 'close_total' and shares:
+                await execute_partial_sell(
+                    ticker=ticker, position=pos, block='tp_total',
+                    shares=shares, price=price, action=action, new_sl=0, new_trail_high=price,
+                    supabase=sb, ib_provider=None
+                )
+
+            elif action == 'close_block1' and shares:
+                await execute_partial_sell(
+                    ticker=ticker, position=pos, block='tp_b1',
+                    shares=shares, price=price, action=action, new_sl=0, new_trail_high=price,
+                    supabase=sb, ib_provider=None
+                )
+
+            elif action == 'close_block2' and shares:
+                await execute_partial_sell(
+                    ticker=ticker, position=pos, block='tp_b2',
+                    shares=shares, price=price, action=action, new_sl=0, new_trail_high=price,
+                    supabase=sb, ib_provider=None
+                )
+
+            elif action == 'close_block3' and shares:
+                await execute_partial_sell(
+                    ticker=ticker, position=pos, block='tp_b3',
+                    shares=shares, price=price, action=action, new_sl=0, new_trail_high=price,
+                    supabase=sb, ib_provider=None
+                )
+
+            elif action == 'close_blocks_2_and_3' \
+                 and shares:
+                await execute_partial_sell(
+                    ticker=ticker, position=pos, block='tp_b2b3',
+                    shares=shares, price=price, action=action, new_sl=0, new_trail_high=price,
+                    supabase=sb, ib_provider=None
+                )
+
+        except Exception as e:
+            log_error('TP_v2',
+                f'{ticker}: {e}'
+            )
 
 
 async def start_stocks_scheduler(force=False):
@@ -977,7 +1078,7 @@ async def start_stocks_scheduler(force=False):
 
     # 1b. TP MANAGER: every 5 minutes during market hours
     scheduler.add_job(
-        run_stocks_tp_cycle,
+        run_stocks_tp_v2_cycle,
         trigger=IntervalTrigger(minutes=5),
         id="stocks_tp_cycle",
         name="Stocks TP Manager (3 Blocks, 5m)",
@@ -1029,7 +1130,7 @@ async def start_stocks_scheduler(force=False):
     log_info(MODULE, f"Stocks scheduler started (Market: {status_txt}). Tasks: Hot(15m) + Pro(16:05ET) + Sweep(16:01ET)")
 
     # Run first cycles immediately
-    asyncio.create_task(run_stocks_tp_cycle())
+    asyncio.create_task(run_stocks_tp_v2_cycle())
     await run_stocks_cycle(force=force)
 
     # Keep running
