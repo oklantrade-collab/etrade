@@ -58,6 +58,7 @@ def calculate_stock_indicators(
     volume = df["volume"]
 
     # ── EMAs ──
+    df["ema_3"] = EMAIndicator(close=close, window=3).ema_indicator()
     df["ema_9"] = EMAIndicator(close=close, window=9).ema_indicator()
     df["ema_20"] = EMAIndicator(close=close, window=20).ema_indicator()
     df["ema_50"] = EMAIndicator(close=close, window=50).ema_indicator()
@@ -153,7 +154,7 @@ def calculate_stock_indicators(
     # ── Extract last candle values ──
     last = df.iloc[-1]
     indicator_fields = [
-        "ema_9", "ema_20", "ema_50", "ema_200",
+        "ema_3", "ema_9", "ema_20", "ema_50", "ema_200",
         "rsi_14",
         "macd_line", "macd_signal", "macd_histogram",
         "pinescript_signal", "signal_age", "last_pinescript_signal",
@@ -398,12 +399,12 @@ def upsert_technical_score(
             "timestamp":         datetime.now(timezone.utc).isoformat(),
             "rsi_14":            indicators.get("rsi_14"),
             "atr_14":            indicators.get("atr_14"),
-            "bollinger_squeeze": indicators.get("bb_squeeze", False),
+            "bollinger_squeeze": bool(indicators.get("bb_squeeze", False)),
             "macd_signal":       macd_signal_dir,
             "ema_alignment":     indicators.get("ema_alignment", "unknown"),
             "rvol":              indicators.get("rvol"),
             "fib_level":         fib_level,
-            "mtf_confirmed":     mtf_confirmed,
+            "mtf_confirmed":     bool(mtf_confirmed),
             "technical_score":   technical_score,
             "signals_json":      {
                 "price": indicators.get("close"),
@@ -426,6 +427,17 @@ def upsert_technical_score(
                 "gemini_summary": indicators.get("gemini_summary", ""),
                 "intrinsic_value": indicators.get("intrinsic_value", 0),
                 "undervaluation": indicators.get("undervaluation", 0),
+                "margin_of_safety": indicators.get("margin_of_safety", 0),
+                "ema_3": indicators.get("ema_3"),
+                "ema_9": indicators.get("ema_9"),
+                "ema_20": indicators.get("ema_20"),
+                "bb_expanding": bool(indicators.get("bb_expanding", False)),
+                "piotroski_score": indicators.get("piotroski_score", 0),
+                "revenue_growth_yoy": indicators.get("revenue_growth_yoy", 0),
+                "rev_growth": indicators.get("revenue_growth_yoy", 0), # Alias for UI
+                "fundamental_score": indicators.get("fundamental_score", 0),
+                "sm_score": indicators.get("sm_score", 1.0),
+                "composite_intrinsic": indicators.get("intrinsic_price", indicators.get("intrinsic_value", 0)),
                 # Smart Limit & Movement (Multi-TF)
                 "movement_15m": indicators.get("movement_15m"),
                 "fib_zone_15m": indicators.get("fib_zone_15m"),
@@ -436,10 +448,11 @@ def upsert_technical_score(
                 "smart_limit_long_1d": indicators.get("smart_limit_long_1d"),
                 "smart_limit_short_1d": indicators.get("smart_limit_short_1d"),
                 # Component Confirmation (For UI)
-                "t01_confirmed": indicators.get("t01_confirmed", False),
-                "t02_confirmed": indicators.get("t02_confirmed", False),
-                "t03_confirmed": indicators.get("t03_confirmed", False),
-                "t04_confirmed": indicators.get("t04_confirmed", False),
+                "t01_confirmed": bool(indicators.get("t01_confirmed", False)),
+                "t02_confirmed": bool(indicators.get("t02_confirmed", False)),
+                "t03_confirmed": bool(indicators.get("t03_confirmed", False)),
+                "t04_confirmed": bool(indicators.get("t04_confirmed", False)),
+                "last_scan_time": indicators.get("last_scan_time"),
             },
         }
 

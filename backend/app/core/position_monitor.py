@@ -684,12 +684,10 @@ async def _execute_paper_open(
     symbol = normalize_crypto_symbol(symbol)
 
     # 1. REVERSIÓN FORZADA (Hedge no permitido)
-    # Si llega una señal LONG y hay SHORTs (o viceversa), cerrar todo lo opuesto primero.
     async with BOT_STATE.order_lock:
         opposite_side = 'SHORT' if side.upper() in ['LONG', 'BUY'] else 'LONG'
         opp_res = supabase.table('positions').select('*').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').execute()
         
-        # Filtrar manualmente por el lado opuesto (considerando alias BUY/LONG)
         to_close = []
         for p in (opp_res.data or []):
             p_side = (p.get('side') or '').upper()
@@ -704,9 +702,9 @@ async def _execute_paper_open(
                 await _execute_paper_close(pos, price, f'reversal_{side.lower()}', supabase)
 
         # 2. Límite GLOBAL (max_open_trades) y SÍMBOLO usando LOCK para atomicidad
-        max_global = int(BOT_STATE.config_cache.get('max_open_trades', 3))
+        max_global = int(BOT_STATE.config_cache.get('max_open_trades', 15))
         
-        # --- NUEVO: Bloqueo de símbolo en memoria para evitar RACE CONDITIONS ---
+        # --- BLOQUEO DE SÍMBOLO EN MEMORIA ---
         if BOT_STATE.opening_locks.get(symbol):
             log_warning(MODULE, f"🛑 BLOQUEO DE SEGURIDAD: {symbol} ya está en proceso de apertura. Abortando duplicado.")
             return None
@@ -714,35 +712,78 @@ async def _execute_paper_open(
         BOT_STATE.opening_locks[symbol] = True
         
         try:
-            # Consultar DB directamente para conteo global exacto (Sin limite)
-            global_res = supabase.table('positions').select('id', count='exact').eq('status', 'open').limit(0).execute()
-            current_global = global_res.count or 0
+            # Consultar DB directamente para conteo global exacto
+            try:
+                global_res = supabase.table('positions').select('id', count='exact').eq('status', 'open').limit(0).execute()
+                current_global = global_res.count if global_res.count is not None else 0
+                if global_res.data:
+                    current_global = max(current_global, len(global_res.data))
+            except Exception as e:
+                log_error(MODULE, f"Error consultando límite global: {e}. Bloqueando apertura por seguridad.")
+                current_global = 999
             
             if current_global >= max_global:
-                log_info(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} posiciones alcanzado ({current_global}).")
-                BOT_STATE.opening_locks[symbol] = False
+                log_warning(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} alcanzado (Actual: {current_global}).")
                 return None
 
             # 3. Límite POR SÍMBOLO
             max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
             
-            # Contar posiciones abiertas para este símbolo específico (Exacto)
-            sym_pos_res = supabase.table('positions').select('id', count='exact').in_('symbol', crypto_symbol_match_variants(symbol)).eq('status', 'open').limit(0).execute()
-            current_sym = sym_pos_res.count or 0
+            try:
+                variants = crypto_symbol_match_variants(symbol)
+                # Seleccionamos campos necesarios para DCA y Cool-down
+                sym_pos_res = supabase.table('positions').select('id, rule_code, opened_at, entry_price, side', count='exact').in_('symbol', variants).eq('status', 'open').execute()
+                current_sym = sym_pos_res.count if sym_pos_res.count is not None else 0
+                existing_data = sym_pos_res.data or []
+                current_sym = max(current_sym, len(existing_data))
+            except Exception as e:
+                log_error(MODULE, f"Error consultando límite por símbolo ({symbol}): {e}")
+                current_sym = 999
 
             if current_sym >= max_symbol:
-                log_info(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} posiciones por símbolo alcanzado ({current_sym}).")
-                BOT_STATE.opening_locks[symbol] = False
+                log_warning(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} alcanzado (Actual: {current_sym}).")
                 return None
+            
+            # 3.1 DCA & COOL-DOWN PROTECTION (Basado en Forex logic)
+            now_utc = datetime.now(timezone.utc)
+            from datetime import timedelta
+            
+            # 3.1.1 Spam Protection (Historial reciente)
+            try:
+                since = (now_utc - timedelta(minutes=15)).isoformat()
+                hist = supabase.table('positions').select('opened_at').in_('symbol', variants).eq('rule_code', rule_code).gte('opened_at', since).order('opened_at', desc=True).limit(1).execute()
+                if hist.data:
+                    log_warning(MODULE, f"SPAM_BLOCK: {symbol} rule {rule_code} ejecutada hace menos de 15 min. Abortando.")
+                    return None
+            except Exception as hist_e:
+                log_warning(MODULE, f"Error checking crypto history: {hist_e}")
 
-            # Si pasamos los límites, procedemos a abrir (dentro del lock o justo después)
-            # Lo mantenemos dentro del lock para que el 'count' de la siguiente tarea sea correcto
+            # 3.1.2 DCA Price Improvement (Misma regla)
+            same_rule_pos = [p for p in existing_data if p.get('rule_code') == rule_code]
+            if same_rule_pos:
+                last_pos = sorted(same_rule_pos, key=lambda x: x['opened_at'], reverse=True)[0]
+                last_entry = float(last_pos.get('entry_price') or 0)
+                
+                # Para LONG: nuevo precio debe ser MENOR que el anterior (mejora costo)
+                # Para SHORT: nuevo precio debe ser MAYOR que el anterior (mejora costo)
+                is_long = side.lower() in ['long', 'buy']
+                if is_long and price >= last_entry:
+                    log_warning(MODULE, f"DCA_BLOCK: {symbol} LONG price {price} >= {last_entry}. No mejora costo.")
+                    return None
+                if not is_long and price <= last_entry:
+                    log_warning(MODULE, f"DCA_BLOCK: {symbol} SHORT price {price} <= {last_entry}. No mejora costo.")
+                    return None
+
+            # 4. EJECUCIÓN
+            log_info(MODULE, f"✅ LÍMITES OK: Abriendo {side.upper()} en {symbol} (Global: {current_global}/{max_global}, Sym: {current_sym}/{max_symbol})")
             res = await _execute_paper_open_unlocked(
                 symbol, side, price, size, rule_code, regime, levels, vel_config, supabase
             )
             return res
+        except Exception as e:
+            log_error(MODULE, f"Error crítico en validación de límites para {symbol}: {e}")
+            return None
         finally:
-            # SIEMPRE liberar el bloqueo de apertura al terminar (éxito o error)
             BOT_STATE.opening_locks[symbol] = False
 
 async def _execute_paper_open_unlocked(

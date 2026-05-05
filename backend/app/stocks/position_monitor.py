@@ -22,9 +22,12 @@ from app.core.supabase_client import get_supabase
 from app.strategy.proactive_exit import evaluate_proactive_exit
 from app.strategy.dynamic_sl_manager import evaluate_sl_action
 from app.analysis.fibonacci_utils import calculate_fibonacci_zone
+from app.stocks.stocks_adaptive_tp_v2 import evaluate_stock_tp_v2
 
 
 MODULE = "position_monitor"
+MIN_HOLDING_MINUTES = 6.0  # Esperar al menos 6 min (1 vela de 5m + margen) antes de evaluar salidas
+
 
 
 def safe_float(v, default=0.0):
@@ -150,8 +153,19 @@ class PositionMonitor:
             except Exception as slvm_e:
                 log_warning(MODULE, f'SLVM error for {ticker}: {slvm_e}')
 
-            # ── NUEVO: Cierre Proactivo Aa51/Bb51 ──
-            closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, sb)
+            # ── Cálculo de Antigüedad de la Posición ──
+            entry_time_str = trade.get("first_buy_at") or trade.get("entry_time")
+            age_mins = 0.0
+            if entry_time_str:
+                try:
+                    # Normalizar ISO string para comparación
+                    entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                    age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+                except Exception as age_e:
+                    log_debug(MODULE, f"Error calculando age para {ticker}: {age_e}")
+
+            # ── Cierre Proactivo Aa51/Bb51 ──
+            closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, pnl_pct, sb)
             if closed:
                 return
 
@@ -237,12 +251,63 @@ class PositionMonitor:
                     await self._close_position(trade, current_price, "hot_pullback_exit")
                     return
 
+            # ── NUEVO: Adaptive TP v2 (Stocks) ──
+            try:
+                hist_15m = t_obj.history(period="5d", interval="15m")
+                hist_5m = t_obj.history(period="2d", interval="5m")
+                
+                # Fetch recent RVOL (simplified)
+                rvol = 1.0
+                if not hist_15m.empty:
+                    vol_ema = hist_15m['Volume'].rolling(20).mean().iloc[-1]
+                    cur_vol = hist_15m['Volume'].iloc[-1]
+                    if vol_ema > 0: rvol = cur_vol / vol_ema
+
+                tp_res = evaluate_stock_tp_v2(
+                    ticker=ticker,
+                    position=trade,
+                    current_price=current_price,
+                    snap=snap_val,
+                    df_15m=hist_15m,
+                    df_5m=hist_5m,
+                    df_4h=hist_4h,
+                    rvol=rvol,
+                    sar_15m=snap_val.get('sar_trend_15m', 1)
+                )
+
+                    # Actualizar indicadores en DB (NUEVOS CAMPOS)
+                    debug = tp_res.get('debug_indicators', {})
+                    ema_info = debug.get('ema', {})
+                    sipv15 = debug.get('sipv_15m', {})
+                    sipv4h = debug.get('sipv_4h', {})
+                    fib_info = debug.get('fib', {})
+
+                    sb.table("stocks_positions").update({
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", trade["id"]).execute()
+
+                    if tp_res['action'] == 'close_total':
+                        log_warning(MODULE, f"🎯 TP V2 CLOSE TOTAL: {ticker} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
+                        await self._close_position(trade, current_price, f"tp_v2_total_{tp_res.get('trigger', 'signal')}")
+                        return
+
+                    if tp_res['action'] in ['close_block1', 'close_block2', 'close_block3']:
+                        block_name = tp_res['action'].replace('close_', '')
+                        log_info(MODULE, f"🎯 TP V2 PARTIAL: {ticker} {block_name.upper()} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
+                        await self._execute_partial_close(trade, current_price, tp_res['shares'], block_name, tp_res['reason'])
+                        # No retornamos aquí porque la posición sigue abierta (parcialmente)
+                else:
+                    log_debug(MODULE, f"Skipping adaptive TP for {ticker}: age {age_mins:.1f} < {MIN_HOLDING_MINUTES}")
+
+            except Exception as tp_e:
+                log_error(MODULE, f"Error en Adaptive TP V2 para {ticker}: {tp_e}")
+
             log_info(MODULE, f"  {ticker}: ${current_price:.2f} | P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
 
         except Exception as e:
             log_error(MODULE, f"Error monitoring {ticker}: {e}")
 
-    async def check_proactive_exit_stocks(self, ticker: str, position: dict, current_price: float, sb) -> bool:
+    async def check_proactive_exit_stocks(self, ticker: str, position: dict, current_price: float, pnl_pct: float, sb) -> bool:
         """ Evalúa Aa51/Bb51 para posiciones de Stocks. """
         try:
             import yfinance as yf
@@ -280,41 +345,7 @@ class PositionMonitor:
                 atr = current_price * 0.02
             
             fib_zone = calculate_fibonacci_zone(current_price, basis, atr)
-            log_debug(MODULE, f"Real-time Fib Zone for {ticker}: {fib_zone} (Price: {current_price}, Basis: {basis}, ATR: {atr})")
-
-            if fib_zone >= 5 and pnl_pct >= 0.8:
-                # Verificar patrón de reversión en vela 15m
-                if not hist_15m.empty and len(hist_15m) >= 2:
-                    last_15 = hist_15m.iloc[-1]
-                    prev_15 = hist_15m.iloc[-2]
-                    
-                    is_bearish_now = last_15['Close'] < last_15['Open']
-                    is_bullish_prev = prev_15['Close'] > prev_15['Open']
-                    
-                    if is_bearish_now and is_bullish_prev:
-                        # Verificar si hubo señal BUY de SIPV recientemente
-                        has_buy_signal = False
-                        try:
-                            # Buscamos en signals_log el último registro para este ticker
-                            sig_res = sb.table('signals_log').select('signal_type').eq('symbol', ticker).order('detected_at', desc=True).limit(1).execute()
-                            if sig_res.data and str(sig_res.data[0].get('signal_type', '')).upper() == 'BUY':
-                                has_buy_signal = True
-                        except:
-                            has_buy_signal = True # Fallback a True si falla la consulta para no perder el cierre si el patrón es claro
-                        
-                        if has_buy_signal:
-                            log_warning(MODULE, f"🔴 PATRÓN REVERSIÓN 15m (Verde->Roja) en ZONA {fib_zone} para {ticker} (PnL: {pnl_pct:.2f}%). Cerrando.")
-                            await self._close_position(position, current_price, f"EXT_BEARISH_15M")
-                            return True
-                
-                # Verificar vela 5m
-                if not hist_5m.empty:
-                    last_5 = hist_5m.iloc[-1]
-                    is_bearish_5 = last_5['Close'] < last_5['Open']
-                    if is_bearish_5:
-                        log_warning(MODULE, f"🔴 VELA BAJISTA 5m en ZONA {fib_zone} para {ticker} (PnL: {pnl_pct:.2f}%). Cerrando.")
-                        await self._close_position(position, current_price, f"EXT_BEARISH_5M")
-                        return True
+            log_debug(MODULE, f"Real-time Fib Zone for {ticker}: {fib_zone}")
 
             position_std = {
                 'symbol':          ticker,
@@ -378,7 +409,7 @@ class PositionMonitor:
                 "pnl_pct": pnl_pct,
                 "result": result,
                 "exit_reason": exit_reason,
-                "strategy": trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL"
+                "trade_type": trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL"
             }
             sb.table("trades_journal").insert(journal_entry).execute()
 
@@ -407,6 +438,63 @@ class PositionMonitor:
 
         except Exception as e:
             log_error(MODULE, f"Error closing position {ticker}: {e}")
+
+    async def _execute_partial_close(self, trade: dict, exit_price: float, shares_to_close: int, block_name: str, reason: str):
+        """Executes a partial close for a block (B1, B2, B3)."""
+        sb = get_supabase()
+        now = datetime.now(timezone.utc).isoformat()
+        ticker = trade["ticker"]
+        entry_price = safe_float(trade.get("avg_price") or trade.get("entry_price"))
+        
+        # Calculate P&L for this block
+        pnl_usd = round((exit_price - entry_price) * shares_to_close, 2)
+        pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
+        
+        try:
+            # 1. Update Position
+            update_data = {
+                f"tp_{block_name}_executed": True,
+                f"tp_{block_name}_price": exit_price,
+                f"tp_{block_name}_pnl": pnl_usd,
+                "shares_remaining": int(trade.get("shares_remaining", trade["shares"])) - shares_to_close,
+                "updated_at": now
+            }
+            
+            # If it was the last block or if remaining shares <= 0, close it
+            if update_data["shares_remaining"] <= 0:
+                await self._close_position(trade, exit_price, f"partial_finish_{block_name}")
+                return
+
+            sb.table("stocks_positions").update(update_data).eq("id", trade["id"]).execute()
+            
+            # 2. Record in journal (as partial)
+            journal_entry = {
+                "ticker": ticker,
+                "shares": shares_to_close,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "entry_date": trade.get("entry_time") or trade.get("first_buy_at"),
+                "exit_date": now,
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "result": "win" if pnl_usd > 0 else "loss",
+                "exit_reason": f"partial_{block_name}_{reason}",
+                "trade_type": trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL"
+            }
+            sb.table("trades_journal").insert(journal_entry).execute()
+
+            # 3. Notify
+            from app.core.telegram_notifier import send_telegram
+            emoji = "🎯"
+            msg = (f"{emoji} *STOCK PARTIAL CLOSE ({block_name.upper()})*\n"
+                   f"Ticker: `{ticker}`\n"
+                   f"Shares: {shares_to_close}\n"
+                   f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)\n"
+                   f"Reason: {reason}")
+            await send_telegram(msg)
+            
+        except Exception as e:
+            log_error(MODULE, f"Error executing partial close for {ticker}: {e}")
 
     async def _notify_close(self, ticker, result, pnl_usd, pnl_pct, reason):
         """Send Telegram notification for trade closure."""

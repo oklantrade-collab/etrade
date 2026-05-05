@@ -32,6 +32,22 @@ URGENT_PROFIT_THRESHOLD = 0.010  # 1.0%
 # Tamaño mínimo de vela 4H (cuerpo)
 MIN_CANDLE_BODY_PCT = 0.005  # 0.5%
 
+
+def safe_float(v, default=0.0):
+    try:
+        if v is None: return default
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_int(v, default=0):
+    try:
+        if v is None: return default
+        return int(float(v))
+    except (ValueError, TypeError):
+        return default
+
 MODULE = "PROACTIVE_EXIT"
 
 def analyze_4h_candle(
@@ -60,10 +76,10 @@ def analyze_4h_candle(
             try: return float(v) if v is not None else 0.0
             except: return 0.0
 
-        open_price  = _f(last_closed.get('open'))
-        close_price = _f(last_closed.get('close'))
-        high_price  = _f(last_closed.get('high'))
-        low_price   = _f(last_closed.get('low'))
+        open_price  = safe_float(last_closed.get('open', last_closed.get('Open')))
+        close_price = safe_float(last_closed.get('close', last_closed.get('Close')))
+        high_price  = safe_float(last_closed.get('high', last_closed.get('High')))
+        low_price   = safe_float(last_closed.get('low', last_closed.get('Low')))
 
         if open_price <= 0:
             return {
@@ -81,8 +97,8 @@ def analyze_4h_candle(
         is_bullish = (close_price > open_price and body_pct >= MIN_CANDLE_BODY_PCT)
 
         # Confirmación estructural adicional
-        prev_low  = float(prev['low'])
-        prev_high = float(prev['high'])
+        prev_low  = safe_float(prev.get('low', prev.get('Low')))
+        prev_high = safe_float(prev.get('high', prev.get('High')))
         lower_low   = low_price < prev_low
         higher_high = high_price > prev_high
 
@@ -194,7 +210,8 @@ def evaluate_proactive_exit(
         nyc_now = get_nyc_now()
         current_time = nyc_now.time()
         # Cerrar todo lo HOT/Scalping en los últimos 5 min para evitar GAPs nocturnos
-        if time(15, 55) <= current_time <= time(16, 5):
+        # Solo para Stocks. Forex (24/5) y Crypto (24/7) prefieren evitar cierres forzados por horario.
+        if market_type == 'stocks_spot' and time(15, 55) <= current_time <= time(16, 5):
             return {
                 'should_close': True,
                 'rule_code':    'AaEOD' if is_long else 'BbEOD',
@@ -206,13 +223,20 @@ def evaluate_proactive_exit(
         log_error(MODULE, f"Error en protección EOD: {e}")
 
     # ── NUEVO: Protección por Zona Extrema (UPPER_6) ──
-    fib_zone = int(snap.get('fibonacci_zone', 0))
-    if (is_long and fib_zone >= 5) or (not is_long and fib_zone <= -5):
+    # Se requiere profit mínimo y señal SIPV para evitar cierres prematuros en spikes.
+    fib_zone = safe_int(snap.get('fibonacci_zone', 0))
+    pnl = calculate_position_pnl(position, current_price, market_type)
+    
+    # SIPV 15m SELL check
+    pine_signal = str(snap.get('pinescript_signal', '')).lower()
+    sipv_sell = (is_long and pine_signal == 'sell') or (not is_long and pine_signal == 'buy')
+
+    if ((is_long and fib_zone >= 5) or (not is_long and fib_zone <= -5)) and pnl['has_profit'] and sipv_sell:
         return {
             'should_close': True,
             'rule_code':    'AaEXT' if is_long else 'BbEXT',
-            'reason':       f'Zona Extrema detectada (Zona {fib_zone}). Precio sobre-extendido, asegurando profit.',
-            'pnl':          calculate_position_pnl(position, current_price, market_type),
+            'reason':       f'Zona Extrema {fib_zone} + Señal SIPV + Profit. Asegurando ganancias.',
+            'pnl':          pnl,
             'urgency':      'urgent'
         }
 
@@ -231,7 +255,7 @@ def evaluate_proactive_exit(
         pine_expected = 'Buy'
 
     # C2: SAR negativo/positivo (15m preference)
-    sar_trend = int(snap.get('sar_trend_15m', snap.get('sar_trend_4h', 0)))
+    sar_trend = safe_int(snap.get('sar_trend_15m', snap.get('sar_trend_4h', 0)))
     if is_long:
         c2_sar = sar_trend < 0
     else:

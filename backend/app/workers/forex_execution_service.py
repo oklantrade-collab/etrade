@@ -6,7 +6,7 @@ Supports up to 4 concurrent positions per symbol.
 import os
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from ctrader_open_api import Protobuf
 from ctrader_open_api.messages.OpenApiMessages_pb2 import *
@@ -199,10 +199,20 @@ class ForexExecutionService:
             pine_not_opposite = pine != 'Buy'
             mtf_directional = mtf < 0  # Al menos momentum negativo
 
-        # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine (RESTORED - No restrictive)
+        # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine (STRICT - Require MTF alignment)
+        rule_alignment_triggered = False
+        if direction == 'long':
+            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.25 Y no señal contraria de Pine Y no en techo
+            # TIGHTEN: fib_zone <= 3 (was 4) to leave room for profit before tp_band
+            rule_alignment_triggered = (sar_15m_ok and (sar_4h_ok or mtf >= 0.5) and mtf >= 0.25 and pine_not_opposite and struct_ok and fib_zone <= 3)
+        else:
+            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.25 Y no señal contraria de Pine Y no en piso
+            # TIGHTEN: fib_zone >= -3 (was -4) to leave room for profit before tp_band
+            rule_alignment_triggered = (sar_15m_ok and (sar_4h_ok or mtf <= -0.5) and mtf <= -0.25 and pine_not_opposite and struct_ok and fib_zone >= -3)
+
         results.append({
             'rule_code': 'Aa31a' if direction == 'long' else 'Bb31a', 
-            'triggered': (sar_4h_ok and sar_15m_ok and pine_not_opposite and mtf_directional and struct_ok), 
+            'triggered': rule_alignment_triggered, 
             'score': 0.7
         })
 
@@ -213,12 +223,11 @@ class ForexExecutionService:
         hot_triggered = False
         if ema3 and ema9 and ema20:
             if direction == 'long':
-                # LONG: EMA3 > EMA9 > EMA20 + Bollinger abriéndose
-                hot_triggered = (ema3 > ema9 > ema20) and bb_exp and (-6 <= fib_zone <= 3)
+                # LONG: EMA3 > EMA9 > EMA20 + (Bollinger abriéndose O MTF fuerte) + MTF Aligned
+                hot_triggered = (ema3 > ema9 > ema20) and (bb_exp or mtf >= 0.5) and (-6 <= fib_zone <= 3) and sar_15m_ok and mtf > 0
             else:
-                # SHORT: EMA3 < EMA9 < EMA20 + Bollinger comprimiéndose/abriéndose para caída
-                # El usuario mencionó "comprimir" para SHORT. Implementamos ambas señales de fuerza.
-                hot_triggered = (ema3 < ema9 < ema20) and (not bb_exp or abs(mtf) > 0.5) and (-6 <= fib_zone <= 3)
+                # SHORT: EMA3 < EMA9 < EMA20 + (Bollinger abriéndose O MTF fuerte) + MTF Aligned
+                hot_triggered = (ema3 < ema9 < ema20) and (bb_exp or mtf <= -0.5) and (-6 <= fib_zone <= 3) and sar_15m_ok and mtf < 0
 
         results.append({
             'rule_code': 'Aa_HOT' if direction == 'long' else 'Bb_HOT',
@@ -236,6 +245,7 @@ class ForexExecutionService:
     def _execute_signal(self, symbol, direction, signal, snap):
         # 1. Reglas Multi-layer (Misma estrategia)
         same_strat = [p for p in self._open_positions_list if p['symbol'] == symbol and p['rule_code'] == signal['rule_code']]
+        
         if same_strat:
             # Regla 1: 1 compra por vela (usamos 15 min como estándar solicitado)
             last_pos = sorted(same_strat, key=lambda x: x['opened_at'], reverse=True)[0]
@@ -245,10 +255,10 @@ class ForexExecutionService:
             now = datetime.now(timezone.utc)
             
             if (now - opened_at).total_seconds() < 900: # 15 minutos
-                 self.log(f'Omitiendo {symbol} {signal["rule_code"]}: Ya se abrio en los ultimos 15 min.')
+                 self.log(f'Omitiendo {symbol} {signal["rule_code"]}: Ya hay una abierta en los ultimos 15 min.')
                  return
             
-            # Regla 2: Mejora de precio
+            # Regla 2: Mejora de precio (DCA)
             price = self._safe_float(snap.get('price'))
             last_entry = self._safe_float(last_pos.get('entry_price'))
             if direction == 'long' and price >= last_entry:
@@ -260,7 +270,29 @@ class ForexExecutionService:
             
             self.log(f'Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
 
-        # Gualdián final: Límite TOTAL por símbolo (Para todas las estrategias)
+        # 2. Spam Protection: Verificar historial reciente (Cerradas)
+        try:
+            # Consultar últimas posiciones cerradas del mismo símbolo y estrategia en los últimos 15 min
+            since = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+            hist = self.sb.table('forex_positions')\
+                .select('opened_at')\
+                .eq('symbol', symbol)\
+                .eq('rule_code', signal['rule_code'])\
+                .gte('opened_at', since)\
+                .order('opened_at', desc=True)\
+                .limit(1).execute()
+            
+            if hist.data:
+                last_hist = hist.data[0]
+                hist_at_str = str(last_hist['opened_at']).replace('Z', '+00:00')
+                hist_at = datetime.fromisoformat(hist_at_str)
+                if (datetime.now(timezone.utc) - hist_at).total_seconds() < 900:
+                    self.log(f'Omitiendo {symbol} {signal["rule_code"]}: Spam protection (Cerrada recientemente, cool-down 15min active).')
+                    return
+        except Exception as e:
+            self.log(f"Error checking position history: {e}", "WARNING")
+
+        # 3. Gualdián final: Límite TOTAL por símbolo (Para todas las estrategias)
         total_symbol = len([p for p in self._open_positions_list if p['symbol'] == symbol])
         from app.core.supabase_client import get_risk_config
         max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
@@ -268,7 +300,7 @@ class ForexExecutionService:
             self.log(f'LIMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
 
-        # 2. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
+        # 4. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
         # Normalizamos el símbolo para asegurar coincidencia
         opposite = 'short' if direction == 'long' else 'long'
         opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == opposite]
