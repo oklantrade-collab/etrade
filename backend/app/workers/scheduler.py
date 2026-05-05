@@ -737,7 +737,6 @@ async def check_proactive_exit_crypto(
     # ── Cerrar posición ───────────────────────
     log_info('PROACTIVE_EXIT', f'🛡️ {symbol}: {result["rule_code"]} — {result["reason"]}')
 
-    from app.core.position_monitor import _execute_paper_close
     await _execute_paper_close(position, current_price, result['rule_code'], sb)
 
     # Guardar en strategy_evaluations
@@ -865,7 +864,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
         # 5. SMART EXIT (SAR Phase Change)
         # Faster detection in 5m cycle to close before SL
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
-        from app.core.position_monitor import _execute_paper_close
+
         
         snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
         sar_phase = snap.get('sar_phase', 'neutral')
@@ -973,7 +972,6 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
             if signal_5m:
                 await engine.log_evaluation(symbol, signal_5m, context_5m)
                 # Ejecutar apertura 5m
-                from app.core.position_monitor import _execute_paper_open
                 qty_5m = (float(BOT_STATE.config_cache.get("capital_operativo", 100)) * 0.10) / current_price
                 await _execute_paper_open(
                     symbol=symbol, side=signal_5m['direction'], price=current_price,
@@ -2084,7 +2082,8 @@ async def listen_for_rule_changes():
 
 async def main():
     # 0. Load Configuration (Fail-safe to Paper)
-    load_config_to_memory()
+    await sync_db_config_to_memory() # Cargar config inmediatamente
+    await sync_positions_to_memory() # Cargar posiciones inmediatamente
     load_rules_to_memory()
     
     # Initialize Strategy Engine v1.0
@@ -2121,8 +2120,9 @@ async def main():
     # 3. Realtime Cache Invalidation Task
     asyncio.create_task(listen_for_rule_changes())
     
-    # 4. Sync Config Periodically
-    scheduler.add_job(sync_db_config_to_memory, 'interval', minutes=10, id='sync_cfg')
+    # 4. Sync Config and Positions Periodically
+    scheduler.add_job(sync_db_config_to_memory, 'interval', minutes=5, id='sync_cfg')
+    scheduler.add_job(sync_positions_to_memory, 'interval', minutes=2, id='sync_pos')
     
     # 5. Schedule Tasks with offsets
     scheduler.add_job(cycle_5m, CronTrigger(minute='*/5', second='10'), id='2a', replace_existing=True)
