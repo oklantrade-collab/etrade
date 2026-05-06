@@ -38,16 +38,8 @@ TF_DURATION_SECONDS = {
 
 
 def to_internal_symbol(binance_symbol: str) -> str:
-    """Convert Binance symbol format (BTCUSDT) to internal format (BTC/USDT)."""
-    # Check SYMBOL_MAP first
-    if binance_symbol in SYMBOL_MAP:
-        return SYMBOL_MAP[binance_symbol]
-    # Fallback: split by known quote currencies
-    for quote in ["USDT", "BUSD", "USDC", "BTC", "ETH", "BNB"]:
-        if binance_symbol.endswith(quote):
-            base = binance_symbol[: -len(quote)]
-            return f"{base}/{quote}"
-    return binance_symbol
+    """Standardized format (No Slash) for DB consistency."""
+    return binance_symbol.replace("/", "")
 
 
 def to_binance_symbol(internal_symbol: str) -> str:

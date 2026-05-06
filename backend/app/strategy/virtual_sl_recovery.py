@@ -17,6 +17,22 @@ import time
 from datetime import datetime, timezone
 from app.core.logger import log_info, log_warning, log_error
 
+
+def safe_float(v, default=0.0):
+    try:
+        if v is None: return default
+        return float(v)
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_int(v, default=0):
+    try:
+        if v is None: return default
+        return int(float(v))
+    except (ValueError, TypeError):
+        return default
+
 # --- CONFIGURACIÓN SLV v5.0 ---
 SLVM_CONFIG = {
     'crypto_futures': {
@@ -32,7 +48,7 @@ SLVM_CONFIG = {
     'forex_futures': {
         'slv_method':            'atr',
         'slv_atr_mult':          1.5,
-        'recovery_max_cycles':   4,     # 60 min
+        'recovery_max_cycles':   60,    # 60 min (Ajustado para ciclos de 1 min)
         'recovery_target_pips':  -2,    # Aceptar pérdida mínima
         'recovery_buffer_pips':  1,
         'trailing_pips_trigger': 8,
@@ -78,7 +94,7 @@ def calculate_pips(entry: float, current: float, side: str, symbol: str) -> floa
 def calculate_hard_stop_pips(symbol: str, market_type: str, snap: dict) -> float:
     """Calcula el Hard Stop basado en volatilidad (ATR)."""
     rules = ATR_HARD_STOP_RULES.get(market_type, {'pips_base': 10, 'atr_factor': 1.0})
-    atr = float(snap.get('atr', 0))
+    atr = safe_float(snap.get('atr', 0))
     pip_size = get_pip_size(symbol)
     
     if atr > 0:
@@ -130,7 +146,7 @@ def check_5m_hard_stop(
     Si el precio viola el Hard Stop (ATR based), cierra sin esperar a los 15m.
     """
     side = position.get('side', 'long')
-    entry_price = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+    entry_price = safe_float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     
     # Hard Stop dinámico
     hs_pips = calculate_hard_stop_pips(symbol, market_type, snap)
@@ -172,12 +188,12 @@ def evaluate_recovery_mode_v2(
     """
     config = SLVM_CONFIG.get(market_type, SLVM_CONFIG['crypto_futures'])
     side = position.get('side', 'long')
-    entry_price = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+    entry_price = safe_float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     
     # Datos de la vela actual (deberían venir en snap o calcularse)
     # Por ahora usamos placeholders si no vienen
-    v1_open = float(snap.get('open_15m', current_price))
-    v2_close_prev = float(snap.get('close_prev_15m', current_price))
+    v1_open = safe_float(snap.get('open_15m', current_price))
+    v2_close_prev = safe_float(snap.get('close_prev_15m', current_price))
     
     # 1. Verificar Hard Stop Urgente (5m)
     hs_urgent = check_5m_hard_stop(position, current_price, snap, symbol, market_type)
@@ -204,7 +220,7 @@ def evaluate_recovery_mode_v2(
         }
         
     # 3. Verificar Timeout (4 ciclos máx)
-    cycles = int(position.get('recovery_cycles', 0))
+    cycles = safe_int(position.get('recovery_cycles', 0))
     if cycles >= config['recovery_max_cycles']:
         return {
             'should_close': True,
@@ -277,8 +293,8 @@ async def process_symbol_5m_with_slvm_v2(
                 # Logging extendido para auditoría
                 'slv_hard_stop_trigger': mr_result.get('exit_type'),
                 'slv_hard_stop_pips': mr_result.get('hs_pips'),
-                'slv_v1_open': float(snap.get('open_15m', 0)),
-                'v2_close_prev': float(snap.get('close_prev_15m', 0)),
+                'slv_v1_open': safe_float(snap.get('open_15m', 0)),
+                'v2_close_prev': safe_float(snap.get('close_prev_15m', 0)),
                 'slv_timeframe_trigger': '5m'
             }
             
@@ -341,7 +357,7 @@ def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, s
             'close_reason': f"recovery_{mr_result['exit_type']}",
             'closed_at': datetime.now(timezone.utc).isoformat(),
             'current_price': price,
-            'realized_pnl': calculate_pips(float(position.get('avg_entry_price', 0)), price, position.get('side', 'long'), symbol)
+            'realized_pnl': calculate_pips(safe_float(position.get('avg_entry_price', 0)), price, position.get('side', 'long'), symbol)
         }).eq('id', position['id']).execute()
         log_info('SLVM', f"Finalized recovery exit for {symbol} ({mr_result['exit_type']})")
     except Exception as e:
@@ -373,12 +389,12 @@ def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market
     
     if config['slv_method'] == 'fibonacci' and 'lower_1' in snap:
         if side.lower() in ('long', 'buy'):
-            slv_price = float(snap.get(config['slv_fibonacci_band'], 0))
+            slv_price = safe_float(snap.get(config['slv_fibonacci_band'], 0))
             source = config['slv_fibonacci_band']
         else:
             # Para shorts usa la banda superior equivalente
             band = config['slv_fibonacci_band'].replace('lower', 'upper')
-            slv_price = float(snap.get(band, 0))
+            slv_price = safe_float(snap.get(band, 0))
             source = band
             
     if slv_price <= 0:

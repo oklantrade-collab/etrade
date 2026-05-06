@@ -210,7 +210,8 @@ export default function PortfolioPage() {
                           <th className="py-6">CANTIDAD</th>
                           <th className="py-6">ESTRATEGIA</th>
                           <th className="py-6">ESTADO</th>
-                          <th className="py-6 text-right px-10">IMPORTE</th>
+                          <th className="py-6">IMPORTE</th>
+                          <th className="py-6 text-right px-10">VER</th>
                        </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5">
@@ -241,11 +242,20 @@ export default function PortfolioPage() {
                                      {a.reason && a.reason !== 'closed' ? a.reason.replace(/_/g, ' ').toUpperCase() : (isWin ? 'Profit Consolidado' : 'Stop Ejecutado')}
                                   </span>
                                </td>
-                               <td className="text-right px-10 font-mono font-black text-sm italic">
+                               <td className="font-mono font-black text-sm italic">
                                   <span style={{ color: isWin ? '#34d399' : '#fb7185' }}>
                                      {isWin ? '+' : ''}${(a?.pnl || 0).toFixed(2)}
                                   </span>
                                </td>
+                               <td className="py-6 text-right px-10">
+                                   <Link 
+                                     href={`/dashboard?symbol=${a.symbol}`}
+                                     className="bg-blue-500/5 hover:bg-blue-500/15 border border-white/5 p-2 rounded-lg transition-all inline-block"
+                                     title="Ver Gráfico"
+                                   >
+                                     <span className="text-sm">📊</span>
+                                   </Link>
+                                </td>
                             </tr>
                           )
                        })}
@@ -386,9 +396,9 @@ function TableSection({ title, symbols, color }: any) {
                       <th className="py-6">P&L ($)</th>
                       <th className="py-6 text-center">ROI (%)</th>
                       <th className="py-6 text-center">TOT INV</th>
-                      <th className="py-6 text-center">CANT</th>
                       <th className="py-6 text-center">ZONA FIBO</th>
-                      <th className="py-6 text-right px-10">ESTRATEGIA</th>
+                      <th className="py-6 text-right">ESTRATEGIA</th>
+                      <th className="py-6 text-right px-10">VER</th>
                    </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5">
@@ -424,9 +434,6 @@ function TableSection({ title, symbols, color }: any) {
                               <td className="text-center font-mono text-xs text-slate-400">
                                  ${(s.total_investment || 0).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
                               </td>
-                              <td className="text-center font-mono text-xs text-slate-400">
-                                 {(s.quantity || 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 })}
-                              </td>
                               <td className="text-center">
                                  <div className="flex flex-col items-center gap-1">
                                     <span className={`text-[0.65rem] font-black italic tracking-tighter ${
@@ -449,7 +456,16 @@ function TableSection({ title, symbols, color }: any) {
                                     </div>
                                  </div>
                               </td>
-                              <td className="text-right px-10 font-mono text-[0.6rem] text-slate-600 font-bold uppercase">{s.rule_code || 'S-01'}</td>
+                              <td className="text-center font-mono text-[0.6rem] text-slate-600 font-bold uppercase">{s.rule_code || 'S-01'}</td>
+                              <td className="py-8 px-10 text-right">
+                                  <Link 
+                                    href={`/dashboard?symbol=${s.symbol}`}
+                                    className="bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 p-2 rounded-lg transition-all group-hover:scale-110 inline-block"
+                                    title="Ver en Command Center"
+                                  >
+                                    <span className="text-lg">📊</span>
+                                  </Link>
+                               </td>
                            </tr>
                          )
                        })}

@@ -13,7 +13,7 @@ Prerequisites:
 import os
 import time
 import threading
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict
 from datetime import datetime, timezone
 
 from app.core.logger import log_info, log_error, log_warning
@@ -56,6 +56,7 @@ class IBConnection(EWrapper, EClient):
         self.connected: bool = False
         self._data_callbacks: dict = {}
         self._errors: list = []
+        self._prices: Dict[str, float] = {}  # {ticker: last_price}
         self._thread: threading.Thread | None = None
 
     # ── Connection ────────────────────────────────────────
@@ -133,7 +134,19 @@ class IBConnection(EWrapper, EClient):
                 "message": errorString,
                 "time": datetime.now(timezone.utc).isoformat()
             })
-            log_error(MODULE, f"[IB Error {errorCode}] reqId={reqId}: {errorString}")
+            # Connection errors (502, 504) should be warnings, not critical Telegram alerts
+            if errorCode in [502, 504]:
+                log_warning(MODULE, f"[IB Connection] {errorString}")
+            else:
+                log_error(MODULE, f"[IB Error {errorCode}] reqId={reqId}: {errorString}")
+    
+    def tickPrice(self, reqId: int, tickType: int, price: float, attrib):
+        """Called when a market price update is received."""
+        # tickType 4 is Last Price, 1 is Bid, 2 is Ask
+        if tickType in [1, 2, 4] and price > 0:
+            ticker = self._data_callbacks.get(reqId)
+            if ticker:
+                self._prices[ticker] = price
 
     def connectionClosed(self):
         """Called when connection is lost."""
@@ -264,6 +277,17 @@ class IBConnection(EWrapper, EClient):
             "qty":       qty,
         }
 
+    def req_mkt_data(self, ticker: str):
+        """Request real-time market data for a ticker."""
+        if not self.connected:
+            return
+        
+        req_id = self.get_next_order_id() # Use same ID pool
+        self._data_callbacks[req_id] = ticker.upper()
+        contract = self.us_stock_contract(ticker)
+        self.reqMktData(req_id, contract, "", False, False, [])
+        log_info(MODULE, f"Market data requested for {ticker} (reqId={req_id})")
+
     # ── Status ────────────────────────────────────────────
 
     def get_status(self) -> dict:
@@ -351,3 +375,42 @@ class IBProvider:
             "shares": shares,
             "price": price
         }
+
+    async def get_current_price(self, ticker: str) -> float:
+        """
+        Get current price from IB memory cache. 
+        If not present, trigger a request and wait briefly.
+        """
+        if not self.conn or not self.conn.connected:
+            return 0.0
+        
+        ticker = ticker.upper()
+        if ticker not in self.conn._prices:
+            self.conn.req_mkt_data(ticker)
+            # Wait up to 2 seconds for first tick
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if ticker in self.conn._prices:
+                    break
+        
+        return self.conn._prices.get(ticker, 0.0)
+
+    async def get_multiple_prices(self, tickers: list[str]) -> dict[str, float]:
+        """
+        Request multiple prices in parallel and wait briefly for them to populate.
+        """
+        if not self.conn or not self.conn.connected:
+            return {t: 0.0 for t in tickers}
+        
+        missing = [t.upper() for t in tickers if t.upper() not in self.conn._prices]
+        for t in missing:
+            self.conn.req_mkt_data(t)
+        
+        if missing:
+            # Wait up to 1.5 seconds for results
+            for _ in range(15):
+                await asyncio.sleep(0.1)
+                if all(t.upper() in self.conn._prices for t in missing):
+                    break
+        
+        return {t.upper(): self.conn._prices.get(t.upper(), 0.0) for t in tickers}

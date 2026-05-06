@@ -4,7 +4,8 @@ import Link from 'next/link'
 import ForexWelcomeScreen from '../WelcomeScreen'
 import TradeMarkerChart from '@/components/TradeMarkerChart'
 
-const FOREX_PAIRS = [
+// No longer hardcoded - loaded from DB
+const DEFAULT_FOREX_PAIRS = [
   'EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD'
 ]
 
@@ -25,18 +26,40 @@ export default function ForexDashboard() {
   const [loading, setLoading] = useState(true)
   const [activePositions, setActivePositions] = useState<any[]>([])
   const [activePosition, setActivePosition] = useState<any>(null)
+  const [forexPairs, setForexPairs] = useState<string[]>(DEFAULT_FOREX_PAIRS)
 
   useEffect(() => {
+    loadConfig()
     checkConnection()
-    const intervalSnap = setInterval(fetchSnapshots, 15000)
-    const intervalCandles = setInterval(() => loadChartData(focusPair, false), 30000)
-    const intervalPos = setInterval(fetchPositions, 10000)
-    return () => {
-        clearInterval(intervalSnap)
-        clearInterval(intervalCandles)
-        clearInterval(intervalPos)
+  }, [])
+
+  useEffect(() => {
+    if (connected) {
+        const intervalSnap = setInterval(fetchSnapshots, 15000)
+        const intervalCandles = setInterval(() => loadChartData(focusPair, false), 30000)
+        const intervalPos = setInterval(fetchPositions, 10000)
+        return () => {
+            clearInterval(intervalSnap)
+            clearInterval(intervalCandles)
+            clearInterval(intervalPos)
+        }
     }
-  }, [focusPair, timeframe])
+  }, [focusPair, timeframe, connected])
+
+  const loadConfig = async () => {
+    try {
+      const { supabase } = await import('@/lib/supabase')
+      const { data } = await supabase.from('trading_config').select('regime_params').eq('id', 1).single()
+      if (data?.regime_params?.forex_assets) {
+        setForexPairs(data.regime_params.forex_assets)
+        if (!data.regime_params.forex_assets.includes(focusPair)) {
+          setFocusPair(data.regime_params.forex_assets[0])
+        }
+      }
+    } catch (err) {
+      console.error("Error loading forex config:", err)
+    }
+  }
 
   const checkConnection = async () => {
     try {
@@ -196,11 +219,11 @@ export default function ForexDashboard() {
       {/* PAIR CARDS - ALL IN ONE ROW (RESTORED DESIGN) */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)',
+        gridTemplateColumns: `repeat(${Math.min(4, forexPairs.length)}, 1fr)`,
         gap: '12px',
         marginBottom: '24px',
       }}>
-        {FOREX_PAIRS.map(pair => (
+        {forexPairs.map(pair => (
           <ForexPairCard
             key={pair}
             pair={pair}
@@ -282,7 +305,7 @@ function ForexPairCard({ pair, snap, isFocus, position, onClick }: any) {
           </div>
       )}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-        <span style={{ fontSize: '13px', fontWeight: 900, color: '#FFF' }}>{meta.flag} {pair}</span>
+        <span style={{ fontSize: '13px', fontWeight: 900, color: '#FFF' }}>{meta.flag || '🏳️'} {pair}</span>
         <span style={{ fontSize: '9px', fontWeight: 900, color: zone > 0 ? '#00C896' : zone < 0 ? '#FF4757' : '#555' }}>ZONA {zone}</span>
       </div>
       <div style={{ fontSize: '18px', fontWeight: 900, color: price > 0 ? '#FFF' : '#333', marginBottom: '8px', fontFamily: 'monospace' }}>

@@ -453,7 +453,7 @@ def _open_or_update_position(
         # ── SLVM: Calcular Stop Loss Virtual ──
         slv_price = None
         try:
-            from app.strategy.virtual_sl_recovery import calculate_slv
+            from app.strategy.virtual_sl_recovery import calculate_slv, calculate_hard_stop_pips
             snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
             snap_slv = snap_res.data[0] if snap_res.data else {}
             slv_data = calculate_slv(

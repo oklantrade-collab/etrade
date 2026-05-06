@@ -79,7 +79,8 @@ export default function TradeMarkerChart({
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
-            hour12: false
+            hour12: false,
+            timeZone: 'America/Lima'
           })
         }
       },
@@ -176,41 +177,50 @@ export default function TradeMarkerChart({
         if ((chartRef.current as any).upper6Series) (chartRef.current as any).upper6Series.setData([])
         if ((chartRef.current as any).lower6Series) (chartRef.current as any).lower6Series.setData([])
         
-        // Clear old PriceLines (active position markers)
+        // Clear old PriceLines
         priceLinesRef.current.forEach(l => candleSeriesRef.current?.removePriceLine(l))
         priceLinesRef.current = []
-
         return
     }
 
     // Format and set candle data
-    const formattedCandles = candles.map(c => ({
-      time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-      open: parseFloat(c.open),
-      high: parseFloat(c.high),
-      low: parseFloat(c.low),
-      close: parseFloat(c.close)
-    })).sort((a, b) => a.time - b.time)
+    const formattedCandles = candles
+      .map(c => {
+        const t = Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000)
+        return {
+          time: t as any,
+          open:  parseFloat(c.open || 0),
+          high:  parseFloat(c.high || 0),
+          low:   parseFloat(c.low || 0),
+          close: parseFloat(c.close || 0)
+        }
+      })
+      .filter(c => !isNaN(c.time) && !isNaN(c.close))
+      .sort((a, b) => a.time - b.time)
 
     // Remove duplicates
     const uniqueCandles = Array.from(new Map(formattedCandles.map(c => [c.time, c])).values())
-    if (candleSeriesRef.current) {
+    if (candleSeriesRef.current && uniqueCandles.length > 0) {
       candleSeriesRef.current.setData(uniqueCandles)
     }
 
-    // Set SAR data via markers for dots (TradingView style)
+    // --- INDICATORS ---
     const sarSeries = (chartRef.current as any)?.sarSeries
     if (sarSeries) {
       const sarData = candles
-        .filter(c => c.sar > 0)
-        .map(c => ({
-          time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-          value: parseFloat(c.sar),
-          trend: parseInt(c.sar_trend)
-        })).sort((a, b) => a.time - b.time)
+        .map(c => {
+          const t = Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000)
+          return {
+            time: t as any,
+            value: parseFloat(c.sar || 0),
+            trend: parseInt(c.sar_trend || 0)
+          }
+        })
+        .filter(p => !isNaN(p.time) && p.value > 0)
+        .sort((a, b) => a.time - b.time)
       
       const uniqueSar = Array.from(new Map(sarData.map(c => [c.time, c])).values())
-      sarSeries.setData(uniqueSar)
+      sarSeries.setData(uniqueSar.map(p => ({ time: p.time, value: p.value })))
       
       const sarMarkers = uniqueSar.map(p => ({
         time:     p.time,
@@ -219,48 +229,60 @@ export default function TradeMarkerChart({
         shape:    'circle' as any,
         size:     1
       }))
-      if (!(chartRef.current as any).sarMarkersPlugin) {
-        (chartRef.current as any).sarMarkersPlugin = createSeriesMarkers(sarSeries, sarMarkers)
-      } else {
-        (chartRef.current as any).sarMarkersPlugin.setMarkers(sarMarkers)
-      }
+      
+      try {
+          if (!(chartRef.current as any).sarMarkersPlugin) {
+            (chartRef.current as any).sarMarkersPlugin = createSeriesMarkers(sarSeries, sarMarkers)
+          } else {
+            (chartRef.current as any).sarMarkersPlugin.setMarkers(sarMarkers)
+          }
+      } catch (e) { console.error("SAR Markers error", e) }
     }
 
-    // --- SET INDICATOR DATA (FROM API) ---
     const basisSeries = (chartRef.current as any)?.basisSeries
     const upper6Series = (chartRef.current as any)?.upper6Series
     const lower6Series = (chartRef.current as any)?.lower6Series
 
     if (basisSeries && showBasis) {
-        basisSeries.setData(candles.filter(c => parseFloat(c.basis) > 0).map(c => ({
+        const d = candles
+          .map(c => ({
             time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-            value: parseFloat(c.basis)
-        })).sort((a: any, b: any) => a.time - b.time))
+            value: parseFloat(c.basis || 0)
+          }))
+          .filter(p => !isNaN(p.time) && p.value > 0)
+          .sort((a, b) => a.time - b.time)
+        basisSeries.setData(d)
     }
     if (upper6Series) {
-        upper6Series.setData(candles.filter(c => parseFloat(c.upper_6) > 0).map(c => ({
+        const d = candles
+          .map(c => ({
             time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-            value: parseFloat(c.upper_6)
-        })).sort((a: any, b: any) => a.time - b.time))
+            value: parseFloat(c.upper_6 || 0)
+          }))
+          .filter(p => !isNaN(p.time) && p.value > 0)
+          .sort((a, b) => a.time - b.time)
+        upper6Series.setData(d)
     }
     if (lower6Series) {
-        lower6Series.setData(candles.filter(c => parseFloat(c.lower_6) > 0).map(c => ({
+        const d = candles
+          .map(c => ({
             time: Math.floor(new Date(c.open_time || c.timestamp).getTime() / 1000) as any,
-            value: parseFloat(c.lower_6)
-        })).sort((a: any, b: any) => a.time - b.time))
+            value: parseFloat(c.lower_6 || 0)
+          }))
+          .filter(p => !isNaN(p.time) && p.value > 0)
+          .sort((a, b) => a.time - b.time)
+        lower6Series.setData(d)
     }
 
-    // Add Markers
+    // --- TRADE MARKERS ---
     const markers = trades
       .filter(t => t.type === 'entry' && showRealTrades)
       .map(t => {
         const isLong = t.direction === 'long'
-        // Asegurar que el timestamp sea en segundos y sea un número válido
         let tradeTime = typeof t.timestamp === 'string' ? new Date(t.timestamp).getTime() / 1000 : t.timestamp
-        if (tradeTime > 10000000000) tradeTime = tradeTime / 1000 // Convertir ms a s si es necesario
+        if (tradeTime > 10000000000) tradeTime = tradeTime / 1000
         
-        // Encontrar la vela más cercana (o exacta) para alinear el marcador
-        const candleTime = formattedCandles.find(c => c.time <= tradeTime && (c.time + (15 * 60)) > tradeTime)?.time || tradeTime
+        const candleTime = uniqueCandles.find(c => (c.time as any) <= tradeTime && ((c.time as any) + (15 * 60)) > tradeTime)?.time || tradeTime
 
         return {
           time:     candleTime as any,
@@ -272,7 +294,6 @@ export default function TradeMarkerChart({
         }
       })
 
-    // --- ADD PINESCRIPT MARKERS (B/S) ---
     const pineMarkers = candles
       .filter(c => c.pinescript_signal === 'Buy' || c.pinescript_signal === 'Sell')
       .map(c => ({
@@ -281,41 +302,42 @@ export default function TradeMarkerChart({
         color:    c.pinescript_signal === 'Buy' ? '#00C896' : '#FF4757',
         shape:    'text' as any,
         text:     c.pinescript_signal === 'Buy' ? 'B' : 'S',
-        size:     2, // Aumentado de 1 a 2
+        size:     2,
       }))
 
     const allMarkers = [...markers, ...pineMarkers].sort((a, b) => a.time - b.time)
 
-    if (candleSeriesRef.current) {
-      if (!(chartRef.current as any).tradeMarkersPlugin) {
-        (chartRef.current as any).tradeMarkersPlugin = createSeriesMarkers(candleSeriesRef.current, allMarkers)
-      } else {
-        (chartRef.current as any).tradeMarkersPlugin.setMarkers(allMarkers)
-      }
+    if (candleSeriesRef.current && allMarkers.length > 0) {
+      try {
+          if (!(chartRef.current as any).tradeMarkersPlugin) {
+            (chartRef.current as any).tradeMarkersPlugin = createSeriesMarkers(candleSeriesRef.current, allMarkers)
+          } else {
+            (chartRef.current as any).tradeMarkersPlugin.setMarkers(allMarkers)
+          }
+      } catch (e) { console.error("Trade Markers error", e) }
     }
 
-    // Add Price Lines for active position
+    // --- PRICE LINES ---
     priceLinesRef.current.forEach(l => candleSeriesRef.current?.removePriceLine(l))
     priceLinesRef.current = []
 
     if (activePosition && candleSeriesRef.current) {
-      const entryPrice = activePosition.avg_entry || activePosition.entry_price || activePosition.avg_entry_price;
-      const slPrice = activePosition.sl_price;
-      const tp1Price = activePosition.tp_partial || activePosition.tp_partial_price || activePosition.tp_price;
-      const tp2Price = activePosition.tp_full || activePosition.tp_full_price;
-      const tp3Price = activePosition.tp_3 || activePosition.tp_3_price;
+      const entryPrice = activePosition.avg_entry || activePosition.entry_price || 0;
+      const slPrice = activePosition.sl_price || 0;
+      const tp1Price = activePosition.tp_partial || activePosition.tp_partial_price || activePosition.tp_block1_price || 0;
+      const tp2Price = activePosition.tp_full || activePosition.tp_full_price || activePosition.tp_block2_price || 0;
+      const tp3Price = activePosition.tp_3 || activePosition.tp_3_price || activePosition.tp_block3_price || 0;
 
       const lines = [
-        entryPrice ? { price: entryPrice, color: '#00C896', title: `Entry $${entryPrice.toLocaleString()}` } : null,
-        slPrice ? { price: slPrice, color: '#FF4757', title: `SL $${slPrice.toLocaleString()}` } : null,
-        tp1Price ? { price: tp1Price, color: '#FFD700', title: `TP1 $${tp1Price.toLocaleString()}` } : null,
-        tp2Price ? { price: tp2Price, color: '#ffffff', title: `TP2 $${tp2Price.toLocaleString()}` } : null,
-        tp3Price ? { price: tp3Price, color: '#38BDF8', title: `TP3 $${tp3Price.toLocaleString()}` } : null,
+        entryPrice > 0 ? { price: entryPrice, color: '#00C896', title: `Entry $${entryPrice.toLocaleString()}` } : null,
+        slPrice > 0 ? { price: slPrice, color: '#FF4757', title: `SL $${slPrice.toLocaleString()}` } : null,
+        tp1Price > 0 ? { price: tp1Price, color: '#FFD700', title: `TP1 $${tp1Price.toLocaleString()}` } : null,
+        tp2Price > 0 ? { price: tp2Price, color: '#ffffff', title: `TP2 $${tp2Price.toLocaleString()}` } : null,
+        tp3Price > 0 ? { price: tp3Price, color: '#38BDF8', title: `TP3 $${tp3Price.toLocaleString()}` } : null,
       ].filter(l => l !== null);
 
       lines.forEach((l: any) => {
-        if (l.price > 0 && candleSeriesRef.current) {
-          const pl = candleSeriesRef.current.createPriceLine({
+          const pl = candleSeriesRef.current?.createPriceLine({
             price: l.price,
             color: l.color,
             lineWidth: 1,
@@ -324,53 +346,78 @@ export default function TradeMarkerChart({
             title: l.title,
           })
           if (pl) priceLinesRef.current.push(pl)
-        }
       })
     }
 
-    if (!hasFitInitial && candles.length > 0) {
-      chartRef.current?.timeScale().fitContent()
-      setHasFitInitial(true)
+    if (!hasFitInitial && uniqueCandles.length > 0) {
+      setTimeout(() => {
+        chartRef.current?.timeScale().fitContent()
+        setHasFitInitial(true)
+      }, 100)
     }
-   }, [candles, trades, activePosition, showRealTrades]);
+  }, [candles, trades, activePosition, showRealTrades, symbol, timeframe]);
+
+  // Chart creation logic including localization:
+  // (Assuming chart object creation here)
+  /*
+      localization: {
+        locale: 'es-PE',
+        timeFormatter: (time: number) => {
+          const date = new Date(time * 1000)
+          return date.toLocaleString('es-PE', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
+            timeZone: 'America/Lima'
+          })
+        }
+      },
+  */
 
   return (
     <div className="relative w-full h-full">
       <div style={{
         position:   'absolute',
-        top:        '8px',
-        left:       '8px',
-        background: 'rgba(0,0,0,0.6)',
-        padding:    '4px 8px',
-        borderRadius: '4px',
-        fontSize:   '10px',
-        color:      '#888',
+        bottom:     '40px',
+        left:       '12px',
+        background: 'rgba(15, 23, 42, 0.9)',
+        padding:    '8px 16px',
+        borderRadius: '8px',
+        fontSize:   '12px',
+        color:      '#cbd5e1',
         zIndex:     10,
         pointerEvents: 'none',
         display: 'flex',
-        gap: '12px'
+        gap: '20px',
+        border: '1px solid rgba(255, 255, 255, 0.1)',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+        backdropFilter: 'blur(8px)'
       }}>
-        <div className="flex gap-4 items-center">
-          <label className="flex items-center gap-1.5 cursor-pointer hover:text-white transition-colors pointer-events-auto">
+        <div className="flex gap-6 items-center">
+          <label className="flex items-center gap-2 cursor-pointer hover:text-white transition-colors pointer-events-auto">
             <input 
               type="checkbox" 
               checked={showRealTrades} 
               onChange={e => setShowRealTrades(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-white/20 bg-black/40 accent-[#00FF00]"
+              className="w-4 h-4 rounded border-white/20 bg-black/40 accent-[#00FF00]"
             />
-            <span style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '0.5px' }}>MOSTRAR BUY/SELL</span>
+            <span style={{ fontSize: '12px', fontWeight: 900, letterSpacing: '0.5px', color: '#fff' }}>MIS TRADES (SIPV)</span>
           </label>
         </div>
-        <div className="flex gap-3 border-l border-white/10 pl-3">
-          <span className="flex items-center gap-1"><span style={{color:'#00FF00'}}>BUY</span> Buy</span>
-          <span className="flex items-center gap-1"><span style={{color:'#FFA500'}}>SELL</span> Sell</span>
+        <div className="flex gap-4 border-l border-white/10 pl-4">
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#00FF00]" /> BUY</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#FFA500]" /> SELL</span>
         </div>
-        <div className="flex gap-3 border-l border-white/10 pl-3">
-          <span className="flex items-center gap-1"><span style={{color:'#00C896'}}>B</span> Buy</span>
-          <span className="flex items-center gap-1"><span style={{color:'#FF4757'}}>S</span> Sell</span>
-          <span className="flex items-center gap-1"><span style={{color:'#ef5350'}}>●</span> SAR</span>
-          <span className="flex items-center gap-1"><span style={{color:'#00C896'}}>--</span> U6</span>
-          <span className="flex items-center gap-1"><span style={{color:'#FF4757'}}>--</span> L6</span>
+        <div className="flex gap-4 border-l border-white/10 pl-4">
+          <span className="flex items-center gap-1.5 text-[#00C896] font-bold">B (PINE)</span>
+          <span className="flex items-center gap-1.5 text-[#FF4757] font-bold">S (PINE)</span>
+          <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#ef5350]" /> SAR</span>
+          <span className="flex items-center gap-1.5 font-bold text-[#00C896]">U6</span>
+          <span className="flex items-center gap-1.5 font-bold text-[#FF4757]">L6</span>
         </div>
       </div>
       <div ref={chartContainerRef} className="w-full h-full" />

@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import ForexWelcomeScreen from '../WelcomeScreen'
 
 interface ForexPosition {
@@ -22,6 +22,9 @@ export default function ForexPositions() {
   const [closedPositions, setClosedPositions] = useState<ForexPosition[]>([])
   const [snapshots, setSnapshots] = useState<any>({})
   const [activeTab, setActiveTab] = useState<'open' | 'closed'>('open')
+  const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
+
 
   useEffect(() => {
     async function init() {
@@ -74,7 +77,7 @@ export default function ForexPositions() {
 
   // Función auxiliar para calcular Pips y PnL USD
   const calculatePnL = (pos: any, currentPrice: number) => {
-    if (!currentPrice || currentPrice <= 0) return { pips: 0, usd: 0 }
+    if (!currentPrice || currentPrice <= 0) return { pips: 0, usd: 0, pct: 0 }
     
     const isLong = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy'
     const isJPY = pos.symbol.includes('JPY')
@@ -87,13 +90,16 @@ export default function ForexPositions() {
     const pips = isLong ? (currentPrice - pos.entry_price) / pipSize : (pos.entry_price - currentPrice) / pipSize
     
     // Valor del pip (Estándar para 0.01 lotes)
-    // EURUSD: 0.10 USD | USDJPY: ~0.06 USD | XAUUSD: 1 pip (0.01) = 0.01 USD (si 0.01 lotes = 1 onza)
     let pipValue = 10.0 // Default 1.0 lote = $10/pip
-    if (isXAU) pipValue = 1.0   // 1.0 lote = $100/pip (pero pips son 0.01, así que $1 por $1 de movimiento)
-    if (isJPY) pipValue = 6.5   // Ajuste para Yen
+    if (isXAU) pipValue = 1.0
+    if (isJPY) pipValue = 6.5
     
     const usd = pips * pipValue * Math.abs(pos.lots)
-    return { pips, usd }
+    
+    // Porcentaje de ganancia/pérdida relativo al precio de entrada
+    const pct = (isLong ? (currentPrice - pos.entry_price) : (pos.entry_price - currentPrice)) / pos.entry_price * 100
+    
+    return { pips, usd, pct }
   }
 
   const totalUnrealized = positions.reduce((acc, p) => {
@@ -218,9 +224,9 @@ export default function ForexPositions() {
                                     <span className={`text-sm ${pnl.usd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                                        {pnl.usd >= 0 ? '+' : ''}${pnl.usd.toFixed(2)}
                                     </span>
-                                    <span className={`text-[0.55rem] opacity-50 ${pnl.pips >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
-                                       {pnl.pips >= 0 ? '+' : ''}{pnl.pips.toFixed(1)} PIPS
-                                    </span>
+                                     <span className={`text-[0.55rem] font-black italic opacity-60 ${pnl.pct >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                        {pnl.pct >= 0 ? '+' : ''}{pnl.pct.toFixed(4)}%
+                                     </span>
                                  </div>
                               </td>
                               <td className="py-8 text-right px-10">
@@ -228,6 +234,17 @@ export default function ForexPositions() {
                                     <span className="bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em] shadow-[0_0_15px_rgba(99,102,241,0.1)]">
                                        {pos.rule_code || 'FX-CORE'}
                                     </span>
+                                    <button 
+                                      onClick={() => {
+                                        setSelectedTicker(pos.symbol)
+                                        setShowChart(true)
+                                      }}
+                                      className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500 hover:bg-blue-500 hover:text-white transition-all shadow-lg shadow-blue-500/10 group-hover:scale-110"
+                                      title="Ver Gráfico"
+                                    >
+                                       <span className="text-[0.6rem] font-black">📈</span>
+                                    </button>
+
                                     <button 
                                       onClick={async () => {
                                         if (confirm(`¿Cerrar posición de ${pos.symbol} manualmente? Se enviará al historial.`)) {
@@ -304,9 +321,7 @@ export default function ForexPositions() {
                       closedPositions.map((pos: any) => {
                         const isLong = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy'
                         const exitPrice = pos.exit_price || pos.close_price || pos.current_price || 0
-                        const pips = pos.pips_profit !== undefined ? pos.pips_profit : (pos.realized_pips || 0)
                         const realPnl = parseFloat(pos.pnl_usd || 0)
-                        const isWin = realPnl >= 0
 
                         return (
                           <tr key={pos.id} className="hover:bg-white/[0.03] transition-all group">
@@ -348,9 +363,9 @@ export default function ForexPositions() {
                                    <span className={`text-sm ${realPnl > 0 ? 'text-emerald-400' : realPnl < 0 ? 'text-rose-400' : 'text-slate-400'}`}>
                                       {realPnl > 0 ? '+' : realPnl < 0 ? '-' : ''}${Math.abs(realPnl).toFixed(2)}
                                    </span>
-                                   <span className={`text-[0.6rem] opacity-50 ${isWin ? 'text-emerald-500/60' : 'text-rose-500/60'}`}>
-                                      {isWin ? '+' : ''}{pips.toFixed(1)} PIPS
-                                   </span>
+                                    <span className={`text-[0.55rem] font-black italic opacity-60 ${realPnl >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                                       {realPnl >= 0 ? '+' : ''}{((isLong ? (exitPrice - pos.entry_price) : (pos.entry_price - exitPrice)) / pos.entry_price * 100).toFixed(4)}%
+                                    </span>
                                 </div>
                              </td>
                              <td className="py-8 text-right px-10">
@@ -377,7 +392,9 @@ export default function ForexPositions() {
            </div>
         </div>
 
+        {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
       </div>
+
 
       <style jsx>{`
         .glass-card {
@@ -396,3 +413,81 @@ export default function ForexPositions() {
     </div>
   )
 }
+
+function TradingViewWidget({ symbol }: { symbol: string }) {
+  const container = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!container.current) return;
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+    script.type = "text/javascript";
+    script.async = true;
+    
+    // Mapeo de símbolos para Forex
+    const getFxtvSymbol = (s: string) => {
+        if (s.includes('XAU')) return `SAXO:XAUUSD`;
+        if (s.includes('JPY')) return `FX:USDJPY`;
+        if (s.includes('EUR')) return `FX:EURUSD`;
+        if (s.includes('GBP')) return `FX:GBPUSD`;
+        return `FX:${s}`;
+    };
+
+    script.innerHTML = JSON.stringify({
+      "autosize": true,
+      "symbol": getFxtvSymbol(symbol),
+      "interval": "15",
+      "timezone": "America/Lima",
+      "theme": "dark",
+      "style": "1",
+      "locale": "en",
+      "enable_publishing": false,
+      "hide_side_toolbar": false,
+      "allow_symbol_change": true,
+      "calendar": false,
+      "support_host": "https://www.tradingview.com"
+    });
+    container.current.appendChild(script);
+    
+    return () => {
+      if (container.current) container.current.innerHTML = '';
+    }
+  }, [symbol]);
+
+  return (
+    <div className="tradingview-widget-container" ref={container} style={{ height: "100%", width: "100%" }}>
+      <div className="tradingview-widget-container__widget" style={{ height: "calc(100% - 32px)", width: "100%" }}></div>
+    </div>
+  );
+}
+
+function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }) {
+  return (
+    <div 
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4 md:p-8"
+      onClick={onClose}
+    >
+      <div 
+        className="relative w-[95%] h-[92%] bg-[#0a0a0f] border border-white/10 rounded-[32px] overflow-hidden shadow-2xl shadow-blue-500/10 flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-8 py-6 border-b border-white/5 bg-white/[0.02]">
+          <div className="flex items-center gap-4">
+            <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse shadow-[0_0_10px_#3b82f6]" />
+            <h3 className="text-sm font-black uppercase tracking-[0.3em] text-white italic">{symbol} <span className="text-slate-500 not-italic ml-2">Technical Analysis</span></h3>
+          </div>
+          <button 
+            onClick={onClose}
+            className="w-10 h-10 rounded-full bg-white/5 hover:bg-rose-500/20 hover:text-rose-500 transition-all flex items-center justify-center text-slate-400 group"
+          >
+            <span className="text-xl font-light group-hover:rotate-90 transition-transform">✕</span>
+          </button>
+        </div>
+        <div className="flex-1 w-full bg-black/20">
+          <TradingViewWidget symbol={symbol} />
+        </div>
+      </div>
+    </div>
+  );
+}
+

@@ -84,7 +84,8 @@ CTRADER_ENV   = os.getenv('CTRADER_ENV', 'live')
 SUPABASE_URL  = os.getenv('SUPABASE_URL')
 SUPABASE_KEY  = os.getenv('SUPABASE_SERVICE_KEY')
 
-FOREX_SYMBOLS = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']
+# DEFAULT fallback symbols
+DEFAULT_FOREX_SYMBOLS = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']
 
 TF_MAP = {
     '15m': ProtoOATrendbarPeriod.M15,
@@ -93,7 +94,28 @@ TF_MAP = {
     '1d':  ProtoOATrendbarPeriod.D1,
 }
 
-UNIVERSAL_DIVISOR = 100000
+# Divisores de precio por símbolo
+SYMBOL_DIVISORS = {
+    'EURUSD': 100000,
+    'GBPUSD': 100000,
+    'USDJPY': 1000,
+    'USDCHF': 100000,
+    'AUDUSD': 100000,
+    'NZDUSD': 100000,
+    'USDCAD': 100000,
+    'EURGBP': 100000,
+    'EURJPY': 1000,
+    'GBPJPY': 1000,
+    'XAUUSD': 200,
+    'XAGUSD': 1000,
+    'US30':   100,
+    'US500':  100,
+    'NAS100': 100,
+}
+
+def get_divisor(symbol):
+    return SYMBOL_DIVISORS.get(symbol, 100000)
+
 
 STATE = { 'symbol_ids': {}, 'prices': {}, 'candles': {}, 'cycle_count': 0 }
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -136,6 +158,7 @@ class StandaloneForexWorker:
         self.client.setDisconnectedCallback(self.on_disconnected)
         self.client.setMessageReceivedCallback(self.on_message)
         self.execution = None  # Se inicializa después de auth
+        self.symbols = DEFAULT_FOREX_SYMBOLS
 
     def safe_send(self, req):
         from twisted.internet import reactor
@@ -150,19 +173,26 @@ class StandaloneForexWorker:
         reactor.callFromThread(_send)
 
     def log(self, msg, level='INFO'):
+        from app.core.logger import log_info, log_error, log_warning
+        
         ts = datetime.now().strftime('%H:%M:%S')
-        try:
-            # Forzar codificación segura para consolas Windows
-            clean_msg = str(msg).encode('utf-8', errors='replace').decode('utf-8')
-            print(f"[{ts}] [{level}] {clean_msg}")
-            sys.stdout.flush()
-        except:
-            # Fallback total: solo texto plano sin formato
-            try: print(f"[{ts}] [{level}] {str(msg).encode('ascii', 'ignore').decode('ascii')}")
-            except: pass
+        clean_msg = str(msg).encode('utf-8', errors='replace').decode('utf-8')
+        
+        # Console output (always)
+        print(f"[{ts}] [{level}] {clean_msg}")
+        sys.stdout.flush()
+        
+        # DB output
+        if level == 'ERROR' or level == 'CRITICAL':
+            log_error('forex_worker', clean_msg)
+        elif level == 'WARNING':
+            log_warning('forex_worker', clean_msg)
+        else:
+            log_info('forex_worker', clean_msg)
 
     def start(self):
         self.log(f"Iniciando Worker v3.1 (Rutas Windows OK)...")
+        self._load_dynamic_symbols()
         self.client.startService()
         # Iniciar ciclos base
         task.LoopingCall(self.send_heartbeat).start(25, now=False)
@@ -186,6 +216,23 @@ class StandaloneForexWorker:
             self.safe_send(req)
         except: pass
 
+    def _load_dynamic_symbols(self):
+        """Carga la lista de símbolos desde trading_config -> regime_params."""
+        try:
+            res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
+            data = res.data[0] if res.data else {}
+            if data.get('regime_params'):
+                assets = data['regime_params'].get('forex_assets')
+                if assets and isinstance(assets, list):
+                    self.symbols = assets
+                    self.log(f"Configuración dinámica cargada: {', '.join(self.symbols)}")
+                else:
+                    self.log("No se encontró 'forex_assets' en regime_params. Usando valores por defecto.")
+            else:
+                self.log("No se pudo cargar trading_config. Usando valores por defecto.")
+        except Exception as e:
+            self.log(f"Error cargando símbolos dinámicos: {e}. Usando valores por defecto.")
+
     def _init_execution_service(self):
         """Inicializa el Execution Service después de cargar símbolos."""
         try:
@@ -194,7 +241,7 @@ class StandaloneForexWorker:
                 worker=self, 
                 supabase_client=sb,
                 state_ref=STATE,
-                symbols_ref=FOREX_SYMBOLS
+                symbols_ref=self.symbols
             )
             self.log("[OK] Execution Service iniciado")
 
@@ -229,7 +276,7 @@ class StandaloneForexWorker:
             res = Protobuf.extract(message)
             count = 0
             for sym in res.symbol:
-                if sym.symbolName in FOREX_SYMBOLS: 
+                if sym.symbolName in self.symbols: 
                     STATE['symbol_ids'][sym.symbolName] = sym.symbolId
                     count += 1
             if count > 0:
@@ -282,7 +329,7 @@ class StandaloneForexWorker:
         STATE['is_warming_up'] = True
         
         delay = 0.5
-        for sym in FOREX_SYMBOLS:
+        for sym in self.symbols:
             self.log(f"-> Programando carga de {sym}...")
             # 15m
             reactor.callLater(delay, self.request_bars, sym, '15m', 300)
@@ -318,7 +365,7 @@ class StandaloneForexWorker:
     def handle_spot(self, spot):
         name = next((n for n, sid in STATE['symbol_ids'].items() if sid == spot.symbolId), None)
         if not name: return
-        div = UNIVERSAL_DIVISOR
+        div = get_divisor(name)
         bid_raw = spot.bid or 0
         ask_raw = spot.ask or 0
 
@@ -337,16 +384,22 @@ class StandaloneForexWorker:
         else:
             mid = prev.get('mid', 0)
 
-        STATE['prices'][name] = {'bid': bid, 'ask': ask, 'mid': mid}
+        if bid and ask:
+            mid = (bid + ask) / 2
+            if name == 'XAUUSD':
+                self.log(f"DEBUG XAUUSD SPOT: raw_bid={bid_raw}, raw_ask={ask_raw}, div={div}, bid={bid}, ask={ask}, mid={mid}")
+            STATE['prices'][name] = {'bid': bid, 'ask': ask, 'mid': mid}
 
     def handle_bars(self, res):
         name = next((n for n, sid in STATE['symbol_ids'].items() if sid == res.symbolId), None)
         if not name: return
         p_rev = {v: k for k, v in TF_MAP.items()}; tf = p_rev.get(res.period, '15m')
-        div = UNIVERSAL_DIVISOR
+        div = get_divisor(name)
         bars = []
         for b in res.trendbar:
             low = b.low / div
+            if name == 'XAUUSD':
+                self.log(f"DEBUG XAUUSD BAR: raw_low={b.low}, div={div}, low={low}")
             bars.append({'ts': b.utcTimestampInMinutes*60, 'o': low+b.deltaOpen/div, 'h': low+b.deltaHigh/div, 'l': low, 'c': low+b.deltaClose/div, 'v': b.volume or 0})
         if bars:
             self.log(f"Recibidas {len(bars)} velas de {name} ({tf})", "DEBUG")
@@ -429,7 +482,7 @@ class StandaloneForexWorker:
         STATE['cycle_count'] = STATE.get('cycle_count', 0) + 1
         cycle = STATE['cycle_count']
         delay = 0
-        for sym in FOREX_SYMBOLS:
+        for sym in self.symbols:
             # 15m cada minuto - Aumentamos a 100 para ATR estable
             reactor.callLater(delay, self.request_bars, sym, '15m', 100)
             
@@ -458,11 +511,42 @@ class StandaloneForexWorker:
                 self.log(f"Snapshot abortado para {symbol}: Datos insuficientes ({len(data)} velas)", "WARNING")
                 return
             df = pd.DataFrame(data)
-            df['basis'] = df['c'].ewm(span=20).mean()
+            df['ema20'] = df['c'].ewm(span=20).mean()
+            df['ema9']  = df['c'].ewm(span=9).mean()
+            df['ema3']  = df['c'].ewm(span=3).mean()
+            df['bb_up']  = df['ema20'] + (df['c'].rolling(20).std() * 2)
+            df['bb_low'] = df['ema20'] - (df['c'].rolling(20).std() * 2)
+            
             df['tr'] = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
             df['atr'] = df['tr'].rolling(window=14).mean()
             # Usar implementación interna (ya no requiere renombrar columnas)
             calculate_parabolic_sar(df)
+            
+            # --- MACD 4C para Pinescript Signal ---
+            df['macd_fast'] = df['c'].ewm(span=12, adjust=False).mean()
+            df['macd_slow'] = df['c'].ewm(span=26, adjust=False).mean()
+            df['macd'] = df['macd_fast'] - df['macd_slow']
+            df['macd_prev'] = df['macd'].shift(1)
+            
+            # 1: Up Strong, 2: Up Weak, 3: Down Strong, 4: Down Weak
+            df['macd_4c'] = np.select(
+                [(df['macd'] > 0) & (df['macd'] > df['macd_prev']),
+                 (df['macd'] > 0) & (df['macd'] <= df['macd_prev']),
+                 (df['macd'] < 0) & (df['macd'] < df['macd_prev']),
+                 (df['macd'] < 0) & (df['macd'] >= df['macd_prev'])],
+                [1, 2, 3, 4], default=0
+            )
+            df['macd_buy'] = (df['macd_4c'] == 4) & (df['macd_4c'].shift(1) == 3)
+            df['macd_sell'] = (df['macd_4c'] == 2) & (df['macd_4c'].shift(1) == 1)
+
+            # --- ADX ---
+            df['dm_plus'] = np.where((df['h'] - df['h'].shift(1)) > (df['l'].shift(1) - df['l']), np.maximum(df['h'] - df['h'].shift(1), 0), 0)
+            df['dm_minus'] = np.where((df['l'].shift(1) - df['l']) > (df['h'] - df['h'].shift(1)), np.maximum(df['l'].shift(1) - df['l'], 0), 0)
+            df['tr_14'] = df['tr'].rolling(window=14).mean()
+            df['di_plus'] = 100 * (df['dm_plus'].rolling(window=14).mean() / df['tr_14'])
+            df['di_minus'] = 100 * (df['dm_minus'].rolling(window=14).mean() / df['tr_14'])
+            df['dx'] = 100 * abs(df['di_plus'] - df['di_minus']) / (df['di_plus'] + df['di_minus'] + 1e-10)
+            df['adx'] = df['dx'].rolling(window=14).mean()
             
             last = df.iloc[-1]
             candle_price = float(last['c'])
@@ -482,23 +566,37 @@ class StandaloneForexWorker:
             else:
                 price = candle_price
 
-            ema20 = float(last['basis']); atr = float(last['atr'])
+            # --- SAFE DATA EXTRACTION ---
+            def safe_f(val, default=0.0):
+                try:
+                    if val is None or (isinstance(val, float) and np.isnan(val)): return default
+                    return float(val)
+                except: return default
+
+            ema20 = safe_f(last.get('ema20'))
+            ema9  = safe_f(last.get('ema9'))
+            ema3  = safe_f(last.get('ema3'))
+            atr   = safe_f(last.get('atr'))
+            adx   = safe_f(last.get('adx'), 25.0)
+
+            # Bollinger Expansion detection
+            prev = df.iloc[-2] if len(df) >= 2 else last
+            bb_expanding = bool((last.get('bb_up', 0) > prev.get('bb_up', 0)) and (last.get('bb_low', 0) < prev.get('bb_low', 0)))
             
             multipliers = [1.0, 1.618, 2.618, 3.618, 4.236, 5.618]
             zone = 0
-            if not np.isnan(atr) and atr > 0:
+            if atr > 0:
                 for i in range(6, 0, -1):
                     if price > ema20 + (atr * multipliers[i-1]): zone = i; break
                     if price < ema20 - (atr * multipliers[i-1]): zone = -i; break
 
-            # --- CALCULO DE MTF SCORE (Multi-Timeframe Trend) ---
-            # Comparamos el precio contra la EMA20 en todos los TFs disponibles
+            # --- CALCULO DE MTF SCORE ---
             mtf_score = 0.0
             tfs_checked = 0
             for tf_suffix in ['15m', '1h', '4h', '1d']:
                 tf_key = f"{symbol}_{tf_suffix}"
                 tf_data = STATE['candles'].get(tf_key, [])
-                if len(tf_data) >= 20:
+                if len(tf_data) >= 10:
                     try:
                         tf_df = pd.DataFrame(tf_data)
                         tf_ema20 = tf_df['c'].ewm(span=20).mean().iloc[-1]
@@ -507,22 +605,16 @@ class StandaloneForexWorker:
                         tfs_checked += 1
                     except: pass
             
-            # Si no hay datos de 1d/4h, normalizamos el peso (opcional)
-            if tfs_checked > 0:
-                self.log(f"   [MTF] {symbol}: {mtf_score:.2f} (Basado en {tfs_checked} TFs)")
-            else:
-                mtf_score = 0.0
-
             # Calculate Fibonacci band levels
             fib_bands = {}
-            if not np.isnan(atr):
+            if atr > 0:
                 for i, m in enumerate(multipliers, 1):
                     fib_bands[f'upper_{i}'] = float(ema20 + (atr * m))
                     fib_bands[f'lower_{i}'] = float(ema20 - (atr * m))
 
             # Calculate SAR from 4h data if available
-            sar_15m = float(last.get('sar') or 0)
-            sar_4h = sar_15m  # Safe fallback
+            sar_15m = safe_f(last.get('sar'))
+            sar_4h = sar_15m  
             sar_trend_4h = 0
             key_4h = f"{symbol}_4h"
             data_4h = STATE['candles'].get(key_4h, [])
@@ -534,10 +626,9 @@ class StandaloneForexWorker:
                     df_4h['atr'] = df_4h['tr'].rolling(window=14).mean()
                     calculate_parabolic_sar(df_4h)
                     last_4h = df_4h.iloc[-1]
-                    sar_4h = float(last_4h['sar'])
-                    sar_trend_4h = int(last_4h['sar_trend'])
-                except:
-                    pass
+                    sar_4h = safe_f(last_4h.get('sar'))
+                    sar_trend_4h = int(last_4h.get('sar_trend', 0))
+                except: pass
 
             dist_basis = abs(price - ema20) / ema20 * 100 if ema20 > 0 else 0
 
@@ -545,22 +636,43 @@ class StandaloneForexWorker:
                 'symbol': symbol,
                 'price': float(price),
                 'basis': float(ema20),
-                'fibonacci_zone': zone,
+                'atr': float(atr),  # Added atr for consistency with stocks_scheduler
+                'fibonacci_zone': int(zone),
                 'dist_basis_pct': round(dist_basis, 4),
                 'mtf_score': float(mtf_score),
                 'sar_4h': float(sar_4h),
                 'sar_trend_4h': sar_trend_4h,
                 'sar_15m': sar_15m,
-                'sar_trend_15m': 1 if last['sar_trend'] > 0 else -1,
+                'sar_trend_15m': 1 if last.get('sar_trend', 0) > 0 else -1,
                 'sar_phase': 'long' if sar_trend_4h > 0 else ('short' if sar_trend_4h < 0 else ('long' if price > sar_15m else 'short')),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
+                'ema_3': ema3,
+                'ema_9': ema9,
+                'ema_20': ema20,
+                'bb_expanding': bb_expanding,
+                'adx': adx,
+                'pinescript_signal': 'Buy' if last.get('macd_buy') else ('Sell' if last.get('macd_sell') else None)
             }
 
             # Add Fibonacci bands
             snap.update(fib_bands)
 
             query = sb.table('market_snapshot').upsert(snap, on_conflict='symbol')
-            threads.deferToThread(self.safe_db_execute, query).addErrback(
+            
+            def safe_upsert(q, s):
+                try:
+                    return q.execute()
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "column" in err_str and ("atr" in err_str or "bb_expanding" in err_str or "ema_" in err_str):
+                        # Limpieza agresiva de columnas conflictivas
+                        for col in ['atr', 'bb_expanding', 'ema_3', 'ema_9', 'ema_20']:
+                            if col in s: del s[col]
+                        return sb.table('market_snapshot').upsert(s, on_conflict='symbol').execute()
+
+                    raise e
+
+            threads.deferToThread(safe_upsert, query, snap).addErrback(
                 lambda f: self.log(f"Error async db snapshot: {f.getErrorMessage()}", "ERROR")
             )
         except Exception as e: 

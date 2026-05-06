@@ -1,11 +1,15 @@
-
+import asyncio
 import os
-from supabase import create_client, Client
+import sys
 
-url = "https://iriotnsoauqrfsjbqyyp.supabase.co"
-key = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+# Add backend to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-res = supabase.table("risk_config").select("*").execute()
-for r in res.data:
-    print(f"{r['key']}: {r['value']}")
+from app.core.supabase_client import get_risk_config
+
+async def check_risk_config():
+    cfg = get_risk_config()
+    print(f"Risk Config: {cfg}")
+
+if __name__ == "__main__":
+    asyncio.run(check_risk_config())

@@ -16,7 +16,7 @@ async def force_full_scan():
     if not tickers:
         print("No tickers in watchlist.")
         return
-
+    
     print(f"Analysis for {len(tickers[:30])} tickers...")
     tasks = [process_ticker(t, config) for t in tickers[:30]]
     results = await asyncio.gather(*tasks, return_exceptions=True)

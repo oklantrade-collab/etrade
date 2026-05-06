@@ -1,7 +1,8 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, Suspense } from 'react'
 import { supabase } from '@/lib/supabase'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import TradeMarkerChart, { TradeEvent } from '@/components/TradeMarkerChart'
 import RuleDiagnosticPanel from '@/components/RuleDiagnosticPanel'
 
@@ -103,6 +104,14 @@ const TIMEFRAMES = [
 ]
 
 export default function DashboardPage() {
+  return (
+    <Suspense fallback={<div className="p-10 text-slate-500 italic">Cargando Command Center...</div>}>
+      <DashboardContent />
+    </Suspense>
+  )
+}
+
+function DashboardContent() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [diagnosticSymbol, setDiagnosticSymbol] = useState<string | null>(null)
@@ -112,6 +121,14 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true)
   const [chartLoading, setChartLoading] = useState(false)
   const [mode, setMode] = useState<string | null>(null)
+  const searchParams = useSearchParams()
+  const urlSymbol = searchParams.get('symbol')
+
+  useEffect(() => {
+    if (urlSymbol && data?.symbols[urlSymbol]) {
+      setSelectedSymbol(urlSymbol)
+    }
+  }, [urlSymbol, data])
 
   useEffect(() => {
     setMode(localStorage.getItem('etrade_mode') || 'paper')
@@ -289,10 +306,10 @@ export default function DashboardPage() {
              </div>
           </div>
           <div className="text-right border-l border-slate-800 pl-6">
-             <span className="text-[0.6rem] text-slate-500 uppercase font-black block leading-none mb-1">Local Time (LIMA)</span>
-             <span className="text-sm font-black text-white italic">
-               {new Date().toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
-             </span>
+              <span className="text-[0.6rem] text-slate-500 uppercase font-black block leading-none mb-1">Local Time (LIMA)</span>
+              <span className="text-sm font-black text-white italic">
+                {new Date().toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'America/Lima' })}
+              </span>
           </div>
         </div>
       </div>
@@ -439,7 +456,7 @@ export default function DashboardPage() {
              </div>
              <div className="flex items-center gap-2">
                 <span className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest">DIST:</span>
-                <span className="text-xs font-bold font-mono text-blue-400">{currentFocus?.dist_basis_pct.toFixed(2)}%</span>
+                <span className="text-xs font-bold font-mono text-blue-400">{(currentFocus?.dist_basis_pct || 0).toFixed(2)}%</span>
              </div>
           </div>
         </div>
@@ -451,7 +468,10 @@ export default function DashboardPage() {
             }`}>
               <div>
                 <div className="flex justify-between items-center mb-8 pb-4 border-b border-white/5">
-                   <h3 className="text-[0.65rem] font-black text-slate-400 uppercase tracking-[0.2em]">ANÁLISIS DE POSICIÓN ACTIVA</h3>
+                   <div className="flex items-center gap-3">
+                      <span className="text-xl">📊</span>
+                      <h3 className="text-[0.65rem] font-black text-slate-400 uppercase tracking-[0.2em]">ANÁLISIS DE POSICIÓN ACTIVA</h3>
+                   </div>
                    <span className={`badge px-4 py-1.5 font-black italic rounded-lg shadow-lg ${
                      currentFocus.position.side.toLowerCase() === 'long' 
                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
@@ -594,7 +614,7 @@ export default function DashboardPage() {
                       </div>
                       <div className="text-right">
                          <label className="text-[0.55rem] text-slate-500 font-black uppercase tracking-widest block mb-1">MTF Score</label>
-                         <span className="text-xs font-black font-mono text-white">{currentFocus.mtf_score.toFixed(2)}</span>
+                         <span className="text-xs font-black font-mono text-white">{(currentFocus.mtf_score || 0).toFixed(2)}</span>
                          <span className="ml-1 text-[0.6rem] font-black text-blue-400">→ BUY</span>
                       </div>
                    </div>
@@ -885,7 +905,7 @@ function SymbolCard({
                    <span>{data.ai_sentiment === 'bullish' ? '🟢' : data.ai_sentiment === 'bearish' ? '🔴' : '😐'}</span>
                    <span className="text-[0.6rem] font-black text-slate-400 uppercase tracking-widest">{data.ai_sentiment?.toUpperCase() || 'NEUTRAL'}</span>
                 </div>
-                <span className="text-[0.6rem] font-black text-blue-400 uppercase tracking-widest">MTF: {data.mtf_score.toFixed(2)}</span>
+                <span className="text-[0.6rem] font-black text-blue-400 uppercase tracking-widest">MTF: {(data.mtf_score || 0).toFixed(2)}</span>
              </div>
           </div>
         ) : data.card_status === 'signal' && data.spike?.detected ? (
@@ -912,14 +932,14 @@ function SymbolCard({
                 <div className="space-y-1.5 px-1">
                    <div className="flex justify-between items-center text-[0.6rem] font-bold">
                       <span className="text-slate-500">MTF Score</span>
-                      <span className={data.mtf_score >= adxInfo.threshold ? 'text-emerald-400' : 'text-slate-400'}>
-                        {data.mtf_score.toFixed(2)} <span className="text-[0.5rem] opacity-50">/ {adxInfo.threshold}</span>
+                      <span className={(data.mtf_score || 0) >= adxInfo.threshold ? 'text-emerald-400' : 'text-slate-400'}>
+                        {(data.mtf_score || 0).toFixed(2)} <span className="text-[0.5rem] opacity-50">/ {adxInfo.threshold}</span>
                       </span>
                    </div>
                    <div className="flex justify-between items-center text-[0.6rem] font-bold">
                       <span className="text-slate-500">Velocidad</span>
                       <span className={adxInfo.color}>
-                        {adxInfo.label} <span className="text-[0.5rem] opacity-50">(ADX {data.adx.toFixed(1)})</span>
+                        {adxInfo.label} <span className="text-[0.5rem] opacity-50">(ADX {(data.adx || 0).toFixed(1)})</span>
                       </span>
                    </div>
                    <div className="flex justify-between items-center text-[0.6rem] font-bold">
@@ -931,7 +951,7 @@ function SymbolCard({
                    <div className="flex justify-between items-center text-[0.6rem] font-bold">
                       <span className="text-slate-500">Dist. Basis</span>
                       <span className={data.dist_basis_pct <= 2.2 ? 'text-emerald-400' : 'text-rose-400'}>
-                         {data.dist_basis_pct.toFixed(2)}% <span className="text-[0.5rem] opacity-50">/ 2.2%</span>
+                         {(data.dist_basis_pct || 0).toFixed(2)}% <span className="text-[0.5rem] opacity-50">/ 2.2%</span>
                       </span>
                    </div>
                 </div>
@@ -955,7 +975,7 @@ function SymbolCard({
                    </div>
                    <div className="flex justify-between items-center text-[0.6rem] font-bold">
                       <span className="text-slate-500">ADX (<span className={adxInfo.color}>{adxInfo.label}</span>)</span>
-                      <span className="text-white">{data.adx.toFixed(1)} <span className="text-[0.5rem] opacity-50">umbral: {adxInfo.threshold}</span></span>
+                      <span className="text-white">{(data.adx || 0).toFixed(1)} <span className="text-[0.5rem] opacity-50">umbral: {adxInfo.threshold}</span></span>
                    </div>
                 </div>
              </div>

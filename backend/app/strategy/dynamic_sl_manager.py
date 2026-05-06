@@ -446,8 +446,6 @@ def evaluate_sl_action(
                 'sl_price': existing_dynamic,
             }
 
-                'sl_price': trailing_sl,
-            }
 
     # ── NUEVO: Bloqueo de Ganancia en Zonas Extremas (UPPER_5/6) ──
     # Si estamos en zona 5 o 6 y la vela es alcista, movemos SL a la banda
@@ -610,7 +608,7 @@ async def send_sl_to_exchange(
             exchange_id = f'paper_sl_{position_id}'
 
         # Registrar en sl_orders
-        await supabase.table('sl_orders').insert({
+        supabase.table('sl_orders').insert({
             'position_id':      position_id,
             'symbol':           symbol,
             'side':             sl_side,
@@ -621,7 +619,7 @@ async def send_sl_to_exchange(
         }).execute()
 
         # Actualizar position con el ID
-        await supabase.table('positions')\
+        supabase.table('positions')\
             .update({
                 'sl_exchange_order_id': exchange_id
             })\
@@ -656,7 +654,7 @@ async def cancel_all_sl_orders(
         return
 
     # Obtener todas las SL activas
-    sl_res = await supabase\
+    sl_res = supabase\
         .table('sl_orders')\
         .select('*')\
         .eq('position_id', position_id)\
@@ -687,7 +685,7 @@ async def cancel_all_sl_orders(
                     )
 
             # Actualizar en Supabase
-            await supabase\
+            supabase\
                 .table('sl_orders')\
                 .update({
                     'status':       'cancelled',
@@ -712,7 +710,7 @@ async def cancel_all_sl_orders(
             )
 
     # Limpiar en la posición
-    await supabase.table('positions')\
+    supabase.table('positions')\
         .update({
             'sl_exchange_order_id': None,
             'sl_dynamic_price':     None,

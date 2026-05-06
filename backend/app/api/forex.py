@@ -130,13 +130,15 @@ async def get_forex_dashboard(
     desde Supabase (lectura local, sin cTrader).
     Tiempo de respuesta: < 50ms
     """
+    # 2. Config and Active Symbols
+    config_res = sb.table("trading_config").select("regime_params").eq("id", 1).execute()
+    config = config_res.data[0] if config_res.data else {}
+    pairs = (config.get('regime_params', {}) or {}).get('forex_assets', ['EURUSD','GBPUSD','USDJPY','XAUUSD'])
+
     # Snapshots actuales
     snaps_res = sb.table('market_snapshot')\
         .select('*')\
-        .in_('symbol', [
-            'EURUSD','GBPUSD',
-            'USDJPY','XAUUSD'
-        ])\
+        .in_('symbol', pairs)\
         .execute()
     snapshots = {
         s['symbol']: s

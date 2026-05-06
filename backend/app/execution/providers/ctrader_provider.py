@@ -112,16 +112,16 @@ class CTraderProtobufProvider(BaseMarketProvider):
     PRICE_DIVISOR = {
         'EURUSD': 100000,
         'GBPUSD': 100000,
-        'USDJPY': 1000,
+        'USDJPY': 100,
         'USDCHF': 100000,
         'AUDUSD': 100000,
         'NZDUSD': 100000,
         'USDCAD': 100000,
         'EURGBP': 100000,
-        'EURJPY': 1000,
-        'GBPJPY': 1000,
-        'XAUUSD': 100,
-        'XAGUSD': 1000,
+        'EURJPY': 100,
+        'GBPJPY': 100,
+        'XAUUSD': 500,
+        'XAGUSD': 500,
     }
 
     def __init__(
@@ -362,13 +362,19 @@ class CTraderProtobufProvider(BaseMarketProvider):
         if not symbol_name:
             return
 
+        # Normalizar nombre para el lookup
+        lookup_name = symbol_name.upper().strip()
         divisor = self.PRICE_DIVISOR.get(
-            symbol_name, 100000
+            lookup_name, 100000
         )
 
         bid = spot.bid / divisor if spot.bid else 0
         ask = spot.ask / divisor if spot.ask else 0
         mid = (bid + ask) / 2 if bid and ask else 0
+
+        # LOGGING CRITICO PARA DIAGNOSTICO
+        if 'XAU' in lookup_name or 'JPY' in lookup_name:
+             log_warning('CTRADER_DEBUG', f"SPOT: name={symbol_name}, lookup={lookup_name}, raw={spot.bid}, divisor={divisor}, final={bid}")
 
         self._live_prices[symbol_name] = {
             'bid':       bid,
@@ -395,6 +401,8 @@ class CTraderProtobufProvider(BaseMarketProvider):
         for sym in response.symbol:
             self._symbol_ids[sym.symbolName] = \
                 sym.symbolId
+            if 'XAU' in sym.symbolName or 'JPY' in sym.symbolName:
+                log_warning('CTRADER_DEBUG', f"Mapeando {sym.symbolName} -> {sym.symbolId}")
         log_info('CTRADER',
             f'Mapa de símbolos: '
             f'{len(self._symbol_ids)} símbolos'
@@ -553,8 +561,9 @@ class CTraderProtobufProvider(BaseMarketProvider):
         a un DataFrame de pandas con el formato
         estándar de eTrader.
         """
+        lookup_name = symbol.upper().strip()
         divisor = self.PRICE_DIVISOR.get(
-            symbol, 100000
+            lookup_name, 100000
         )
         bars = response.trendbar
         if not bars:

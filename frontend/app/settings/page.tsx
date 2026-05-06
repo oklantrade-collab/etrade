@@ -124,25 +124,36 @@ export default function SettingsPage() {
     const toUpdateRC: any = {}
 
     Object.keys(data).forEach(key => {
+      // Evitar enviar campos temporales del frontend que no existen en DB
+      if (['forex_symbols_str', 'active_symbols_str', 'max_total_risk_forex_pct'].includes(key)) return;
+      
       if (tradingFields.includes(key)) toUpdateTC[key] = data[key]
-      if (riskFields.includes(key)) toUpdateRC[key] = data[key]
-      if (!tradingFields.includes(key) && !riskFields.includes(key)) toUpdateTC[key] = data[key]
+      else if (riskFields.includes(key)) toUpdateRC[key] = data[key]
+      else {
+        // Solo agregar si no es un campo de control conocido
+        if (!['id', 'tc_id', 'rc_id'].includes(key)) {
+            toUpdateTC[key] = data[key]
+        }
+      }
     })
 
     try {
       if (Object.keys(toUpdateTC).length > 0) {
         delete toUpdateTC.id
-        await supabase.from('trading_config').update(toUpdateTC).eq('id', config.tc_id || 1)
+        const { error: tcErr } = await supabase.from('trading_config').update(toUpdateTC).eq('id', config.tc_id || 1)
+        if (tcErr) throw tcErr
       }
       if (Object.keys(toUpdateRC).length > 0) {
         delete toUpdateRC.id
-        await supabase.from('risk_config').update(toUpdateRC).eq('id', config.rc_id)
+        const { error: rcErr } = await supabase.from('risk_config').update(toUpdateRC).eq('id', config.rc_id)
+        if (rcErr) throw rcErr
       }
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
       loadConfig()
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error saving config:", err)
+      alert(`❌ Error al guardar: ${err.message || 'Fallo en la conexión con Supabase'}`)
     }
   }
 

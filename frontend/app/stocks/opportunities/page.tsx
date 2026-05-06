@@ -27,7 +27,7 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
           "autosize": true,
           "symbol": symbol,
           "interval": "D",
-          "timezone": "Etc/UTC",
+          "timezone": "America/Lima",
           "theme": "dark",
           "style": "1",
           "locale": "es",
@@ -53,7 +53,7 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
   }, [symbol, containerId]);
 
   return (
-    <div ref={containerRef} id={containerId} style={{ height: '450px', width: '100%', borderRadius: '16px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }} />
+    <div ref={containerRef} id={containerId} style={{ height: '100%', width: '100%', borderRadius: '16px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }} />
   );
 }
 
@@ -74,7 +74,7 @@ function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }
         backdropFilter: 'blur(5px)' 
       }}
     >
-        <div style={{ background: '#0F1117', width: '90%', height: '85%', borderRadius: '24px', border: '1px solid #38BDF8', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(56,189,248,0.2)' }}>
+        <div style={{ background: '#0F1117', width: '95%', height: '92%', borderRadius: '24px', border: '1px solid #38BDF8', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(56,189,248,0.2)' }}>
             <div style={{ padding: '15px 25px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
                 <h3 style={{ margin: 0, color: '#FFF', fontSize: '16px', fontWeight: 900 }}>GRÁFICO TÉCNICO: {symbol}</h3>
                 <button onClick={onClose} style={{ background: '#EF4444', border: 'none', color: '#FFF', padding: '6px 15px', borderRadius: '8px', fontSize: '10px', fontWeight: 900, cursor: 'pointer' }}>CERRAR GRÁFICO</button>
@@ -404,9 +404,9 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
       <PiotroskiBadge score={opp.piotroski_score} detail={opp.piotroski_detail} />
       <ValuationBadge intrinsic={opp.composite_intrinsic} price={opp.price} margin={opp.margin_of_safety} source={opp.data_source} />
       <span style={{ color: getMovColor(rawMovement), fontSize: '10px', fontWeight: 900, textTransform: 'uppercase' }}>{movementDisplay}</span>
-      <div style={{ display:'flex', flexDirection:'column' }}>
-        <span style={{ fontSize:'8px', color:'#444', fontWeight:800 }}>{opp.created_at ? new Date(opp.created_at).toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
-        <span style={{ fontSize:'10px', color:'#555', fontWeight:800, fontFamily:'monospace' }}>{opp.last_scan_time || '—:—'}</span>
+      <div style={{ display:'flex', flexDirection:'column', justifyContent: 'center' }}>
+        <span style={{ fontSize:'9px', color:'#888', fontWeight:800 }}>{opp.created_at ? new Date(opp.created_at).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
+        <span style={{ fontSize:'12px', color:'#22C55E', fontWeight:900, fontFamily:'monospace', marginTop: '2px' }}>{opp.last_scan_time || '—:—'}</span>
       </div>
       <OrderActivityIndicator orders={opp.orders || []} />
       <span style={{ color: displayScoreTech >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 950, fontSize:'11px' }}>{displayScoreTech}</span>
@@ -548,9 +548,14 @@ export default function OpportunitiesIntelligence() {
           <h1 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0', letterSpacing: '-0.02em' }}>🎯 AI Stock Scanner</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <p style={{ color: '#555', fontSize: '12px' }}>{total} monitoreados · NYC Live Tracking</p>
-              <span style={{ fontSize: '10px', background: marketStatus.is_open ? '#22C55E' : '#EF4444', color: '#000', padding: '1px 8px', borderRadius: '4px', fontWeight: 950, textTransform: 'uppercase' }}>
+               <span style={{ fontSize: '10px', background: marketStatus.is_open ? '#22C55E' : '#EF4444', color: '#000', padding: '1px 8px', borderRadius: '4px', fontWeight: 950, textTransform: 'uppercase' }}>
                 {marketStatus.is_open ? '🟢' : '🔴'} MERCADO {marketStatus.status}
               </span>
+              {opportunities.length > 0 && (
+                <span style={{ fontSize: '10px', color: '#888', fontWeight: 700 }}>
+                  ÚLTIMO PROCESO: <span style={{ color: '#22C55E' }}>{opportunities[0].last_scan_time || 'RECIBIENDO...'}</span>
+                </span>
+              )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: '12px' }}>

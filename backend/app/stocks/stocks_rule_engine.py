@@ -72,6 +72,10 @@ class StocksRuleEngine:
         sm_score: float = 0.0,
         piotroski_score: int = 0,
         sipv_signal: str = "",
+        ema_3: float = None,
+        ema_9: float = None,
+        ema_20: float = None,
+        bb_expanding: bool = False,
     ) -> dict:
         """
         Construye el contexto de evaluación para un ticker.
@@ -102,6 +106,10 @@ class StocksRuleEngine:
             "sm_score": sm_score,
             "piotroski_score": piotroski_score,
             "sipv_signal": sipv_signal,
+            "ema_3": ema_3,
+            "ema_9": ema_9,
+            "ema_20": ema_20,
+            "bb_expanding": bb_expanding,
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -432,6 +440,38 @@ class StocksRuleEngine:
             # 4. Calculus of LIMIT Price (Current Price for immediate fill)
             if len(failures) == 0:
                 smart_limit_price = current_price # Comprar ya si está barato
+
+        # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5) ──
+        if rule_code == "HOT_CANDLE":
+            ema3  = context.get("ema_3")
+            ema9  = context.get("ema_9")
+            ema20 = context.get("ema_20")
+            bb_exp = context.get("bb_expanding", False)
+            fib_z = int(context.get("fib_zone", 0))
+            rvol  = float(context.get("rvol") or 1.0)
+            vol_24h = float(context.get("volume") or 0)
+            
+            # Requisito 1: Volumen Mínimo (Evitar acciones sin tracción)
+            if vol_24h < 1_000_000:
+                failures.append(f"Low Volume: {vol_24h/1e6:.1f}M < 1.0M (No traction)")
+
+            # Requisito 2: Proyección de Volumen (RVOL)
+            if rvol < 2.0:
+                failures.append(f"Insufficient RVOL: {rvol:.2f}x < 2.0x (No momentum projection)")
+
+            # Requisito 3: Momentum Técnico (EMA OR Bollinger Expansion)
+            ema_ok = (ema3 and ema9 and ema3 > ema9)
+            if not (ema_ok or bb_exp):
+                failures.append("No Momentum Signal: Need (EMA3 > EMA9) OR (BB Expanding)")
+            
+            # Requisito 4: Alineación de tendencia (EMA20 como base)
+            if ema3 and ema20 and ema3 < ema20:
+                failures.append(f"Price below EMA20: {ema3:.2f} < {ema20:.2f} (Bearish trend)")
+
+            # Requisito 5: Filtro Fibonacci (-6 hasta +3)
+            fib_ok = -6 <= fib_z <= 3
+            if not fib_ok:
+                failures.append(f"Fibonacci Zone {fib_z} is OUT of range [-6, 3]")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

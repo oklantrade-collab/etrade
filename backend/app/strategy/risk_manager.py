@@ -101,7 +101,7 @@ def validate_signal(
             return { 'approved': False, 'reason': f'MAX_OPEN_TRADES_REACHED ({current_open}/{max_open})' }
     except Exception as e:
         logging.error(f"Error checking global open trades: {e}")
-        current_open = 0 # Fallback
+        current_open = 999 # FAIL-CLOSED
 
     # CHECK 4 — No exceder posiciones por símbolo:
     try:
@@ -113,8 +113,8 @@ def validate_signal(
             .eq('status', 'open') \
             .execute()
             
-        max_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
-        current_symbol_open = symbol_positions.count or 0
+        max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+        current_symbol_open = symbol_positions.count if symbol_positions.count is not None else 999
 
         if current_symbol_open >= max_per_symbol:
             return { 'approved': False, 'reason': f'MAX_POSITIONS_PER_SYMBOL_REACHED ({signal["symbol"]}: {current_symbol_open}/{max_per_symbol})' }

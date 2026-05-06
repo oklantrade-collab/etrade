@@ -1,5 +1,5 @@
 "use client"
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 
 export default function StocksPositions() {
@@ -9,11 +9,8 @@ export default function StocksPositions() {
   const [hasMounted, setHasMounted] = useState(false)
   const [selectedPos, setSelectedPos] = useState<any>(null)
   const [tab, setTab] = useState<'open' | 'closed'>('open')
-  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({})
-
-  const toggleRow = (id: string) => {
-    setExpandedRows(prev => ({ ...prev, [id]: !prev[id] }))
-  }
+  const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
 
   useEffect(() => {
     setHasMounted(true)
@@ -80,16 +77,25 @@ export default function StocksPositions() {
       
       {/* MODAL DETALLE */}
       {selectedPos && (
-        <div style={{ 
-          position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', 
-          background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)', 
-          zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' 
-        }}>
-          <div style={{ 
-            background: '#12161F', width: '500px', borderRadius: '24px', 
-            border: '1px solid rgba(255,255,255,0.1)', overflow: 'hidden',
-            boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)'
-          }}>
+        <div 
+          onClick={() => setSelectedPos(null)}
+          style={{ 
+            position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', 
+            background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(10px)', 
+            zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer'
+          }}
+        >
+          <div 
+            onClick={e => e.stopPropagation()}
+            style={{ 
+              background: '#12161F', width: '500px', maxHeight: '90vh', borderRadius: '24px', 
+              border: '1px solid rgba(255,255,255,0.1)', overflow: 'hidden',
+              boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)',
+              display: 'flex', flexDirection: 'column',
+              cursor: 'default'
+            }}
+          >
             <div style={{ padding: '30px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h2 style={{ fontSize: '22px', fontWeight: 900, margin: 0 }}>{selectedPos.ticker}</h2>
@@ -98,17 +104,36 @@ export default function StocksPositions() {
               <button onClick={() => setSelectedPos(null)} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900 }}>×</button>
             </div>
             
-            <div style={{ padding: '30px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            <div style={{ padding: '30px', overflowY: 'auto', flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
               <DetailItem label="Empresa" val={selectedPos.company_name} color="#FFF" />
               <DetailItem label="Sector" val={selectedPos.sector} color="#FFF" />
               <DetailItem label="Fecha Compra" val={selectedPos.first_buy_at ? new Date(selectedPos.first_buy_at).toLocaleDateString() : '—'} color="#AAA" />
-              <DetailItem label="Tipo Orden" val={selectedPos.order_type} color="#00C896" />
-              <DetailItem label="Precio Entrada" val={`$${selectedPos.avg_price?.toFixed(2)}`} color="#FFF" />
+              <DetailItem label="Tipo Orden" val={selectedPos.order_type || 'MARKET'} color="#00C896" />
+              <DetailItem label="Precio Entrada" val={`$${(selectedPos.avg_price || selectedPos.entry_price)?.toFixed(2)}`} color="#FFF" />
               <DetailItem label="Cantidad" val={`${selectedPos.shares >= 0 ? '+' : ''}${selectedPos.shares}`} color={selectedPos.shares >= 0 ? '#FFF' : '#FF4757'} />
-              <DetailItem label="Stop Loss (SL)" val={selectedPos.sl_price ? `$${selectedPos.sl_price}` : '—'} color="#FF4757" />
-              <DetailItem label="Take Profit (TP)" val={selectedPos.tp_price ? `$${selectedPos.tp_price}` : '—'} color="#00C896" />
-              <DetailItem label="Inversión" val={`$${selectedPos.total_cost?.toLocaleString()}`} color="#AAA" />
-              <DetailItem label="Razón" val={selectedPos.exit_reason || 'ABIERTA'} color={selectedPos.status === 'open' ? '#00C896' : '#AAA'} />
+              <DetailItem label="Stop Loss (SL)" val={selectedPos.stop_loss ? `$${parseFloat(selectedPos.stop_loss).toFixed(2)}` : '—'} color="#FF4757" />
+              <DetailItem label="Take Profit (TP)" val={selectedPos.take_profit ? `$${parseFloat(selectedPos.take_profit).toFixed(2)}` : '—'} color="#00C896" />
+              <DetailItem label="Inversión" val={`$${(selectedPos.total_cost || 0).toLocaleString()}`} color="#AAA" />
+              
+              <div style={{ gridColumn: 'span 2', background: 'rgba(255,255,255,0.02)', padding: '15px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '10px' }}>
+                <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Estrategia de Compra</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '5px' }}>
+                   <StrategyBadge strategy={selectedPos.strategy || selectedPos.rule_code} />
+                   <p style={{ margin: 0, fontSize: '11px', color: '#AAA', lineHeight: '1.4' }}>
+                     {STRATEGY_MAP[selectedPos.strategy?.toUpperCase()?.replace(' ', '_')]?.desc || STRATEGY_MAP[selectedPos.rule_code]?.desc || 'Estrategia de entrada algorítmica basada en parámetros de mercado.'}
+                   </p>
+                </div>
+              </div>
+
+              <div style={{ gridColumn: 'span 2', background: 'rgba(255,255,255,0.02)', padding: '15px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}>
+                <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Estrategia de Cierre</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '5px' }}>
+                   <ReasonBadge reason={selectedPos.exit_reason || selectedPos.close_reason || 'ABIERTA'} />
+                   <p style={{ margin: 0, fontSize: '11px', color: '#AAA', lineHeight: '1.4' }}>
+                     {REASON_MAP[selectedPos.exit_reason || selectedPos.close_reason]?.desc || 'Posición actualmente en mercado. Se aplican reglas de salida adaptativas.'}
+                   </p>
+                </div>
+              </div>
               
               <div style={{ gridColumn: 'span 2', background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '16px', marginTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
@@ -124,6 +149,14 @@ export default function StocksPositions() {
                    </p>
                 </div>
               </div>
+
+              {/* Nuevos bloques integrados del expander */}
+              {selectedPos.status !== 'closed' && (
+                <div style={{ gridColumn: 'span 2', display: 'flex', flexDirection: 'column', gap: '15px', marginTop: '10px' }}>
+                  {selectedPos.tp_block1_price && <TPBlocksProgress position={selectedPos} />}
+                  <SLAdaptiveBadge position={selectedPos} />
+                </div>
+              )}
             </div>
             
             <div style={{ padding: '20px 30px', background: 'rgba(255,255,255,0.02)', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
@@ -132,6 +165,7 @@ export default function StocksPositions() {
           </div>
         </div>
       )}
+      {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <div>
@@ -173,16 +207,17 @@ export default function StocksPositions() {
           {tab === 'open' ? (
             <div style={{ minWidth: '1000px' }}>
               <div style={TableHeadOpenStyle}>
-                <span>Ticker</span>
+                 <span>Ticker</span>
                 <span>Side</span>
                 <span>Grupo</span>
                 <span>Fecha</span>
                 <span>Shares</span>
                 <span>Avg</span>
                 <span>Actual</span>
-                <span style={{ textAlign: 'center' }}>Estrategia</span>
+                <span style={{ textAlign: 'center' }}>Estrategia Compra</span>
                 <span style={{ textAlign: 'right' }}>PnL (%)</span>
-                <span style={{ textAlign: 'right' }}>Acción</span>
+                <span style={{ textAlign: 'right' }}>Chart</span>
+                <span style={{ textAlign: 'right' }}>Acciones</span>
               </div>
 
               {loading && <div style={LoadingStyle}>Cargando portafolio...</div>}
@@ -191,30 +226,13 @@ export default function StocksPositions() {
               {!loading && positions.map((pos, i) => (
                 <div key={`open-${pos.id || i}`}>
                   <div style={{ ...TableRowOpenStyle, background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <button 
-                        onClick={() => toggleRow(pos.id)}
-                        style={{ 
-                          background: expandedRows[pos.id] ? 'rgba(255,255,255,0.1)' : 'rgba(34,197,94,0.1)', 
-                          border: 'none', 
-                          color: expandedRows[pos.id] ? '#AAA' : '#00C896', 
-                          width: '24px', height: '24px', 
-                          borderRadius: '6px', 
-                          cursor: 'pointer', 
-                          fontSize: '14px', 
-                          fontWeight: 900,
-                          display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          transition: 'all 0.2s'
-                        }}
-                      >
-                        {expandedRows[pos.id] ? '−' : '+'}
-                      </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                       <div style={{ 
-                          width: '3px', height: '20px', borderRadius: '4px',
+                          width: '4px', height: '24px', borderRadius: '4px',
                           background: pos.side?.toUpperCase() === 'SELL' ? '#ff4757' : '#00C896',
-                          boxShadow: pos.side?.toUpperCase() === 'SELL' ? '0 0 10px #ff4757' : '0 0 10px #00C896'
+                          boxShadow: pos.side?.toUpperCase() === 'SELL' ? '0 0 12px rgba(255,71,87,0.4)' : '0 0 12px rgba(0,200,150,0.4)'
                       }}></div>
-                      <span style={{ fontWeight: 900, fontSize: '15px' }}>{pos.ticker}</span>
+                      <span style={{ fontWeight: 900, fontSize: '16px', letterSpacing: '-0.02em' }}>{pos.ticker}</span>
                     </div>
                     <span style={{ fontSize: '10px', fontWeight: 900, color: pos.side?.toUpperCase() === 'SELL' ? '#FF4757' : '#00C896' }}>{pos.side?.toUpperCase() || 'BUY'}</span>
                     <span><GroupBadge group={pos.group_name} /></span>
@@ -234,11 +252,36 @@ export default function StocksPositions() {
                         {(pos.unrealized_pnl_pct || 0) >= 0 ? '+' : ''}{(pos.unrealized_pnl_pct || 0).toFixed(2)}%
                       </p>
                     </div>
+                    <div style={{ textAlign: 'right' }}>
+                       <button 
+                         onClick={() => { setSelectedTicker(pos.ticker); setShowChart(true); }}
+                         style={{ ...DetailButtonStyle, background: 'rgba(56,189,248,0.1)', color: '#38BDF8', border: '1px solid rgba(56,189,248,0.2)', width: '26px', height: '26px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                         title="Ver Gráfico"
+                       >
+                         📊
+                       </button>
+                    </div>
                     <div style={{ textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end', minWidth: '120px' }}>
                        <button 
                          onClick={() => setSelectedPos(pos)} 
-                         style={{ ...DetailButtonStyle, background: 'rgba(0,123,255,0.05)', color: '#007BFF', border: '1px solid rgba(0,123,255,0.1)' }}
+                         style={{ 
+                           ...DetailButtonStyle, 
+                           background: '#4FC3F7', 
+                           color: '#000', 
+                           border: 'none', 
+                           width: '26px', 
+                           height: '26px', 
+                           padding: 0, 
+                           display: 'flex', 
+                           alignItems: 'center', 
+                           justifyContent: 'center',
+                           fontSize: '12px',
+                           boxShadow: '0 4px 10px rgba(79,195,247,0.3)',
+                           transition: 'transform 0.2s'
+                         }}
                          title="Ver Detalles"
+                         onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                         onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
                        >
                          ℹ️
                        </button>
@@ -284,13 +327,7 @@ export default function StocksPositions() {
                        </button>
                     </div>
                   </div>
-                  {/* TP Blocks Progress & SL Adaptive (Expandible) */}
-                  {expandedRows[pos.id] && (
-                    <div style={{ padding: '0 30px 20px 75px', background: 'rgba(255,255,255,0.01)', borderBottom: '1px solid rgba(255,255,255,0.02)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
-                      {pos.tp_block1_price && <TPBlocksProgress position={pos} />}
-                      <SLAdaptiveBadge position={pos} />
-                    </div>
-                  )}
+                  {/* Información ahora integrada en el modal de detalles */}
                 </div>
               ))}
             </div>
@@ -299,14 +336,16 @@ export default function StocksPositions() {
               <div style={TableHeadClosedStyle}>
                 <span>Ticker</span>
                 <span>Grupo</span>
+                <span style={{ textAlign: 'center' }}>Estrategia Compra</span>
                 <span>Entrada</span>
                 <span>Salida</span>
                 <span>Entry $</span>
                 <span>Exit $</span>
                 <span>Shares</span>
-                <span style={{ textAlign: 'center' }}>Reason</span>
+                <span style={{ textAlign: 'center' }}>Estrategia Cierre</span>
                 <span style={{ textAlign: 'right' }}>PnL (%)</span>
-                <span style={{ textAlign: 'right' }}>Acción</span>
+                <span style={{ textAlign: 'right' }}>Chart</span>
+                <span style={{ textAlign: 'right' }}>Det.</span>
               </div>
 
               {closedPositions.length === 0 && <div style={LoadingStyle}>No hay historial de posiciones cerradas.</div>}
@@ -322,28 +361,55 @@ export default function StocksPositions() {
                     <span style={{ fontWeight: 900, fontSize: '15px' }}>{pos.ticker}</span>
                   </div>
                   <span><GroupBadge group={pos.group_name} /></span>
+                  <span style={{ textAlign: 'center' }}><StrategyBadge strategy={pos.strategy || pos.rule_code} /></span>
                   <div style={{ fontSize: '10px', color: '#555', lineHeight: '1.2' }}>
-                    <div>{pos.first_buy_at ? new Date(pos.first_buy_at).toLocaleDateString() : '—'}</div>
-                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{pos.first_buy_at ? new Date(pos.first_buy_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
+                    <div>{pos.first_buy_at || pos.entry_date ? new Date(pos.first_buy_at || pos.entry_date).toLocaleDateString() : '—'}</div>
+                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{pos.first_buy_at || pos.entry_date ? new Date(pos.first_buy_at || pos.entry_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
                   </div>
                   <div style={{ fontSize: '10px', color: '#666', lineHeight: '1.2' }}>
-                    <div>{pos.updated_at ? new Date(pos.updated_at).toLocaleDateString() : '—'}</div>
-                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{pos.updated_at ? new Date(pos.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
+                    <div>{pos.updated_at || pos.exit_date ? new Date(pos.updated_at || pos.exit_date).toLocaleDateString() : '—'}</div>
+                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{pos.updated_at || pos.exit_date ? new Date(pos.updated_at || pos.exit_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
                   </div>
-                  <span style={{ color: '#AAA', fontSize: '13px' }}>${pos.avg_price?.toFixed(2)}</span>
-                  <span style={{ fontWeight: 700, fontSize: '13px' }}>${pos.current_price?.toFixed(2)}</span>
+                  <span style={{ color: '#AAA', fontSize: '13px' }}>${(pos.avg_price || pos.entry_price)?.toFixed(2)}</span>
+                  <span style={{ fontWeight: 700, fontSize: '13px' }}>${(pos.current_price || pos.exit_price)?.toFixed(2)}</span>
                   <span style={{ fontSize: '13px', color: pos.shares >= 0 ? '#AAA' : '#FF4757/70' }}>{pos.shares >= 0 ? '+' : ''}{pos.shares}</span>
                   <span style={{ textAlign: 'center' }}><ReasonBadge reason={pos.exit_reason || 'closed'} /></span>
                   <div style={{ textAlign: 'right' }}>
-                    <p style={{ margin: 0, fontWeight: 900, color: (pos.unrealized_pnl || 0) >= 0 ? '#00C896' : '#FF4757' }}>
-                      {(pos.unrealized_pnl || 0) >= 0 ? '+' : ''}${(pos.unrealized_pnl || 0).toFixed(2)}
+                    <p style={{ margin: 0, fontWeight: 900, color: (pos.pnl_usd || pos.unrealized_pnl || 0) >= 0 ? '#00C896' : '#FF4757' }}>
+                      {(pos.pnl_usd || pos.unrealized_pnl || 0) >= 0 ? '+' : ''}${(pos.pnl_usd || pos.unrealized_pnl || 0).toFixed(2)}
                     </p>
-                    <p style={{ margin: 0, fontSize: '11px', color: (pos.unrealized_pnl_pct || 0) >= 0 ? '#00C896' : '#FF4757', opacity: 0.8 }}>
-                      {(pos.unrealized_pnl_pct || 0) >= 0 ? '+' : ''}{(pos.unrealized_pnl_pct || 0).toFixed(2)}%
+                    <p style={{ margin: 0, fontSize: '11px', color: (pos.pnl_pct || pos.unrealized_pnl_pct || 0) >= 0 ? '#00C896' : '#FF4757', opacity: 0.8 }}>
+                      {(pos.pnl_pct || pos.unrealized_pnl_pct || 0) >= 0 ? '+' : ''}{(pos.pnl_pct || pos.unrealized_pnl_pct || 0).toFixed(2)}%
                     </p>
                   </div>
                   <div style={{ textAlign: 'right' }}>
-                     <button onClick={() => setSelectedPos(pos)} style={DetailButtonStyle}>Info</button>
+                      <button 
+                         onClick={() => { setSelectedTicker(pos.ticker); setShowChart(true); }}
+                         style={{ ...DetailButtonStyle, background: 'rgba(56,189,248,0.1)', color: '#38BDF8', border: '1px solid rgba(56,189,248,0.2)', width: '26px', height: '26px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                         title="Ver Gráfico"
+                       >
+                         📊
+                       </button>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                     <button 
+                       onClick={() => setSelectedPos(pos)} 
+                       style={{ 
+                         ...DetailButtonStyle, 
+                         background: '#4FC3F7', 
+                         color: '#000', 
+                         border: 'none', 
+                         width: '26px', 
+                         height: '26px', 
+                         padding: 0, 
+                         display: 'flex', 
+                         alignItems: 'center', 
+                         justifyContent: 'center',
+                         fontSize: '12px'
+                       }}
+                     >
+                       ℹ️
+                     </button>
                   </div>
                 </div>
               ))}
@@ -357,6 +423,71 @@ export default function StocksPositions() {
           ← IR AL SCANNER DE OPORTUNIDADES
         </Link>
       </div>
+    </div>
+  )
+}
+
+// --- CHART COMPONENTS ---
+
+function TradingViewWidget({ symbol }: { symbol: string }) {
+  const containerId = `tv-chart-${symbol}`;
+  const containerRef = useRef<any>(null);
+  const scriptLoaded = useRef(false);
+  
+  useEffect(() => {
+    if (scriptLoaded.current) return;
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => {
+      if ((window as any).TradingView && containerRef.current) {
+        new (window as any).TradingView.widget({
+          "autosize": true,
+          "symbol": symbol,
+          "interval": "15",
+          "timezone": "America/Lima",
+          "theme": "dark",
+          "style": "1",
+          "locale": "es",
+          "toolbar_bg": "#161922",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "container_id": containerId,
+          "backgroundColor": "#0F1117",
+          "gridColor": "rgba(255, 255, 255, 0.05)",
+          "hide_side_toolbar": false,
+          "studies": [
+            "BB@tv-basicstudies",
+            "MAExp@tv-basicstudies",
+            "MAExp@tv-basicstudies"
+          ],
+          "overrides": {
+            "mainSeriesProperties.style": 1,
+          }
+        });
+      }
+    };
+    document.head.appendChild(script);
+    scriptLoaded.current = true;
+  }, [symbol, containerId]);
+
+  return (
+    <div ref={containerRef} id={containerId} style={{ height: '100%', width: '100%', borderRadius: '16px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }} />
+  );
+}
+
+function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }) {
+  return (
+    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, backdropFilter: 'blur(5px)' }}>
+        <div style={{ background: '#0F1117', width: '95%', height: '92%', borderRadius: '24px', border: '1px solid #38BDF8', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(56,189,248,0.2)' }}>
+            <div style={{ padding: '15px 25px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <h3 style={{ margin: 0, color: '#FFF', fontSize: '16px', fontWeight: 900 }}>GRÁFICO TÉCNICO: {symbol}</h3>
+                <button onClick={onClose} style={{ background: '#EF4444', border: 'none', color: '#FFF', padding: '6px 15px', borderRadius: '8px', fontSize: '10px', fontWeight: 900, cursor: 'pointer' }}>CERRAR GRÁFICO</button>
+            </div>
+            <div style={{ flex: 1, background: '#000' }}>
+                <TradingViewWidget symbol={symbol} />
+            </div>
+        </div>
     </div>
   )
 }
@@ -393,6 +524,9 @@ function TabButton({ active, onClick, label }: any) {
 
 function StrategyBadge({ strategy }: { strategy: string }) {
   if (!strategy) return <span style={{ color: '#444' }}>—</span>
+  const code = strategy?.toUpperCase()?.replace(' ', '_')
+  const map = STRATEGY_MAP[code] || STRATEGY_MAP[strategy]
+  
   return (
     <span style={{ 
       fontSize: '8px', fontWeight: 950, 
@@ -401,7 +535,7 @@ function StrategyBadge({ strategy }: { strategy: string }) {
       padding: '4px 6px', borderRadius: '4px', border: '1px solid rgba(206,147,216,0.2)',
       textTransform: 'uppercase'
     }}>
-      {strategy.replace('_', ' ')}
+      {map ? map.label : strategy.replace('_', ' ')}
     </span>
   )
 }
@@ -420,17 +554,42 @@ function GroupBadge({ group }: { group: string }) {
   )
 }
 
+const REASON_MAP: Record<string, { label: string, desc: string }> = {
+  'AaEXT': { label: 'EXTENSIÓN ALTA', desc: 'Cierre preventivo por extensión excesiva del precio (RSI/Fibonacci).' },
+  'V2_TOTAL_EMA_DOWN_OR_NEUTRAL': { label: 'TENDENCIA BAJISTA', desc: 'Las EMAs se han cruzado a la baja o están en modo neutral.' },
+  'V2_TOTAL_EMA_UP_MID_SAR_NEG': { label: 'SAR NEGATIVO', desc: 'Reversión del SAR Parabolic mientras la tendencia EMA era alcista.' },
+  'TP_V2_TOTAL_SIP_V_4H_SELL': { label: 'SIPV SELL (4H)', desc: 'Patrón de velas bajista detectado en temporalidad de 4 horas.' },
+  'tp_band': { label: 'TAKE PROFIT BANDA', desc: 'El precio ha alcanzado la banda superior de Fibonacci (U6/L6).' },
+  'sl': { label: 'STOP LOSS', desc: 'El precio ha tocado el límite de pérdida configurado.' },
+  'tp': { label: 'TAKE PROFIT', desc: 'El precio ha alcanzado el objetivo de ganancia estándar.' },
+  'proactive_exit': { label: 'SALIDA PROACTIVA', desc: 'Cierre anticipado por pérdida de momentum antes de tocar SL/TP.' },
+  'recovery_exit': { label: 'SALIDA RECUPERACIÓN', desc: 'Cierre en modo recuperación tras un rebote técnico favorable.' },
+}
+
+const STRATEGY_MAP: Record<string, { label: string, desc: string }> = {
+  'V5_INDUSTRIAL': { label: 'V5 INDUSTRIAL', desc: 'Estrategia institucional basada en acumulación de volumen y quiebre de estructura técnica.' },
+  'HOT_CANDLE_BUY': { label: 'HOT CANDLE', desc: 'Entrada por momentum tras vela de alta convicción en zonas de soporte dinámico.' },
+  'EMA_REVERSAL': { label: 'EMA REVERSAL', desc: 'Detección de cambio de tendencia mediante cruce optimizado de medias móviles.' },
+  'BOLLINGER_EXT': { label: 'BOLLINGER EXT', desc: 'Explotación de extremos en bandas de Bollinger con confirmación de RSI.' },
+}
+
 function ReasonBadge({ reason }: { reason: string }) {
+  const code = reason?.split(' ')[0] || reason
+  const map = REASON_MAP[code] || REASON_MAP[reason]
   const isWin = !reason.toLowerCase().includes('sl') && !reason.toLowerCase().includes('stop')
+  
   return (
-    <span style={{ 
-      fontSize: '8px', fontWeight: 900, 
-      color: isWin ? '#00C896' : '#FF4757',
-      border: `1px solid ${isWin ? 'rgba(0,200,150,0.2)' : 'rgba(255,71,87,0.2)'}`,
-      padding: '3px 6px', borderRadius: '4px', textTransform: 'uppercase'
-    }}>
-      {reason.replace('_', ' ')}
-    </span>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2px' }}>
+      <span style={{ 
+        fontSize: '8px', fontWeight: 900, 
+        color: isWin ? '#00C896' : '#FF4757',
+        border: `1px solid ${isWin ? 'rgba(0,200,150,0.2)' : 'rgba(255,71,87,0.2)'}`,
+        padding: '3px 6px', borderRadius: '4px', textTransform: 'uppercase'
+      }}>
+        {map ? map.label : reason.replace('_', ' ')}
+      </span>
+      {map && <span style={{ fontSize: '7px', color: '#555', fontWeight: 600 }}>{code}</span>}
+    </div>
   )
 }
 
@@ -544,7 +703,7 @@ function TPBlocksProgress({ position }: { position: any }) {
 
 const TableHeadOpenStyle = {
   display: 'grid', 
-  gridTemplateColumns: '80px 50px 75px 95px 70px 80px 80px 95px 110px 100px', 
+  gridTemplateColumns: '80px 50px 75px 95px 70px 80px 80px 95px 110px 40px 100px', 
   padding: '16px 30px', 
   background: 'rgba(255,255,255,0.01)',
   fontSize: '10px', 
@@ -557,7 +716,7 @@ const TableHeadOpenStyle = {
 
 const TableRowOpenStyle = {
   display: 'grid', 
-  gridTemplateColumns: '80px 50px 75px 95px 70px 80px 80px 95px 110px 100px', 
+  gridTemplateColumns: '80px 50px 75px 95px 70px 80px 80px 95px 110px 40px 100px', 
   padding: '18px 30px', 
   borderBottom: '1px solid rgba(255,255,255,0.02)',
   alignItems: 'center'
@@ -565,8 +724,8 @@ const TableRowOpenStyle = {
 
 const TableHeadClosedStyle = {
   display: 'grid', 
-  gridTemplateColumns: '80px 80px 95px 95px 80px 80px 70px 120px 110px 100px', 
-  padding: '16px 30px', 
+  gridTemplateColumns: '70px 50px 80px 80px 80px 70px 70px 60px 150px 80px 40px 60px', 
+  padding: '16px 20px', 
   background: 'rgba(255,255,255,0.01)',
   fontSize: '10px', 
   fontWeight: 900, 
@@ -578,8 +737,8 @@ const TableHeadClosedStyle = {
 
 const TableRowClosedStyle = {
   display: 'grid', 
-  gridTemplateColumns: '80px 80px 95px 95px 80px 80px 70px 120px 110px 100px', 
-  padding: '18px 30px', 
+  gridTemplateColumns: '70px 50px 80px 80px 80px 70px 70px 60px 150px 80px 40px 60px', 
+  padding: '18px 20px', 
   borderBottom: '1px solid rgba(255,255,255,0.02)',
   alignItems: 'center'
 }
@@ -752,5 +911,6 @@ function SLAdaptiveBadge({ position }: { position: any }) {
     </div>
   )
 }
+
 
 

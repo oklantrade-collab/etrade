@@ -1,17 +1,22 @@
 from datetime import datetime, time, timezone, timedelta
 
 def get_nyc_now():
-    """
-    Returns the current time in NYC (ET).
-    Since we don't have pytz, we estimate based on UTC.
-    NYC is typically UTC-5 (EST) and UTC-4 (EDT).
-    As of April, it is EDT (UTC-4).
-    """
     # UTC Now
     utc_now = datetime.now(timezone.utc)
     # Estimate NYC time (UTC-4 for EDT)
     nyc_now = utc_now - timedelta(hours=4)
     return nyc_now
+
+def get_lima_now():
+    """Returns current time in Lima (UTC-5)."""
+    utc_now = datetime.now(timezone.utc)
+    return utc_now - timedelta(hours=5)
+
+def convert_to_lima(dt_utc):
+    """Converts a UTC datetime to Lima time."""
+    if not dt_utc.tzinfo:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    return dt_utc.astimezone(timezone(timedelta(hours=-5)))
 
 def is_market_open():
     """

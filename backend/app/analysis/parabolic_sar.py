@@ -28,6 +28,14 @@ def calculate_parabolic_sar(
                        (b_sars_ini_low en Pine)
     """
     n = len(df)
+    if n < 3:
+        # Not enough candles to calculate SAR accurately
+        df['sar'] = df['close']
+        df['sar_trend'] = 0
+        df['sar_ini_high'] = False
+        df['sar_ini_low'] = False
+        return df
+
     sar    = np.zeros(n)
     trend  = np.zeros(n, dtype=int)
     ep     = np.zeros(n)
