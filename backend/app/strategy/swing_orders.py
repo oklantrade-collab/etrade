@@ -278,6 +278,18 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
 
             sb.table('pending_orders').update({'status': 'triggered', 'triggered_at': datetime.now(timezone.utc).isoformat()}).eq('id', order['id']).execute()
             
+            # ═══════════════════════════════════════════════════════════
+            # ATOMIC LIMIT CHECK — LAST LINE OF DEFENSE BEFORE INSERT
+            # Re-query DB right before INSERT to catch any concurrent opens
+            # ═══════════════════════════════════════════════════════════
+            final_variants = crypto_symbol_match_variants(symbol)
+            final_count_res = sb.table('positions').select('id', count='exact').in_('symbol', final_variants).eq('status', 'open').limit(0).execute()
+            final_count = final_count_res.count if final_count_res.count is not None else 999
+            if final_count >= max_symbol:
+                log_warning('SWING', f"🚫 ATOMIC BLOCK: {symbol} has {final_count} open (max {max_symbol}). Swing INSERT rejected.")
+                return
+            # ═══════════════════════════════════════════════════════════
+
             pos_data = {
                 'symbol': symbol, 'side': direction.upper(), 'entry_price': execution_price,
                 'avg_entry_price': execution_price, 'stop_loss': float(order.get('sl_price') or 0),

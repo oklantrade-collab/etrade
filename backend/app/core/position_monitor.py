@@ -905,6 +905,27 @@ async def _execute_paper_open_unlocked(
     except Exception as e:
         log_warning(MODULE, f"Failed to log order to orders table: {e}")
 
+    # ═══════════════════════════════════════════════════════════════
+    # ATOMIC LIMIT RE-CHECK — LAST LINE OF DEFENSE BEFORE INSERT
+    # Even though _execute_paper_open checked under lock, re-verify
+    # because candle_execution may have inserted in parallel.
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        max_sym_recheck = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+        recheck_variants = crypto_symbol_match_variants(symbol)
+        recheck_res = supabase.table('positions').select('id', count='exact') \
+            .in_('symbol', recheck_variants).eq('status', 'open').execute()
+        recheck_count = recheck_res.count if recheck_res.count is not None else 0
+        if recheck_res.data:
+            recheck_count = max(recheck_count, len(recheck_res.data))
+        if recheck_count >= max_sym_recheck:
+            log_warning(MODULE, f"🚫 ATOMIC BLOCK (pre-insert): {symbol} has {recheck_count} open (max {max_sym_recheck}). INSERT rejected.")
+            return None
+    except Exception as rc_e:
+        log_error(MODULE, f"ATOMIC re-check failed for {symbol}: {rc_e}. BLOCKING for safety.")
+        return None
+    # ═══════════════════════════════════════════════════════════════
+
     res = supabase.table('positions').insert(data).execute()
     new_pos = res.data[0] if res.data else None
     if new_pos:

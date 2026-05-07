@@ -377,14 +377,9 @@ def execute_crypto_signal(
     inv_pct = 2.0  # Default 2% for forex risk
     leverage = 100.0
     
-    target_inv = capital * (inv_pct / 100) # e.g. $20.00 if capital is $1000  if not risk_check["passed"]:
-        log_warning(MODULE, f"🚫 RIESGO TOTAL CRIPTO ALCANZADO: {risk_check['reason']}")
-        return {
-            "success": False,
-            "reason": "max_total_risk_reached",
-            "pair": binance_symbol,
-            "detail": risk_check["reason"]
-        }
+    target_inv = capital * (inv_pct / 100) # e.g. $20.00 if capital is $1000
+    # Note: risk_check is not computed here for crypto (handled by guards above)
+    # The original code had a malformed conditional that was dead code.
 
     # ── STEP 2: Execute MARKET order ──
     price = float(candle_data.get("close", 0) or 0)
@@ -418,10 +413,12 @@ def execute_crypto_signal(
         f'({backstop_data["source"]}) '
         f'({backstop_data["pct_from_entry"]:.2f}% '
         f'del precio de entrada)'
+    )
     qty_display: float | None = None
     entry_display = price
 
-    price = entry_display    # ── STEP 2: Calculate quantity based on risk ──
+    price = entry_display
+    # ── STEP 2: Calculate quantity based on risk ──
     from app.core.capital_manager import get_total_operating_capital
     capital_total = get_total_operating_capital('crypto')
     
@@ -694,6 +691,13 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                     f"  ↳ Cerrada {pos['id'][:8]}... side={pos.get('side')} PnL: {pnl:.4f} ({pnl_pct_row}%) qty={size}",
                 )
 
+                # REGLA 7: Cooldown if closed with loss
+                if pnl < 0:
+                    BOT_STATE.last_close_cycles[binance_symbol] = BOT_STATE.current_cycle
+
+            except Exception as e:
+                log_error(MODULE, f"Error cerrando posición {pos.get('id')}: {e}")
+
         # ── CANCELAR ÓRDENES HUÉRFANAS ──
         # Si cerramos algo (o hay reversión), limpiamos pending_orders para evitar ejecuciones contradictorias
         if out["closed_count"] > 0 or has_opposite:
@@ -708,13 +712,6 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                 log_info(MODULE, f"🧹 Órdenes pendientes canceladas para {binance_symbol}")
             except Exception as cancel_e:
                 log_warning(MODULE, f"Error cancelando órdenes huérfanas: {cancel_e}")
-
-                # REGLA 7: Cooldown if closed with loss
-                if pnl < 0:
-                    BOT_STATE.last_close_cycles[binance_symbol] = BOT_STATE.current_cycle
-
-            except Exception as e:
-                log_error(MODULE, f"Error cerrando posición {pos.get('id')}: {e}")
 
     except Exception as e:
         log_error(MODULE, f"Error cerrando posiciones crypto: {e}")
@@ -759,7 +756,11 @@ def _save_candle_order_crypto(sb, binance_symbol, action, strategy_code, price, 
         return None
 
 def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, price, pattern, tf, order_id, quantity=0, sl=0.0, tp1=0.0, tp2=0.0) -> bool:
-    """Save position record for crypto candle signal. Returns True si la fila quedó en Supabase."""
+    """Save position record for crypto candle signal. Returns True si la fila quedó en Supabase.
+    
+    CRITICAL: Contains ATOMIC limit check right before INSERT to prevent exceeding
+    max_positions_per_symbol. This is the LAST line of defense.
+    """
     try:
         now_iso = datetime.now(timezone.utc).isoformat()
         
@@ -770,6 +771,37 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
         # NUEVO: Signo algebraico para la cantidad (Negativo para SELL/SHORT)
         final_qty = abs(qty_f) if action == "BUY" else -abs(qty_f)
         
+        # ═══════════════════════════════════════════════════════════════
+        # ATOMIC LIMIT CHECK — LAST LINE OF DEFENSE BEFORE INSERT
+        # Queries DB fresh count RIGHT BEFORE inserting. No stale data.
+        # ═══════════════════════════════════════════════════════════════
+        from app.core.supabase_client import get_risk_config
+        try:
+            risk_config = get_risk_config()
+            max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+        except Exception:
+            max_per_symbol = 4
+
+        variants = crypto_symbol_match_variants(sym)
+        try:
+            count_res = sb.table("positions").select("id", count="exact") \
+                .in_("symbol", variants).eq("status", "open").execute()
+            current_count = count_res.count if count_res.count is not None else 0
+            # Belt-and-suspenders: also check .data length
+            if count_res.data:
+                current_count = max(current_count, len(count_res.data))
+        except Exception as cnt_e:
+            log_error(MODULE, f"ATOMIC LIMIT CHECK failed for {sym}: {cnt_e}. BLOCKING insert for safety.")
+            return False
+
+        if current_count >= max_per_symbol:
+            log_warning(MODULE,
+                f"🚫 ATOMIC BLOCK: {sym} has {current_count} open positions "
+                f"(max {max_per_symbol}). Candle signal INSERT rejected."
+            )
+            return False
+        # ═══════════════════════════════════════════════════════════════
+
         # Obtener snap desde cache si no viene
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
         snap = MARKET_SNAPSHOT_CACHE.get(binance_symbol, {})
