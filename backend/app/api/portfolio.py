@@ -251,11 +251,16 @@ async def get_global_portfolio():
                     'entry_price': t.get('avg_price') or t.get('entry_price'),
                     'status': 'closed',
                     'reason': t.get('close_reason', 'closed'),
-                    'quantity': t.get('shares'),
+                    'quantity': t.get('shares') or 0,
                     'side': 'long',
                     'rule': t.get('strategy') or t.get('pool_type') or t.get('rule_code') or 'V5_STOCKS'
                 })
-            recent_activity.sort(key=lambda x: x['time'], reverse=True)
+            except Exception as e:
+                log_error("portfolio", f"Error mapping recent stock {t}: {e}")
+                continue
+            # Filtrar y asegurar que todos tengan 'time' para el sort
+            recent_activity = [a for a in recent_activity if a.get('time')]
+            recent_activity.sort(key=lambda x: str(x['time']), reverse=True)
             
             # --- 4. SIPV SIGNALS (BTC, DXY, VIX) ---
             sipv_res = supabase.table('candle_signals') \
