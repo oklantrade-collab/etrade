@@ -206,8 +206,8 @@ export default function PortfolioPage() {
                  <table className="w-full text-left">
                     <thead className="bg-white/[0.03] text-[0.55rem] text-slate-500 font-black uppercase tracking-[0.2em] border-b border-white/5">
                        <tr>
-                          <th className="py-6 px-10">FECHA / HORA</th>
-                          <th className="py-6">INSTRUMENTO</th>
+                          <th className="py-6 px-10">INSTRUMENTO</th>
+                          <th className="py-6">FECHA / HORA</th>
                           <th className="py-6">PRECIO COMPRA</th>
                           <th className="py-6">CANTIDAD</th>
                           <th className="py-6">ESTRATEGIA COMPRA</th>
@@ -223,10 +223,6 @@ export default function PortfolioPage() {
                           return (
                             <tr key={i} className="hover:bg-white/[0.04] transition-colors group">
                                <td className="py-6 px-10">
-                                  <div className="text-[0.75rem] font-black text-white uppercase leading-none mb-1">{a?.time ? new Date(a.time).toLocaleTimeString() : '--:--'}</div>
-                                  <div className="text-[0.65rem] font-bold text-slate-500 uppercase tracking-widest">{a?.time ? new Date(a.time).toLocaleDateString() : '--/--'}</div>
-                               </td>
-                               <td className="py-6">
                                   <div className="flex items-center gap-4">
                                      <div className={`w-0.5 h-8 ${isLong ? 'bg-emerald-500' : 'bg-rose-500'}`} />
                                      <div>
@@ -236,6 +232,10 @@ export default function PortfolioPage() {
                                         </div>
                                      </div>
                                   </div>
+                               </td>
+                               <td className="py-6">
+                                  <div className="text-[0.85rem] font-black text-white uppercase leading-none mb-1">{a?.time ? new Date(a.time).toLocaleTimeString() : '--:--'}</div>
+                                  <div className="text-[0.75rem] font-bold text-slate-500 uppercase tracking-widest">{a?.time ? new Date(a.time).toLocaleDateString() : '--/--'}</div>
                                </td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
                                   ${a?.entry_price ? a.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
