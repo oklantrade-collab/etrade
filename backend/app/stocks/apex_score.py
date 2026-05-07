@@ -1,0 +1,612 @@
+"""
+APEX Score v1.0
+Adaptive Probability EXpectation
+
+Motor de probabilidad de éxito para Stocks.
+Calcula la probabilidad de subida en 4H y 1D.
+
+NO predice el precio exacto.
+Calcula la probabilidad y el rango esperado.
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone, timedelta
+from app.core.logger import log_info
+
+
+# ── Pesos de cada bloque ──────────────────────
+APEX_WEIGHTS = {
+    'b1_momentum':    0.30,
+    'b2_technical':   0.25,
+    'b3_fundamental': 0.20,
+    'b4_regime':      0.15,
+    'b5_sentiment':   0.10,
+}
+
+# ── Ajuste de pesos por horizonte ─────────────
+APEX_WEIGHTS_4H = {
+    'b1_momentum':    0.40,  # flujo domina en 4H
+    'b2_technical':   0.30,
+    'b3_fundamental': 0.10,  # menos relevante en 4H
+    'b4_regime':      0.15,
+    'b5_sentiment':   0.05,
+}
+
+APEX_WEIGHTS_1D = {
+    'b1_momentum':    0.25,
+    'b2_technical':   0.25,
+    'b3_fundamental': 0.25,  # más relevante en 1D
+    'b4_regime':      0.15,
+    'b5_sentiment':   0.10,
+}
+
+
+# ════════════════════════════════════════════
+# BLOQUE 1 — MOMENTUM DEL FLUJO (30%)
+# ════════════════════════════════════════════
+
+def calculate_b1_momentum(
+    snap:    dict,
+    df_5m:   pd.DataFrame = None,
+    df_15m:  pd.DataFrame = None,
+) -> dict:
+    """
+    Mide la fuerza del flujo comprador.
+    Variables: RVOL, Aceleración del precio, Distancia al VWAP, Consistencia del volumen.
+    """
+    score      = 0.0
+    components = {}
+
+    # ── RVOL ──────────────────────────────────
+    rvol = float(snap.get('rvol', 1.0))
+    if rvol >= 3.0:
+        rvol_score = 100
+    elif rvol >= 2.0:
+        rvol_score = 80
+    elif rvol >= 1.5:
+        rvol_score = 65
+    elif rvol >= 1.0:
+        rvol_score = 50
+    elif rvol >= 0.7:
+        rvol_score = 35
+    else:
+        rvol_score = 20
+
+    components['rvol'] = {
+        'value': rvol, 'score': rvol_score, 'weight': 0.35,
+    }
+
+    # ── Aceleración del precio en 5m ──────────
+    price_accel = 0
+    if df_5m is not None and len(df_5m) >= 6:
+        closes = df_5m['close'].tail(6).values
+        recent_move = (float(closes[-1]) - float(closes[-3])) / float(closes[-3]) * 100
+        momentum = (float(closes[-1]) - float(closes[0])) / float(closes[0]) * 100
+
+        if recent_move > 1.0:
+            price_accel = 90
+        elif recent_move > 0.5:
+            price_accel = 75
+        elif recent_move > 0.2:
+            price_accel = 60
+        elif recent_move > 0:
+            price_accel = 50
+        elif recent_move > -0.2:
+            price_accel = 40
+        else:
+            price_accel = 20
+
+        components['price_acceleration'] = {
+            'recent_move_pct': round(recent_move, 3),
+            'momentum_6c_pct': round(momentum, 3),
+            'score': price_accel, 'weight': 0.25,
+        }
+
+    # ── Distancia al VWAP ─────────────────────
+    price = float(snap.get('price', 0))
+    vwap  = float(snap.get('vwap', price))
+    vwap_score = 50
+    if vwap > 0 and price > 0:
+        dist_vwap = (price - vwap) / vwap * 100
+        if dist_vwap > 2.0:
+            vwap_score = 85
+        elif dist_vwap > 0.5:
+            vwap_score = 70
+        elif dist_vwap > 0:
+            vwap_score = 55
+        elif dist_vwap > -0.5:
+            vwap_score = 45
+        elif dist_vwap > -2.0:
+            vwap_score = 30
+        else:
+            vwap_score = 15
+
+        components['vwap'] = {
+            'dist_pct': round(dist_vwap, 3),
+            'score': vwap_score, 'weight': 0.20,
+        }
+
+    # ── Consistencia del volumen ───────────────
+    vol_consistency = 50
+    if df_15m is not None and len(df_15m) >= 10:
+        vols = df_15m['volume'].tail(10).values
+        vol_trend = np.polyfit(range(len(vols)), vols.astype(float), 1)[0]
+        if vol_trend > 0:
+            vol_consistency = 70
+        else:
+            vol_consistency = 35
+        components['vol_consistency'] = {
+            'trend': 'up' if vol_trend > 0 else 'down',
+            'score': vol_consistency, 'weight': 0.20,
+        }
+
+    # ── Score final B1 ────────────────────────
+    weights_used = {
+        'rvol': 0.35,
+        'price_accel': 0.25 if 'price_acceleration' in components else 0,
+        'vwap': 0.20 if 'vwap' in components else 0,
+        'vol_consist': 0.20 if 'vol_consistency' in components else 0,
+    }
+    total_w = sum(weights_used.values())
+
+    score = (
+        rvol_score * weights_used['rvol'] +
+        price_accel * weights_used['price_accel'] +
+        vwap_score * weights_used['vwap'] +
+        vol_consistency * weights_used['vol_consist']
+    ) / (total_w if total_w > 0 else 1)
+
+    return {
+        'score': round(score, 2),
+        'components': components,
+        'rvol': rvol,
+        'reason': f'Momentum: RVOL={rvol:.1f}x score={score:.1f}/100',
+    }
+
+
+# ════════════════════════════════════════════
+# BLOQUE 2 — CONTEXTO TÉCNICO (25%)
+# ════════════════════════════════════════════
+
+def calculate_b2_technical(
+    snap:   dict,
+    df_15m: pd.DataFrame = None,
+    df_4h:  pd.DataFrame = None,
+) -> dict:
+    """
+    Evalúa el contexto técnico actual.
+    Variables: RSI, MACD, Posición vs EMAs, Banda Fibonacci, SAR.
+    """
+    score      = 0.0
+    components = {}
+    price = float(snap.get('price', 0))
+
+    # ── RSI ───────────────────────────────────
+    rsi = float(snap.get('rsi_14', 50))
+    if 45 <= rsi <= 65:
+        rsi_score = 60
+    elif rsi < 30:
+        rsi_score = 80
+    elif 30 <= rsi < 45:
+        rsi_score = 70
+    elif 65 < rsi <= 75:
+        rsi_score = 45
+    else:
+        rsi_score = 25
+
+    components['rsi'] = {'value': rsi, 'score': rsi_score, 'weight': 0.20}
+
+    # ── MACD ──────────────────────────────────
+    macd_hist = float(snap.get('macd_histogram', 0))
+    macd_prev = float(snap.get('macd_histogram_prev', 0))
+    if macd_hist > 0 and macd_hist > macd_prev:
+        macd_score = 80
+    elif macd_hist > 0 and macd_hist <= macd_prev:
+        macd_score = 60
+    elif macd_hist < 0 and macd_hist > macd_prev:
+        macd_score = 45
+    else:
+        macd_score = 25
+
+    components['macd'] = {
+        'histogram': round(macd_hist, 4),
+        'growing': macd_hist > macd_prev,
+        'score': macd_score, 'weight': 0.20,
+    }
+
+    # ── Posición vs EMA ───────────────────────
+    ema20 = float(snap.get('ema20', snap.get('ema_20', 0)))
+    ema50 = float(snap.get('ema50', snap.get('ema_50', 0)))
+    ema_score = 50
+
+    if price > 0 and ema20 > 0 and ema50 > 0:
+        above_20 = price > ema20
+        above_50 = price > ema50
+        ema20_above_50 = ema20 > ema50
+
+        if above_20 and above_50 and ema20_above_50:
+            ema_score = 85
+        elif above_20 and above_50:
+            ema_score = 70
+        elif above_20 and not above_50:
+            ema_score = 55
+        elif not above_20 and above_50:
+            ema_score = 40
+        else:
+            ema_score = 25
+
+    components['ema_position'] = {
+        'price': price, 'ema20': ema20, 'ema50': ema50,
+        'score': ema_score, 'weight': 0.20,
+    }
+
+    # ── Banda Fibonacci ───────────────────────
+    fib_zone = int(snap.get('fibonacci_zone', snap.get('fib_zone_15m', 0)))
+    fib_score_map = {
+        -6: 95, -5: 88, -4: 80, -3: 72, -2: 62, -1: 55,
+        0: 50,
+        1: 48, 2: 42, 3: 35, 4: 28, 5: 20, 6: 15,
+    }
+    fib_score = fib_score_map.get(max(-6, min(6, fib_zone)), 50)
+    components['fibonacci'] = {'zone': fib_zone, 'score': fib_score, 'weight': 0.20}
+
+    # ── SAR ───────────────────────────────────
+    sar_15m = int(snap.get('sar_trend_15m', 0))
+    sar_4h  = int(snap.get('sar_trend_4h', 0))
+
+    if sar_15m > 0 and sar_4h > 0:
+        sar_score = 80
+    elif sar_15m > 0:
+        sar_score = 60
+    elif sar_4h > 0:
+        sar_score = 55
+    elif sar_15m < 0 and sar_4h < 0:
+        sar_score = 20
+    else:
+        sar_score = 40
+
+    components['sar'] = {
+        'sar_15m': sar_15m, 'sar_4h': sar_4h,
+        'score': sar_score, 'weight': 0.20,
+    }
+
+    # ── Score final B2 ────────────────────────
+    score = (
+        rsi_score * 0.20 + macd_score * 0.20 +
+        ema_score * 0.20 + fib_score * 0.20 + sar_score * 0.20
+    )
+
+    return {
+        'score': round(score, 2),
+        'components': components,
+        'rsi': rsi, 'fib_zone': fib_zone,
+        'reason': f'Técnico: RSI={rsi:.0f} Fib=z{fib_zone} score={score:.1f}/100',
+    }
+
+
+# ════════════════════════════════════════════
+# BLOQUE 3 — VALORACIÓN FUNDAMENTAL (20%)
+# ════════════════════════════════════════════
+
+def calculate_b3_fundamental(fundamental_cache: dict) -> dict:
+    """
+    Usa el valuation_engine.py que ya tenemos.
+    Variables: Piotroski, Margen de seguridad, Altman Z-Score, Pro Score.
+    """
+    score      = 0.0
+    components = {}
+
+    # ── Piotroski F-Score ─────────────────────
+    piotroski = int(fundamental_cache.get('piotroski_score', 4))
+    piotroski_score = piotroski / 9 * 100
+    components['piotroski'] = {
+        'score_raw': piotroski, 'score': round(piotroski_score, 1), 'weight': 0.30,
+    }
+
+    # ── Margen de seguridad ───────────────────
+    margin = float(fundamental_cache.get('margin_of_safety', 0))
+    if margin >= 20:
+        margin_score = 90
+    elif margin >= 10:
+        margin_score = 75
+    elif margin >= 0:
+        margin_score = 60
+    elif margin >= -10:
+        margin_score = 45
+    elif margin >= -20:
+        margin_score = 30
+    else:
+        margin_score = 15
+    components['margin_of_safety'] = {
+        'value': margin, 'score': margin_score, 'weight': 0.30,
+    }
+
+    # ── Altman Z-Score ────────────────────────
+    altman_zone = str(fundamental_cache.get('altman_zone', 'grey'))
+    altman_score = {'safe': 80, 'grey': 50, 'danger': 20}.get(altman_zone, 50)
+    components['altman'] = {
+        'zone': altman_zone, 'score': altman_score, 'weight': 0.20,
+    }
+
+    # ── Pro Score existente ───────────────────
+    pro_score = float(fundamental_cache.get('fundamental_score', 50))
+    components['pro_score'] = {
+        'value': pro_score, 'score': pro_score, 'weight': 0.20,
+    }
+
+    # ── Score final B3 ────────────────────────
+    score = (
+        piotroski_score * 0.30 + margin_score * 0.30 +
+        altman_score * 0.20 + pro_score * 0.20
+    )
+
+    return {
+        'score': round(score, 2),
+        'components': components,
+        'piotroski': piotroski, 'margin': margin,
+        'reason': f'Fundamental: Piotroski={piotroski}/9 Margen={margin:.1f}% score={score:.1f}/100',
+    }
+
+
+# ════════════════════════════════════════════
+# BLOQUE 4 — RÉGIMEN DEL MERCADO (15%)
+# ════════════════════════════════════════════
+
+def calculate_b4_regime(
+    macro: dict, snap: dict, df_daily: pd.DataFrame = None,
+) -> dict:
+    """
+    Detecta el régimen actual del mercado.
+    Tipos: trending_up, trending_down, mean_reversion, high_volatility, low_volatility.
+    """
+    score      = 0.0
+    components = {}
+
+    adx = float(snap.get('adx', 25))
+    atr = float(snap.get('atr', 0))
+    price = float(snap.get('price', 1))
+    atr_pct = (atr / price * 100) if price > 0 else 0
+
+    if adx > 35 and snap.get('sar_trend_4h', 0) > 0:
+        regime_type, regime_score = 'trending_up', 80
+    elif adx > 35 and snap.get('sar_trend_4h', 0) < 0:
+        regime_type, regime_score = 'trending_down', 25
+    elif adx < 20 and atr_pct < 1.5:
+        regime_type, regime_score = 'low_volatility', 55
+    elif atr_pct > 3.0:
+        regime_type, regime_score = 'high_volatility', 45
+    else:
+        regime_type, regime_score = 'mean_reversion', 60
+
+    components['regime'] = {
+        'type': regime_type, 'adx': adx,
+        'atr_pct': round(atr_pct, 2),
+        'score': regime_score, 'weight': 0.40,
+    }
+
+    # ── Macro (VIX/SPY/NDX) ───────────────────
+    macro_score_raw = float(macro.get('score', 0))
+    macro_score = (macro_score_raw + 10) / 20 * 100
+    components['macro'] = {
+        'score_raw': macro_score_raw,
+        'score': round(macro_score, 1),
+        'sentiment': macro.get('sentiment', ''),
+        'weight': 0.40, 'flags': macro.get('flags', []),
+    }
+
+    # ── Sector performance (MTF proxy) ────────
+    mtf = float(snap.get('mtf_score', 0))
+    sector_score = (mtf + 1) / 2 * 100
+    components['sector'] = {
+        'mtf': mtf, 'score': round(sector_score, 1), 'weight': 0.20,
+    }
+
+    score = regime_score * 0.40 + macro_score * 0.40 + sector_score * 0.20
+
+    return {
+        'score': round(score, 2),
+        'regime_type': regime_type,
+        'components': components, 'adx': adx,
+        'reason': f'Régimen: {regime_type} ADX={adx:.0f} Macro={macro_score_raw:.1f} score={score:.1f}/100',
+    }
+
+
+# ════════════════════════════════════════════
+# BLOQUE 5 — SENTIMIENTO (10%)
+# ════════════════════════════════════════════
+
+def calculate_b5_sentiment(fundamental_cache: dict, snap: dict) -> dict:
+    """
+    Sentimiento específico para stocks.
+    Variables: Analyst rating, Short interest, Earnings proximity, Valuation status.
+    """
+    score      = 0.0
+    components = {}
+
+    # ── Analyst Rating ────────────────────────
+    analyst_rating = float(fundamental_cache.get('analyst_rating', 5) or 5)
+    analyst_score = analyst_rating * 10
+    components['analyst'] = {
+        'rating': analyst_rating, 'score': analyst_score, 'weight': 0.40,
+    }
+
+    # ── Short Interest ────────────────────────
+    short_pct = float(fundamental_cache.get('short_interest_pct', 5) or 5)
+    if short_pct < 5:
+        short_score = 65
+    elif short_pct < 10:
+        short_score = 55
+    elif short_pct < 20:
+        short_score = 45
+    else:
+        short_score = 35
+    components['short_interest'] = {
+        'pct': short_pct, 'score': short_score, 'weight': 0.20,
+    }
+
+    # ── Earnings Proximity ────────────────────
+    days_to_earnings = int(fundamental_cache.get('days_to_earnings', 30) or 30)
+    if days_to_earnings < 3:
+        earnings_score = 30
+    elif days_to_earnings < 7:
+        earnings_score = 45
+    elif days_to_earnings < 14:
+        earnings_score = 55
+    elif days_to_earnings < 30:
+        earnings_score = 65
+    else:
+        earnings_score = 70
+    components['earnings'] = {
+        'days_to': days_to_earnings, 'score': earnings_score, 'weight': 0.25,
+    }
+
+    # ── Valuation Status ─────────────────────
+    val_status = str(fundamental_cache.get('valuation_status', 'fairly_valued'))
+    val_score = {
+        'undervalued': 80, 'fairly_valued': 60,
+        'overvalued': 35, 'unknown': 50,
+    }.get(val_status, 50)
+    components['valuation'] = {
+        'status': val_status, 'score': val_score, 'weight': 0.15,
+    }
+
+    score = (
+        analyst_score * 0.40 + short_score * 0.20 +
+        earnings_score * 0.25 + val_score * 0.15
+    )
+
+    return {
+        'score': round(score, 2),
+        'components': components,
+        'reason': f'Sentimiento: Analyst={analyst_rating:.1f}/10 DaysEarnings={days_to_earnings} score={score:.1f}/100',
+    }
+
+
+# ════════════════════════════════════════════
+# FUNCIÓN PRINCIPAL — APEX SCORE
+# ════════════════════════════════════════════
+
+def calculate_apex_score(
+    ticker:            str,
+    snap:              dict,
+    fundamental_cache: dict,
+    macro:             dict,
+    df_5m:             pd.DataFrame = None,
+    df_15m:            pd.DataFrame = None,
+    df_4h:             pd.DataFrame = None,
+    df_daily:          pd.DataFrame = None,
+) -> dict:
+    """
+    Función principal del APEX Score.
+    Combina los 5 bloques con pesos diferenciados para 4H y 1D.
+    Retorna la probabilidad de subida y el retorno esperado con 3 escenarios.
+    """
+    price = float(snap.get('price', 0))
+    atr   = float(snap.get('atr', price * 0.02))
+
+    # ── Calcular los 5 bloques ────────────────
+    b1 = calculate_b1_momentum(snap, df_5m, df_15m)
+    b2 = calculate_b2_technical(snap, df_15m, df_4h)
+    b3 = calculate_b3_fundamental(fundamental_cache)
+    b4 = calculate_b4_regime(macro, snap, df_daily)
+    b5 = calculate_b5_sentiment(fundamental_cache, snap)
+
+    blocks = {
+        'b1_momentum':    b1['score'],
+        'b2_technical':   b2['score'],
+        'b3_fundamental': b3['score'],
+        'b4_regime':      b4['score'],
+        'b5_sentiment':   b5['score'],
+    }
+
+    # ── APEX Score 4H (flujo domina) ──────────
+    apex_4h = sum(blocks[k] * APEX_WEIGHTS_4H[k] for k in blocks)
+    # ── APEX Score 1D (fundamental importa) ───
+    apex_1d = sum(blocks[k] * APEX_WEIGHTS_1D[k] for k in blocks)
+
+    apex_4h = round(max(5, min(95, apex_4h)), 1)
+    apex_1d = round(max(5, min(95, apex_1d)), 1)
+
+    # ── Retorno esperado ──────────────────────
+    atr_pct = atr / price * 100 if price > 0 else 2
+    prob_factor_4h = (apex_4h - 50) / 50
+    prob_factor_1d = (apex_1d - 50) / 50
+    return_4h = atr_pct * 0.5 * prob_factor_4h
+    return_1d = atr_pct * 1.0 * prob_factor_1d
+
+    # ── Confianza ─────────────────────────────
+    scores = list(blocks.values())
+    divergence = float(np.std(scores))
+    if divergence < 10 and apex_4h > 65:
+        confidence = 'high'
+    elif divergence < 20:
+        confidence = 'medium'
+    else:
+        confidence = 'low'
+
+    # ── Edge estadístico ──────────────────────
+    edge_4h = apex_4h - 50
+    edge_1d = apex_1d - 50
+
+    # ── 3 Escenarios ──────────────────────────
+    scenarios = {
+        'bull': {
+            'probability': min(95, apex_4h + 15),
+            'price_target': round(price * (1 + atr_pct / 100 * 1.5), 4),
+            'return_pct': round(atr_pct * 1.5, 2),
+            'description': 'Momentum continúa fuerte',
+        },
+        'base': {
+            'probability': apex_4h,
+            'price_target': round(price * (1 + return_4h / 100), 4),
+            'return_pct': round(return_4h, 2),
+            'description': 'Escenario más probable',
+        },
+        'bear': {
+            'probability': max(5, 100 - apex_4h - 10),
+            'price_target': round(price * (1 - atr_pct / 100), 4),
+            'return_pct': round(-atr_pct, 2),
+            'description': 'Retroceso hacia soporte',
+        },
+    }
+
+    # ── Clasificación del score ────────────────
+    if apex_4h >= 75:
+        signal, color, emoji = 'STRONG_BUY', '#00C896', '🟢🟢'
+    elif apex_4h >= 60:
+        signal, color, emoji = 'BUY', '#4FC3F7', '🟢'
+    elif apex_4h >= 45:
+        signal, color, emoji = 'NEUTRAL', '#FFB74D', '🟡'
+    elif apex_4h >= 30:
+        signal, color, emoji = 'CAUTION', '#FF8A65', '🟠'
+    else:
+        signal, color, emoji = 'AVOID', '#FF4757', '🔴'
+
+    log_info('APEX',
+        f'{emoji} {ticker}: APEX_4H={apex_4h}% APEX_1D={apex_1d}% '
+        f'({signal}) conf={confidence} edge={edge_4h:+.1f}%'
+    )
+
+    return {
+        'ticker': ticker,
+        'price': price,
+        'apex_score_4h': apex_4h,
+        'apex_score_1d': apex_1d,
+        'signal': signal,
+        'color': color,
+        'confidence': confidence,
+        'edge_4h': round(edge_4h, 1),
+        'edge_1d': round(edge_1d, 1),
+        'return_expected_4h': round(return_4h, 3),
+        'return_expected_1d': round(return_1d, 3),
+        'scenarios': scenarios,
+        'blocks': blocks,
+        'regime_type': b4['regime_type'],
+        'detail': {
+            'b1': b1, 'b2': b2, 'b3': b3, 'b4': b4, 'b5': b5,
+        },
+        'calculated_at': datetime.now(timezone.utc).isoformat(),
+        'valid_until_4h': (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+        'valid_until_1d': (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
+    }

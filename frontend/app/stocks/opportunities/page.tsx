@@ -369,6 +369,51 @@ const OrderActivityIndicator = ({ orders }: { orders: any[] }) => {
   );
 }
 
+const ApexBadge = ({ score4h, score1d, signal, confidence, edge }: {
+  score4h: number | null, score1d: number | null,
+  signal: string | null, confidence: string | null, edge: number | null
+}) => {
+  if (!score4h && score4h !== 0) return <span style={{color:'#333', fontSize:'10px'}}>—</span>
+
+  const signalConfig: Record<string, {color: string, bg: string, label: string}> = {
+    STRONG_BUY: { color:'#00C896', bg:'rgba(0,200,150,0.12)', label:'STRONG BUY' },
+    BUY:        { color:'#4FC3F7', bg:'rgba(79,195,247,0.12)', label:'BUY' },
+    NEUTRAL:    { color:'#FFB74D', bg:'rgba(255,183,77,0.12)', label:'NEUTRAL' },
+    CAUTION:    { color:'#FF8A65', bg:'rgba(255,138,101,0.12)', label:'CAUTION' },
+    AVOID:      { color:'#FF4757', bg:'rgba(255,71,87,0.12)', label:'AVOID' },
+  }
+  const cfg = signalConfig[signal || 'NEUTRAL'] || signalConfig.NEUTRAL
+  const confIcon: Record<string, string> = { high: '⬆️', medium: '➡️', low: '⬇️' }
+  const edgeVal = edge || 0
+
+  return (
+    <div style={{
+      background: cfg.bg, border: `1px solid ${cfg.color}33`,
+      borderRadius: '8px', padding: '5px 8px', minWidth: '100px',
+    }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'3px' }}>
+        <span style={{ fontSize:'16px', fontWeight:900, color: cfg.color, fontFamily:'monospace' }}>
+          {score4h}%
+        </span>
+        <span style={{ fontSize:'10px', color:'#666' }}>{confIcon[confidence || 'low']}</span>
+      </div>
+      <div style={{ fontSize:'8px', fontWeight:700, color: cfg.color, letterSpacing:'0.8px', marginBottom:'3px' }}>
+        {cfg.label}
+      </div>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:'8px', color:'#666' }}>
+        <span>edge</span>
+        <span style={{ color: edgeVal > 0 ? '#00C896' : '#FF4757', fontWeight:600 }}>
+          {edgeVal > 0 ? '+' : ''}{edgeVal.toFixed(1)}%
+        </span>
+      </div>
+      <div style={{ display:'flex', justifyContent:'space-between', fontSize:'8px', color:'#555', marginTop:'1px' }}>
+        <span>1D</span>
+        <span>{score1d || 0}%</span>
+      </div>
+    </div>
+  )
+}
+
 function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
   const rawIA = opp.pro_score || 0;
   const scoreIA = (rawIA > 10 ? rawIA / 10 : rawIA).toFixed(1);
@@ -386,7 +431,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
   if (fibZone !== undefined && fibZone !== null && movementDisplay !== '—') movementDisplay = `${movementDisplay} F(${fibZone})`;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '70px 80px 70px 70px 70px 70px 70px 105px 55px 85px 35px 35px 35px 90px', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: '70px 80px 70px 70px 70px 70px 70px 105px 55px 85px 35px 35px 35px 115px 90px', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
       <div style={{ display:'flex', alignItems:'center', gap: '4px' }}>
           <span style={{ fontWeight: 900, color: '#FFF', fontSize: '13px' }}>{opp.ticker}</span>
           {(opp.intrinsic_value > opp.price && opp.intrinsic_value > 0) && (
@@ -412,6 +457,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
       <span style={{ color: displayScoreTech >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 950, fontSize:'11px' }}>{displayScoreTech}</span>
       <span style={{ color: Number(scoreIA) >= 7.5 ? '#A855F7' : '#22C55E', fontWeight: 950, fontSize:'11px' }}>{scoreIA}</span>
       <span style={{ color: Number(opp.sm_score) >= 7.5 ? '#FF4757' : (Number(opp.sm_score) >= 5 ? '#F59E0B' : '#666'), fontWeight: 950, fontSize:'11px' }}>{opp.sm_score?.toFixed(1) || '1.0'}</span>
+      <ApexBadge score4h={opp.apex_4h} score1d={opp.apex_1d} signal={opp.apex_signal} confidence={opp.apex_conf} edge={opp.apex_edge} />
       <div style={{textAlign:'right', display: 'flex', justifyContent: 'flex-end', gap: '8px'}}>
         <button onClick={onOpenDetails} title="Analizar Empresa" style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', color: '#22C55E', width: '28px', height: '28px', borderRadius: '50%', fontSize: '12px', cursor: 'pointer', display: 'inline-flex', justifyContent: 'center', alignItems: 'center' }}>🔍</button>
         {isPro && (
@@ -544,7 +590,7 @@ export default function OpportunitiesIntelligence() {
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
         <div>
-          <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Intelligence Layer v4.5</div>
+          <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Intelligence Layer v4.5 • APEX Score v1.0</div>
           <h1 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0', letterSpacing: '-0.02em' }}>🎯 AI Stock Scanner</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <p style={{ color: '#555', fontSize: '12px' }}>{total} monitoreados · NYC Live Tracking</p>
@@ -578,7 +624,7 @@ export default function OpportunitiesIntelligence() {
       )}
 
       <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '70px 80px 70px 70px 70px 70px 70px 105px 55px 85px 35px 35px 35px 90px', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '70px 80px 70px 70px 70px 70px 70px 105px 55px 85px 35px 35px 35px 115px 90px', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' }}>
           <span>Ticker</span>
           <span>% PRC</span>
           <span>Precio</span>
@@ -592,6 +638,7 @@ export default function OpportunitiesIntelligence() {
           <span>TS</span>
           <span>IA</span>
           <span>SM</span>
+          <span style={{color:'#4FC3F7'}}>APEX</span>
           <span style={{textAlign:'right'}}>Accion</span>
         </div>
         {!loading && displayList.map((opp, i) => ( 

@@ -10,6 +10,9 @@ files_to_copy = [
     "backend/app/strategy/swing_orders.py",
     "backend/app/workers/scheduler.py",
     "backend/app/workers/stocks_scheduler.py",
+    "backend/app/stocks/apex_score.py",
+    "backend/app/stocks/apex_scheduler.py",
+    "backend/app/stocks/migrations/005_apex_scores_table.sql",
     "backend/app/api/stocks.py",
     "backend/app/execution/providers/ctrader_provider.py"
 ]

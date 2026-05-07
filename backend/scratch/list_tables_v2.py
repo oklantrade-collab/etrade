@@ -1,8 +1,7 @@
 from app.core.supabase_client import get_supabase
 
 sb = get_supabase()
-# List some common tables to check
-tables = ["forex_positions", "forex_journal", "trades_journal", "market_snapshot"]
+tables = ["forex_positions_history", "historical_trades", "trades_journal_forex"]
 
 for t in tables:
     try:

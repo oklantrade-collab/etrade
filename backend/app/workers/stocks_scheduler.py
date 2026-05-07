@@ -56,6 +56,10 @@ from app.stocks.stocks_adaptive_sl import (
     evaluate_adaptive_sl,
     execute_adaptive_sl_close,
 )
+from app.stocks.apex_scheduler import (
+    run_apex_cycle,
+    run_apex_backtesting,
+)
 
 sm = SymbolStateMachine.get_instance()
 
@@ -655,6 +659,44 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             else:
                 log_debug(MODULE, f"Skipping sell rules for {ticker}: age {age_mins:.1f} < 6.0m")
 
+        # ── 11. APEX SCORE — Probabilidad de subida ──
+        apex_result = None
+        try:
+            from app.stocks.apex_score import calculate_apex_score
+            from app.stocks.stocks_adaptive_tp import fetch_macro_data
+
+            macro_data = await fetch_macro_data(sb)
+            fund_cache = {
+                'piotroski_score': ind_15m.get('piotroski_score', 4),
+                'margin_of_safety': ind_15m.get('margin_of_safety', 0),
+                'altman_zone': fundamental_res.get('components', {}).get('altman', {}).get('zone', 'grey'),
+                'fundamental_score': ind_15m.get('fundamental_score', 50),
+                'analyst_rating': a_rating or 5,
+                'valuation_status': fundamental_res.get('valuation_status', 'fairly_valued'),
+                'days_to_earnings': f_data.get('days_to_earnings', 30) if f_data else 30,
+                'short_interest_pct': f_data.get('short_interest_pct', 5) if f_data else 5,
+            }
+            apex_result = calculate_apex_score(
+                ticker=ticker,
+                snap={**ind_15m, **snap_for_sm, 'price': current_price},
+                fundamental_cache=fund_cache,
+                macro=macro_data,
+                df_5m=df_5m, df_15m=df_15m,
+                df_4h=df_4h, df_daily=df_1d,
+            )
+            # Persist APEX to market_snapshot
+            try:
+                sb.table('market_snapshot').update({
+                    'apex_4h': apex_result['apex_score_4h'],
+                    'apex_1d': apex_result['apex_score_1d'],
+                    'apex_signal': apex_result['signal'],
+                    'apex_conf': apex_result['confidence'],
+                }).eq('symbol', ticker).execute()
+            except Exception:
+                pass
+        except Exception as apex_e:
+            log_warning(MODULE, f"APEX skip {ticker}: {apex_e}")
+
         if is_acceptable:
             log_info(MODULE, f"🌟 {ticker} BULLISH Score={base_score} | Pro_Score={pro_score}")
         else:
@@ -669,7 +711,12 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             "acceptable": is_acceptable,
             "movement_15m": movement_15m["movement_type"],
             "last_scan_time": ind_15m["last_scan_time"],
-            "pool_type": ind_15m.get("pool_type", "HOT")
+            "pool_type": ind_15m.get("pool_type", "HOT"),
+            "apex_4h": apex_result['apex_score_4h'] if apex_result else None,
+            "apex_1d": apex_result['apex_score_1d'] if apex_result else None,
+            "apex_signal": apex_result['signal'] if apex_result else None,
+            "apex_conf": apex_result['confidence'] if apex_result else None,
+            "apex_edge": apex_result['edge_4h'] if apex_result else None,
         }
 
     except Exception as e:
@@ -1092,6 +1139,26 @@ async def start_stocks_scheduler(force=False):
         trigger=CronTrigger(day_of_week='mon-fri', hour=16, minute=5, timezone='US/Eastern'),
         id="stocks_pro_cycle",
         name="Inversión Pro (market close daily analysis)",
+        max_instances=1,
+        replace_existing=True,
+    )
+
+    # 5. APEX SCORE: every 15 minutes during market hours
+    scheduler.add_job(
+        run_apex_cycle,
+        trigger=IntervalTrigger(minutes=15),
+        id="apex_score_cycle",
+        name="APEX Score (15m probability engine)",
+        max_instances=1,
+        replace_existing=True,
+    )
+
+    # 6. APEX BACKTESTING: every 4 hours
+    scheduler.add_job(
+        run_apex_backtesting,
+        trigger=IntervalTrigger(hours=4),
+        id="apex_backtesting",
+        name="APEX Backtesting (4H accuracy check)",
         max_instances=1,
         replace_existing=True,
     )
