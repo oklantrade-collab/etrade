@@ -210,7 +210,7 @@ export default function PortfolioPage() {
                           <th className="py-6">INSTRUMENTO</th>
                           <th className="py-6">PRECIO COMPRA</th>
                           <th className="py-6">CANTIDAD</th>
-                          <th className="py-6">ESTRATEGIA</th>
+                          <th className="py-6">ESTRATEGIA COMPRA</th>
                           <th className="py-6">ESTADO</th>
                           <th className="py-6">IMPORTE</th>
                           <th className="py-6 text-right px-10">VER</th>
@@ -219,18 +219,29 @@ export default function PortfolioPage() {
                     <tbody className="divide-y divide-white/5">
                        {(global?.recent_activity || []).slice(0, MAX_HISTORY).slice(page * ITEMS_PER_PAGE, (page + 1) * ITEMS_PER_PAGE).map((a, i) => {
                           const isWin = (a?.pnl || 0) >= 0
+                          const isLong = (a?.side || '').toLowerCase() === 'long' || (a?.side || '').toLowerCase() === 'buy'
                           return (
                             <tr key={i} className="hover:bg-white/[0.04] transition-colors group">
                                <td className="py-6 px-10">
-                                  <div className="text-[0.6rem] font-black text-slate-500 uppercase leading-none mb-1">{a?.time ? new Date(a.time).toLocaleTimeString() : '--:--'}</div>
-                                  <div className="text-[0.55rem] font-medium text-slate-700 uppercase tracking-widest">{a?.time ? new Date(a.time).toLocaleDateString() : '--/--'}</div>
+                                  <div className="text-[0.75rem] font-black text-white uppercase leading-none mb-1">{a?.time ? new Date(a.time).toLocaleTimeString() : '--:--'}</div>
+                                  <div className="text-[0.65rem] font-bold text-slate-500 uppercase tracking-widest">{a?.time ? new Date(a.time).toLocaleDateString() : '--/--'}</div>
                                </td>
-                               <td className="font-black text-white italic uppercase tracking-tighter">{a?.symbol || '---'}</td>
+                               <td className="py-6">
+                                  <div className="flex items-center gap-4">
+                                     <div className={`w-0.5 h-8 ${isLong ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                                     <div>
+                                        <div className="font-black text-white italic uppercase tracking-tighter text-sm">{a?.symbol || '---'}</div>
+                                        <div className={`text-[0.5rem] font-black uppercase tracking-tighter ${isLong ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                           {isLong ? 'LONG / COMPRA' : 'SHORT / VENTA'}
+                                        </div>
+                                     </div>
+                                  </div>
+                               </td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
                                   ${a?.entry_price ? a.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '---'}
                                </td>
                                <td className="font-mono text-[0.7rem] text-slate-400">
-                                  {a?.quantity ? (a.quantity).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 }) : '---'}
+                                  {a?.quantity ? (a.quantity).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 3 }) : '---'}
                                </td>
                                <td className="font-mono text-[0.6rem] text-slate-500 font-bold uppercase">
                                   {a?.rule || 'S-01'}
@@ -354,7 +365,7 @@ function MarketBox({ title, icon, data, sipv, color }: any) {
     'border-white/5';
 
   return (
-    <div className={`glass-card flex flex-col items-center gap-6 text-center hover:border-white/20 transition-all ${borderColor} border-2`}>
+    <div className="glass-card flex flex-col items-center gap-6 text-center hover:border-white/10 transition-all border border-white/5">
        <div className="text-4xl bg-white/5 w-16 h-16 flex items-center justify-center rounded-2xl group-hover:scale-110 transition-transform">
           {icon}
        </div>

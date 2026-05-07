@@ -58,9 +58,9 @@ async def get_global_portfolio():
                     supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute(),
                     supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute(),
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
-                    supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(50).execute(),
-                    supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
-                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute(),
+                    supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price, size, side, rule_code').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(50).execute(),
+                    supabase.table('forex_positions').select('symbol, closed_at, pnl_usd, entry_price, lots, side, rule_code').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
+                    supabase.table('stocks_positions').select('ticker, updated_at, unrealized_pnl, avg_price, shares, strategy, pool_type').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute(),
                     supabase.table('risk_config').select('max_open_trades, max_positions_per_symbol').limit(1).execute()
                 )
 
@@ -216,9 +216,9 @@ async def get_global_portfolio():
 
             # Actividad reciente (Ya cargada en paralelo arriba)
             recent_activity = []
-            for t in recent_crypto: recent_activity.append({'time': t['closed_at'], 'market': 'Crypto', 'symbol': t['symbol'], 'pnl': float(t['total_pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
-            for t in recent_forex: recent_activity.append({'time': t['closed_at'], 'market': 'Forex', 'symbol': t['symbol'], 'pnl': float(t['pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
-            for t in recent_stocks: recent_activity.append({'time': t['updated_at'], 'market': 'Stocks', 'symbol': t['ticker'], 'pnl': float(t['unrealized_pnl'] or 0), 'entry_price': t['avg_price'], 'quantity': t['shares'], 'status': 'closed', 'reason': t.get('close_reason', 'closed')})
+            for t in recent_crypto: recent_activity.append({'time': t['closed_at'], 'market': 'Crypto', 'symbol': t['symbol'], 'pnl': float(t['total_pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed'), 'quantity': t.get('size'), 'side': t.get('side'), 'rule': t.get('rule_code')})
+            for t in recent_forex: recent_activity.append({'time': t['closed_at'], 'market': 'Forex', 'symbol': t['symbol'], 'pnl': float(t['pnl_usd'] or 0), 'entry_price': t['entry_price'], 'status': 'closed', 'reason': t.get('close_reason', 'closed'), 'quantity': t.get('lots'), 'side': t.get('side'), 'rule': t.get('rule_code')})
+            for t in recent_stocks: recent_activity.append({'time': t['updated_at'], 'market': 'Stocks', 'symbol': t['ticker'], 'pnl': float(t['unrealized_pnl'] or 0), 'entry_price': t['avg_price'], 'quantity': t['shares'], 'status': 'closed', 'reason': t.get('close_reason', 'closed'), 'side': 'long', 'rule': t.get('strategy') or t.get('pool_type')})
             recent_activity.sort(key=lambda x: x['time'], reverse=True)
             
             # --- 4. SIPV SIGNALS (BTC, DXY, VIX) ---
