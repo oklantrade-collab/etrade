@@ -217,47 +217,58 @@ async def get_global_portfolio():
             # Actividad reciente (Ya cargada en paralelo arriba)
             recent_activity = []
             for t in recent_crypto:
-                recent_activity.append({
-                    'time': t.get('closed_at'),
-                    'market': 'Crypto',
-                    'symbol': t.get('symbol'),
-                    'pnl': float(t.get('total_pnl_usd') or 0),
-                    'entry_price': t.get('entry_price'),
-                    'status': 'closed',
-                    'reason': t.get('close_reason', 'closed'),
-                    'quantity': t.get('size'),
-                    'side': t.get('side'),
-                    'rule': t.get('rule_code')
-                })
+                try:
+                    recent_activity.append({
+                        'time': t.get('closed_at'),
+                        'market': 'Crypto',
+                        'symbol': t.get('symbol'),
+                        'pnl': float(t.get('total_pnl_usd') or 0),
+                        'entry_price': t.get('entry_price'),
+                        'status': 'closed',
+                        'reason': t.get('close_reason', 'closed'),
+                        'quantity': t.get('size'),
+                        'side': t.get('side'),
+                        'rule': t.get('rule_code')
+                    })
+                except Exception as e:
+                    log_error("portfolio", f"Error mapping recent crypto {t}: {e}")
+                    continue
+
             for t in recent_forex:
-                recent_activity.append({
-                    'time': t.get('closed_at'),
-                    'market': 'Forex',
-                    'symbol': t.get('symbol'),
-                    'pnl': float(t.get('pnl_usd') or t.get('realized_pnl') or 0),
-                    'entry_price': t.get('entry_price'),
-                    'status': 'closed',
-                    'reason': t.get('close_reason', 'closed'),
-                    'quantity': t.get('lots'),
-                    'side': t.get('side'),
-                    'rule': t.get('rule_code')
-                })
+                try:
+                    recent_activity.append({
+                        'time': t.get('closed_at'),
+                        'market': 'Forex',
+                        'symbol': t.get('symbol'),
+                        'pnl': float(t.get('pnl_usd') or t.get('realized_pnl') or 0),
+                        'entry_price': t.get('entry_price'),
+                        'status': 'closed',
+                        'reason': t.get('close_reason', 'closed'),
+                        'quantity': t.get('lots'),
+                        'side': t.get('side'),
+                        'rule': t.get('rule_code')
+                    })
+                except Exception as e:
+                    log_error("portfolio", f"Error mapping recent forex {t}: {e}")
+                    continue
+
             for t in recent_stocks:
-                recent_activity.append({
-                    'time': t.get('updated_at') or t.get('exit_date'),
-                    'market': 'Stocks',
-                    'symbol': t.get('ticker'),
-                    'pnl': float(t.get('unrealized_pnl') or t.get('pnl_usd') or 0),
-                    'entry_price': t.get('avg_price') or t.get('entry_price'),
-                    'status': 'closed',
-                    'reason': t.get('close_reason', 'closed'),
-                    'quantity': t.get('shares') or 0,
-                    'side': 'long',
-                    'rule': t.get('strategy') or t.get('pool_type') or t.get('rule_code') or 'V5_STOCKS'
-                })
-            except Exception as e:
-                log_error("portfolio", f"Error mapping recent stock {t}: {e}")
-                continue
+                try:
+                    recent_activity.append({
+                        'time': t.get('updated_at') or t.get('exit_date'),
+                        'market': 'Stocks',
+                        'symbol': t.get('ticker'),
+                        'pnl': float(t.get('unrealized_pnl') or t.get('pnl_usd') or 0),
+                        'entry_price': t.get('avg_price') or t.get('entry_price'),
+                        'status': 'closed',
+                        'reason': t.get('close_reason', 'closed'),
+                        'quantity': t.get('shares') or 0,
+                        'side': 'long',
+                        'rule': t.get('strategy') or t.get('pool_type') or t.get('rule_code') or 'V5_STOCKS'
+                    })
+                except Exception as e:
+                    log_error("portfolio", f"Error mapping recent stock {t}: {e}")
+                    continue
             # Filtrar y asegurar que todos tengan 'time' para el sort
             recent_activity = [a for a in recent_activity if a.get('time')]
             recent_activity.sort(key=lambda x: str(x['time']), reverse=True)
