@@ -128,6 +128,7 @@ export default function PortfolioPage() {
                 signal: global?.markets?.crypto?.sipv_signal || "ESPERANDO",
                 action: global?.markets?.crypto?.sipv_action || "HOLD"
               }}
+              color="rose"
            />
            <MarketBox 
               title="FOREX" 
@@ -138,6 +139,7 @@ export default function PortfolioPage() {
                 signal: global?.markets?.forex?.sipv_signal || "ESPERANDO",
                 action: global?.markets?.forex?.sipv_action || "HOLD"
               }}
+              color="blue"
            />
            <MarketBox 
               title="ACCIONES" 
@@ -148,7 +150,7 @@ export default function PortfolioPage() {
                 signal: global?.markets?.stocks?.sipv_signal || "ESPERANDO",
                 action: global?.markets?.stocks?.sipv_action || "HOLD"
               }}
-              locked={activeStocks.length === 0} 
+              color="amber"
            />
         </div>
 
@@ -333,7 +335,7 @@ function PerfCard({ title, val, trades, wr, color }: any) {
   )
 }
 
-function MarketBox({ title, icon, data, sipv, locked }: any) {
+function MarketBox({ title, icon, data, sipv, color }: any) {
   const isPositive = (data?.pnl_usd || 0) >= 0
   
   const actionColor = 
@@ -341,8 +343,18 @@ function MarketBox({ title, icon, data, sipv, locked }: any) {
     sipv?.action === 'SELL' ? 'text-rose-500' :
     'text-amber-500';
 
+  // Map title to specific P&L label as requested
+  const pnlLabel = `P&L Mensual Contabilizado ${title === 'CRIPTO' ? 'Crypto' : title === 'ACCIONES' ? 'Stocks' : 'Forex'}`;
+
+  // Map color prop to tailwind classes
+  const borderColor = 
+    color === 'rose' ? 'border-rose-500/40' :
+    color === 'blue' ? 'border-blue-500/40' :
+    color === 'amber' ? 'border-amber-500/40' :
+    'border-white/5';
+
   return (
-    <div className={`glass-card flex flex-col items-center gap-6 text-center ${locked ? 'opacity-30 grayscale' : 'hover:border-white/10'}`}>
+    <div className={`glass-card flex flex-col items-center gap-6 text-center hover:border-white/20 transition-all ${borderColor} border-2`}>
        <div className="text-4xl bg-white/5 w-16 h-16 flex items-center justify-center rounded-2xl group-hover:scale-110 transition-transform">
           {icon}
        </div>
@@ -357,20 +369,19 @@ function MarketBox({ title, icon, data, sipv, locked }: any) {
             </span>
           </div>
        </div>
-       {!locked && (
-         <div className="w-full pt-4 space-y-6">
-            <div className="bg-white/[0.04] p-6 rounded-[20px] border border-white/5 flex flex-col items-center gap-2">
-               <span className="text-[0.55rem] font-black text-slate-500 uppercase tracking-widest">P&L Mensual Contabilizado</span>
-               <span className={`text-3xl font-black italic tracking-tighter ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                 ${(data?.pnl_usd || 0).toFixed(0)}
-               </span>
-            </div>
-            <div className="flex justify-between text-[0.55rem] font-black text-slate-400 uppercase tracking-widest px-1">
-               <span>{data.trades} Operaciones</span>
-               <span className="text-blue-500">{data.win_rate}% WR</span>
-            </div>
-         </div>
-       )}
+       
+       <div className="w-full pt-4 space-y-6">
+          <div className="bg-white/[0.04] p-6 rounded-[20px] border border-white/5 flex flex-col items-center gap-2">
+             <span className="text-[0.55rem] font-black text-slate-500 uppercase tracking-widest">{pnlLabel}</span>
+             <span className={`text-3xl font-black italic tracking-tighter ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+               ${(data?.pnl_usd || 0).toFixed(0)}
+             </span>
+          </div>
+          <div className="flex justify-between text-[0.55rem] font-black text-slate-400 uppercase tracking-widest px-1">
+             <span>{data?.trades || 0} Operaciones</span>
+             <span className="text-blue-500">{data?.win_rate || 0}% WR</span>
+          </div>
+       </div>
     </div>
   )
 }
