@@ -220,8 +220,13 @@ class SymbolStateMachine:
                 return True
             
             # Si hay posiciones pero la última tiene precio 0
-            last_pos = sorted(active_positions, key=lambda x: x.get('opened_at', ''), reverse=True)[0]
-            price = float(last_pos.get('entry_price') or last_pos.get('avg_entry_price') or 0)
+            # Soporta tanto 'entry_price' (Crypto/Forex) como 'avg_price' (Stocks)
+            last_pos = sorted(active_positions, key=lambda x: x.get('opened_at', x.get('first_buy_at', '')), reverse=True)[0]
+            price = float(
+                last_pos.get('entry_price') or 
+                last_pos.get('avg_price') or 
+                last_pos.get('avg_entry_price') or 0
+            )
             if price <= 0:
                 log_info('STATE_MACHINE', f'?? RESET: {symbol} tiene posición con precio 0.0. Posible señal huérfana. Reseteando.')
                 ctx.transition_to(SymbolState.NEUTRAL, 'Cleanup: Zero price position detected')

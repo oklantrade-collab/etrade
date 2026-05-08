@@ -697,6 +697,46 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         except Exception as apex_e:
             log_warning(MODULE, f"APEX skip {ticker}: {apex_e}")
 
+        # ── 12. PERSISTENCE — technical_scores ──
+        try:
+            # We explicitly include APEX fields instead of merging components to avoid type conflicts
+            full_indicators = {
+                **ind_15m,
+                "t01_confirmed": bool(ind_15m.get("ema_3", 0) > ind_15m.get("ema_9", 0)),
+                "t02_confirmed": bool(ind_15m.get("ema_50", 0) > ind_15m.get("ema_200", 0)),
+                "t03_confirmed": bool(ind_15m.get("change_pct", 0) > 0),
+                "t04_confirmed": bool(40 <= ind_15m.get("rsi_14", 50) <= 70),
+                "last_scan_time": ind_15m["last_scan_time"],
+                "piotroski_score": ind_15m.get("piotroski_score", 0),
+                "revenue_growth_yoy": ind_15m.get("revenue_growth_yoy", 0),
+                "fundamental_score": ind_15m.get("fundamental_score", 0),
+                "sm_score": ind_15m.get("sm_score", 1.0),
+                "intrinsic_price": ind_15m.get("intrinsic_value", 0),
+                "movement_15m": movement_15m["movement_type"],
+                "fib_zone_15m": movement_15m["fib_zone_current"],
+                "movement_1d": movement_1d["movement_type"] if movement_1d else "unknown",
+                "fib_zone_1d": movement_1d["fib_zone_current"] if movement_1d else 0,
+            }
+            # Append APEX data for UI
+            if apex_result:
+                full_indicators.update({
+                    "apex_4h": apex_result['apex_score_4h'],
+                    "apex_1d": apex_result['apex_score_1d'],
+                    "apex_signal": apex_result['signal'],
+                    "apex_conf": apex_result['confidence'],
+                    "apex_edge": apex_result['edge_4h'],
+                })
+
+            upsert_technical_score(
+                ticker=ticker,
+                indicators=full_indicators,
+                technical_score=base_score,
+                mtf_confirmed=is_acceptable,
+                pro_score=pro_score
+            )
+        except Exception as db_e:
+            log_warning(MODULE, f"Persistence error for {ticker}: {db_e}")
+
         if is_acceptable:
             log_info(MODULE, f"🌟 {ticker} BULLISH Score={base_score} | Pro_Score={pro_score}")
         else:
@@ -1029,28 +1069,16 @@ async def run_stocks_tp_v2_cycle():
             )
 
             # Actualizar estado en BD
-            sb\
-                .table('stocks_positions')\
-                .update({
-                    'ema3_15m':    result.get(
-                        'ema', {}
-                    ).get('ema3', 0),
-                    'ema9_15m':    result.get(
-                        'ema', {}
-                    ).get('ema9', 0),
-                    'ema_trend_15m': result.get(
-                        'ema', {}
-                    ).get('trend', ''),
-                    'current_fib_band': result.get(
-                        'fib', {}
-                    ).get('band', 0),
-                    'mid_band_price': result.get(
-                        'fib', {}
-                    ).get('mid_band', 0),
-                    'sl_last_evaluated': 'now()',
-                })\
-                .eq('id', pos['id'])\
-                .execute()
+            try:
+                sb\
+                    .table('stocks_positions')\
+                    .update({
+                        'sl_last_evaluated': 'now()',
+                    })\
+                    .eq('id', pos['id'])\
+                    .execute()
+            except Exception as db_e:
+                log_warning('TP_v2', f'{ticker}: Error update DB {db_e}')
 
             # Ejecutar según acción
             shares = result.get('shares', 0)

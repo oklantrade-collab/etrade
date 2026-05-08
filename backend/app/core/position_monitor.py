@@ -714,16 +714,15 @@ async def _execute_paper_open(
         try:
             # Consultar DB directamente para conteo global exacto
             try:
-                global_res = supabase.table('positions').select('id', count='exact').eq('status', 'open').limit(0).execute()
-                current_global = global_res.count if global_res.count is not None else 0
-                if global_res.data:
-                    current_global = max(current_global, len(global_res.data))
+                # Usar select('id') sin limit(0) para mayor confiabilidad en el conteo
+                global_res = supabase.table('positions').select('id').eq('status', 'open').execute()
+                current_global = len(global_res.data) if global_res.data is not None else 0
             except Exception as e:
                 log_error(MODULE, f"Error consultando límite global: {e}. Bloqueando apertura por seguridad.")
                 current_global = 999
             
             if current_global >= max_global:
-                log_warning(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} alcanzado (Actual: {current_global}).")
+                log_warning(MODULE, f"GLOBAL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_global} alcanzado (Actual en DB: {current_global}).")
                 return None
 
             # 3. Límite POR SÍMBOLO
@@ -731,17 +730,15 @@ async def _execute_paper_open(
             
             try:
                 variants = crypto_symbol_match_variants(symbol)
-                # Seleccionamos campos necesarios para DCA y Cool-down
-                sym_pos_res = supabase.table('positions').select('id, rule_code, opened_at, entry_price, side', count='exact').in_('symbol', variants).eq('status', 'open').execute()
-                current_sym = sym_pos_res.count if sym_pos_res.count is not None else 0
+                sym_pos_res = supabase.table('positions').select('id, rule_code, opened_at, entry_price, side').in_('symbol', variants).eq('status', 'open').execute()
                 existing_data = sym_pos_res.data or []
-                current_sym = max(current_sym, len(existing_data))
+                current_sym = len(existing_data)
             except Exception as e:
                 log_error(MODULE, f"Error consultando límite por símbolo ({symbol}): {e}")
                 current_sym = 999
 
             if current_sym >= max_symbol:
-                log_warning(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} alcanzado (Actual: {current_sym}).")
+                log_warning(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} alcanzado (Actual en DB: {current_sym}).")
                 return None
             
             # 3.1 DCA & COOL-DOWN PROTECTION (Basado en Forex logic)

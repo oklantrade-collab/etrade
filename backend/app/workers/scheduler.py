@@ -1262,19 +1262,30 @@ async def sync_db_config_to_memory():
         log_error(MODULE, f"Failed to sync config from DB: {e}")
 
 async def sync_positions_to_memory():
-    """Synchronize BOT_STATE.positions with the 'positions' table in Supabase."""
+    """Synchronize BOT_STATE.positions with the 'positions' table in Supabase and notify StateMachine."""
     try:
         sb = get_supabase()
         res = sb.table("positions").select("*").eq("status", "open").execute()
         
         # Clear current and rebuild to ensure closed ones are removed
         new_positions = {}
+        symbols_to_sync = set()
+        
         for p in res.data:
             pos_id = str(p.get('id', p['symbol']))
             new_positions[pos_id] = p
+            symbols_to_sync.add(p['symbol'])
             
         BOT_STATE.positions = new_positions
-        log_info(MODULE, f"Positions synced: {len(BOT_STATE.positions)} active trades in memory.")
+        
+        # Notify State Machine to maintain limits (Requirement: Fix over-trading)
+        from app.core.symbol_state import SymbolStateMachine
+        sm = SymbolStateMachine.get_instance()
+        for symbol in symbols_to_sync:
+            symbol_pos = [p for p in new_positions.values() if p['symbol'] == symbol]
+            sm.sync_from_positions(symbol, symbol_pos)
+            
+        log_info(MODULE, f"Positions synced: {len(BOT_STATE.positions)} active trades. StateMachine updated for {len(symbols_to_sync)} symbols.")
     except Exception as e:
         log_error(MODULE, f"Failed to sync positions to memory: {e}")
 
