@@ -63,6 +63,16 @@ class SymbolStateMachine:
             self.load_from_db(symbol)
         return self._contexts[symbol]
 
+    def sync_single_symbol(self, symbol: str):
+        """Force a fresh sync from DB for one specific symbol (Last defense)."""
+        from app.core.crypto_symbols import normalize_crypto_symbol, crypto_symbol_match_variants
+        symbol = normalize_crypto_symbol(symbol)
+        sb = get_supabase()
+        variants = crypto_symbol_match_variants(symbol)
+        res = sb.table("positions").select("*").in_("symbol", variants).eq("status", "open").execute()
+        self.sync_from_positions(symbol, res.data or [])
+        log_info('STATE_SYNC', f'{symbol}: On-demand sync found {len(res.data or [])} positions.')
+
     def sync_from_positions(self, symbol: str, positions: list):
         from app.core.crypto_symbols import normalize_crypto_symbol
         symbol = normalize_crypto_symbol(symbol)

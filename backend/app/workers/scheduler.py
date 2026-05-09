@@ -1466,6 +1466,9 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 if cooldown.data: blocked_by = "cooldown_active"
 
         if not blocked_by:
+            # --- REFUERZO: Sincronizar State Machine con la DB antes de evaluar ---
+            sm.sync_single_symbol(symbol)
+
             # ── PASO 4: FILTRO SAR 4H ──────────────────────
             # Leer fase SAR actual (recién calculada en snapshot)
             sar_data  = MEMORY_STORE[symbol].get('sar', {})
@@ -1982,6 +1985,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                        try:
                            if BOT_STATE.config_cache.get('use_strategy_engine_v2'):
                                engine = StrategyEngine.get_instance()
+                               sm.sync_single_symbol(symbol)
                                if not BOT_STATE.get_positions_by_symbol(symbol):
                                    context_4h = engine.build_context(snap=snap_ref, df_15m=df, df_4h=df_4h_safe)
                                    signal_4h = engine.get_best_signal(context=context_4h, strategy_type='scalping', cycle='4h')

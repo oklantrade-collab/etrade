@@ -730,16 +730,21 @@ async def _execute_paper_open(
             
             try:
                 variants = crypto_symbol_match_variants(symbol)
-                sym_pos_res = supabase.table('positions').select('id, rule_code, opened_at, entry_price, side').in_('symbol', variants).eq('status', 'open').execute()
+                # Usar count='exact' para máxima precisión
+                sym_pos_res = supabase.table('positions').select('id, rule_code, opened_at, entry_price, side', count='exact').in_('symbol', variants).eq('status', 'open').execute()
+                
+                db_count = sym_pos_res.count if sym_pos_res.count is not None else 0
                 existing_data = sym_pos_res.data or []
-                current_sym = len(existing_data)
+                current_sym = max(db_count, len(existing_data))
             except Exception as e:
                 log_error(MODULE, f"Error consultando límite por símbolo ({symbol}): {e}")
                 current_sym = 999
 
             if current_sym >= max_symbol:
-                log_warning(MODULE, f"SYMBOL_LIMIT: {symbol} bloqueado ({rule_code}). Límite de {max_symbol} alcanzado (Actual en DB: {current_sym}).")
+                log_warning(MODULE, f"SYMBOL_LIMIT_BLOCKED: {symbol} has {current_sym} open (limit {max_symbol}). Variants: {variants}")
                 return None
+            
+            log_info(MODULE, f"LIMIT_CHECK_OK: {symbol} count is {current_sym}/{max_symbol}.")
             
             # 3.1 DCA & COOL-DOWN PROTECTION (Basado en Forex logic)
             now_utc = datetime.now(timezone.utc)
@@ -905,19 +910,23 @@ async def _execute_paper_open_unlocked(
     # ═══════════════════════════════════════════════════════════════
     # ATOMIC LIMIT RE-CHECK — LAST LINE OF DEFENSE BEFORE INSERT
     # Even though _execute_paper_open checked under lock, re-verify
-    # because candle_execution may have inserted in parallel.
+    # because candle_execution or other workers may have inserted.
     # ═══════════════════════════════════════════════════════════════
     try:
         max_sym_recheck = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
         recheck_variants = crypto_symbol_match_variants(symbol)
         recheck_res = supabase.table('positions').select('id', count='exact') \
             .in_('symbol', recheck_variants).eq('status', 'open').execute()
+        
         recheck_count = recheck_res.count if recheck_res.count is not None else 0
         if recheck_res.data:
             recheck_count = max(recheck_count, len(recheck_res.data))
+            
         if recheck_count >= max_sym_recheck:
-            log_warning(MODULE, f"🚫 ATOMIC BLOCK (pre-insert): {symbol} has {recheck_count} open (max {max_sym_recheck}). INSERT rejected.")
+            log_warning(MODULE, f"🚫 ATOMIC_RECHECK_BLOCKED: {symbol} has {recheck_count} open (limit {max_sym_recheck}). INSERT rejected.")
             return None
+        
+        log_info(MODULE, f"✅ ATOMIC_RECHECK_OK: {symbol} count is {recheck_count}. Proceeding with insert.")
     except Exception as rc_e:
         log_error(MODULE, f"ATOMIC re-check failed for {symbol}: {rc_e}. BLOCKING for safety.")
         return None
