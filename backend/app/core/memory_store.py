@@ -38,8 +38,10 @@ class BotState:
     current_cycle: int = 0                                          # Global cycle counter
 
     def get_positions_by_symbol(self, symbol: str) -> list[dict]:
-        """Helper to get all open positions for a specific symbol."""
-        return [p for p in self.positions.values() if p.get('symbol') == symbol]
+        """Helper to get all open positions for a specific symbol (Normalized)."""
+        from app.core.crypto_symbols import normalize_crypto_symbol
+        target = normalize_crypto_symbol(symbol)
+        return [p for p in self.positions.values() if normalize_crypto_symbol(p.get('symbol', '')) == target]
 
     def get_first_position_by_symbol(self, symbol: str) -> Optional[dict]:
         """Helper for backward compatibility (gets the first/oldest position)."""

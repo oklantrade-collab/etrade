@@ -1280,9 +1280,11 @@ async def sync_positions_to_memory():
         
         # Notify State Machine to maintain limits (Requirement: Fix over-trading)
         from app.core.symbol_state import SymbolStateMachine
+        from app.core.crypto_symbols import normalize_crypto_symbol
         sm = SymbolStateMachine.get_instance()
         for symbol in symbols_to_sync:
-            symbol_pos = [p for p in new_positions.values() if p['symbol'] == symbol]
+            norm_target = normalize_crypto_symbol(symbol)
+            symbol_pos = [p for p in new_positions.values() if normalize_crypto_symbol(p.get('symbol', '')) == norm_target]
             sm.sync_from_positions(symbol, symbol_pos)
             
         log_info(MODULE, f"Positions synced: {len(BOT_STATE.positions)} active trades. StateMachine updated for {len(symbols_to_sync)} symbols.")

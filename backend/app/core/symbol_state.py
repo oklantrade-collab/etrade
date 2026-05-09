@@ -38,7 +38,7 @@ class SymbolContext:
         if old != new_state.value:
             self.state = new_state
             self.last_state_change = datetime.now(timezone.utc)
-            log_info('STATE_MACHINE', f'{self.symbol}: {old} → {new_state.value} ({reason})')
+            log_info('STATE_MACHINE', f'{self.symbol}: {old} -> {new_state.value} ({reason})')
             # Trigger DB sync
             return True
         return False
@@ -56,14 +56,19 @@ class SymbolStateMachine:
         self._contexts: dict[str, SymbolContext] = {}
 
     def get(self, symbol: str) -> SymbolContext:
+        from app.core.crypto_symbols import normalize_crypto_symbol
+        symbol = normalize_crypto_symbol(symbol)
         if symbol not in self._contexts:
             self._contexts[symbol] = SymbolContext(symbol=symbol)
             self.load_from_db(symbol)
         return self._contexts[symbol]
 
     def sync_from_positions(self, symbol: str, positions: list):
+        from app.core.crypto_symbols import normalize_crypto_symbol
+        symbol = normalize_crypto_symbol(symbol)
         ctx = self.get(symbol)
-        open_pos = [p for p in positions if p.get('status') == 'open']
+        # Filter positions matching this symbol (normalized)
+        open_pos = [p for p in positions if p.get('status') == 'open' and normalize_crypto_symbol(p.get('symbol', '')) == symbol]
         ctx.open_positions = open_pos
 
         if not open_pos:
