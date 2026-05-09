@@ -1,11 +1,11 @@
 """
 Forex Worker Standalone (Protobuf v3.1)
 
-FIXES:
-1. Re-conexión automática (Auto-reconnect) si cTrader desconecta.
-2. Divisor Universal de 100,000 estable.
-3. Limpieza de datos corruptos integrada.
-4. Carga explícita del .env del backend (evita conflicto con .env padre).
+# FIXES:
+# 1. Re-conexion automatica (Auto-reconnect) si cTrader desconecta.
+# 2. Divisor Universal de 100,000 estable.
+# 3. Limpieza de datos corruptos integrada.
+# 4. Carga explicita del .env del backend (evita conflicto con .env padre).
 """
 
 import os
@@ -15,7 +15,7 @@ import json
 import time
 import threading
 
-# ═══ PASO 1: Resolver rutas y cargar .env manualmente ═══
+#     PASO 1: Resolver rutas y cargar .env manualmente    
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_dir, "..", ".."))
 if root_dir not in sys.path:
@@ -25,11 +25,11 @@ if root_dir not in sys.path:
 dotenv_path = os.path.join(root_dir, '.env')
 discovered_keys = []
 if os.path.exists(dotenv_path):
-    # Intentamos leer el archivo completo primero para ver qué hay
+    # Intentamos leer el archivo completo primero para ver qu  hay
     try:
         with open(dotenv_path, 'rb') as f:
             raw = f.read()
-            # Detectar si es UTF-16 (común en Windows si se guardó con Notepad)
+            # Detectar si es UTF-16 (comun en Windows si se guardo con Notepad)
             content = ""
             if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
                 content = raw.decode('utf-16')
@@ -48,21 +48,21 @@ if os.path.exists(dotenv_path):
                 os.environ[key] = value
                 discovered_keys.append(key)
     except Exception as e:
-        print(f"[ERROR] Fallo crítico leyendo .env: {e}")
+        print(f"[ERROR] Fallo critico leyendo .env: {e}")
 
     s_url = os.getenv('SUPABASE_URL', '')
     print(f"[INFO] .env procesado. Total llaves: {len(discovered_keys)}")
     print(f"[INFO] Llaves encontradas: {', '.join(discovered_keys[:5])}...")
-    print(f"[INFO] SUPABASE_URL detectada: {'SÍ' if s_url else 'NO'} ({len(s_url)} chars)")
+    print(f"[INFO] SUPABASE_URL detectada: {'S ' if s_url else 'NO'} ({len(s_url)} chars)")
     
     if not s_url:
-        print(f"[CRITICAL] ¡SUPABASE_URL no encontrada en {dotenv_path}!")
+        print(f"[CRITICAL]  SUPABASE_URL no encontrada en {dotenv_path}!")
         print(f"[DEBUG] Primeros 100 caracteres del archivo: {repr(content[:100])}")
 else:
-    print(f"[ERROR] No se encontró .env en {dotenv_path}")
+    print(f"[ERROR] No se encontro .env en {dotenv_path}")
     sys.exit(1)
 
-# ═══ PASO 2: Imports que dependen del .env ═══
+#     PASO 2: Imports que dependen del .env    
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
@@ -74,7 +74,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 from supabase import create_client
 
-# ═══ PASO 3: Config ═══
+#     PASO 3: Config    
 CLIENT_ID     = os.getenv('CTRADER_CLIENT_ID')
 CLIENT_SECRET = os.getenv('CTRADER_CLIENT_SECRET')
 ACCOUNT_ID    = int(os.getenv('CTRADER_ACCOUNT_ID', 0))
@@ -94,7 +94,7 @@ TF_MAP = {
     '1d':  ProtoOATrendbarPeriod.D1,
 }
 
-# Divisores de precio por símbolo
+# Divisores de precio por simbolo
 SYMBOL_DIVISORS = {
     'EURUSD': 100000,
     'GBPUSD': 100000,
@@ -106,7 +106,7 @@ SYMBOL_DIVISORS = {
     'EURGBP': 100000,
     'EURJPY': 1000,
     'GBPJPY': 1000,
-    'XAUUSD': 200,
+    'XAUUSD': 100000,
     'XAGUSD': 1000,
     'US30':   100,
     'US500':  100,
@@ -121,7 +121,7 @@ STATE = { 'symbol_ids': {}, 'prices': {}, 'candles': {}, 'cycle_count': 0 }
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def calculate_parabolic_sar(df, start=0.02, increment=0.02, maximum=0.20):
-    """Cálculo interno de SAR Parabolic para evitar dependencias de 'app'"""
+    """Calculo interno de SAR Parabolic para evitar dependencias de 'app'"""
     n = len(df)
     sar, trend, ep, af = np.zeros(n), np.zeros(n, dtype=int), np.zeros(n), np.zeros(n)
     sar[0], trend[0], ep[0], af[0] = df['c'].iloc[0], 0, df['c'].iloc[0], start
@@ -157,7 +157,7 @@ class StandaloneForexWorker:
         self.client.setConnectedCallback(self.on_connected)
         self.client.setDisconnectedCallback(self.on_disconnected)
         self.client.setMessageReceivedCallback(self.on_message)
-        self.execution = None  # Se inicializa después de auth
+        self.execution = None  # Se inicializa despues de auth
         self.symbols = DEFAULT_FOREX_SYMBOLS
 
     def safe_send(self, req):
@@ -176,19 +176,29 @@ class StandaloneForexWorker:
         from app.core.logger import log_info, log_error, log_warning
         
         ts = datetime.now().strftime('%H:%M:%S')
-        clean_msg = str(msg).encode('utf-8', errors='replace').decode('utf-8')
         
-        # Console output (always)
-        print(f"[{ts}] [{level}] {clean_msg}")
+        # Clean message for console (ASCII only to avoid 'charmap' errors on Windows)
+        # Use errors='replace' to turn non-ASCII into '?'
+        console_msg = str(msg).encode('ascii', errors='replace').decode('ascii')
+        
+        # Clean message for DB (UTF-8 is fine for Supabase)
+        db_msg = str(msg).encode('utf-8', errors='replace').decode('utf-8')
+        
+        # Console output
+        print(f"[{ts}] [{level}] {console_msg}")
         sys.stdout.flush()
         
         # DB output
-        if level == 'ERROR' or level == 'CRITICAL':
-            log_error('forex_worker', clean_msg)
-        elif level == 'WARNING':
-            log_warning('forex_worker', clean_msg)
-        else:
-            log_info('forex_worker', clean_msg)
+        try:
+            if level == 'ERROR' or level == 'CRITICAL':
+                log_error('forex_worker', db_msg)
+            elif level == 'WARNING':
+                log_warning('forex_worker', db_msg)
+            else:
+                log_info('forex_worker', db_msg)
+        except Exception as e:
+            # Fallback if DB logging fails
+            print(f"[{ts}] [ERROR] Failed to log to DB: {e}")
 
     def start(self):
         self.log(f"Iniciando Worker v3.1 (Rutas Windows OK)...")
@@ -210,14 +220,14 @@ class StandaloneForexWorker:
         except: pass
 
     def send_heartbeat(self):
-        """Mantener viva la conexión (Requerido cada 25s)"""
+        """Mantener viva la conexion (Requerido cada 25s)"""
         try:
             req = ProtoOAHeartbeatEvent()
             self.safe_send(req)
         except: pass
 
     def _load_dynamic_symbols(self):
-        """Carga la lista de símbolos desde trading_config -> regime_params."""
+        """Carga la lista de simbolos desde trading_config -> regime_params."""
         try:
             res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
             data = res.data[0] if res.data else {}
@@ -225,16 +235,16 @@ class StandaloneForexWorker:
                 assets = data['regime_params'].get('forex_assets')
                 if assets and isinstance(assets, list):
                     self.symbols = assets
-                    self.log(f"Configuración dinámica cargada: {', '.join(self.symbols)}")
+                    self.log(f"Configuracion dinamica cargada: {', '.join(self.symbols)}")
                 else:
-                    self.log("No se encontró 'forex_assets' en regime_params. Usando valores por defecto.")
+                    self.log("No se encontro 'forex_assets' in regime_params. Usando valores por defecto.")
             else:
                 self.log("No se pudo cargar trading_config. Usando valores por defecto.")
         except Exception as e:
-            self.log(f"Error cargando símbolos dinámicos: {e}. Usando valores por defecto.")
+            self.log(f"Error cargando s mbolos din micos: {e}. Usando valores por defecto.")
 
     def _init_execution_service(self):
-        """Inicializa el Execution Service después de cargar símbolos."""
+        """Inicializa el Execution Service despues de cargar simbolos."""
         try:
             from app.workers.forex_execution_service import ForexExecutionService
             self.execution = ForexExecutionService(
@@ -248,26 +258,26 @@ class StandaloneForexWorker:
             # Ciclo de evaluacion de estrategias (cada 5 min, con offset de 30s)
             reactor.callLater(30, self._start_evaluation_loop)
 
-            # Ciclo de gestion de posiciones (cada 60s)
+            # Ciclo de gestion de posiciones (cada 15s) - OPTIMIZADO PARA MEMORIA
             self._mgmt_task = task.LoopingCall(self.execution.run_position_management)
-            self._mgmt_task.start(60, now=False)
+            self._mgmt_task.start(15, now=False)
 
         except Exception as e:
             self.log(f"Error iniciando Execution Service: {e}", "ERROR")
             self.log(traceback.format_exc(), "ERROR")
 
     def _start_evaluation_loop(self):
-        """Inicia el loop de evaluación de estrategias."""
+        """Inicia el loop de evaluacion de estrategias."""
         self._eval_task = task.LoopingCall(self.execution.run_evaluation_cycle)
         self._eval_task.start(300, now=True)  # Cada 5 min, ejecutar inmediatamente
 
     def on_message(self, client, message):
         pt = message.payloadType
         if pt == ProtoOAApplicationAuthRes().payloadType: 
-            self.log("Autenticación de Aplicación OK. Autenticando cuenta...")
+            self.log("Autenticacion de Aplicacion OK. Autenticando cuenta...")
             self.send_acc_auth()
         elif pt == ProtoOAAccountAuthRes().payloadType: 
-            self.log("Autenticación de Cuenta OK. Cargando símbolos...")
+            self.log("Autenticacion de Cuenta OK. Cargando simbolos...")
             self.load_symbols()
         elif pt == ProtoOAErrorRes().payloadType:
             err = Protobuf.extract(message)
@@ -280,9 +290,9 @@ class StandaloneForexWorker:
                     STATE['symbol_ids'][sym.symbolName] = sym.symbolId
                     count += 1
             if count > 0:
-                self.log(f"Símbolos vinculados: {count} ({', '.join(STATE['symbol_ids'].keys())})")
+                self.log(f"Simbolos vinculados: {count} ({', '.join(STATE['symbol_ids'].keys())})")
             self.subscribe_spots(); self.warmup_all()
-            # Iniciar Execution Service después de cargar símbolos
+            # Iniciar Execution Service despues de cargar simbolos
             reactor.callLater(5, self._init_execution_service)
         elif pt == ProtoOASpotEvent().payloadType:
             self.handle_spot(Protobuf.extract(message))
@@ -292,23 +302,23 @@ class StandaloneForexWorker:
             self._handle_execution_event(Protobuf.extract(message))
 
     def _handle_execution_event(self, event):
-        """Maneja respuestas de ejecución de órdenes de cTrader."""
+        """Maneja respuestas de ejecucion de ordenes de cTrader."""
         try:
             if hasattr(event, 'order') and event.order:
                 order = event.order
                 self.log(
-                    f"📨 Orden cTrader: id={order.orderId} "
+                    f"  Orden cTrader: id={order.orderId} "
                     f"status={event.executionType} "
                     f"symbol_id={order.tradeData.symbolId if hasattr(order, 'tradeData') else 'N/A'}"
                 )
             if hasattr(event, 'position') and event.position:
                 pos = event.position
                 self.log(
-                    f"📨 Posición cTrader: id={pos.positionId} "
+                    f"  Posicion cTrader: id={pos.positionId} "
                     f"status={pos.positionStatus}"
                 )
         except Exception as e:
-            self.log(f"Error procesando evento de ejecución: {e}", "ERROR")
+            self.log(f"Error procesando evento de ejecucion: {e}", "ERROR")
 
     def send_app_auth(self):
         req = ProtoOAApplicationAuthReq(); req.clientId = CLIENT_ID; req.clientSecret = CLIENT_SECRET; self.safe_send(req)
@@ -323,8 +333,8 @@ class StandaloneForexWorker:
         self.safe_send(req)
 
     def warmup_all(self):
-        """Carga histórica inicial no bloqueante para evitar congelar el reactor."""
-        self.log("Preparando datos históricos (Lazy Warmup)...")
+        """Carga historica inicial no bloqueante para evitar congelar el reactor."""
+        self.log("Preparando datos historicos (Lazy Warmup)...")
         # Marcamos que estamos en fase de arranque para NO guardar historial pesado en DB
         STATE['is_warming_up'] = True
         
@@ -348,7 +358,7 @@ class StandaloneForexWorker:
         reactor.callLater(delay + 5.0, self._finish_warmup)
 
     def _finish_warmup(self):
-        self.log("Warmup inicial completado en memoria. El guardado en DB se activará en el siguiente ciclo.")
+        self.log("Warmup inicial completado en memoria. El guardado en DB se activara en el siguiente ciclo.")
         STATE['is_warming_up'] = False
 
     def request_bars(self, symbol, tf, limit=500):
@@ -387,7 +397,7 @@ class StandaloneForexWorker:
         if bid and ask:
             mid = (bid + ask) / 2
             if name == 'XAUUSD':
-                self.log(f"DEBUG XAUUSD SPOT: raw_bid={bid_raw}, raw_ask={ask_raw}, div={div}, bid={bid}, ask={ask}, mid={mid}")
+                self.log(f"DEBUG XAUUSD SPOT VERIFIED_V4: raw_bid={bid_raw}, raw_ask={ask_raw}, div={div}, bid={bid}, ask={ask}, mid={mid}")
             STATE['prices'][name] = {'bid': bid, 'ask': ask, 'mid': mid}
 
     def handle_bars(self, res):
@@ -413,7 +423,7 @@ class StandaloneForexWorker:
                 return query.execute()
             except Exception as e:
                 err_str = str(e)
-                # Si es un error de Gateway o Schema Cache, esperamos más tiempo
+                # Si es un error de Gateway o Schema Cache, esperamos m s tiempo
                 wait_time = 5 * (i + 1)
                 if "502" in err_str or "503" in err_str or "504" in err_str or "PGRST002" in err_str:
                     wait_time = 10 * (i + 1)
@@ -476,7 +486,7 @@ class StandaloneForexWorker:
             self.log(f"Error procesando {sym} ({tf}):\n{traceback.format_exc()}", "ERROR")
 
     def run_cycle(self):
-        # ── Heartbeat ─────────────────────────────
+        #    Heartbeat                              
         register_heartbeat('forex_worker')
         
         STATE['cycle_count'] = STATE.get('cycle_count', 0) + 1
@@ -519,7 +529,7 @@ class StandaloneForexWorker:
             
             df['tr'] = np.maximum(df['h'] - df['l'], np.maximum(abs(df['h'] - df['c'].shift(1)), abs(df['l'] - df['c'].shift(1))))
             df['atr'] = df['tr'].rolling(window=14).mean()
-            # Usar implementación interna (ya no requiere renombrar columnas)
+            # Usar implementacion interna (ya no requiere renombrar columnas)
             calculate_parabolic_sar(df)
             
             # --- MACD 4C para Pinescript Signal ---

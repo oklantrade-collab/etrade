@@ -71,7 +71,46 @@ class WebSocketManager:
 
         from app.core.memory_store import MEMORY_STORE, BOT_STATE
         from app.core.supabase_client import get_supabase
+        from app.core.position_monitor import _execute_paper_close
+        from app.core.crypto_symbols import normalize_crypto_symbol
         
+        # --- 1. HARD CAP & SL MONITORING (SPEED 1) ---
+        # Checks every price tick for open positions to trigger emergency exits
+        norm_symbol = normalize_crypto_symbol(symbol)
+        open_positions = BOT_STATE.get_positions_by_symbol(symbol)
+        
+        if open_positions:
+            sb = get_supabase()
+            for pos in open_positions:
+                entry = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+                sl = float(pos.get('sl_price') or pos.get('stop_loss') or 0)
+                side = str(pos.get('side', 'long')).lower()
+                is_long = side in ('long', 'buy')
+                
+                # A. Check Stop Loss Hit (Direct breach)
+                sl_hit = (is_long and price <= sl) or (not is_long and price >= sl)
+                if sl > 0 and sl_hit:
+                    log_warning(MODULE, f"EMERGENCY SL HIT for {symbol}! Price {price} reached SL {sl}. Closing...")
+                    await _execute_paper_close(pos, price, 'emergency_sl_ws', sb)
+                    continue 
+                    
+                # B. Check Hard Cap (-5% from entry as ultimate safety net)
+                pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
+                if pnl_pct <= -5.0:
+                    log_warning(MODULE, f"HARD CAP BREACH for {symbol}! PnL {pnl_pct:.2f}% <= -5%. Forced closure.")
+                    await _execute_paper_close(pos, price, 'hard_cap_ws', sb)
+                    continue
+                    
+                # C. Check Sharp Drop from Peak (-3% drop from highest recorded price)
+                peak = float(pos.get('highest_price_reached') or entry if is_long else pos.get('lowest_price_reached') or entry)
+                if peak > 0:
+                    drop_from_peak = ((peak - price) / peak * 100) if is_long else ((price - peak) / peak * 100)
+                    if drop_from_peak >= 3.0:
+                        log_warning(MODULE, f"SHARP DROP for {symbol}! Price dropped {drop_from_peak:.2f}% from peak {peak}. Closing...")
+                        await _execute_paper_close(pos, price, 'sharp_drop_ws', sb)
+                        continue
+
+        # --- 2. ATR SPIKE MONITORING (Existing) ---
         # CORRECT LOGIC: Compare Current ATR (last closed) vs Average ATR 20
         mem = MEMORY_STORE.get(symbol, {})
         current_atr = mem.get('current_atr', 0.0)

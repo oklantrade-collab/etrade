@@ -21,9 +21,9 @@ from app.strategy.capital_protection import (
 from app.strategy.forex_adaptive_exit import evaluate_forex_tp, evaluate_forex_sl
 from app.core.safety_manager import register_sl_event, reset_sl_counter
 
-# ── Configuración ────────────────────────────────
+#    Configuracion                                 
 def get_forex_config():
-    """Obtiene la configuración de riesgo de Forex desde Supabase"""
+    """Obtiene la configuracion de riesgo de Forex desde Supabase"""
     try:
         from app.core.supabase_client import get_risk_config
         config = get_risk_config()
@@ -43,6 +43,23 @@ PIP_CONFIG = {
     'XAUUSD': {'pip': 0.01,   'pip_val_std': 1.0}, # 1 pip (0.01) = $0.01 USD para 0.01 lotes. 1 lote = $100/punto.
 }
 
+#    HARD CAP: Perdida maxima absoluta por trade   
+# Si se excede CUALQUIERA de estos limites, se cierra inmediatamente
+# sin esperar confirmaciones tecnicas.
+HARD_CAP_LOSS_PIPS = {
+    'EURUSD': 25,
+    'GBPUSD': 25,
+    'USDJPY': 25,
+    'XAUUSD': 50,
+}
+HARD_CAP_LOSS_USD = 15.0  # P rdida m xima en USD por trade
+MAX_SL_PIPS = {
+    'EURUSD': 30,
+    'GBPUSD': 30,
+    'USDJPY': 30,
+    'XAUUSD': 60,
+}
+
 class ForexExecutionService:
     def __init__(self, worker, supabase_client, state_ref, symbols_ref):
         self.worker   = worker
@@ -50,7 +67,7 @@ class ForexExecutionService:
         self.state    = state_ref
         self.symbols  = symbols_ref
         self.log      = worker.log
-        self.protection_states = {} # Cache de estados de protección
+        self.protection_states = {} # Cache de estados de proteccion
         # Usar variable de entorno directamente para el modo
         self.mode     = os.getenv('CTRADER_ENV', 'paper')
         self._open_positions_list = []
@@ -75,7 +92,7 @@ class ForexExecutionService:
                     import time
                     time.sleep(5)
                 else:
-                    self.log(f'[ERROR] Error crítico cargando posiciones tras {retries} intentos: {e}', 'ERROR')
+                    self.log(f'[ERROR] Error critico cargando posiciones tras {retries} intentos: {e}', 'ERROR')
                     self._open_positions_list = []
 
     def run_evaluation_cycle(self):
@@ -102,7 +119,7 @@ class ForexExecutionService:
 
             symbols = list(self.state['symbol_ids'].keys()) or self.symbols
             
-            # 3. Obtener snapshots con reintentos por desconexión
+            # 3. Obtener snapshots con reintentos por desconexion
             snaps_data = []
             for attempt in range(max_retries):
                 try:
@@ -202,11 +219,11 @@ class ForexExecutionService:
         # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine (STRICT - Require MTF alignment)
         rule_alignment_triggered = False
         if direction == 'long':
-            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.25 Y no señal contraria de Pine Y no en techo
+            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.25 Y no se al contraria de Pine Y no en techo
             # TIGHTEN: fib_zone <= 3 (was 4) to leave room for profit before tp_band
             rule_alignment_triggered = (sar_15m_ok and (sar_4h_ok or mtf >= 0.5) and mtf >= 0.25 and pine_not_opposite and struct_ok and fib_zone <= 3)
         else:
-            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.25 Y no señal contraria de Pine Y no en piso
+            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.25 Y no se al contraria de Pine Y no en piso
             # TIGHTEN: fib_zone >= -3 (was -4) to leave room for profit before tp_band
             rule_alignment_triggered = (sar_15m_ok and (sar_4h_ok or mtf <= -0.5) and mtf <= -0.25 and pine_not_opposite and struct_ok and fib_zone >= -3)
 
@@ -216,17 +233,17 @@ class ForexExecutionService:
             'score': 0.7
         })
 
-        # NUEVA REGLA: HOT_MOMENTUM (Específica y Quirúrgica)
+        # NUEVA REGLA: HOT_MOMENTUM (Especifica y Quirurgica)
         ema3, ema9, ema20 = context.get('ema_3'), context.get('ema_9'), context.get('ema_20')
         bb_exp = context.get('bb_expanding', False)
         
         hot_triggered = False
         if ema3 and ema9 and ema20:
             if direction == 'long':
-                # LONG: EMA3 > EMA9 > EMA20 + (Bollinger abriéndose O MTF fuerte) + MTF Aligned
+                # LONG: EMA3 > EMA9 > EMA20 + (Bollinger abri ndose O MTF fuerte) + MTF Aligned
                 hot_triggered = (ema3 > ema9 > ema20) and (bb_exp or mtf >= 0.5) and (-6 <= fib_zone <= 3) and sar_15m_ok and mtf > 0
             else:
-                # SHORT: EMA3 < EMA9 < EMA20 + (Bollinger abriéndose O MTF fuerte) + MTF Aligned
+                # SHORT: EMA3 < EMA9 < EMA20 + (Bollinger abri ndose O MTF fuerte) + MTF Aligned
                 hot_triggered = (ema3 < ema9 < ema20) and (bb_exp or mtf <= -0.5) and (-6 <= fib_zone <= 3) and sar_15m_ok and mtf < 0
 
         results.append({
@@ -247,7 +264,7 @@ class ForexExecutionService:
         same_strat = [p for p in self._open_positions_list if p['symbol'] == symbol and p['rule_code'] == signal['rule_code']]
         
         if same_strat:
-            # Regla 1: 1 compra por vela (usamos 15 min como estándar solicitado)
+            # Regla 1: 1 compra por vela (usamos 15 min como est ndar solicitado)
             last_pos = sorted(same_strat, key=lambda x: x['opened_at'], reverse=True)[0]
             opened_at_str = str(last_pos['opened_at'])
             if 'Z' in opened_at_str: opened_at_str = opened_at_str.replace('Z', '+00:00')
@@ -262,17 +279,17 @@ class ForexExecutionService:
             price = self._safe_float(snap.get('price'))
             last_entry = self._safe_float(last_pos.get('entry_price'))
             if direction == 'long' and price >= last_entry:
-                 self.log(f'⏸️ Omitiendo {symbol} {direction.upper()}: Precio {price} >= {last_entry} (No mejora costo)')
+                 self.log(f'[WAIT] Omitiendo {symbol} {direction.upper()}: Precio {price} >= {last_entry} (No mejora costo)')
                  return
             if direction == 'short' and price <= last_entry:
-                 self.log(f'⏸️ Omitiendo {symbol} {direction.upper()}: Precio {price} <= {last_entry} (No mejora costo)')
+                 self.log(f'[WAIT] Omitiendo {symbol} {direction.upper()}: Precio {price} <= {last_entry} (No mejora costo)')
                  return
             
             self.log(f'Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
 
         # 2. Spam Protection: Verificar historial reciente (Cerradas)
         try:
-            # Consultar últimas posiciones cerradas del mismo símbolo y estrategia en los últimos 15 min
+            # Consultar  ltimas posiciones cerradas del mismo s mbolo y estrategia en los  ltimos 15 min
             since = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
             hist = self.sb.table('forex_positions')\
                 .select('opened_at')\
@@ -292,7 +309,7 @@ class ForexExecutionService:
         except Exception as e:
             self.log(f"Error checking position history: {e}", "WARNING")
 
-        # 3. Gualdián final: Límite TOTAL por símbolo (Para todas las estrategias)
+        # 3. Guardian final: Limite TOTAL por simbolo (Para todas las estrategias)
         total_symbol = len([p for p in self._open_positions_list if p['symbol'] == symbol])
         from app.core.supabase_client import get_risk_config
         max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
@@ -300,12 +317,12 @@ class ForexExecutionService:
             self.log(f'LIMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
 
-        # 4. Reversión forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
-        # Normalizamos el símbolo para asegurar coincidencia
+        # 4. Reversion forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
+        # Normalizamos el simbolo para asegurar coincidencia
         opposite = 'short' if direction == 'long' else 'long'
         opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == opposite]
         if opp_positions:
-            self.log(f'[REVERSIÓN] Cerrando {len(opp_positions)} posiciones {opposite.upper()} por entrada {direction.upper()}')
+            self.log(f'[REVERSION] Cerrando {len(opp_positions)} posiciones {opposite.upper()} por entrada {direction.upper()}')
             price = self._safe_float(snap.get('price'))
             for p in opp_positions:
                 entry = self._safe_float(p.get('entry_price'))
@@ -319,7 +336,7 @@ class ForexExecutionService:
             # Recargar posiciones tras cerrar opuestas
             self._load_open_positions()
 
-        # 2. Ejecutar nueva señal
+        # 2. Ejecutar nueva se al
         price = self._safe_float(snap.get('price'))
         sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal["rule_code"])
         lots = self._calculate_lot_size(symbol, sl_pips)
@@ -329,7 +346,7 @@ class ForexExecutionService:
         pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
         riesgo_real = lots * sl_pips * pip_val
 
-        # Verificar Riesgo Total Acumulado (Máximo 30%)
+        # Verificar Riesgo Total Acumulado (M ximo 30%)
         total_risk_usd = 0
         for p in self._open_positions_list:
             try:
@@ -347,10 +364,10 @@ class ForexExecutionService:
             self.log(f'RIESGO TOTAL EXCEDIDO (${total_risk_usd:.2f} + ${riesgo_real:.2f} > ${max_accumulated:.2f})', 'WARNING')
             return
 
-        if riesgo_real > (riesgo_limite * 1.5): # Margen de holgura por el mínimo de 0.01 lotes
+        if riesgo_real > (riesgo_limite * 1.5): # Margen de holgura por el m nimo de 0.01 lotes
             self.log(
                 f'ABORTANDO {symbol}: Riesgo proyectado ${riesgo_real:.2f} '
-                f'excede el límite de ${riesgo_limite:.2f} '
+                f'excede el l mite de ${riesgo_limite:.2f} '
                 f'(SL Pips: {sl_pips:.1f}, Lots: {lots})',
                 'WARNING'
             )
@@ -369,6 +386,7 @@ class ForexExecutionService:
 
     def _calculate_sl_tp(self, symbol, direction, entry, snap, rule_code):
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+        max_sl_pips = MAX_SL_PIPS.get(symbol, 30)
         u1 = self._safe_float(snap.get('upper_1'))
         l1 = self._safe_float(snap.get('lower_1'))
         atr = abs(u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
@@ -388,6 +406,15 @@ class ForexExecutionService:
             # TP: Lower 3 (Partial Target)
             tp = self._safe_float(snap.get('lower_3'), entry - (3 * atr))
             if tp >= entry: tp = entry - (2 * atr)  # Forzar TP rentable
+        
+        #    CAP: Limitar SL a maximo permitido   
+        sl_pips_raw = abs(entry - sl) / pip_size
+        if sl_pips_raw > max_sl_pips:
+            self.log(f"   [SL CAP] {symbol}: SL de {sl_pips_raw:.0f} pips excede maximo de {max_sl_pips}. Reduciendo.")
+            if direction == 'long':
+                sl = entry - (max_sl_pips * pip_size)
+            else:
+                sl = entry + (max_sl_pips * pip_size)
         
         return round(sl, 6), round(tp, 6), abs(entry-sl)/pip_size
 
@@ -415,7 +442,7 @@ class ForexExecutionService:
             # Aplicar signo algebraico (Negativo para SHORT/SELL)
             final_lots = -abs(float(lots)) if str(direction).lower() == 'short' or str(direction).lower() == 'sell' else abs(float(lots))
             
-            # ── SLVM: Calcular Stop Loss Virtual ──
+            #    SLVM: Calcular Stop Loss Virtual   
             slv_price = None
             try:
                 from app.strategy.virtual_sl_recovery import calculate_slv
@@ -441,7 +468,7 @@ class ForexExecutionService:
                 'mode': mode, 
                 'rule_code': rule_code, 
                 'opened_at': datetime.now(timezone.utc).isoformat(),
-                # ── SLVM Fields ──
+                #    SLVM Fields   
                 'slv_price': slv_price,
                 'recovery_mode': False,
                 'recovery_cycles': 0,
@@ -453,24 +480,43 @@ class ForexExecutionService:
         except Exception as e: self.log(f'Error guardando: {e}')
 
     def run_position_management(self):
+        """Gestiona SL, TP, HardCap y Protecciones. Optimizada para MEMORIA."""
         if not self._open_positions_list: return
+        
         snaps = {}
-        try:
-            symbols = list(set(p['symbol'] for p in self._open_positions_list))
-            res = self.sb.table('market_snapshot').select('*').in_('symbol', symbols).execute()
-            for s in (res.data or []): snaps[s['symbol']] = s
-        except Exception as e: self.log(f"Error gestion snaps: {e}")
+        # Solo consultamos snapshots (indicadores) cada 60s para ahorrar trafico
+        # Pero el chequeo de precios (SL/TP) se hace cada 15s en memoria.
+        should_fetch_snaps = (int(time.time()) % 60 < 15) 
+        
+        if should_fetch_snaps:
+            try:
+                symbols = list(set(p['symbol'] for p in self._open_positions_list))
+                res = self.sb.table('market_snapshot').select('*').in_('symbol', symbols).execute()
+                for s in (res.data or []): snaps[s['symbol']] = s
+            except Exception as e: 
+                self.log(f"Error gestion snaps (DB-Skip): {e}")
 
         for pos in list(self._open_positions_list):
             try: 
-                snap = snaps.get(pos['symbol'])
                 symbol = pos['symbol']
+                snap = snaps.get(symbol)
+                
+                #    OBTENER PRECIO DE MEMORIA (REAL-TIME)   
                 price_data = self.state['prices'].get(symbol)
                 price = self._safe_float(price_data.get('mid')) if price_data else 0
+                
+                # Fallback solo si memoria falla
                 if price <= 0 and snap:
                     price = self._safe_float(snap.get('price'))
+                
+                if price <= 0: continue # No hay precio, no podemos evaluar
 
-                # ── SLVM: Modo Recuperación ──
+                #    1. HARD CAP & SL/TP (MEMORIA PURA - PRIORIDAD ALTA)   
+                # Estos se ejecutan SIEMPRE cada 15s sin depender de la DB
+                if self._manage_position_fast(pos, price, snap):
+                    continue # Posicion cerrada
+
+                #    SLVM: Modo Recuperacion   
                 try:
                     from app.strategy.virtual_sl_recovery import (
                         check_slv_trigger, evaluate_recovery_mode,
@@ -509,18 +555,19 @@ class ForexExecutionService:
                 except Exception as slvm_e:
                     self.log(f'SLVM error for {symbol}: {slvm_e}')
 
-                # ── Primero: Verificar cierre proactivo ──
+                #    Primero: Verificar cierre proactivo   
                 if snap and self._check_proactive_exit_forex(pos, snap):
-                    continue # Posición cerrada
+                    continue # Posici n cerrada
 
-                # ── Segundo: Sistema de Protección de Capital (7 Reglas) ──
+                #    3. Sistema de Protecci n de Capital (Trailling, BE, etc.)   
+                # Requiere snap (indicadores), solo corre si tenemos snap fresco
                 if snap:
                     self._run_protection_forex(pos, snap)
 
                     # 1. TP Adaptativo
                     tp_res = evaluate_forex_tp(symbol, [pos], price, snap)
                     if tp_res['should_close']:
-                        self.log(f"🎯 [ADAPTIVE TP] {symbol}: {tp_res['close_reason']} (PnL: {tp_res['pnl_pips']:.1f} pips)")
+                        self.log(f"[ADAPTIVE TP] {symbol}: {tp_res['close_reason']} (PnL: {tp_res['pnl_pips']:.1f} pips)")
                         self._close_position(pos, price, tp_res['close_reason'], tp_res['pnl_pips'])
                         reset_sl_counter(symbol, pos['side'])
                         continue
@@ -528,23 +575,65 @@ class ForexExecutionService:
                     # 2. SL Adaptativo / SLV
                     sl_res = evaluate_forex_sl(symbol, [pos], price, snap)
                     if sl_res['should_close']:
-                        self.log(f"🛡️ [ADAPTIVE SL] {symbol}: {sl_res.get('exit_type', 'sl_v5')} (PnL: {sl_res['pnl_pips']:.1f} pips)")
+                        self.log(f"[ADAPTIVE SL] {symbol}: {sl_res.get('exit_type', 'sl_v5')} (PnL: {sl_res['pnl_pips']:.1f} pips)")
                         self._close_position(pos, price, sl_res.get('exit_type', 'sl_v5'), sl_res['pnl_pips'])
                         register_sl_event(symbol, pos['side'])
                         continue
                     elif sl_res.get('slv_triggered'):
-                         # Ya se maneja en el bloque SLVM arriba, pero aseguramos coherencia
                          if not pos.get('recovery_mode'):
                              from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
                              activate_recovery_mode_sync(pos, price, symbol, 'forex_futures', self.sb, 'forex_positions')
 
-                self._manage_position(pos, snap)
-            except Exception as e: self.log(f'Error gestión: {e}')
+            except Exception as e: self.log(f'Error gestion: {e}')
+
+    def _manage_position_fast(self, pos, price, snap=None):
+        """
+        Chequeo rapido en memoria de SL, TP y Hard Cap.
+        Retorna True si la posicion fue cerrada.
+        """
+        symbol = pos['symbol']
+        side   = pos['side'].lower()
+        entry  = self._safe_float(pos.get('entry_price'))
+        sl     = self._safe_float(pos.get('sl_price'))
+        tp     = self._safe_float(pos.get('tp_price'))
+        
+        pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+        pip_val  = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+        lots_abs = abs(self._safe_float(pos.get('lots'), 0.01))
+        
+        pips_pnl = (price - entry) / pip_size if side in ['long', 'buy'] else (entry - price) / pip_size
+        pnl_usd  = pips_pnl * pip_val * lots_abs
+
+        #   1. HARD CAP: Perdida maxima absoluta ($15 USD)
+        max_loss_pips = HARD_CAP_LOSS_PIPS.get(symbol, 25)
+        if pips_pnl < -max_loss_pips or pnl_usd < -HARD_CAP_LOSS_USD:
+            self.log(f"[HARD CAP] {symbol}: PnL ${pnl_usd:.2f} ({pips_pnl:.1f} pips). CIERRE INMEDIATO.")
+            self._close_position(pos, price, 'hard_cap_loss', pips_pnl)
+            return True
+
+        #   2. SL / TP Estandar
+        hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
+        hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
+        
+        if hit_sl or hit_tp:
+            reason = 'sl' if hit_sl else 'tp'
+            self._close_position(pos, price, reason, pips_pnl)
+            return True
+
+        #   3. TP Band (Si tenemos snap)
+        if snap:
+            u6 = self._safe_float(snap.get('upper_6'))
+            l6 = self._safe_float(snap.get('lower_6'))
+            if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
+                self._close_position(pos, price, 'tp_band', pips_pnl)
+                return True
+        
+        return False
 
     def _check_proactive_exit_forex(self, pos: dict, snap: dict) -> bool:
         """
-        Evalúa Aa51/Bb51 para posiciones Forex.
-        Retorna True si se cerró la posición.
+        Evalua Aa51/Bb51 para posiciones Forex.
+        Retorna True si se cerro la posicion.
         """
         symbol = pos['symbol']
         price_data = self.state['prices'].get(symbol)
@@ -564,7 +653,7 @@ class ForexExecutionService:
         # Convertir a DataFrame
         import pandas as pd
         df_4h = pd.DataFrame(bars_4h)
-        # Renombrar columnas abreviadas (o,h,l,c) a formato estándar
+        # Renombrar columnas abreviadas (o,h,l,c) a formato est ndar
         df_4h = df_4h.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'ts': 'open_time'})
         df_4h['open_time'] = pd.to_datetime(df_4h['open_time'], unit='s')
         df_4h = df_4h.set_index('open_time')
@@ -593,8 +682,8 @@ class ForexExecutionService:
         )
 
         if not result['should_close']:
-            if result.get('rule_code') is None and 'Reversión' in result.get('reason', ''):
-                self.log(f"⚠️ [PROACTIVE EVAL] {symbol}: {result['reason']}", "DEBUG")
+            if result.get('rule_code') is None and 'Reversi n' in result.get('reason', ''):
+                self.log(f"   [PROACTIVE EVAL] {symbol}: {result['reason']}", "DEBUG")
             return False
 
         pnl = result['pnl']
@@ -605,13 +694,13 @@ class ForexExecutionService:
             f'({pnl["pnl_pips"]:.1f} pips) - {result["reason"]}'
         )
 
-        # Cerrar posición
+        # Cerrar posicion
         self._close_position(pos, price, result['rule_code'], pnl['pnl_pips'])
         self._send_telegram(
             f"CIERRE PROACTIVO FOREX [{symbol}]\n"
             f"Regla: {result['rule_code']}\n"
             f"Pips: +{pnl['pnl_pips']:.1f}\n"
-            f"Razón: {result['reason']}"
+            f"Razon: {result['reason']}"
         )
 
         return True
@@ -647,20 +736,20 @@ class ForexExecutionService:
             
             if action in ('activate_be', 'update_sl'):
                 new_sl = primary.get('be_price') if action == 'activate_be' else primary.get('new_sl')
-                self.log(f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
+                self.log(f"[PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
                 # Actualizar en DB
                 self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos_id).execute()
                 # Actualizar en memoria
                 pos['sl_price'] = new_sl
-                # Actualizar estado interno de protección
+                # Actualizar estado interno de protecci n
                 state.current_sl = new_sl
                 if action == 'activate_be': state.be_activated = True
                 if action == 'update_sl': state.trailing_level = primary.get('new_level', state.trailing_level)
                 
             elif action == 'partial_close':
-                self.log(f"🛡️ [PROTECTION] {symbol}: Cierre parcial sugerido (No implementado en esta versión)")
+                self.log(f"   [PROTECTION] {symbol}: Cierre parcial sugerido (No implementado en esta version)")
             elif action == 'close_market':
-                self.log(f"🛡️ [PROTECTION] {symbol}: Cierre por señal inversa confirmada")
+                self.log(f"   [PROTECTION] {symbol}: Cierre por senal inversa confirmada")
                 self._close_position(pos, price, 'inverse_signal', 0)
 
     def _manage_position(self, pos, snap=None):
@@ -673,7 +762,6 @@ class ForexExecutionService:
         
         if price <= 0 and snap:
             price = self._safe_float(snap.get('price'))
-            # self.log(f"Uso de precio Snapshot para {symbol}: {price}")
 
         if price <= 0: return
 
@@ -683,8 +771,31 @@ class ForexExecutionService:
         tp    = self._safe_float(pos.get('tp_price'))
         
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+        pip_val  = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+        lots_abs = abs(self._safe_float(pos.get('lots'), 0.01))
         pips_pnl = (price - entry) / pip_size if side in ['long', 'buy'] else (entry - price) / pip_size
-        
+        pnl_usd  = pips_pnl * pip_val * lots_abs
+
+        #                                                   
+        #   HARD CAP: Perdida maxima absoluta (PRIORIDAD 0)
+        # Se ejecuta ANTES de cualquier otra logica.
+        #                                                   
+        max_loss_pips = HARD_CAP_LOSS_PIPS.get(symbol, 25)
+        if pips_pnl < -max_loss_pips or pnl_usd < -HARD_CAP_LOSS_USD:
+            self.log(
+                f"[HARD CAP] {symbol}: Perdida excede limite! "
+                f"Pips: {pips_pnl:.1f} (max: -{max_loss_pips}) | "
+                f"USD: ${pnl_usd:.2f} (max: -${HARD_CAP_LOSS_USD:.2f}) - CIERRE FORZADO"
+            )
+            self._close_position(pos, price, 'hard_cap_loss', pips_pnl)
+            self._send_telegram(
+                f"HARD CAP LOSS [{symbol}]\n"
+                f"Pips: {pips_pnl:.1f} | USD: ${pnl_usd:.2f}\n"
+                f"Limite: -{max_loss_pips} pips / -${HARD_CAP_LOSS_USD}"
+            )
+            return
+
+        #    TP Band Exit   
         if snap:
             u6 = self._safe_float(snap.get('upper_6'))
             l6 = self._safe_float(snap.get('lower_6'))
@@ -692,22 +803,22 @@ class ForexExecutionService:
                 self._close_position(pos, price, 'tp_band', pips_pnl)
                 return
 
-        # Verificación estricta de SL/TP
+        #    Verificaci n estricta de SL/TP   
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
         hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
 
         if hit_sl or hit_tp:
             reason = 'sl' if hit_sl else 'tp'
-            self.log(f"🔥 [EXECUTION] Disparando cierre {reason.upper()} para {symbol} at {price} (SL: {sl}, TP: {tp})")
+            self.log(f"[EXECUTION] Disparando cierre {reason.upper()} para {symbol} at {price} (SL: {sl}, TP: {tp})")
             self._close_position(pos, price, reason, pips_pnl)
 
     def _close_position(self, pos, close_price, reason, pips_pnl, mr_result=None):
         try:
             symbol = pos['symbol']
             
-            # Cancelar todos los SL del exchange (Sincrónico)
+            # Cancelar todos los SL del exchange (Sincronico)
             try:
-                # Obtenemos las órdenes SL activas para esta posición
+                # Obtenemos las ordenes SL activas para esta posicion
                 sl_res = self.sb.table('sl_orders').select('*').eq('position_id', pos['id']).eq('status', 'active').execute()
                 for sl_order in (sl_res.data or []):
                     self.sb.table('sl_orders').update({
@@ -718,7 +829,7 @@ class ForexExecutionService:
             except Exception as sl_e:
                 self.log(f'Error cancelando SL: {sl_e}', 'ERROR')
 
-            # Usar valor absoluto de lots para el cálculo de PnL ya que pips_pnl ya considera la dirección
+            # Usar valor absoluto de lots para el calculo de PnL ya que pips_pnl ya considera la direccion
             pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
             pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
             
@@ -731,7 +842,7 @@ class ForexExecutionService:
                 'closed_at': datetime.now(timezone.utc).isoformat()
             }
             
-            # ── SLVM V2 Audit Logging ──
+            #    SLVM V2 Audit Logging   
             if mr_result:
                 update_data.update({
                     'slv_hard_stop_trigger': mr_result.get('exit_type'),

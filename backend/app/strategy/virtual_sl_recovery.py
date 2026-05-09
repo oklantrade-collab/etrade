@@ -1,16 +1,16 @@
 """
-eTrader v5.0 — Virtual Stop Loss (SLV) Recovery Mechanism
+eTrader v5.0 -- Virtual Stop Loss (SLV) Recovery Mechanism
 ========================================================
 
-Este módulo gestiona el "Modo Recuperación" (Recovery Mode) para posiciones
+Este modulo gestiona el "Modo Recuperacion" (Recovery Mode) para posiciones
 que tocan el Stop Loss Virtual (SLV). El objetivo es evitar el cierre inmediato
-en picos de volatilidad y buscar una salida en breakeven o con pérdida mínima.
+en picos de volatilidad y buscar una salida en breakeven o con perdida minima.
 
 Mejoras v5.0:
-1. Reducción de ciclos de recuperación (máx 4).
-2. Hard Stop dinámico basado en ATR.
-3. Lógica de velas (Case A/B) para confirmación de cierre.
-4. Verificación urgente cada 5m (independiente del cierre de vela 15m).
+1. Reduccion de ciclos de recuperacion (max 4).
+2. Hard Stop dinamico basado en ATR.
+3. Logica de velas (Case A/B) para confirmacion de cierre.
+4. Verificacion urgente cada 5m (independiente del cierre de vela 15m).
 """
 
 import time
@@ -33,7 +33,7 @@ def safe_int(v, default=0):
     except (ValueError, TypeError):
         return default
 
-# --- CONFIGURACIÓN SLV v5.0 ---
+# --- CONFIGURACION SLV v5.0 ---
 SLVM_CONFIG = {
     'crypto_futures': {
         'slv_method':            'fibonacci',
@@ -46,10 +46,11 @@ SLVM_CONFIG = {
         'trailing_pips_step':    5,
     },
     'forex_futures': {
-        'slv_method':            'atr',
-        'slv_atr_mult':          1.5,
-        'recovery_max_cycles':   60,    # 60 min (Ajustado para ciclos de 1 min)
-        'recovery_target_pips':  -2,    # Aceptar pérdida mínima
+        'slv_method':            'fixed_pips',   # Cambiado de 'atr' (calculaba 275 pips!)
+        'slv_fixed_pips':        25,              # SLV a maximo 25 pips del entry
+        'slv_atr_mult':          1.5,             # Fallback si se usa ATR
+        'recovery_max_cycles':   12,              # 12 minutos maximo en recuperacion
+        'recovery_target_pips':  -2,              # Aceptar perdida minima
         'recovery_buffer_pips':  1,
         'trailing_pips_trigger': 8,
         'trailing_pips_step':    4,
@@ -65,7 +66,7 @@ SLVM_CONFIG = {
     }
 }
 
-# Reglas de Hard Stop Dinámico (ATR)
+# Reglas de Hard Stop Dinamico (ATR)
 ATR_HARD_STOP_RULES = {
     'crypto_futures': {'pips_base': 15, 'atr_factor': 1.2},
     'forex_futures':  {'pips_base': 10, 'atr_factor': 1.0},
@@ -102,7 +103,7 @@ def calculate_hard_stop_pips(symbol: str, market_type: str, snap: dict) -> float
         return rules['pips_base'] + (atr_pips * rules['atr_factor'])
     return rules['pips_base'] * 2 # Fallback simple
 
-# --- LÓGICA DE VELAS (CASE A/B) ---
+# --- LOGICA DE VELAS (CASE A/B) ---
 
 def evaluate_hard_stop_candle(
     side: str,
@@ -112,20 +113,20 @@ def evaluate_hard_stop_candle(
     hard_stop_price: float
 ) -> dict:
     """
-    Evalúa la lógica de velas 15m para confirmación de cierre por Hard Stop.
-    Case A (Long): V1 Open < V2 Close Prev (Confirmación bajista) -> Close Market
-    Case B (Short): V1 Open > V2 Close Prev (Confirmación alcista) -> Close Market
+    Evalua la logica de velas 15m para confirmacion de cierre por Hard Stop.
+    Case A (Long): V1 Open < V2 Close Prev (Confirmacion bajista) -> Close Market
+    Case B (Short): V1 Open > V2 Close Prev (Confirmacion alcista) -> Close Market
     """
     is_long = side.lower() in ('long', 'buy')
     
-    # Case A: Long confirmación bajista
+    # Case A: Long confirmacion bajista
     if is_long:
         if v1_open < v2_close_prev:
             return {'should_close': True, 'reason': 'hard_stop_v1_bearish_open', 'case': 'A'}
         if v3_current_price < hard_stop_price:
             return {'should_close': True, 'reason': 'hard_stop_price_breach', 'case': 'C'}
     
-    # Case B: Short confirmación alcista
+    # Case B: Short confirmacion alcista
     else:
         if v1_open > v2_close_prev:
             return {'should_close': True, 'reason': 'hard_stop_v1_bullish_open', 'case': 'B'}
@@ -142,13 +143,13 @@ def check_5m_hard_stop(
     market_type: str
 ) -> dict:
     """
-    Verificación urgente cada 5 minutos del Hard Stop.
+    Verificacion urgente cada 5 minutos del Hard Stop.
     Si el precio viola el Hard Stop (ATR based), cierra sin esperar a los 15m.
     """
     side = position.get('side', 'long')
     entry_price = safe_float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     
-    # Hard Stop dinámico
+    # Hard Stop dinamico
     hs_pips = calculate_hard_stop_pips(symbol, market_type, snap)
     pip_size = get_pip_size(symbol)
     
@@ -168,7 +169,7 @@ def check_5m_hard_stop(
         }
     return {'should_close': False}
 
-# --- EVALUACIÓN DE RECUPERACIÓN V2 ---
+# --- EVALUACION DE RECUPERACION V2 ---
 
 def evaluate_recovery_mode_v2(
     position: dict,
@@ -178,12 +179,12 @@ def evaluate_recovery_mode_v2(
     market_type: str = 'crypto_futures'
 ) -> dict:
     """
-    Versión mejorada del evaluador de Modo Recuperación.
+    Version mejorada del evaluador de Modo Recuperacion.
     Prioridades:
     1. Hard Stop Urgente (5m)
-    2. Lógica de Velas (15m Case A/B)
+    2. Logica de Velas (15m Case A/B)
     3. Trailing Stop (Asegurar rebote)
-    4. Timeout (4 ciclos máx)
+    4. Timeout (4 ciclos max)
     5. Target Recovery (Breakeven)
     """
     config = SLVM_CONFIG.get(market_type, SLVM_CONFIG['crypto_futures'])
@@ -219,7 +220,7 @@ def evaluate_recovery_mode_v2(
             'case': candle_logic.get('case')
         }
         
-    # 3. Verificar Timeout (4 ciclos máx)
+    # 3. Verificar Timeout (4 ciclos max)
     cycles = safe_int(position.get('recovery_cycles', 0))
     if cycles >= config['recovery_max_cycles']:
         return {
@@ -261,8 +262,8 @@ async def process_symbol_5m_with_slvm_v2(
     market_type:   str = 'crypto_futures'
 ):
     """
-    Función de conveniencia para llamar desde el scheduler cada 5m.
-    Busca la posición abierta y aplica la lógica SLVM v2.
+    Funcion de conveniencia para llamar desde el scheduler cada 5m.
+    Busca la posicion abierta y aplica la logica SLVM v2.
     """
     try:
         # 1. Buscar posición abierta
@@ -290,7 +291,7 @@ async def process_symbol_5m_with_slvm_v2(
                 'status': 'closed',
                 'close_reason': f"slv_v2_{mr_result['exit_type']}",
                 'closed_at': datetime.now(timezone.utc).isoformat(),
-                # Logging extendido para auditoría
+                # Logging extendido para auditoria
                 'slv_hard_stop_trigger': mr_result.get('exit_type'),
                 'slv_hard_stop_pips': mr_result.get('hs_pips'),
                 'slv_v1_open': safe_float(snap.get('open_15m', 0)),
@@ -303,8 +304,8 @@ async def process_symbol_5m_with_slvm_v2(
             # Alerta Telegram
             from app.workers.alerts_service import send_telegram_message
             await send_telegram_message(
-                f"🛑 SLV RECOVERY CLOSE [{symbol}]\n"
-                f"Razón: {mr_result['exit_type'].upper()}\n"
+                f"STOP SLV RECOVERY CLOSE [{symbol}]\n"
+                f"Razon: {mr_result['exit_type'].upper()}\n"
                 f"Detalle: {mr_result['reason']}\n"
                 f"Precio: {current_price:.5f}"
             )
@@ -321,7 +322,7 @@ async def process_symbol_5m_with_slvm_v2(
 # --- COMPATIBILIDAD LEGACY ---
 
 def check_slv_trigger(position: dict, current_price: float) -> bool:
-    """Verifica si el precio tocó el SLV para activar modo recuperación."""
+    """Verifica si el precio toco el SLV para activar modo recuperacion."""
     slv_price = position.get('slv_price')
     if not slv_price:
         return False
@@ -346,11 +347,11 @@ def activate_recovery_mode_sync(position: dict, current_price: float, symbol: st
 
 # (Mantenemos funciones de cálculo de SLV para integración)
 def evaluate_recovery_mode(position: dict, current_price: float, snap: dict, symbol: str, market_type: str = 'crypto_futures'):
-    """Wrapper de compatibilidad para la versión antigua del evaluador."""
+    """Wrapper de compatibilidad para la version antigua del evaluador."""
     return evaluate_recovery_mode_v2(position, current_price, snap, symbol, market_type)
 
 def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, symbol: str, sb, table='positions'):
-    """Registra el cierre por recuperación de forma síncrona."""
+    """Registra el cierre por recuperacion de forma sincrona."""
     try:
         sb.table(table).update({
             'status': 'closed',
@@ -364,7 +365,7 @@ def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, s
         log_error('SLVM', f"Error finalizing recovery exit: {e}")
 
 def update_recovery_cycle_sync(position: dict, mr_result: dict, sb, table='positions'):
-    """Actualiza el contador de ciclos de recuperación en la DB."""
+    """Actualiza el contador de ciclos de recuperacion en la DB."""
     try:
         sb.table(table).update({
             'recovery_cycles': mr_result.get('recovery_cycles', 0)
@@ -373,34 +374,61 @@ def update_recovery_cycle_sync(position: dict, mr_result: dict, sb, table='posit
         log_error('SLVM', f"Error updating recovery cycles: {e}")
 
 def update_slv_from_bands_sync(position: dict, snap: dict, symbol: str, market_type: str, sb, table='positions'):
-    """Actualiza dinámicamente el precio del SLV siguiendo las bandas de Fibonacci si se mueven a favor."""
-    # Implementación opcional para trailing del SLV inicial
+    """Actualiza dinamicamente el precio del SLV siguiendo las bandas de Fibonacci si se mueven a favor."""
+    # Implementacion opcional para trailing del SLV inicial
     # Por ahora lo dejamos como stub para no romper compatibilidad si el servicio lo llama
     pass
 
 def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market_type: str = 'crypto_futures') -> dict:
-    """Calcula el precio del SLV inicial basado en la configuración."""
+    """Calcula el precio del SLV inicial basado en la configuracion."""
     config = SLVM_CONFIG.get(market_type, SLVM_CONFIG['crypto_futures'])
     pip_size = get_pip_size(symbol)
     
-    # Lógica simplificada: usa banda Fibonacci o fallback %
     slv_price = 0.0
     source = 'fallback'
     
-    if config['slv_method'] == 'fibonacci' and 'lower_1' in snap:
+    # Metodo 1: Pips fijos (recomendado para forex)
+    if config['slv_method'] == 'fixed_pips':
+        fixed_pips = config.get('slv_fixed_pips', 25)
         if side.lower() in ('long', 'buy'):
-            slv_price = safe_float(snap.get(config['slv_fibonacci_band'], 0))
-            source = config['slv_fibonacci_band']
+            slv_price = entry_price - (fixed_pips * pip_size)
         else:
-            # Para shorts usa la banda superior equivalente
-            band = config['slv_fibonacci_band'].replace('lower', 'upper')
+            slv_price = entry_price + (fixed_pips * pip_size)
+        source = f'fixed_{fixed_pips}_pips'
+    
+    # Metodo 2: Fibonacci band
+    elif config['slv_method'] == 'fibonacci' and 'lower_1' in snap:
+        if side.lower() in ('long', 'buy'):
+            slv_price = safe_float(snap.get(config.get('slv_fibonacci_band', 'lower_1'), 0))
+            source = config.get('slv_fibonacci_band', 'lower_1')
+        else:
+            band = config.get('slv_fibonacci_band', 'lower_1').replace('lower', 'upper')
             slv_price = safe_float(snap.get(band, 0))
             source = band
-            
+    
+    # Metodo 3: ATR-based (con cap de seguridad)
+    elif config['slv_method'] == 'atr':
+        atr = safe_float(snap.get('atr', 0))
+        if atr > 0:
+            mult = config.get('slv_atr_mult', 1.5)
+            dist = atr * mult
+            # CAP: No permitir mas de 30 pips para forex
+            max_dist = 30 * pip_size
+            dist = min(dist, max_dist)
+            if side.lower() in ('long', 'buy'):
+                slv_price = entry_price - dist
+            else:
+                slv_price = entry_price + dist
+            source = f'atr_x{mult}_capped'
+    
+    # Fallback: Porcentaje fijo
     if slv_price <= 0:
         dist = entry_price * config.get('slv_fallback_pct', 0.02)
+        # CAP: No mas de 30 pips
+        max_dist = 30 * pip_size
+        dist = min(dist, max_dist)
         slv_price = entry_price - dist if side.lower() in ('long','buy') else entry_price + dist
-        source = 'fallback_pct'
+        source = 'fallback_pct_capped'
         
     return {
         'slv_price': slv_price,
