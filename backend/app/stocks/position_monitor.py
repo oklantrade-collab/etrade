@@ -66,16 +66,27 @@ class PositionMonitor:
         ticker = trade["ticker"]
         
         try:
-            # Get current price
-            from app.data.yfinance_provider import YFinanceProvider
-            provider = YFinanceProvider()
-            info = await provider.get_ticker_info(ticker)
-            
-            if not info:
-                log_warning(MODULE, f"Cannot get price for {ticker}")
-                return
+            # Get real-time price from IB first, fallback to YFinance
+            current_price = 0.0
+            try:
+                from app.data.ib_provider import IBProvider
+                ib_prov = IBProvider()
+                await ib_prov.connect()
+                current_price = await ib_prov.get_current_price(ticker)
+            except Exception as e:
+                log_warning(MODULE, f"IB price fallback for {ticker}: {e}")
 
-            current_price = safe_float(info.get("current_price"))
+            if current_price <= 0:
+                from app.data.yfinance_provider import YFinanceProvider
+                provider = YFinanceProvider()
+                info = await provider.get_ticker_info(ticker)
+                
+                if not info:
+                    log_warning(MODULE, f"Cannot get price for {ticker}")
+                    return
+
+                current_price = safe_float(info.get("current_price"))
+
             if current_price <= 0:
                 return
 
@@ -275,27 +286,27 @@ class PositionMonitor:
                     sar_15m=snap_val.get('sar_trend_15m', 1)
                 )
 
-                    # Actualizar indicadores en DB (NUEVOS CAMPOS)
-                    debug = tp_res.get('debug_indicators', {})
-                    ema_info = debug.get('ema', {})
-                    sipv15 = debug.get('sipv_15m', {})
-                    sipv4h = debug.get('sipv_4h', {})
-                    fib_info = debug.get('fib', {})
+                # Actualizar indicadores en DB (NUEVOS CAMPOS)
+                debug = tp_res.get('debug_indicators', {})
+                ema_info = debug.get('ema', {})
+                sipv15 = debug.get('sipv_15m', {})
+                sipv4h = debug.get('sipv_4h', {})
+                fib_info = debug.get('fib', {})
 
-                    sb.table("stocks_positions").update({
-                        "updated_at": datetime.now(timezone.utc).isoformat()
-                    }).eq("id", trade["id"]).execute()
+                sb.table("stocks_positions").update({
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", trade["id"]).execute()
 
-                    if tp_res['action'] == 'close_total':
-                        log_warning(MODULE, f"🎯 TP V2 CLOSE TOTAL: {ticker} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
-                        await self._close_position(trade, current_price, f"tp_v2_total_{tp_res.get('trigger', 'signal')}")
-                        return
+                if tp_res['action'] == 'close_total':
+                    log_warning(MODULE, f"🎯 TP V2 CLOSE TOTAL: {ticker} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
+                    await self._close_position(trade, current_price, f"tp_v2_total_{tp_res.get('trigger', 'signal')}")
+                    return
 
-                    if tp_res['action'] in ['close_block1', 'close_block2', 'close_block3']:
-                        block_name = tp_res['action'].replace('close_', '')
-                        log_info(MODULE, f"🎯 TP V2 PARTIAL: {ticker} {block_name.upper()} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
-                        await self._execute_partial_close(trade, current_price, tp_res['shares'], block_name, tp_res['reason'])
-                        # No retornamos aquí porque la posición sigue abierta (parcialmente)
+                if tp_res['action'] in ['close_block1', 'close_block2', 'close_block3']:
+                    block_name = tp_res['action'].replace('close_', '')
+                    log_info(MODULE, f"🎯 TP V2 PARTIAL: {ticker} {block_name.upper()} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
+                    await self._execute_partial_close(trade, current_price, tp_res['shares'], block_name, tp_res['reason'])
+                    # No retornamos aquí porque la posición sigue abierta (parcialmente)
                 else:
                     log_debug(MODULE, f"Skipping adaptive TP for {ticker}: age {age_mins:.1f} < {MIN_HOLDING_MINUTES}")
 

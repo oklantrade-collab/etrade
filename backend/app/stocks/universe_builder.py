@@ -242,17 +242,39 @@ class UniverseBuilder:
                     "_name": name,
                 })
 
-            # Sort by RVOL descending — surface high-momentum stocks first
-            candidates.sort(key=lambda x: x.get("_rvol", 0), reverse=True)
+            # To ensure we don't miss high volume leaders (like OPEN, SOFI), 
+            # we will keep the top 50% by raw volume, and the top 50% by RVOL.
+            candidates_by_vol = sorted(candidates, key=lambda x: x.get("_volume", 0), reverse=True)
+            candidates_by_rvol = sorted(candidates, key=lambda x: x.get("_rvol", 0), reverse=True)
+            
+            half_results = max_results // 2
+            
+            final_candidates_set = set()
+            final_candidates = []
+            
+            # 1. Add top by RVOL
+            for c in candidates_by_rvol:
+                if len(final_candidates) >= half_results:
+                    break
+                if c["ticker"] not in final_candidates_set:
+                    final_candidates.append(c)
+                    final_candidates_set.add(c["ticker"])
+                    
+            # 2. Add top by Volume
+            for c in candidates_by_vol:
+                if len(final_candidates) >= max_results:
+                    break
+                if c["ticker"] not in final_candidates_set:
+                    final_candidates.append(c)
+                    final_candidates_set.add(c["ticker"])
 
             # Log RVOL distribution for debugging
-            rvol_above_15 = sum(1 for c in candidates if c.get("_rvol", 0) >= 1.5)
-            rvol_above_10 = sum(1 for c in candidates if c.get("_rvol", 0) >= 1.0)
-            log_info(MODULE, f"Yahoo Screener: {len(candidates)} US stocks | "
-                             f"RVOL>=1.5: {rvol_above_15} | RVOL>=1.0: {rvol_above_10}")
+            rvol_above_15 = sum(1 for c in final_candidates if c.get("_rvol", 0) >= 1.5)
+            rvol_above_10 = sum(1 for c in final_candidates if c.get("_rvol", 0) >= 1.0)
+            log_info(MODULE, f"Yahoo Screener: {len(candidates)} US stocks fetched | "
+                             f"Kept {len(final_candidates)} | RVOL>=1.5: {rvol_above_15} | RVOL>=1.0: {rvol_above_10}")
 
-            # Return top N sorted by RVOL
-            return candidates[:max_results]
+            return final_candidates
 
         except Exception as e:
             log_error(MODULE, f"Yahoo Screener failed: {e}")

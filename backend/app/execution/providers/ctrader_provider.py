@@ -112,16 +112,16 @@ class CTraderProtobufProvider(BaseMarketProvider):
     PRICE_DIVISOR = {
         'EURUSD': 100000,
         'GBPUSD': 100000,
-        'USDJPY': 100,
+        'USDJPY': 100000,
         'USDCHF': 100000,
         'AUDUSD': 100000,
         'NZDUSD': 100000,
         'USDCAD': 100000,
         'EURGBP': 100000,
-        'EURJPY': 100,
-        'GBPJPY': 100,
-        'XAUUSD': 500,
-        'XAGUSD': 500,
+        'EURJPY': 100000,
+        'GBPJPY': 100000,
+        'XAUUSD': 100000,
+        'XAGUSD': 100000,
     }
 
     def __init__(
@@ -241,8 +241,8 @@ class CTraderProtobufProvider(BaseMarketProvider):
 
             if self._authenticated:
                 log_info('CTRADER',
-                    f'✅ Conectado a IC Markets '
-                    f'({self.env}) vía Protobuf TCP'
+                    f'Conectado a IC Markets '
+                    f'({self.env}) via Protobuf TCP'
                 )
                 # Cargar mapa de símbolos
                 await self._load_symbols()
@@ -315,18 +315,18 @@ class CTraderProtobufProvider(BaseMarketProvider):
         # App Auth Response
         if msg_type == \
            ProtoOAApplicationAuthRes().payloadType:
-            log_info('CTRADER', '✅ App Auth OK')
+            log_info('CTRADER', 'App Auth OK')
 
         # Account Auth Response
         elif msg_type == \
              ProtoOAAccountAuthRes().payloadType:
-            log_info('CTRADER', '✅ Account Auth OK')
+            log_info('CTRADER', 'Account Auth OK')
             self._authenticated = True
 
         # Error
         elif msg_type == 50: # ProtoOAErrorRes
             error = Protobuf.extract(message)
-            log_error('CTRADER', f'❌ Error del servidor: {error}')
+            log_error('CTRADER', f'Error del servidor: {error}')
 
 
         # Spot Price Update (precio en tiempo real)

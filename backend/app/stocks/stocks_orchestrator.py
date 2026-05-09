@@ -1,0 +1,743 @@
+"""
+APEX Orchestrator — eTrader v5.0
+
+Sistema central de decisiones de compra para el mercado de Stocks.
+
+Flujo completo:
+  1. Evaluar APEX Score de todas las empresas
+  2. Construir la Cola de Alta Prioridad
+  3. Filtrar sobrecompradas y bloqueadas
+  4. Ordenar por Composite Rank
+  5. Verificar señales de reglas (S01-S09, HOT)
+  6. Calcular capital disponible
+  7. Ejecutar compras en orden de prioridad
+"""
+
+from datetime import datetime, timezone
+from app.core.logger import log_info, log_error, log_warning
+from app.core.supabase_client import get_supabase
+from app.stocks.apex_score import calculate_apex_score
+
+
+MODULE = "ORCHESTRATOR"
+
+
+# ════════════════════════════════════════════
+# MÓDULO 1 — CARGAR CONFIGURACIÓN
+# ════════════════════════════════════════════
+
+async def load_orchestrator_config(supabase) -> dict:
+    """Carga configuración desde stocks_config."""
+    try:
+        # Cargamos TODA la configuración para no depender de categorías
+        res = supabase.table('stocks_config').select('key,value').execute()
+
+        cfg = {
+            'max_total_risk_pct':       30.0,
+            'pct_per_operation':        10.0,
+            'capital_base':             5000.0,
+            'apex_min_score':           60.0,
+            'apex_max_overbought_rsi':  75.0,
+            'apex_max_fib_zone':        3,
+            'apex_lock_cycles':         3,
+            'apex_composite_w_4h':      0.40,
+            'apex_composite_w_1d':      0.30,
+            'apex_composite_w_gain':    0.20,
+            'apex_composite_w_conf':    0.10,
+            'apex_proportional_sizing': True,
+            'apex_max_positions':       5,
+        }
+
+        for row in (res.data or []):
+            k, v = row['key'], row['value']
+            
+            # Mapeo de llaves críticas desde Settings
+            if k == 'total_capital_usd': 
+                cfg['capital_base'] = float(v)
+            elif k == 'max_total_risk_pct': 
+                cfg['max_total_risk_pct'] = float(v)
+            elif k == 'max_pct_per_trade': 
+                # Si en DB está 0.05 (5%), lo convertimos a 5.0 para el orchestrator
+                val = float(v)
+                cfg['pct_per_operation'] = val * 100 if val < 1 else val
+            elif k == 'max_concurrent_positions':
+                cfg['apex_max_positions'] = int(float(v))
+            
+            # Carga el resto si coinciden con los defaults
+            elif k in cfg:
+                if isinstance(cfg[k], bool):
+                    cfg[k] = str(v).lower() == 'true'
+                elif isinstance(cfg[k], int):
+                    cfg[k] = int(float(v))
+                elif isinstance(cfg[k], float):
+                    cfg[k] = float(v)
+                else:
+                    cfg[k] = v
+
+        return cfg
+
+    except Exception as e:
+        log_error(MODULE, f'Error cargando config: {e}')
+        return defaults
+
+
+# ════════════════════════════════════════════
+# MÓDULO 2 — COMPOSITE RANK
+# ════════════════════════════════════════════
+
+def calculate_composite_rank(
+    apex_4h:    float,
+    apex_1d:    float,
+    return_pct: float,
+    confidence: str,
+    cfg:        dict,
+) -> float:
+    """
+    Calcula el Composite Rank — métrica única
+    para ordenar la cola de Alta Prioridad.
+    """
+    w_4h   = float(cfg.get('apex_composite_w_4h',   0.40))
+    w_1d   = float(cfg.get('apex_composite_w_1d',   0.30))
+    w_gain = float(cfg.get('apex_composite_w_gain', 0.20))
+    w_conf = float(cfg.get('apex_composite_w_conf', 0.10))
+
+    gain_norm = min(100, max(0, return_pct * 10))
+
+    conf_score = {
+        'high':   90,
+        'medium': 60,
+        'low':    30,
+    }.get(confidence, 50)
+
+    rank = (
+        apex_4h    * w_4h  +
+        apex_1d    * w_1d  +
+        gain_norm  * w_gain +
+        conf_score * w_conf
+    )
+
+    return round(min(100, max(0, rank)), 2)
+
+
+# ════════════════════════════════════════════
+# MÓDULO 3 — VERIFICAR SOBRECOMPRA
+# ════════════════════════════════════════════
+
+def is_overbought(snap: dict, cfg: dict) -> dict:
+    """
+    Verifica si una acción está sobrecomprada.
+    Si sí → BLOQUEAR la compra.
+    """
+    rsi      = float(snap.get('rsi_14') or 50)
+    fib_zone = int(snap.get('fibonacci_zone', snap.get('fib_zone_15m', 0)) or 0)
+    price    = float(snap.get('price') or 0)
+    upper_3  = float(snap.get('upper_3') or 0)
+
+    max_rsi  = float(cfg.get('apex_max_overbought_rsi') or 75)
+    max_fib  = int(cfg.get('apex_max_fib_zone') or 3)
+
+    reasons  = []
+
+    if rsi >= max_rsi:
+        reasons.append(f'RSI sobrecomprado ({rsi:.0f} ≥ {max_rsi})')
+
+    if fib_zone >= max_fib:
+        reasons.append(f'Zona Fib alta ({fib_zone} ≥ {max_fib})')
+
+    if upper_3 > 0 and price > upper_3:
+        reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
+
+    blocked = len(reasons) > 0
+
+    return {
+        'blocked':  blocked,
+        'reasons':  reasons,
+        'rsi':      rsi,
+        'fib_zone': fib_zone,
+        'reason':   ' | '.join(reasons) if reasons else 'No sobrecomprada ✅',
+    }
+
+
+# ════════════════════════════════════════════
+# MÓDULO 4 — CALCULAR CAPITAL DISPONIBLE
+# ════════════════════════════════════════════
+
+async def calculate_available_capital(cfg: dict, supabase) -> dict:
+    """
+    Calcula el capital disponible para nuevas
+    compras respetando los límites de Settings.
+    """
+    capital_base = float(cfg.get('capital_base', 5000))
+    max_risk_pct = float(cfg.get('max_total_risk_pct', 30))
+    per_op_pct   = float(cfg.get('pct_per_operation', 10))
+
+    capital_max    = capital_base * max_risk_pct / 100
+    capital_per_op = capital_base * per_op_pct / 100
+
+    # Capital ya invertido (posiciones abiertas)
+    pos_res = supabase \
+        .table('stocks_positions') \
+        .select('shares, avg_price') \
+        .eq('status', 'open') \
+        .execute()
+
+    capital_invested = sum(
+        float(p.get('shares', 0)) * float(p.get('avg_price', 0))
+        for p in (pos_res.data or [])
+    )
+
+    capital_available = max(0, capital_max - capital_invested)
+
+    ops_possible = int(capital_available / capital_per_op) if capital_per_op > 0 else 0
+
+    open_count = len(pos_res.data or [])
+    max_pos    = int(cfg.get('apex_max_positions', 5))
+    pos_slots  = max(0, max_pos - open_count)
+
+    return {
+        'capital_base':      capital_base,
+        'capital_max_total': round(capital_max, 2),
+        'capital_invested':  round(capital_invested, 2),
+        'capital_available': round(capital_available, 2),
+        'capital_per_op':    round(capital_per_op, 2),
+        'ops_possible':      min(ops_possible, pos_slots),
+        'pos_slots':         pos_slots,
+        'open_count':        open_count,
+        'max_positions':     max_pos,
+        'can_buy':           capital_available >= capital_per_op and pos_slots > 0,
+        'reason': (
+            f'Capital: ${capital_available:.2f} disponible de '
+            f'${capital_max:.2f} (invertido: ${capital_invested:.2f}). '
+            f'Slots: {pos_slots}/{max_pos}. '
+            f'Ops posibles: {min(ops_possible, pos_slots)}'
+        ),
+    }
+
+
+# ════════════════════════════════════════════
+# MÓDULO 5 — SIZING PROPORCIONAL
+# ════════════════════════════════════════════
+
+def calculate_position_size(
+    ticker:         str,
+    price:          float,
+    composite_rank: float,
+    capital_per_op: float,
+    cfg:            dict,
+    all_ranks:      list,
+) -> dict:
+    """
+    Calcula cuánto capital y cuántas acciones comprar.
+    Sizing proporcional al rank si está habilitado.
+    """
+    proportional = cfg.get('apex_proportional_sizing', True)
+    factor_norm  = 1.0
+
+    if proportional and all_ranks:
+        total_rank = sum(all_ranks)
+        my_factor  = composite_rank / total_rank if total_rank > 0 else 1 / len(all_ranks)
+        factor_norm = 0.70 + (my_factor * len(all_ranks) - 1) * 0.30
+        factor_norm = max(0.70, min(1.30, factor_norm))
+        capital_op  = capital_per_op * factor_norm
+    else:
+        capital_op = capital_per_op
+
+    if price <= 0:
+        return {'capital': 0, 'shares': 0, 'error': 'Precio inválido'}
+
+    shares = int(capital_op / price)
+    if shares <= 0:
+        shares = 1
+
+    actual_capital = shares * price
+
+    return {
+        'capital': round(actual_capital, 2),
+        'shares':  shares,
+        'price':   price,
+        'factor':  round(factor_norm, 3),
+        'reason':  f'{ticker}: {shares} shares × ${price:.2f} = ${actual_capital:.2f}',
+    }
+
+
+# ════════════════════════════════════════════
+# MÓDULO 6 — VERIFICAR SEÑALES DE REGLAS
+# ════════════════════════════════════════════
+
+def check_active_rules(ticker: str, snap: dict, supabase) -> dict:
+    """
+    Verifica si alguna regla activa (S01-S09, HOT_CANDLE_BUY, PRO_CANDLE_BUY, etc.)
+    tiene señal de compra para este ticker.
+    """
+    try:
+        from app.stocks.stocks_rule_engine import StocksRuleEngine
+
+        engine = StocksRuleEngine.get_instance()
+        if not engine.rules:
+            engine.load_rules()
+
+        context = engine.build_context(
+            ticker     = ticker,
+            snap       = snap,
+            ia_score   = float(snap.get('meta_score', 0) or 0) / 10,
+            tech_score = float(snap.get('technical_score', 0) or 0),
+            rvol       = float(snap.get('rvol', 1.0) or 1.0),
+            pine_signal = str(snap.get('pinescript_signal', '') or ''),
+        )
+
+        results = engine.evaluate_all(context=context, direction='buy')
+
+        triggered = [r for r in results if r.get('triggered')]
+
+        if not triggered:
+            return {'has_signal': False, 'best_rule': None, 'rules': []}
+
+        best = max(triggered, key=lambda r: (r.get('score', 0), r.get('order_type') == 'market'))
+
+        rule_code = best.get('rule_code', '')
+        is_hot = any(rule_code.startswith(p) for p in ('HOT', 'S05', 'S06', 'S07', 'S08'))
+        group  = 'hot' if is_hot else 'pro'
+
+        return {
+            'has_signal':    True,
+            'best_rule':     best,
+            'rule_code':     rule_code,
+            'group':         group,
+            'order_type':    best.get('order_type'),
+            'all_triggered': triggered,
+            'count':         len(triggered),
+        }
+
+    except Exception as e:
+        log_warning(MODULE, f'check_active_rules {ticker}: {e}')
+        return {'has_signal': False, 'best_rule': None, 'rules': []}
+
+
+# ════════════════════════════════════════════
+# MÓDULO 7 — CONSTRUIR LA COLA DE PRIORIDAD
+# ════════════════════════════════════════════
+
+async def _get_df(ticker: str, interval: str):
+    """Obtiene OHLCV DataFrame via yfinance."""
+    try:
+        from app.data.yfinance_provider import YFinanceProvider
+        provider = YFinanceProvider()
+        period_map = {
+            '5m': '5d', '15m': '60d',
+            '4h': '120d', '1d': '365d',
+        }
+        return await provider.get_ohlcv(
+            ticker, interval=interval,
+            period=period_map.get(interval, '60d')
+        )
+    except Exception:
+        return None
+
+
+async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
+    """
+    Construye la Cola de Alta Prioridad.
+    Retorna lista ordenada por Composite Rank.
+    """
+    min_score = float(cfg.get('apex_min_score', 60))
+
+    # Obtener todos los tickers activos del watchlist diario
+    today = datetime.now().date().isoformat()
+    wl_res = supabase \
+        .table('watchlist_daily') \
+        .select('ticker') \
+        .eq('date', today) \
+        .eq('hard_filter_pass', True) \
+        .limit(500) \
+        .execute()
+
+    tickers = list(set(r['ticker'] for r in (wl_res.data or [])))
+
+    # Obtener posiciones ya abiertas
+    pos_res = supabase \
+        .table('stocks_positions') \
+        .select('ticker') \
+        .eq('status', 'open') \
+        .execute()
+    owned_tickers = {p['ticker'] for p in (pos_res.data or [])}
+    
+    # Update owned tickers in the priority queue to maintain consistent DB state
+    for t in owned_tickers:
+        try:
+            supabase.table('stocks_priority_queue') \
+                .update({'status': 'owned', 'last_updated': datetime.now(timezone.utc).isoformat()}) \
+                .eq('ticker', t) \
+                .execute()
+        except:
+            pass
+
+    queue_candidates = []
+
+    for ticker in tickers:
+        if ticker in owned_tickers:
+            continue
+
+        try:
+            # Obtener snapshot
+            snap_res = supabase \
+                .table('market_snapshot') \
+                .select('*') \
+                .eq('symbol', ticker) \
+                .limit(1) \
+                .execute()
+            snap = snap_res.data[0] if snap_res.data else {}
+
+            if not snap or not snap.get('price'):
+                continue
+
+            # Obtener fundamentales
+            fund_res = supabase \
+                .table('watchlist_daily') \
+                .select('*') \
+                .eq('ticker', ticker) \
+                .eq('date', today) \
+                .limit(1) \
+                .execute()
+            fund = fund_res.data[0] if fund_res.data else {}
+
+            fund_cache = {
+                'piotroski_score':    fund.get('piotroski_score', 4),
+                'margin_of_safety':   fund.get('margin_of_safety', 0),
+                'altman_zone':        fund.get('altman_zone', 'grey'),
+                'fundamental_score':  fund.get('fundamental_score', 50),
+                'analyst_rating':     fund.get('analyst_rating', 5),
+                'short_interest_pct': fund.get('short_interest_pct', 5),
+                'days_to_earnings':   fund.get('days_to_earnings', 30),
+                'valuation_status':   fund.get('valuation_status', 'fairly_valued'),
+            }
+
+            df_5m    = await _get_df(ticker, '5m')
+            df_15m   = await _get_df(ticker, '15m')
+            df_4h    = await _get_df(ticker, '4h')
+            df_daily = await _get_df(ticker, '1d')
+
+            # Calcular APEX Score
+            apex = calculate_apex_score(
+                ticker            = ticker,
+                snap              = snap,
+                fundamental_cache = fund_cache,
+                macro             = macro,
+                df_5m             = df_5m,
+                df_15m            = df_15m,
+                df_4h             = df_4h,
+                df_daily          = df_daily,
+            )
+
+            apex_4h = float(apex.get('apex_score_4h') or 50)
+            apex_1d = float(apex.get('apex_score_1d') or 50)
+            ret_exp = float(apex.get('return_expected_4h') or 0)
+            conf    = str(apex.get('confidence') or 'medium')
+
+            # Verificar señales de reglas
+            rule_signal = check_active_rules(ticker, snap, supabase)
+
+            # Calcular Composite Rank
+            rank = calculate_composite_rank(apex_4h, apex_1d, ret_exp, conf, cfg)
+
+            # Criterios de entrada a la cola de alta prioridad
+            enters_by_apex = apex_4h >= min_score
+            enters_by_rule = rule_signal['has_signal']
+
+            # Definir estado inicial
+            # Si tiene señal de regla o score alto -> pending (lista para comprar)
+            # Si no -> watching (solo monitoreo)
+            status = 'pending' if (enters_by_apex or enters_by_rule) else 'watching'
+
+            # Verificar sobrecompra
+            overbought = is_overbought(snap, cfg)
+
+            entry_reason = 'apex_auto'
+            if enters_by_rule:
+                entry_reason = f'rule_{rule_signal.get("rule_code", "")}'
+
+            candidate = {
+                'ticker':            ticker,
+                'group_name':        fund.get('pool_type', ''),
+                'apex_4h':           apex_4h,
+                'apex_1d':           apex_1d,
+                'return_expected':   ret_exp,
+                'confidence':        conf,
+                'composite_rank':    rank,
+                'is_overbought':     overbought['blocked'],
+                'overbought_reason': overbought.get('reason', ''),
+                'rsi':               overbought['rsi'],
+                'fib_zone':          overbought['fib_zone'],
+                'has_rule_signal':   enters_by_rule,
+                'rule_signal':       rule_signal,
+                'entry_reason':      entry_reason,
+                'price':             float(snap.get('price', 0)),
+                'status':            status,
+                'snap':              snap,
+                'apex_detail':       apex,
+            }
+
+            # Guardar/Actualizar en base de datos inmediatamente
+            await _upsert_queue(supabase, candidate, status=status)
+
+            queue_candidates.append(candidate)
+
+        except Exception as e:
+            log_warning(MODULE, f'{ticker}: {e}')
+            continue
+
+    # Ordenar la cola
+    def sort_key(c):
+        has_rule       = c['has_rule_signal']
+        not_overbought = not c['is_overbought']
+        rank           = c['composite_rank']
+        return (has_rule and not_overbought, not_overbought, rank)
+
+    queue_candidates.sort(key=sort_key, reverse=True)
+
+    log_info(MODULE,
+        f'Cola de Prioridad: {len(queue_candidates)} candidatos | '
+        f'{sum(1 for c in queue_candidates if not c["is_overbought"])} '
+        f'no sobrecompradas | '
+        f'{sum(1 for c in queue_candidates if c["has_rule_signal"])} '
+        f'con señal de regla'
+    )
+
+    return queue_candidates
+
+
+# ════════════════════════════════════════════
+# MÓDULO 8 — EJECUTAR COMPRAS EN ORDEN
+# ════════════════════════════════════════════
+
+async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase) -> list:
+    """Ejecuta las compras en orden de prioridad."""
+    from app.stocks.stocks_order_executor import (
+        execute_market_order, place_limit_order,
+    )
+
+    ops_remaining = capital['ops_possible']
+    cap_available = capital['capital_available']
+    cap_per_op    = capital['capital_per_op']
+
+    if ops_remaining <= 0 or cap_available <= 0:
+        log_info(MODULE, f'Sin capital disponible: {capital["reason"]}')
+        return []
+
+    executed   = []
+    all_ranks  = [c['composite_rank'] for c in queue if not c['is_overbought']]
+
+    for candidate in queue:
+        if ops_remaining <= 0:
+            break
+        if cap_available < cap_per_op * 0.5:
+            break
+
+        ticker = candidate['ticker']
+        price  = candidate['price']
+        is_ob  = candidate['is_overbought']
+
+        if is_ob:
+            log_info(MODULE, f'{ticker}: BLOQUEADA — {candidate["overbought_reason"]}')
+            await _upsert_queue(supabase, candidate, status='blocked')
+            continue
+
+        sizing = calculate_position_size(
+            ticker         = ticker,
+            price          = price,
+            composite_rank = candidate['composite_rank'],
+            capital_per_op = cap_per_op,
+            cfg            = cfg,
+            all_ranks      = all_ranks,
+        )
+
+        if sizing['shares'] <= 0 or price <= 0:
+            continue
+
+        rule_sig   = candidate.get('rule_signal', {})
+        order_type = 'market'
+        rule_code  = 'APEX_AUTO'
+
+        if rule_sig.get('has_signal'):
+            best_rule  = rule_sig.get('best_rule', {})
+            order_type = best_rule.get('order_type', 'market')
+            rule_code  = rule_sig.get('rule_code', 'APEX_AUTO')
+
+        log_info(MODULE,
+            f'✅ COMPRANDO {ticker}: {sizing["shares"]} shares × '
+            f'${price:.2f} = ${sizing["capital"]:.2f} | '
+            f'Rank={candidate["composite_rank"]:.1f} | '
+            f'APEX={candidate["apex_4h"]:.0f}% | '
+            f'Regla={rule_code} ({order_type})'
+        )
+
+        context = candidate.get('snap', {})
+        context['price'] = price
+
+        rule_mock = {
+            'rule_code':   rule_code,
+            'group_name':  candidate.get('group_name', ''),
+            'close_all':   False,
+            'dca_enabled': False,
+        }
+
+        try:
+            if order_type == 'market':
+                order = execute_market_order(
+                    ticker    = ticker,
+                    direction = 'buy',
+                    rule_code = rule_code,
+                    context   = context,
+                    rule      = rule_mock,
+                )
+            else:
+                order = place_limit_order(
+                    ticker    = ticker,
+                    direction = 'buy',
+                    rule_code = rule_code,
+                    context   = context,
+                    rule      = rule_mock,
+                )
+
+            if order.get('success'):
+                executed.append({
+                    'ticker':    ticker,
+                    'shares':    sizing['shares'],
+                    'capital':   sizing['capital'],
+                    'rank':      candidate['composite_rank'],
+                    'apex_4h':   candidate['apex_4h'],
+                    'rule_code': rule_code,
+                })
+
+                ops_remaining -= 1
+                cap_available -= sizing['capital']
+
+                await _upsert_queue(
+                    supabase, candidate,
+                    status='buying',
+                    capital_assigned=sizing['capital'],
+                    shares_target=sizing['shares'],
+                )
+
+                _send_telegram_buy(candidate, sizing, cap_available, rule_code)
+
+        except Exception as e:
+            log_error(MODULE, f'Error comprando {ticker}: {e}')
+
+    log_info(MODULE, f'Ciclo completado: {len(executed)} compras ejecutadas')
+    return executed
+
+
+def _send_telegram_buy(candidate, sizing, cap_available, rule_code):
+    """Best-effort Telegram notification for buy."""
+    try:
+        from app.stocks.stocks_order_executor import _send_telegram_sync
+        _send_telegram_sync(
+            f'🛒 APEX ORCHESTRATOR\n'
+            f'Compra: {candidate["ticker"]}\n'
+            f'Shares: {sizing["shares"]}\n'
+            f'Capital: ${sizing["capital"]:.2f}\n'
+            f'APEX 4H: {candidate["apex_4h"]:.0f}%\n'
+            f'Rank: {candidate["composite_rank"]:.1f}\n'
+            f'Regla: {rule_code}\n'
+            f'Retorno esp: +{candidate["return_expected"]:.2f}%\n'
+            f'Capital restante: ${cap_available:.2f}'
+        )
+    except Exception:
+        pass
+
+
+async def _upsert_queue(
+    supabase,
+    candidate: dict,
+    status:    str   = 'pending',
+    capital_assigned: float = 0,
+    shares_target:    int   = 0,
+):
+    """Actualiza el estado en la cola."""
+    try:
+        supabase \
+            .table('stocks_priority_queue') \
+            .upsert({
+                'ticker':          candidate['ticker'],
+                'group_name':      candidate.get('group_name', ''),
+                'apex_score_4h':   candidate['apex_4h'],
+                'apex_score_1d':   candidate['apex_1d'],
+                'return_expected': candidate.get('return_expected', 0),
+                'confidence':      candidate['confidence'],
+                'composite_rank':  candidate['composite_rank'],
+                'status':          status,
+                'entry_reason':    candidate.get('entry_reason', 'apex_auto'),
+                'triggered_rule':  candidate.get('rule_signal', {}).get('rule_code'),
+                'is_overbought':   candidate['is_overbought'],
+                'rsi_at_entry':    candidate.get('rsi', 0),
+                'fib_zone':        candidate.get('fib_zone', 0),
+                'capital_assigned': capital_assigned,
+                'shares_target':   shares_target,
+                'price_at_rank':   candidate.get('price', 0),
+                'last_updated':    datetime.now(timezone.utc).isoformat(),
+            }, on_conflict='ticker') \
+            .execute()
+    except Exception as e:
+        log_error(MODULE, f'Error upsert queue: {e}')
+
+
+# ════════════════════════════════════════════
+# FUNCIÓN PRINCIPAL — CICLO DEL ORCHESTRATOR
+# ════════════════════════════════════════════
+
+async def run_orchestrator_cycle(supabase=None):
+    """
+    Ciclo principal del APEX Orchestrator.
+    Corre cada 15m en horario de mercado.
+    """
+    if supabase is None:
+        supabase = get_supabase()
+
+    log_info(MODULE, '🔄 Iniciando ciclo APEX Orchestrator...')
+
+    # 1. Config
+    cfg = await load_orchestrator_config(supabase)
+    if not cfg:
+        return
+
+    # 2. Capital disponible
+    capital = await calculate_available_capital(cfg, supabase)
+    log_info(MODULE, capital['reason'])
+
+    if not capital['can_buy']:
+        log_info(MODULE, '⏸️ Sin slots o capital disponible')
+        return
+
+    # 3. Macro context
+    from app.stocks.stocks_adaptive_tp import fetch_macro_data
+    macro = await fetch_macro_data(supabase)
+
+    # 4. Construir cola de prioridad
+    queue = await build_priority_queue(cfg, supabase, macro)
+
+    if not queue:
+        log_info(MODULE, 'Cola vacía — sin candidatos')
+        return
+
+    # 5. Log de la cola (top 5)
+    log_info(MODULE,
+        f'TOP 5 candidatos:\n' +
+        '\n'.join([
+            f'  {i+1}. {c["ticker"]}: '
+            f'rank={c["composite_rank"]:.1f} '
+            f'APEX={c["apex_4h"]:.0f}% '
+            f'ret={c["return_expected"]:.2f}% '
+            f'{"🔴 OB" if c["is_overbought"] else "✅"}'
+            for i, c in enumerate(queue[:5])
+        ])
+    )
+
+    # 6. Ejecutar compras
+    executed = await execute_priority_buys(queue, capital, cfg, supabase)
+
+    return {
+        'queue_size': len(queue),
+        'executed':   len(executed),
+        'capital':    capital,
+        'top_ticker': queue[0]['ticker'] if queue else None,
+    }

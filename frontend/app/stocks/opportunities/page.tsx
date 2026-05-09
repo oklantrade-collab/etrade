@@ -4,6 +4,164 @@ import Link from 'next/link'
 import TradeMarkerChart from '@/components/TradeMarkerChart'
 import toast from 'react-hot-toast'
 
+// ════════════════════════════════════════════
+// APEX Priority Queue Panel
+// ════════════════════════════════════════════
+
+function StatusBadge({ status, isOB }: { status: string, isOB: boolean }) {
+  const configs: any = {
+    'pending':  { label: 'PENDING',  color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', icon: '⏳' },
+    'buying':   { label: 'BUYING',   color: '#38BDF8', bg: 'rgba(56,189,248,0.15)', icon: '⚡' },
+    'owned':    { label: 'OWNED',    color: '#22C55E', bg: 'rgba(34,197,94,0.15)',  icon: '💎' },
+    'blocked':  { label: 'BLOCKED',  color: '#EF4444', bg: 'rgba(239,68,68,0.15)',  icon: '🚫' },
+    'watching': { label: 'WATCHING', color: '#94A3B8', bg: 'rgba(148,163,184,0.1)', icon: '👁️' },
+  };
+  
+  let s = status?.toLowerCase() || 'pending';
+  if (isOB) s = 'blocked';
+  
+  const cfg = configs[s] || configs['pending'];
+  
+  return (
+    <div style={{
+      fontSize: '9px', fontWeight: 900,
+      padding: '3px 10px', borderRadius: '6px',
+      background: cfg.bg, color: cfg.color,
+      minWidth: '85px', textAlign: 'center',
+      border: `1px solid ${cfg.color}22`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px',
+      textTransform: 'uppercase', letterSpacing: '0.05em'
+    }}>
+      <span>{cfg.icon}</span>
+      <span>{cfg.label}</span>
+    </div>
+  );
+}
+
+function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital: any, summary: any }) {
+  const hasQueue = queue && queue.length > 0;
+
+  const capPct = capital?.capital_max_total > 0
+    ? Math.round((capital.capital_invested / capital.capital_max_total) * 100)
+    : 0;
+
+  return (
+    <div style={{
+      background: 'linear-gradient(145deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.01) 100%)',
+      border: '1px solid rgba(255,255,255,0.08)',
+      borderRadius: '16px', padding: '20px',
+      marginBottom: '24px',
+      boxShadow: '0 10px 30px rgba(0,0,0,0.2)'
+    }}>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between',
+        alignItems: 'center', marginBottom: '18px',
+      }}>
+        <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
+            <h3 style={{ color: '#FFF', fontSize: '15px', fontWeight: 900, margin: 0, letterSpacing: '-0.5px' }}>
+              🎯 COLA DE ALTA PRIORIDAD APEX
+            </h3>
+            <span style={{ fontSize: '10px', color: '#444', fontWeight: 800 }}>V5.0 ORCHESTRATOR</span>
+        </div>
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <span style={{
+            background: 'rgba(0,200,150,0.1)', color: '#00C896',
+            fontSize: '10px', padding: '4px 12px', borderRadius: '20px', fontWeight: 800, border: '1px solid rgba(0,200,150,0.2)'
+          }}>
+            {summary?.active || 0} ACTIVAS
+          </span>
+          <span style={{
+            background: 'rgba(79,195,247,0.1)', color: '#4FC3F7',
+            fontSize: '10px', padding: '4px 12px', borderRadius: '20px', fontWeight: 800, border: '1px solid rgba(79,195,247,0.2)'
+          }}>
+            {summary?.with_signal || 0} SEÑAL
+          </span>
+        </div>
+      </div>
+
+      {/* Capital Allocation Bar */}
+      {capital?.capital_max_total > 0 && (
+        <div style={{ marginBottom: '20px', background: 'rgba(0,0,0,0.2)', padding: '12px 16px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.03)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#888', marginBottom: '8px', fontWeight: 700 }}>
+            <div style={{ display:'flex', gap:'15px' }}>
+                <span>INVESTED: <b style={{ color: '#FFF' }}>${capital.capital_invested?.toLocaleString()}</b></span>
+                <span>MAX RISK: <b style={{ color: '#FFF' }}>${capital.capital_max_total?.toLocaleString()}</b></span>
+            </div>
+            <span style={{ color: '#22C55E' }}>AVAILABLE: <b>${capital.capital_available?.toLocaleString()}</b> ({capital.ops_possible} ops)</span>
+          </div>
+          <div style={{ height: '6px', background: 'rgba(255,255,255,0.05)', borderRadius: '3px', overflow: 'hidden' }}>
+            <div style={{
+              width: `${Math.min(100, capPct)}%`, height: '100%',
+              background: 'linear-gradient(90deg, #22C55E 0%, #38BDF8 100%)',
+              boxShadow: '0 0 10px rgba(34,197,94,0.3)',
+              transition: 'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
+            }} />
+          </div>
+        </div>
+      )}
+
+      {!hasQueue ? (
+        <div style={{ textAlign: 'center', padding: '30px', color: '#444', fontSize: '13px', fontWeight: 700, background: 'rgba(0,0,0,0.1)', borderRadius: '12px' }}>
+          Esperando que el Orchestrator identifique candidatos de alta prioridad...
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px' }}>
+            {queue.slice(0, 10).map((item: any, idx: number) => {
+              const apex4h = item.apex_score_4h || 0;
+              const retExp = item.return_expected || 0;
+              const rank = item.composite_rank || 0;
+              const isOB = item.is_overbought;
+              const status = item.status || 'pending';
+
+              return (
+                <div key={item.ticker || idx} style={{
+                  display: 'flex', alignItems: 'center', gap: '12px',
+                  padding: '12px', borderRadius: '12px',
+                  background: 'rgba(255,255,255,0.02)',
+                  border: `1px solid ${idx === 0 ? 'rgba(245,158,11,0.2)' : 'rgba(255,255,255,0.04)'}`,
+                  transition: 'transform 0.2s',
+                }}>
+                  <div style={{
+                    width: '30px', height: '30px', borderRadius: '8px',
+                    background: idx === 0 ? 'rgba(245,158,11,0.1)' : 'rgba(0,0,0,0.3)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: '12px', fontWeight: 900,
+                    color: idx === 0 ? '#F59E0B' : '#444',
+                  }}>
+                    #{idx + 1}
+                  </div>
+
+                  <div style={{ minWidth: '60px' }}>
+                    <div style={{ fontWeight: 900, fontSize: '15px', color: isOB ? '#EF4444' : '#FFF' }}>{item.ticker}</div>
+                    <div style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>RANK {rank.toFixed(1)}</div>
+                  </div>
+
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                      <span style={{ color: '#4FC3F7', fontSize: '11px', fontWeight: 900 }}>{apex4h.toFixed(0)}% APEX</span>
+                      <span style={{ color: retExp > 0 ? '#22C55E' : '#EF4444', fontSize: '11px', fontWeight: 800 }}>
+                        {retExp > 0 ? '+' : ''}{retExp.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div style={{ height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px' }}>
+                      <div style={{
+                        width: `${Math.min(100, apex4h)}%`, height: '100%',
+                        background: apex4h >= 75 ? '#22C55E' : apex4h >= 60 ? '#38BDF8' : '#F59E0B',
+                        borderRadius: '2px', transition: 'width 1s ease',
+                      }} />
+                    </div>
+                  </div>
+
+                  <StatusBadge status={status} isOB={isOB} />
+                </div>
+              );
+            })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const formatAbbreviated = (num: any) => {
     const val = parseFloat(num);
     if (!val || isNaN(val)) return '0.00';
@@ -431,37 +589,61 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
   if (fibZone !== undefined && fibZone !== null && movementDisplay !== '—') movementDisplay = `${movementDisplay} F(${fibZone})`;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '70px 80px 70px 70px 70px 70px 70px 105px 55px 85px 35px 35px 35px 115px 90px', padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.02)', alignItems: 'center', background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
-      <div style={{ display:'flex', alignItems:'center', gap: '4px' }}>
-          <span style={{ fontWeight: 900, color: '#FFF', fontSize: '13px' }}>{opp.ticker}</span>
+    <div className="scanner-row" style={{ 
+      display: 'grid', 
+      gridTemplateColumns: '80px 90px 80px 80px 70px 1fr 70px 40px 40px 40px 115px 95px 80px', 
+      padding: '12px 16px', 
+      borderBottom: '1px solid rgba(255,255,255,0.03)', 
+      alignItems: 'center', 
+      transition: 'all 0.2s ease',
+      background: index % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' 
+    }}>
+      <div style={{ display:'flex', alignItems:'center', gap: '6px' }}>
+          <span style={{ fontWeight: 900, color: '#FFF', fontSize: '14px', letterSpacing: '-0.5px' }}>{opp.ticker}</span>
           {(opp.intrinsic_value > opp.price && opp.intrinsic_value > 0) && (
-            <span style={{ fontSize: '7px', background: '#22C55E', color: '#000', padding: '1px 3px', borderRadius: '2px', fontWeight: 950 }}>VALOR</span>
+            <span style={{ fontSize: '8px', background: '#22C55E', color: '#000', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>VAL</span>
           )}
       </div>
-      <div style={{ display:'flex', alignItems:'center', gap:'3px' }}>
-          <span style={{ color:(opp.change_pct || 0) >= 0 ? '#22C55E' : '#EF4444', fontWeight:950, fontSize:'12px' }}>
+      
+      <div style={{ display:'flex', alignItems:'center' }}>
+          <span style={{ color:(opp.change_pct || 0) >= 0 ? '#22C55E' : '#EF4444', fontWeight:900, fontSize:'13px' }}>
             {opp.change_pct > 0 ? '+' : ''}{(opp.change_pct || 0).toFixed(2)}%
           </span>
       </div>
-      <span style={{ fontWeight: 700, fontSize:'12px' }}>${opp.price.toFixed(2)}</span>
-      <span style={{ fontWeight: 800, fontSize:'11px', color: '#888' }}>{(opp.volume / 1_000_000).toFixed(2)}M</span>
-      <span style={{ color:(opp.rev_growth || 0) >= 0 ? '#22C55E' : '#EF4444', fontWeight:900, fontSize:'11px' }}>{opp.rev_growth > 0 ? '+' : ''}{opp.rev_growth}%</span>
+
+      <span style={{ fontWeight: 700, fontSize:'13px', color: '#EEE' }}>${opp.price.toFixed(2)}</span>
+      
+      <span style={{ fontWeight: 800, fontSize:'11px', color: '#888' }}>
+        {(opp.volume / 1_000_000).toFixed(2)}M
+      </span>
+
       <PiotroskiBadge score={opp.piotroski_score} detail={opp.piotroski_detail} />
-      <ValuationBadge intrinsic={opp.composite_intrinsic} price={opp.price} margin={opp.margin_of_safety} source={opp.data_source} />
-      <span style={{ color: getMovColor(rawMovement), fontSize: '10px', fontWeight: 900, textTransform: 'uppercase' }}>{movementDisplay}</span>
+
+      <span style={{ color: getMovColor(rawMovement), fontSize: '10px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        {movementDisplay}
+      </span>
+
       <div style={{ display:'flex', flexDirection:'column', justifyContent: 'center' }}>
-        <span style={{ fontSize:'9px', color:'#888', fontWeight:800 }}>{opp.created_at ? new Date(opp.created_at).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
-        <span style={{ fontSize:'12px', color:'#22C55E', fontWeight:900, fontFamily:'monospace', marginTop: '2px' }}>{opp.last_scan_time || '—:—'}</span>
+        <span style={{ fontSize:'9px', color:'#555', fontWeight:800 }}>{opp.created_at ? new Date(opp.created_at).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
+        <span style={{ fontSize:'11px', color:'#22C55E', fontWeight:900, fontFamily:'monospace', marginTop: '1px' }}>{opp.last_scan_time || '—:—'}</span>
       </div>
-      <OrderActivityIndicator orders={opp.orders || []} />
-      <span style={{ color: displayScoreTech >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 950, fontSize:'11px' }}>{displayScoreTech}</span>
-      <span style={{ color: Number(scoreIA) >= 7.5 ? '#A855F7' : '#22C55E', fontWeight: 950, fontSize:'11px' }}>{scoreIA}</span>
-      <span style={{ color: Number(opp.sm_score) >= 7.5 ? '#FF4757' : (Number(opp.sm_score) >= 5 ? '#F59E0B' : '#666'), fontWeight: 950, fontSize:'11px' }}>{opp.sm_score?.toFixed(1) || '1.0'}</span>
-      <ApexBadge score4h={opp.apex_4h} score1d={opp.apex_1d} signal={opp.apex_signal} confidence={opp.apex_conf} edge={opp.apex_edge} />
+
+      <span style={{ color: displayScoreTech >= 70 ? '#22C55E' : '#F59E0B', fontWeight: 950, fontSize:'11px', textAlign: 'center' }}>{displayScoreTech}</span>
+      <span style={{ color: Number(scoreIA) >= 7.5 ? '#A855F7' : '#22C55E', fontWeight: 950, fontSize:'11px', textAlign: 'center' }}>{scoreIA}</span>
+      <span style={{ color: Number(opp.sm_score) >= 7.5 ? '#FF4757' : (Number(opp.sm_score) >= 5 ? '#F59E0B' : '#666'), fontWeight: 950, fontSize:'11px', textAlign: 'center' }}>{opp.sm_score?.toFixed(1) || '1.0'}</span>
+      
+      <div style={{ display: 'flex', justifyContent: 'center' }}>
+        <ApexBadge score4h={opp.apex_4h} score1d={opp.apex_1d} signal={opp.apex_signal} confidence={opp.apex_conf} edge={opp.apex_edge} />
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'center' }}>
+        <StatusBadge status={opp.queue_status} isOB={opp.is_overbought_queue} />
+      </div>
+
       <div style={{textAlign:'right', display: 'flex', justifyContent: 'flex-end', gap: '8px'}}>
-        <button onClick={onOpenDetails} title="Analizar Empresa" style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', color: '#22C55E', width: '28px', height: '28px', borderRadius: '50%', fontSize: '12px', cursor: 'pointer', display: 'inline-flex', justifyContent: 'center', alignItems: 'center' }}>🔍</button>
+        <button onClick={onOpenDetails} title="Analizar Empresa" style={{ background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', color: '#22C55E', width: '32px', height: '32px', borderRadius: '50%', fontSize: '14px', cursor: 'pointer', display: 'inline-flex', justifyContent: 'center', alignItems: 'center', transition: 'all 0.2s' }}>🔍</button>
         {isPro && (
-            <button onClick={onDelete} title="Eliminar de PRO" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', color: '#EF4444', width: '28px', height: '28px', borderRadius: '50%', fontSize: '12px', cursor: 'pointer', display: 'inline-flex', justifyContent: 'center', alignItems: 'center' }}>—</button>
+            <button onClick={onDelete} title="Eliminar de PRO" style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', color: '#EF4444', width: '32px', height: '32px', borderRadius: '50%', fontSize: '14px', cursor: 'pointer', display: 'inline-flex', justifyContent: 'center', alignItems: 'center', transition: 'all 0.2s' }}>—</button>
         )}
       </div>
     </div>
@@ -483,6 +665,9 @@ export default function OpportunitiesIntelligence() {
   const [selectedStock, setSelectedStock] = useState<any | null>(null)
   const [activeTab, setActiveTab] = useState<'HOT' | 'VALUE'>('HOT')
   const [marketStatus, setMarketStatus] = useState({ is_open: false, status: 'CARGANDO...' })
+  const [priorityQueue, setPriorityQueue] = useState<any[]>([])
+  const [pqCapital, setPqCapital] = useState<any>({})
+  const [pqSummary, setPqSummary] = useState<any>({})
   const [settings, setSettings] = useState({
     hotMaxPrice: 50,
     proMaxPrice: 500,
@@ -501,9 +686,22 @@ export default function OpportunitiesIntelligence() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 30000)
+    fetchPriorityQueue()
+    const interval = setInterval(() => { fetchData(); fetchPriorityQueue(); }, 30000)
     return () => clearInterval(interval)
   }, [])
+
+  const fetchPriorityQueue = async () => {
+    try {
+      const res = await fetch('/api/v1/stocks/priority-queue')
+      const data = await res.json()
+      setPriorityQueue(data.queue || [])
+      setPqCapital(data.capital || {})
+      setPqSummary(data.summary || {})
+    } catch (err) {
+      console.error('PQ fetch error:', err)
+    }
+  }
 
   const fetchData = async () => {
     try {
@@ -578,12 +776,45 @@ export default function OpportunitiesIntelligence() {
     }
   };
 
-  const hotList = opportunities
-    .filter(o => o.price <= settings.hotMaxPrice && o.rvol >= settings.minRvol && o.volume >= settings.minVolume)
-    .sort((a, b) => b.rvol - a.rvol)
+  // Merge priority queue items into opportunities so they always appear in the general table
+  const mergedOpportunities = (() => {
+    const existingTickers = new Set(opportunities.map(o => o.ticker));
+    const merged = [...opportunities];
+    
+    // Add priority queue items that aren't already in the main list
+    for (const pq of priorityQueue) {
+      if (!existingTickers.has(pq.ticker)) {
+        merged.push({
+          ticker: pq.ticker,
+          price: pq.price_at_rank || 0,
+          rvol: 0,
+          volume: 0,
+          apex_4h: pq.apex_score_4h || 0,
+          apex_1d: pq.apex_score_1d || 0,
+          apex_signal: '',
+          apex_conf: pq.confidence || '',
+          queue_status: pq.status || 'watching',
+          last_scan_time: '--:--',
+          _from_priority_queue: true,
+        });
+        existingTickers.add(pq.ticker);
+      }
+    }
+    return merged;
+  })();
+
+  const hotList = mergedOpportunities
+    .filter(o => o._from_priority_queue || (o.price <= settings.hotMaxPrice && o.rvol >= settings.minRvol && o.volume >= settings.minVolume))
+    .sort((a, b) => {
+      // Sort by APEX Score 4H descending (primary), then by RVOL (secondary)
+      const apexA = parseFloat(a.apex_4h) || 0;
+      const apexB = parseFloat(b.apex_4h) || 0;
+      if (apexB !== apexA) return apexB - apexA;
+      return (b.rvol || 0) - (a.rvol || 0);
+    })
     .slice(0, settings.maxHotResults);
 
-  const valueList = opportunities.filter(o => o.is_pro_member);
+  const valueList = mergedOpportunities.filter(o => o.is_pro_member);
   const displayList = activeTab === 'HOT' ? hotList : valueList;
 
   return (
@@ -623,23 +854,42 @@ export default function OpportunitiesIntelligence() {
         </div>
       )}
 
+      {/* APEX Priority Queue Panel */}
+      <PriorityQueuePanel queue={priorityQueue} capital={pqCapital} summary={pqSummary} />
+
       <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '70px 80px 70px 70px 70px 70px 70px 105px 55px 85px 35px 35px 35px 115px 90px', padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '9px', fontWeight: 900, color: '#444', textTransform: 'uppercase', letterSpacing: '0.1em', alignItems: 'center' }}>
+        <style jsx>{`
+          .scanner-row:hover {
+            background: rgba(34, 197, 94, 0.05) !important;
+            transform: translateX(4px);
+          }
+        `}</style>
+        <div style={{ 
+          display: 'grid', 
+          gridTemplateColumns: '80px 90px 80px 80px 70px 1fr 70px 40px 40px 40px 115px 95px 80px', 
+          padding: '14px 16px', 
+          borderBottom: '1px solid rgba(255,255,255,0.08)', 
+          fontSize: '10px', 
+          fontWeight: 900, 
+          color: '#555', 
+          textTransform: 'uppercase', 
+          letterSpacing: '0.15em', 
+          alignItems: 'center',
+          background: 'rgba(0,0,0,0.2)'
+        }}>
           <span>Ticker</span>
-          <span>% PRC</span>
+          <span>Retorno</span>
           <span>Precio</span>
-          <span>Vol</span>
-          <span>Rev G.</span>
+          <span>Volumen</span>
           <span>F.Score</span>
-          <span>Valuation</span>
-          <span>Movimiento</span>
-          <span>HH:MM</span>
-          <span>Orden</span>
-          <span>TS</span>
-          <span>IA</span>
-          <span>SM</span>
-          <span style={{color:'#4FC3F7'}}>APEX</span>
-          <span style={{textAlign:'right'}}>Accion</span>
+          <span>Movimiento Taller</span>
+          <span>Escaneo</span>
+          <span style={{textAlign:'center'}}>TS</span>
+          <span style={{textAlign:'center'}}>IA</span>
+          <span style={{textAlign:'center'}}>SM</span>
+          <span style={{color:'#4FC3F7', textAlign:'center'}}>APEX Score</span>
+          <span style={{textAlign:'center'}}>Estado</span>
+          <span style={{textAlign:'right'}}>Acción</span>
         </div>
         {!loading && displayList.map((opp, i) => ( 
             <ScannerRow 

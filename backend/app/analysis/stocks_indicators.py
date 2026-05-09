@@ -447,6 +447,12 @@ def upsert_technical_score(
                 "fib_zone_1d": indicators.get("fib_zone_1d"),
                 "smart_limit_long_1d": indicators.get("smart_limit_long_1d"),
                 "smart_limit_short_1d": indicators.get("smart_limit_short_1d"),
+                # APEX Score fields
+                "apex_4h": indicators.get("apex_4h"),
+                "apex_1d": indicators.get("apex_1d"),
+                "apex_signal": indicators.get("apex_signal"),
+                "apex_conf": indicators.get("apex_conf"),
+                "apex_edge": indicators.get("apex_edge"),
                 # Component Confirmation (For UI)
                 "t01_confirmed": bool(indicators.get("t01_confirmed", False)),
                 "t02_confirmed": bool(indicators.get("t02_confirmed", False)),
@@ -454,6 +460,11 @@ def upsert_technical_score(
                 "t04_confirmed": bool(indicators.get("t04_confirmed", False)),
                 "last_scan_time": indicators.get("last_scan_time"),
             },
+            "apex_4h": indicators.get("apex_4h"),
+            "apex_1d": indicators.get("apex_1d"),
+            "apex_signal": indicators.get("apex_signal"),
+            "apex_conf": indicators.get("apex_conf"),
+            "apex_edge": indicators.get("apex_edge"),
         }
 
         # ── Persistent Upsert (Retry on Timeout, Protocol Error or Busy) ──

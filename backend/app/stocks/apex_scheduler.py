@@ -193,6 +193,14 @@ async def run_apex_cycle(supabase=None):
             f"Duration={duration:.1f}s"
         )
 
+        # 🚀 DISPARAR EL ORCHESTRATOR PARA ACTUALIZAR LA COLA DE PRIORIDAD
+        try:
+            from app.stocks.stocks_orchestrator import run_orchestrator_cycle
+            log_info(MODULE, "Triggering Priority Queue Orchestrator...")
+            await run_orchestrator_cycle(supabase)
+        except Exception as orch_e:
+            log_error(MODULE, f"Failed to run orchestrator after cycle: {orch_e}")
+
     except Exception as e:
         log_error(MODULE, f"APEX cycle failed: {e}")
 

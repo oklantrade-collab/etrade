@@ -59,7 +59,7 @@ def calculate_b1_momentum(
     components = {}
 
     # ── RVOL ──────────────────────────────────
-    rvol = float(snap.get('rvol', 1.0))
+    rvol = float(snap.get('rvol') or 1.0)
     if rvol >= 3.0:
         rvol_score = 100
     elif rvol >= 2.0:
@@ -104,8 +104,8 @@ def calculate_b1_momentum(
         }
 
     # ── Distancia al VWAP ─────────────────────
-    price = float(snap.get('price', 0))
-    vwap  = float(snap.get('vwap', price))
+    price = float(snap.get('price') or 0)
+    vwap  = float(snap.get('vwap') or price)
     vwap_score = 50
     if vwap > 0 and price > 0:
         dist_vwap = (price - vwap) / vwap * 100
@@ -180,10 +180,10 @@ def calculate_b2_technical(
     """
     score      = 0.0
     components = {}
-    price = float(snap.get('price', 0))
+    price = float(snap.get('price') or 0)
 
     # ── RSI ───────────────────────────────────
-    rsi = float(snap.get('rsi_14', 50))
+    rsi = float(snap.get('rsi_14') or 50)
     if 45 <= rsi <= 65:
         rsi_score = 60
     elif rsi < 30:
@@ -198,8 +198,8 @@ def calculate_b2_technical(
     components['rsi'] = {'value': rsi, 'score': rsi_score, 'weight': 0.20}
 
     # ── MACD ──────────────────────────────────
-    macd_hist = float(snap.get('macd_histogram', 0))
-    macd_prev = float(snap.get('macd_histogram_prev', 0))
+    macd_hist = float(snap.get('macd_histogram') or 0)
+    macd_prev = float(snap.get('macd_histogram_prev') or 0)
     if macd_hist > 0 and macd_hist > macd_prev:
         macd_score = 80
     elif macd_hist > 0 and macd_hist <= macd_prev:
@@ -216,8 +216,8 @@ def calculate_b2_technical(
     }
 
     # ── Posición vs EMA ───────────────────────
-    ema20 = float(snap.get('ema20', snap.get('ema_20', 0)))
-    ema50 = float(snap.get('ema50', snap.get('ema_50', 0)))
+    ema20 = float(snap.get('ema20') or snap.get('ema_20') or 0)
+    ema50 = float(snap.get('ema50') or snap.get('ema_50') or 0)
     ema_score = 50
 
     if price > 0 and ema20 > 0 and ema50 > 0:
@@ -363,9 +363,9 @@ def calculate_b4_regime(
     score      = 0.0
     components = {}
 
-    adx = float(snap.get('adx', 25))
-    atr = float(snap.get('atr', 0))
-    price = float(snap.get('price', 1))
+    adx = float(snap.get('adx') or 25)
+    atr = float(snap.get('atr') or 0)
+    price = float(snap.get('price') or 1)
     atr_pct = (atr / price * 100) if price > 0 else 0
 
     if adx > 35 and snap.get('sar_trend_4h', 0) > 0:
@@ -386,7 +386,7 @@ def calculate_b4_regime(
     }
 
     # ── Macro (VIX/SPY/NDX) ───────────────────
-    macro_score_raw = float(macro.get('score', 0))
+    macro_score_raw = float(macro.get('score') or 0)
     macro_score = (macro_score_raw + 10) / 20 * 100
     components['macro'] = {
         'score_raw': macro_score_raw,
@@ -396,7 +396,7 @@ def calculate_b4_regime(
     }
 
     # ── Sector performance (MTF proxy) ────────
-    mtf = float(snap.get('mtf_score', 0))
+    mtf = float(snap.get('mtf_score') or 0)
     sector_score = (mtf + 1) / 2 * 100
     components['sector'] = {
         'mtf': mtf, 'score': round(sector_score, 1), 'weight': 0.20,
@@ -502,8 +502,8 @@ def calculate_apex_score(
     Combina los 5 bloques con pesos diferenciados para 4H y 1D.
     Retorna la probabilidad de subida y el retorno esperado con 3 escenarios.
     """
-    price = float(snap.get('price', 0))
-    atr   = float(snap.get('atr', price * 0.02))
+    price = float(snap.get('price') or 0)
+    atr   = float(snap.get('atr') or (price * 0.02))
 
     # ── Calcular los 5 bloques ────────────────
     b1 = calculate_b1_momentum(snap, df_5m, df_15m)

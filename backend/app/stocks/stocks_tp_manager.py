@@ -505,6 +505,26 @@ async def execute_partial_sell(
     except Exception as e:
         log_error(MODULE, f'Error registrando orden: {e}')
 
+    # Registrar en trades_journal para que aparezca en "Closed History"
+    try:
+        journal_entry = {
+            'ticker': ticker,
+            'shares': shares,
+            'entry_price': entry_price,
+            'exit_price': price,
+            'entry_date': position.get('first_buy_at') or position.get('entry_time'),
+            'exit_date': datetime.now(timezone.utc).isoformat(),
+            'pnl_usd': round(pnl_total, 2),
+            'pnl_pct': round(pnl_pct, 2),
+            'result': 'win' if pnl_total > 0 else 'loss',
+            'exit_reason': f'TP_B{block}_{action}',
+            'trade_type': position.get('strategy') or position.get('rule_code') or 'V5_INDUSTRIAL',
+        }
+        supabase.table('trades_journal').insert(journal_entry).execute()
+        log_info(MODULE, f'📝 Journal recorded: {ticker} TP_B{block} P&L=${pnl_total:.2f}')
+    except Exception as e:
+        log_error(MODULE, f'Error registrando en trades_journal: {e}')
+
     # Telegram notification
     try:
         closed_msg = '🎯 Posición cerrada completamente' if new_shares_rem <= 0 else '⏳ Esperando siguiente bloque...'

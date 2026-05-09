@@ -5,9 +5,10 @@ def fix_forex_prices():
     
     symbols_to_fix = {
         'XAUUSD': 1000.0,
-        'USDJPY': 100.0,
-        'EURJPY': 100.0,
-        'GBPJPY': 100.0
+        'XAGUSD': 1000.0,
+        'USDJPY': 1000.0,
+        'EURJPY': 1000.0,
+        'GBPJPY': 1000.0
     }
     
     for symbol, divisor in symbols_to_fix.items():
