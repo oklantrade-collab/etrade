@@ -510,9 +510,12 @@ async def get_priority_queue():
                 # Get top APEX-scoring tickers from market_snapshot
                 existing_tickers = {q["ticker"] for q in queue} | owned_tickers
                 
+                limit_time_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+                
                 snap_res = sb.table("market_snapshot")\
                     .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf")\
                     .not_.is_("apex_4h", "null")\
+                    .gt("updated_at", limit_time_iso)\
                     .order("apex_4h", desc=True)\
                     .limit(30)\
                     .execute()
