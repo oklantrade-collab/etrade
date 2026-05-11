@@ -203,26 +203,26 @@ async def check_protections(
     # Inicializar estado si no existe
     if pos_id not in _protection_cache:
         # Resolver side
-        side_raw = str(position.get('side', 'long')).lower()
+        side_raw = str(position.get('side') or 'long').lower()
         
         _protection_cache[pos_id] = ProtectionState(
             position_id  = pos_id,
             symbol       = symbol,
             side         = side_raw,
-            entry_price  = float(position.get('avg_entry_price', position.get('entry_price', 0))),
-            current_sl   = float(position.get('sl_price', position.get('stop_loss', 0))),
-            original_sl  = float(position.get('sl_backstop_price', position.get('sl_price', 0))),
+            entry_price  = float(position.get('avg_entry_price') or position.get('entry_price') or 0),
+            current_sl   = float(position.get('sl_price') or position.get('stop_loss') or 0),
+            original_sl  = float(position.get('sl_backstop_price') or position.get('sl_price') or 0),
             market_type  = 'crypto_futures'
         )
         # Campos adicionales no presentes en el constructor base pero necesarios para el flujo
         state = _protection_cache[pos_id]
-        state.remaining_size = float(abs(float(position.get('size', 0))))
+        state.remaining_size = float(abs(float(position.get('size') or 0)))
 
     state = _protection_cache[pos_id]
     state.cycles_open += 1
     
     # Asegurar que el SL en el estado coincida con el de la DB por si hubo cambios externos
-    state.current_sl = float(position.get('sl_price', position.get('stop_loss', 0)))
+    state.current_sl = float(position.get('sl_price') or position.get('stop_loss') or 0)
 
     # ── TRACK PEAK P&L (máximo P&L alcanzado durante la vida de la posición) ──
     entry_p = state.entry_price
@@ -334,15 +334,28 @@ async def check_open_positions_5m(
     # --- PHASE 2: Paper Trading monitor (SL/TP) ---
     try:
         # Get latest configuration
-        config_res = supabase.table('trading_config').select('*').eq('id', 1).single().execute()
-        config = config_res.data or {}
+        config = {}
+        try:
+            config_res = supabase.table('trading_config').select('*').eq('id', 1).maybe_single().execute()
+            if config_res and hasattr(config_res, 'data'):
+                config = config_res.data or {}
+        except: pass
 
         # Get latest snapshot for MTFs
-        snap_res = supabase.table('market_snapshot').select('symbol, price, mtf_score, adx').execute()
-        mtf_scores = {r['symbol'].replace("/", ""): float(r.get('mtf_score') or 0) for r in (snap_res.data or [])}
+        mtf_scores = {}
+        snap_data = []
+        try:
+            snap_res = supabase.table('market_snapshot').select('symbol, price, mtf_score, adx').execute()
+            if snap_res and hasattr(snap_res, 'data') and snap_res.data:
+                snap_data = snap_res.data
+                mtf_scores = {r['symbol'].replace("/", ""): float(r.get('mtf_score') or 0) for r in snap_data}
+        except: pass
         
         # Get active positions from Supabase
         pos_res = supabase.table('positions').select('*').eq('status', 'open').execute()
+        if not pos_res or not hasattr(pos_res, 'data') or not pos_res.data:
+            return events
+
         for pos in pos_res.data:
             symbol = pos['symbol']
             norm_symbol = normalize_crypto_symbol(symbol)
@@ -357,7 +370,7 @@ async def check_open_positions_5m(
                 # Fallback to snapshot price
                 snap_row = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), None)
                 if snap_row:
-                    price = float(snap_row.get('price', 0))
+                    price = float(snap_row.get('price') or 0)
             
             if not price or price <= 0:
                 log_warning(MODULE, f"Skipping monitor for {norm_symbol}: Price not available")
@@ -444,7 +457,7 @@ async def check_open_positions_5m(
             sl = float(pos.get('sl_price') or pos.get('stop_loss') or 0)
             tp_p = float(pos.get('tp_partial_price') or 0)
             tp_f = float(pos.get('tp_full_price') or pos.get('take_profit') or 0)
-            mtf_score = mtf_scores.get(norm_symbol, 0)
+            mtf_score = mtf_scores.get(norm_symbol) or 0
             
             is_long = side in ['long', 'buy']
             
@@ -463,8 +476,9 @@ async def check_open_positions_5m(
 
             # 1. STOP LOSS (Full Close) via Dynamic SL Manager
             from app.strategy.dynamic_sl_manager import evaluate_sl_action
-            df_4h = MEMORY_STORE.get(norm_symbol, {}).get('4h', {}).get('df')
-            df_1d = MEMORY_STORE.get(norm_symbol, {}).get('1d', {}).get('df')
+            from app.core.memory_store import get_memory_df
+            df_4h = get_memory_df(norm_symbol, "4h")
+            df_1d = get_memory_df(norm_symbol, "1d")
 
             # We use snapshot info mapped to what evaluate_sl_action expects
             snap_for_sl = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
@@ -546,7 +560,7 @@ async def check_open_positions_5m(
             try:
                 from app.core.parameter_guard import get_velocity_config
                 # Get ADX from snapshot
-                snap_adx = {r['symbol'].replace("/", ""): float(r.get('adx', 25))
+                snap_adx = {r['symbol'].replace("/", ""): float(r.get('adx') or 25)
                             for r in snap_res.data} if snap_res.data else {}
                 current_adx = snap_adx.get(norm_symbol, 25)
                 vel_config = get_velocity_config(current_adx)
@@ -702,7 +716,11 @@ async def _execute_paper_open(
                 await _execute_paper_close(pos, price, f'reversal_{side.lower()}', supabase)
 
         # 2. Límite GLOBAL (max_open_trades) y SÍMBOLO usando LOCK para atomicidad
-        max_global = int(BOT_STATE.config_cache.get('max_open_trades', 15))
+        try:
+            from app.core.supabase_client import get_risk_config
+            BOT_STATE.config_cache.update(get_risk_config())
+        except: pass
+        max_global = int(BOT_STATE.config_cache.get('max_open_trades') or 15)
         
         # --- BLOQUEO DE SÍMBOLO EN MEMORIA ---
         if BOT_STATE.opening_locks.get(symbol):

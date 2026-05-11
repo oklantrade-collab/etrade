@@ -3,6 +3,7 @@ import os
 
 files_to_copy = [
     "backend/app/workers/forex_worker_standalone.py",
+    "backend/app/workers/forex_execution_service.py",
     "backend/app/execution/providers/ctrader_provider.py",
     "frontend/components/TradeMarkerChart.tsx",
     "frontend/app/dashboard/page.tsx",

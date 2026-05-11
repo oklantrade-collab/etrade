@@ -205,7 +205,8 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
             sar_ini_low_15m_window  = bool(df_15m_recent['sar_ini_low'].any())
             
             # Señal PineScript (Prioridad 15m > 30m > 4h)
-            p_signal_15m = str(last_15m.get('last_pinescript_signal', '') or '')
+            ps_raw = last_15m.get('last_pinescript_signal', '')
+            p_signal_15m = str(ps_raw) if pd.notna(ps_raw) and ps_raw is not None else ''
             
             if p_signal_15m not in ('Buy', 'Sell'):
                 # Si en 15m no hay nada (muy raro con el propagation), probar 30m/4h
@@ -1729,8 +1730,13 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
 
             # Validar pre-filtros si hay match
             if rule_match and rule_match['direction'] in ['long', 'short']:
+                # Forzar sincronizacion de posiciones antes de evaluar para evitar sobre-trading
+                try:
+                    await sync_positions_to_memory()
+                except: pass
+                
                 symbol_positions_count = len(BOT_STATE.get_positions_by_symbol(symbol))
-                max_per_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                max_per_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol') or 4)
                 
                 pre_res = check_pre_filters(
                     regime, rule_match['market_data'], rule_match['direction'],

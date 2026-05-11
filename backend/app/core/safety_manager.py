@@ -110,6 +110,11 @@ def validate_signal(
                 errors.append('Timestamp inválido')
                 ts = None
         if ts:
+            if isinstance(ts, (int, float)):
+                # Convertir timestamp (s o ms) a datetime
+                if ts > 1e12: ts /= 1000 # ms to s
+                ts = datetime.fromtimestamp(ts, tz=timezone.utc)
+            
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
             max_age = SAFETY_CONFIG['signal_max_age_minutes']
@@ -169,28 +174,30 @@ async def check_circuit_breaker(
     daily_pnl    = 0.0
 
     try:
-        res = await supabase \
+        res = supabase \
             .table(table) \
             .select('realized_pnl') \
             .gte('closed_at', day_start.isoformat()) \
             .eq('status', 'closed') \
             .execute()
 
-        daily_pnl = sum(
-            float(r.get('realized_pnl', 0) or 0)
-            for r in (res.data or [])
-        )
+        daily_pnl = 0.0
+        if res and hasattr(res, 'data') and res.data:
+            daily_pnl = sum(
+                float(r.get('realized_pnl', 0) or 0)
+                for r in res.data
+            )
 
-        cfg_res = await supabase \
+        cfg_res = supabase \
             .table('trading_config') \
             .select('value') \
             .eq('key', f'capital_{market_type}') \
             .maybe_single() \
             .execute()
 
-        capital = float(
-            (cfg_res.data or {}).get('value', 1000)
-        )
+        capital = 1000.0
+        if cfg_res and hasattr(cfg_res, 'data') and cfg_res.data:
+            capital = float(cfg_res.data.get('value', 1000) or 1000)
         if daily_pnl < 0 and capital > 0:
             drawdown_pct = abs(daily_pnl) / capital * 100
 
@@ -296,7 +303,7 @@ async def cleanup_zombie_signals(supabase) -> int:
     cleaned = 0
 
     try:
-        zero_res = await supabase \
+        zero_res = supabase \
             .table('market_snapshot') \
             .select('symbol, price, updated_at') \
             .lte('price', 0.001) \
@@ -305,14 +312,14 @@ async def cleanup_zombie_signals(supabase) -> int:
         for row in (zero_res.data or []):
             symbol = row['symbol']
             log_info('SAFETY', f'Señal zombie (price=0): {symbol}')
-            await supabase \
+            supabase \
                 .table('market_snapshot') \
                 .update({'regime': 'zombie', 'mtf_score': 0}) \
                 .eq('symbol', symbol) \
                 .execute()
             cleaned += 1
 
-        old_res = await supabase \
+        old_res = supabase \
             .table('market_snapshot') \
             .select('symbol, updated_at') \
             .lt('updated_at', cutoff.isoformat()) \
@@ -323,7 +330,7 @@ async def cleanup_zombie_signals(supabase) -> int:
             symbol = row['symbol']
             log_info('SAFETY',
                      f'Snapshot antiguo: {symbol} ({row["updated_at"]})')
-            await supabase \
+            supabase \
                 .table('market_snapshot') \
                 .update({'regime': 'stale'}) \
                 .eq('symbol', symbol) \

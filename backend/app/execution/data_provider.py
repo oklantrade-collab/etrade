@@ -173,31 +173,46 @@ class BinanceCryptoProvider(DataProvider):
         return df
 
     async def get_current_price(self, symbol: str) -> float:
-        client = await self._get_async_client()
-        symbol_clean = symbol.replace("/", "")
-        if self.market == "futures":
-            ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
-        else:
-            ticker = await client.get_symbol_ticker(symbol=symbol_clean)
-        return float(ticker["price"])
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                client = await self._get_async_client()
+                symbol_clean = symbol.replace("/", "")
+                if self.market == "futures":
+                    ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
+                else:
+                    ticker = await client.get_symbol_ticker(symbol=symbol_clean)
+                return float(ticker["price"])
+            except Exception as e:
+                import asyncio
+                if attempt == max_retries - 1:
+                    raise e
+                await asyncio.sleep(1)
+        return 0.0
 
     async def get_ticker(self, symbol: str) -> dict:
         """Fetch current price and ticker data."""
-        client = await self._get_async_client()
-        symbol_clean = symbol.replace("/", "")
-        try:
-            if self.market == "futures":
-                ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
-            else:
-                ticker = await client.get_symbol_ticker(symbol=symbol_clean)
-            
-            return {
-                "symbol": symbol_clean,
-                "price": float(ticker["price"]),
-                "time": ticker.get("time") # Some endpoints don't return time
-            }
-        except Exception as e:
-            raise Exception(f"get_ticker failed for {symbol}: {e}")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                client = await self._get_async_client()
+                symbol_clean = symbol.replace("/", "")
+                if self.market == "futures":
+                    ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
+                else:
+                    ticker = await client.get_symbol_ticker(symbol=symbol_clean)
+                
+                return {
+                    "symbol": symbol_clean,
+                    "price": float(ticker["price"]),
+                    "time": ticker.get("time") # Some endpoints don't return time
+                }
+            except Exception as e:
+                import asyncio
+                if attempt == max_retries - 1:
+                    raise Exception(f"get_ticker failed for {symbol}: {e}")
+                await asyncio.sleep(1)
+        return {}
 
     async def place_order(
         self,

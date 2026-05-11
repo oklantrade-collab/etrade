@@ -40,8 +40,12 @@ PIP_CONFIG = {
     'EURUSD': {'pip': 0.0001, 'pip_val_std': 10.0},
     'GBPUSD': {'pip': 0.0001, 'pip_val_std': 10.0},
     'USDJPY': {'pip': 0.01,   'pip_val_std': 6.5},
-    'XAUUSD': {'pip': 0.01,   'pip_val_std': 1.0}, # 1 pip (0.01) = $0.01 USD para 0.01 lotes. 1 lote = $100/punto.
+    'XAUUSD': {'pip': 0.01,   'pip_val_std': 1.0, 'contract': 100}, 
 }
+
+def normalize_forex_price(symbol, price):
+    # El usuario confirma que el precio de 4600+ es correcto, no dividir.
+    return price
 
 #    HARD CAP: Perdida maxima absoluta por trade   
 # Si se excede CUALQUIERA de estos limites, se cierra inmediatamente
@@ -378,11 +382,39 @@ class ForexExecutionService:
         else: self._execute_paper_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
 
     def _calculate_lot_size(self, symbol, sl_pips):
-        f_config = get_forex_config()
-        riesgo = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
-        pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
-        lots = round(riesgo / (sl_pips * pip_val), 2) if sl_pips > 0 else 0.01
-        return min(max(lots, 0.01), 1.0)
+        """
+        Calcula el lotaje basado en MARGEN y APALANCAMIENTO.
+        Inversion = Capital * %Riesgo
+        Volumen = Inversion * Apalancamiento
+        """
+        try:
+            f_config = get_forex_config()
+            inversion = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
+            leverage = f_config.get('leverage', 500)
+            buying_power = inversion * leverage
+            
+            # Valor del contrato estandar
+            contract_size = 100000 # Forex standard
+            if 'XAU' in symbol:
+                contract_size = 100
+            
+            # Obtener precio actual para calculo preciso
+            raw_price = self._safe_float(self.state['prices'].get(symbol, {}).get('mid', 1.0))
+            price = normalize_forex_price(symbol, raw_price)
+            if price <= 0: price = 1.0
+            
+            if 'XAU' in symbol:
+                # Oro: Lotes = Poder de Compra / (Onzas * Precio)
+                lots = buying_power / (contract_size * price)
+            else:
+                # Forex: Lotes = Poder de Compra / 100,000
+                lots = buying_power / contract_size
+                
+            self.log(f"[LOTS] Capital: ${f_config['capital_usd']} | Inv: ${inversion} | BP: ${buying_power} | Lots: {lots:.2f}")
+            return min(max(round(lots, 2), 0.01), 1.0)
+        except Exception as e:
+            self.log(f"Error calculando lotes: {e}", "ERROR")
+            return 0.01
 
     def _calculate_sl_tp(self, symbol, direction, entry, snap, rule_code):
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
@@ -420,15 +452,20 @@ class ForexExecutionService:
 
     def _execute_live_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
         try:
-            from app.workers.forex_worker_standalone import ACCOUNT_ID
+            from app.workers.forex_worker_standalone import ACCOUNT_ID, get_divisor
             sid = self.state['symbol_ids'].get(symbol)
             if not sid: return
+            
+            divisor = get_divisor(symbol)
+            
             req = ProtoOANewOrderReq()
             req.ctidTraderAccountId = ACCOUNT_ID
             req.symbolId, req.orderType, req.tradeSide = sid, 1, (1 if direction=='long' else 2)
             req.volume = int(lots * 100000)
-            if sl > 0: req.stopLoss = round(sl, 6)
-            if tp > 0: req.takeProfit = round(tp, 6)
+            
+            if sl > 0: req.stopLoss = int(round(sl * divisor))
+            if tp > 0: req.takeProfit = int(round(tp * divisor))
+            
             self.worker.client.send(req)
             self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='live')
         except Exception as e: self.log(f'Error live: {e}')
@@ -737,6 +774,11 @@ class ForexExecutionService:
             if action in ('activate_be', 'update_sl'):
                 new_sl = primary.get('be_price') if action == 'activate_be' else primary.get('new_sl')
                 self.log(f"[PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
+                
+                # Sincronizar con cTrader si es cuenta real
+                if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
+                    self.worker.amend_position(pos['ctrader_pos_id'], sl_price=new_sl, symbol=symbol)
+
                 # Actualizar en DB
                 self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos_id).execute()
                 # Actualizar en memoria
@@ -758,10 +800,10 @@ class ForexExecutionService:
         price_data = self.state['prices'].get(symbol)
         price = 0
         if price_data:
-            price = self._safe_float(price_data.get('mid'))
+            price = normalize_forex_price(symbol, self._safe_float(price_data.get('mid')))
         
         if price <= 0 and snap:
-            price = self._safe_float(snap.get('price'))
+            price = normalize_forex_price(symbol, self._safe_float(snap.get('price')))
 
         if price <= 0: return
 
@@ -816,18 +858,10 @@ class ForexExecutionService:
         try:
             symbol = pos['symbol']
             
-            # Cancelar todos los SL del exchange (Sincronico)
-            try:
-                # Obtenemos las ordenes SL activas para esta posicion
-                sl_res = self.sb.table('sl_orders').select('*').eq('position_id', pos['id']).eq('status', 'active').execute()
-                for sl_order in (sl_res.data or []):
-                    self.sb.table('sl_orders').update({
-                        'status': 'cancelled',
-                        'cancel_reason': reason,
-                        'cancelled_at': datetime.now(timezone.utc).isoformat()
-                    }).eq('id', sl_order['id']).execute()
-            except Exception as sl_e:
-                self.log(f'Error cancelando SL: {sl_e}', 'ERROR')
+            # Cerrar en cTrader si es cuenta real
+            if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
+                lots_abs = abs(self._safe_float(pos.get('lots')))
+                self.worker.close_position(pos['ctrader_pos_id'], lots_abs * 100000)
 
             # Usar valor absoluto de lots para el calculo de PnL ya que pips_pnl ya considera la direccion
             pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)

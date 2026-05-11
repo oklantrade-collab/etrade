@@ -188,6 +188,51 @@ async def get_watchlist(config: dict) -> list[str]:
     return default_tickers
 
 
+async def cleanup_low_volume_opportunities():
+    """
+    Remove tickers from technical_scores that have volume < 1,000,000
+    or haven't been updated in more than 48 hours.
+    """
+    sb = get_supabase()
+    config = get_stocks_config()
+    min_vol = float(config.get("min_daily_volume", 1000000))
+
+    try:
+        # 1. Get all current opportunities
+        res = sb.table("technical_scores").select("ticker, signals_json, timestamp").execute()
+        if not res.data:
+            return
+
+        to_delete = []
+        now = datetime.now(timezone.utc)
+        
+        for row in res.data:
+            ticker = row["ticker"]
+            signals = row.get("signals_json") or {}
+            
+            # Volume check
+            volume = float(signals.get("volume", 0) or 0)
+            if volume < min_vol and volume > 0:
+                to_delete.append(ticker)
+                continue
+                
+            # Staleness check (more than 3 days)
+            updated_at_str = row.get("timestamp")
+            if updated_at_str:
+                try:
+                    updated_at = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
+                    if (now - updated_at).days >= 3:
+                        to_delete.append(ticker)
+                except: pass
+
+        if to_delete:
+            log_info(MODULE, f"🗑️ Cleaning up {len(to_delete)} low volume/stale opportunities: {to_delete}")
+            sb.table("technical_scores").delete().in_("ticker", to_delete).execute()
+            
+    except Exception as e:
+        log_error(MODULE, f"Error in opportunity cleanup: {e}")
+
+
 async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, is_pro_member: bool = False, market_open: bool = True) -> dict | None:
     from app.data.yfinance_provider import YFinanceProvider
     from app.analysis.stocks_indicators import calculate_stock_indicators
@@ -773,6 +818,9 @@ async def run_stocks_cycle(force=False):
 
     try:
         config = get_stocks_config()
+        
+        # ── Cleanup low volume ──
+        await cleanup_low_volume_opportunities()
 
         # Check kill switch
         if config.get("kill_switch_active", "false") == "true":

@@ -152,7 +152,7 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     # pinescript_signal='Buy' ocurre exactamente cuando macd_buy=True (alias 1:1).
     # signal_age cuenta las barras desde la ultima señal activa.
     df['pinescript_signal'] = np.where(df['macd_buy'], 'Buy', 
-                                np.where(df['macd_sell'], 'Sell', None))
+                                np.where(df['macd_sell'], 'Sell', ""))
     
     # Calcular la edad de la señal (cuántas barras han pasado desde el último 'Buy' o 'Sell')
     def calc_signal_data(series):

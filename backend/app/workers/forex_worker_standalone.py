@@ -311,14 +311,76 @@ class StandaloneForexWorker:
                     f"status={event.executionType} "
                     f"symbol_id={order.tradeData.symbolId if hasattr(order, 'tradeData') else 'N/A'}"
                 )
+            
             if hasattr(event, 'position') and event.position:
                 pos = event.position
-                self.log(
-                    f"  Posicion cTrader: id={pos.positionId} "
-                    f"status={pos.positionStatus}"
-                )
+                pid = pos.positionId
+                p_status = pos.positionStatus
+                self.log(f"  Posicion cTrader: id={pid} status={p_status}")
+
+                # Vincular ID de cTrader con la DB si es una nueva posicion abierta
+                if p_status == 1: # 1 = OPEN
+                    # Buscar el simbolo por ID
+                    name = next((n for n, sid in STATE['symbol_ids'].items() if sid == pos.tradeData.symbolId), None)
+                    if name:
+                        side = 'long' if pos.tradeData.tradeSide == 1 else 'short'
+                        # Buscar la posicion mas reciente abierta en la DB que no tenga ID vinculado
+                        try:
+                            res = sb.table('forex_positions')\
+                                .select('id')\
+                                .eq('symbol', name)\
+                                .eq('side', side)\
+                                .eq('status', 'open')\
+                                .is_('ctrader_pos_id', 'null')\
+                                .order('opened_at', desc=True)\
+                                .limit(1).execute()
+                            
+                            if res.data:
+                                db_id = res.data[0]['id']
+                                sb.table('forex_positions').update({'ctrader_pos_id': pid}).eq('id', db_id).execute()
+                                self.log(f"[SYNC] Vinculado cTrader ID {pid} a posicion DB {db_id}")
+                        except Exception as e:
+                            self.log(f"Error vinculando ID: {e}", "ERROR")
+
         except Exception as e:
             self.log(f"Error procesando evento de ejecucion: {e}", "ERROR")
+
+    def close_position(self, pos_id, volume_units):
+        """Envía orden de cierre a cTrader."""
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAClosePositionReq
+            req = ProtoOAClosePositionReq()
+            req.ctidTraderAccountId = ACCOUNT_ID
+            req.positionId = int(pos_id)
+            req.volume = int(volume_units)
+            self.safe_send(req)
+            self.log(f"[CTRIDER] Enviada solicitud de cierre para posicion {pos_id}")
+            return True
+        except Exception as e:
+            self.log(f"Error enviando cierre a cTrader: {e}", "ERROR")
+            return False
+
+    def amend_position(self, pos_id, sl_price=None, tp_price=None, symbol=None):
+        """Modifica SL/TP en cTrader."""
+        try:
+            from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAAmendPositionSLTPReq
+            req = ProtoOAAmendPositionSLTPReq()
+            req.ctidTraderAccountId = ACCOUNT_ID
+            req.positionId = int(pos_id)
+            
+            divisor = get_divisor(symbol) if symbol else 100000
+            
+            if sl_price:
+                req.stopLoss = int(round(sl_price * divisor))
+            if tp_price:
+                req.takeProfit = int(round(tp_price * divisor))
+            
+            self.safe_send(req)
+            self.log(f"[CTRIDER] Enviada modificacion SL={sl_price}/TP={tp_price} para {pos_id}")
+            return True
+        except Exception as e:
+            self.log(f"Error enviando modificacion a cTrader: {e}", "ERROR")
+            return False
 
     def send_app_auth(self):
         req = ProtoOAApplicationAuthReq(); req.clientId = CLIENT_ID; req.clientSecret = CLIENT_SECRET; self.safe_send(req)
