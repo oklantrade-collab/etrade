@@ -1,5 +1,5 @@
 "use client"
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import ForexWelcomeScreen from '../WelcomeScreen'
 import TradeMarkerChart from '@/components/TradeMarkerChart'
@@ -27,6 +27,8 @@ export default function ForexDashboard() {
   const [activePositions, setActivePositions] = useState<any[]>([])
   const [activePosition, setActivePosition] = useState<any>(null)
   const [forexPairs, setForexPairs] = useState<string[]>(DEFAULT_FOREX_PAIRS)
+  const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
 
   useEffect(() => {
     loadConfig()
@@ -231,6 +233,7 @@ export default function ForexDashboard() {
             isFocus={pair === focusPair}
             position={activePositions.find(p => p.symbol === pair)}
             onClick={() => setFocusPair(pair)}
+            onOpenChart={(p: string) => { setSelectedTicker(p); setShowChart(true); }}
           />
         ))}
       </div>
@@ -272,11 +275,12 @@ export default function ForexDashboard() {
         </div>
         <ForexAnalysisPanel pair={focusPair} snap={snap} activePosition={activePosition} />
       </div>
+      {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
     </div>
   )
 }
 
-function ForexPairCard({ pair, snap, isFocus, position, onClick }: any) {
+function ForexPairCard({ pair, snap, isFocus, position, onClick, onOpenChart }: any) {
   const meta = PAIR_META[pair] || {}
   const price = parseFloat(snap.price || 0)
   const zone = parseInt(snap.fibonacci_zone || 0)
@@ -314,6 +318,17 @@ function ForexPairCard({ pair, snap, isFocus, position, onClick }: any) {
       <div style={{ display: 'flex', gap: '6px', alignItems: 'center', background: 'rgba(0,0,0,0.2)', padding: '5px 8px', borderRadius: '6px' }}>
         <div style={{ width: '6px', height: '6px', borderRadius: '50%', background: sarColor, boxShadow: `0 0 5px ${sarColor}` }} />
         <span style={{ fontSize: '9px', color: sarColor, fontWeight: 800 }}>FASE {sar.toUpperCase()}</span>
+      </div>
+      
+      <div style={{ marginTop: '12px' }}>
+         <button 
+             onClick={(e) => { e.stopPropagation(); onOpenChart(pair); }}
+             style={{ background: '#38BDF8', color: '#000', border: 'none', padding: '6px 12px', borderRadius: '8px', fontSize: '9px', fontWeight: 950, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s', width: '100%', justifyContent: 'center' }}
+             onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.02)'}
+             onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+         >
+             VER GRÁFICO 📊
+         </button>
       </div>
     </div>
   )
@@ -372,6 +387,66 @@ function AnalysisRow({ label, value, color = '#CCC' }: any) {
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
       <span style={{ fontSize: '11px', color: '#555', fontWeight: 600 }}>{label}</span>
       <span style={{ fontSize: '12px', color: color, fontWeight: 900 }}>{value}</span>
+    </div>
+  )
+}
+
+function TradingViewWidget({ symbol }: { symbol: string }) {
+  const containerId = `tv-chart-${symbol}`;
+  const containerRef = useRef<HTMLDivElement>(null);
+  
+  useEffect(() => {
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => {
+      if ((window as any).TradingView && containerRef.current) {
+        new (window as any).TradingView.widget({
+          "autosize": true,
+          "symbol": symbol,
+          "interval": "15",
+          "timezone": "America/Lima",
+          "theme": "dark",
+          "style": "1",
+          "locale": "es",
+          "toolbar_bg": "#161922",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "container_id": containerId,
+          "backgroundColor": "#0F1117",
+          "gridColor": "rgba(255, 255, 255, 0.05)",
+          "hide_side_toolbar": false,
+          "studies": [
+            "BB@tv-basicstudies",
+            "MAExp@tv-basicstudies",
+            "MAExp@tv-basicstudies"
+          ],
+          "overrides": {
+            "mainSeriesProperties.style": 1,
+          }
+        });
+      }
+    };
+    document.head.appendChild(script);
+  }, [symbol, containerId]);
+
+  return (
+    <div ref={containerRef} id={containerId} style={{ height: '100%', width: '100%', borderRadius: '16px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }} />
+  );
+}
+
+function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }) {
+  return (
+    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, backdropFilter: 'blur(5px)' }}>
+        <div style={{ background: '#0F1117', width: '95%', height: '92%', borderRadius: '24px', border: '1px solid #38BDF8', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(56,189,248,0.2)' }}>
+            <div style={{ padding: '15px 25px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <h3 style={{ margin: 0, color: '#FFF', fontSize: '16px', fontWeight: 900 }}>GRÁFICO TÉCNICO: {symbol}</h3>
+                <button onClick={onClose} style={{ background: '#EF4444', border: 'none', color: '#FFF', padding: '6px 15px', borderRadius: '8px', fontSize: '10px', fontWeight: 900, cursor: 'pointer' }}>CERRAR GRÁFICO</button>
+            </div>
+            <div style={{ flex: 1, background: '#000' }}>
+                <TradingViewWidget symbol={symbol} />
+            </div>
+        </div>
     </div>
   )
 }
