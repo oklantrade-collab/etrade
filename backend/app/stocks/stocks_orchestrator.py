@@ -90,18 +90,22 @@ def calculate_composite_rank(
     apex_1d:    float,
     return_pct: float,
     confidence: str,
+    rvol:       float,
     cfg:        dict,
 ) -> float:
     """
     Calcula el Composite Rank — métrica única
     para ordenar la cola de Alta Prioridad.
+    Incluye RVOL con peso 25% (V5.1 Upgrade).
     """
-    w_4h   = float(cfg.get('apex_composite_w_4h',   0.40))
-    w_1d   = float(cfg.get('apex_composite_w_1d',   0.30))
-    w_gain = float(cfg.get('apex_composite_w_gain', 0.20))
-    w_conf = float(cfg.get('apex_composite_w_conf', 0.10))
+    w_4h   = 0.30  # Ajustado de 0.40 para dar espacio a RVOL
+    w_1d   = 0.25  # Ajustado de 0.30
+    w_gain = 0.15  # Ajustado de 0.20
+    w_conf = 0.05  # Ajustado de 0.10
+    w_rvol = 0.25  # Nuevo peso RVOL (25%)
 
     gain_norm = min(100, max(0, return_pct * 10))
+    rvol_norm = min(100, max(0, rvol * 20)) # 5x = 100 pts
 
     conf_score = {
         'high':   90,
@@ -113,7 +117,8 @@ def calculate_composite_rank(
         apex_4h    * w_4h  +
         apex_1d    * w_1d  +
         gain_norm  * w_gain +
-        conf_score * w_conf
+        conf_score * w_conf +
+        rvol_norm  * w_rvol
     )
 
     return round(min(100, max(0, rank)), 2)
@@ -437,7 +442,7 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             rule_signal = check_active_rules(ticker, snap, supabase)
 
             # Calcular Composite Rank
-            rank = calculate_composite_rank(apex_4h, apex_1d, ret_exp, conf, cfg)
+            rank = calculate_composite_rank(apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg)
 
             # Criterios de entrada a la cola de alta prioridad
             enters_by_apex = apex_4h >= min_score

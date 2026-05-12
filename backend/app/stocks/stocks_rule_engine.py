@@ -35,7 +35,17 @@ class StocksRuleEngine:
     def __init__(self):
         self.sb = get_supabase()
         self.rules = {}
+        self.config = {}
+        self.load_config()
         self.load_rules()
+
+    def load_config(self):
+        """Load global stocks configuration."""
+        try:
+            res = self.sb.table("stocks_config").select("key, value").execute()
+            self.config = {row["key"]: row["value"] for row in (res.data or [])}
+        except Exception as e:
+            log_warning(MODULE, f"Error cargando stocks_config: {e}")
 
     def load_rules(self):
         """Load active rules from Supabase stocks_rules table."""
@@ -442,7 +452,9 @@ class StocksRuleEngine:
                 smart_limit_price = current_price # Comprar ya si está barato
 
         # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5) ──
-        if rule_code == "HOT_CANDLE":
+        # Normalizar rule_code para capturar variaciones con sufijos (_BUY, _SELL)
+        normalized_code = rule_code.replace("_BUY", "").replace("_SELL", "")
+        if normalized_code == "HOT_CANDLE":
             ema3  = context.get("ema_3")
             ema9  = context.get("ema_9")
             ema20 = context.get("ema_20")
@@ -456,8 +468,9 @@ class StocksRuleEngine:
                 failures.append(f"Low Volume: {vol_24h/1e6:.1f}M < 1.0M (No traction)")
 
             # Requisito 2: Proyección de Volumen (RVOL)
-            if rvol < 2.0:
-                failures.append(f"Insufficient RVOL: {rvol:.2f}x < 2.0x (No momentum projection)")
+            dynamic_rvol_min = float(self.config.get("rvol_min", 1.5))
+            if rvol < dynamic_rvol_min:
+                failures.append(f"Insufficient RVOL: {rvol:.2f}x < {dynamic_rvol_min}x (No momentum projection)")
 
             # Requisito 3: Momentum Técnico (EMA OR Bollinger Expansion)
             ema_ok = (ema3 and ema9 and ema3 > ema9)

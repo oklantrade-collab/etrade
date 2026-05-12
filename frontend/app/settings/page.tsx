@@ -258,6 +258,7 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
          <SettingRow label="Apalancamiento (Leverage)" value={generalForm.leverage_stocks ?? 1} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, leverage_stocks: v })} />
          <SettingRow label="% Inversión por Operación" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
          <SettingToggle label="Paper Trading Active" value={generalForm.paper_mode_active === true || generalForm.paper_mode_active === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, paper_mode_active: v })} />
+         <SettingRow label="RVOL Mínimo (V5.1)" value={generalForm.rvol_min || 1.5} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, rvol_min: v })} />
       </SettingsSection>
 
       <SettingsSection title="🛡️ Stop Loss Adaptativo">

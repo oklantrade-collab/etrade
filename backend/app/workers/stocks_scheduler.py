@@ -339,6 +339,13 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         if gap_pct > 12.0:
             log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Gap ({gap_pct}%). High reversal risk.")
             return None
+        
+        # Case 4: Gap Up Trap (V5.1 Upgrade)
+        # Si abre con gap alcista pero el precio cae por debajo del precio de apertura,
+        # significa que no hay fuerza para sostener el movimiento.
+        if gap_pct > 1.5 and current_price < today_open:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap detected (${current_price} < Open ${today_open}). Gap: {gap_pct}%.")
+            return None
 
         # 4. TECHNICAL RULES
         ps_signal_4h = ind_4h.get("last_pinescript_signal")
