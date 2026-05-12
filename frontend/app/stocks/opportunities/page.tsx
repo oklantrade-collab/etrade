@@ -693,7 +693,7 @@ export default function OpportunitiesIntelligence() {
 
   const fetchPriorityQueue = async () => {
     try {
-      const res = await fetch('/api/v1/stocks/priority-queue')
+      const res = await fetch(`/api/v1/stocks/priority-queue?t=${Date.now()}`)
       const data = await res.json()
       setPriorityQueue(data.queue || [])
       setPqCapital(data.capital || {})
@@ -705,7 +705,7 @@ export default function OpportunitiesIntelligence() {
 
   const fetchData = async () => {
     try {
-      const res = await fetch('/api/v1/stocks/opportunities')
+      const res = await fetch(`/api/v1/stocks/opportunities?t=${Date.now()}`)
       const data = await res.json()
       if (data.market_status) setMarketStatus(data.market_status)
       const raw = data.opportunities || []
