@@ -51,12 +51,12 @@ def normalize_forex_price(symbol, price):
 # Si se excede CUALQUIERA de estos limites, se cierra inmediatamente
 # sin esperar confirmaciones tecnicas.
 HARD_CAP_LOSS_PIPS = {
-    'EURUSD': 25,
-    'GBPUSD': 25,
-    'USDJPY': 25,
-    'XAUUSD': 50,
+    'EURUSD': 40,
+    'GBPUSD': 40,
+    'USDJPY': 40,
+    'XAUUSD': 80,
 }
-HARD_CAP_LOSS_USD = 15.0  # P rdida m xima en USD por trade
+HARD_CAP_LOSS_USD = 25.0  # Pérdida máxima de emergencia en USD por trade
 MAX_SL_PIPS = {
     'EURUSD': 30,
     'GBPUSD': 30,
@@ -383,38 +383,30 @@ class ForexExecutionService:
 
     def _calculate_lot_size(self, symbol, sl_pips):
         """
-        Calcula el lotaje basado en MARGEN y APALANCAMIENTO.
-        Inversion = Capital * %Riesgo
-        Volumen = Inversion * Apalancamiento
+        Calcula el lotaje basado en RIESGO REAL EN USD.
+        Riesgo USD = Capital * %Riesgo
+        Lotes = Riesgo USD / (SL Pips * Valor del Pip por Lote Estándar)
         """
         try:
             f_config = get_forex_config()
-            inversion = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
-            leverage = f_config.get('leverage', 500)
-            buying_power = inversion * leverage
+            # Calcular riesgo base, pero limitarlo a un maximo de $15 USD por trade 
+            # para asegurar que NUNCA toque el Hard Cap de $25 por error.
+            riesgo_usd = min(f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100, 15.0)
             
-            # Valor del contrato estandar
-            contract_size = 100000 # Forex standard
-            if 'XAU' in symbol:
-                contract_size = 100
+            # Valor estándar de 1 pip por 1 lote (100,000 unidades)
+            pip_val_std = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
             
-            # Obtener precio actual para calculo preciso
-            raw_price = self._safe_float(self.state['prices'].get(symbol, {}).get('mid', 1.0))
-            price = normalize_forex_price(symbol, raw_price)
-            if price <= 0: price = 1.0
+            # Piso seguro para el SL para no generar lotajes gigantes
+            safe_sl_pips = max(sl_pips, 10.0) 
             
-            if 'XAU' in symbol:
-                # Oro: Lotes = Poder de Compra / (Onzas * Precio)
-                lots = buying_power / (contract_size * price)
-            else:
-                # Forex: Lotes = Poder de Compra / 100,000
-                lots = buying_power / contract_size
+            lots = riesgo_usd / (safe_sl_pips * pip_val_std)
                 
-            self.log(f"[LOTS] Capital: ${f_config['capital_usd']} | Inv: ${inversion} | BP: ${buying_power} | Lots: {lots:.2f}")
+            self.log(f"[LOTS] Capital: ${f_config['capital_usd']} | Riesgo Cap: ${riesgo_usd} | SL Pips: {safe_sl_pips:.1f} | Lots: {lots:.2f}")
             return min(max(round(lots, 2), 0.01), 1.0)
         except Exception as e:
             self.log(f"Error calculando lotes: {e}", "ERROR")
             return 0.01
+
 
     def _calculate_sl_tp(self, symbol, direction, entry, snap, rule_code):
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)

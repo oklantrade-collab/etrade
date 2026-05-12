@@ -53,8 +53,10 @@ export default function PortfolioPage() {
 
   useEffect(() => {
     fetchData()
-    const channel = supabase.channel('portfolio-final-v2').on('postgres_changes', { event: '*', schema: 'public', table: 'market_snapshot' }, (p) => fetchData()).subscribe()
-    return () => { supabase.removeChannel(channel) }
+    // Cambiado: Reemplazar Realtime de market_snapshot por polling cada 60s
+    // Esto ahorra el 99% del consumo de Egress en Supabase
+    const interval = setInterval(() => { fetchData() }, 60000)
+    return () => clearInterval(interval)
   }, [])
 
   async function fetchData() {

@@ -63,15 +63,15 @@ def calculate_b1_momentum(
     if rvol >= 3.0:
         rvol_score = 100
     elif rvol >= 2.0:
-        rvol_score = 80
+        rvol_score = 85
     elif rvol >= 1.5:
-        rvol_score = 65
-    elif rvol >= 1.0:
+        rvol_score = 70
+    elif rvol >= 1.2:
         rvol_score = 50
-    elif rvol >= 0.7:
-        rvol_score = 35
+    elif rvol >= 1.0:
+        rvol_score = 30
     else:
-        rvol_score = 20
+        rvol_score = 5
 
     components['rvol'] = {
         'value': rvol, 'score': rvol_score, 'weight': 0.35,
@@ -187,13 +187,14 @@ def calculate_b2_technical(
     if 45 <= rsi <= 65:
         rsi_score = 60
     elif rsi < 30:
-        rsi_score = 80
+        # Solo premiar si el precio NO está en caída libre
+        rsi_score = 20 if price < ema20 else 80
     elif 30 <= rsi < 45:
-        rsi_score = 70
+        rsi_score = 70 if price > ema20 else 40
     elif 65 < rsi <= 75:
         rsi_score = 45
     else:
-        rsi_score = 25
+        rsi_score = 15
 
     components['rsi'] = {'value': rsi, 'score': rsi_score, 'weight': 0.20}
 
@@ -226,15 +227,16 @@ def calculate_b2_technical(
         ema20_above_50 = ema20 > ema50
 
         if above_20 and above_50 and ema20_above_50:
-            ema_score = 85
+            ema_score = 90
         elif above_20 and above_50:
-            ema_score = 70
+            ema_score = 75
         elif above_20 and not above_50:
-            ema_score = 55
-        elif not above_20 and above_50:
             ema_score = 40
+        elif not above_20 and above_50:
+            ema_score = 30
         else:
-            ema_score = 25
+            # TENDENCIA BAJISTA TOTAL (CASO ABR)
+            ema_score = 5
 
     components['ema_position'] = {
         'price': price, 'ema20': ema20, 'ema50': ema50,

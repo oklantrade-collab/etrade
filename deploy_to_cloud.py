@@ -13,7 +13,8 @@ files_to_sync = [
     "app/strategy/strategy_engine.py",
     "app/workers/forex_worker_standalone.py",
     "app/workers/forex_execution_service.py",
-    "app/workers/stocks_scheduler.py"
+    "app/workers/stocks_scheduler.py",
+    "app/stocks/apex_score.py"
 ]
 
 def deploy():

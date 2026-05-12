@@ -531,7 +531,7 @@ async def get_priority_queue():
                     apex_1d = float(snap.get("apex_1d") or 0)
                     
                     # Only include decent APEX scores
-                    if apex_4h < 30:
+                    if apex_4h < 60:
                         continue
                     
                     # Build a dynamic queue entry
