@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState, Suspense } from 'react'
+import { useEffect, useState, Suspense, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
@@ -116,6 +116,8 @@ function DashboardContent() {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [diagnosticSymbol, setDiagnosticSymbol] = useState<string | null>(null)
   const [selectedTf, setSelectedTf] = useState('15m')
+  const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
   const [candles, setCandles] = useState<any[]>([])
   const [trades, setTrades] = useState<TradeEvent[]>([])
   const [loading, setLoading] = useState(true)
@@ -392,6 +394,7 @@ function DashboardContent() {
             isSelected={selectedSymbol === sym}
             onSelect={() => setSelectedSymbol(sym)}
             onShowDiagnostic={(s) => setDiagnosticSymbol(s)}
+            onOpenChart={(s) => { setSelectedTicker(s); setShowChart(true); }}
           />
         ))}
       </div>
@@ -675,6 +678,8 @@ function DashboardContent() {
         />
       )}
 
+      {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
+
       <style jsx>{`
         .glass-effect {
           background: rgba(17, 24, 39, 0.45);
@@ -722,13 +727,15 @@ function SymbolCard({
   data, 
   isSelected, 
   onSelect,
-  onShowDiagnostic
+  onShowDiagnostic,
+  onOpenChart
 }: { 
   symbol: string, 
   data: SymbolData, 
   isSelected: boolean, 
   onSelect: () => void,
-  onShowDiagnostic: (sym: string) => void
+  onShowDiagnostic: (sym: string) => void,
+  onOpenChart: (sym: string) => void
 }) {
   const getStatusColor = () => {
     switch(data.card_status) {
@@ -1036,6 +1043,41 @@ function SymbolCard({
       >
         🔍 DIAGNÓSTICO DE REGLAS
       </button>
+
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenChart(symbol);
+        }}
+        style={{
+          width:        '100%',
+          padding:      '8px 0',
+          marginTop:    '8px',
+          background:   '#38BDF8',
+          border:       'none',
+          borderRadius: '8px',
+          color:        '#000',
+          fontSize:     '11px',
+          fontWeight:   950,
+          letterSpacing: '1.5px',
+          cursor:       'pointer',
+          display:      'flex',
+          alignItems:   'center',
+          justifyContent: 'center',
+          gap:          '8px',
+          transition:   'all 0.2s',
+        }}
+        onMouseEnter={e => {
+          e.currentTarget.style.transform = 'scale(1.02)'
+          e.currentTarget.style.boxShadow = '0 0 15px rgba(56,189,248,0.3)'
+        }}
+        onMouseLeave={e => {
+          e.currentTarget.style.transform = 'scale(1)'
+          e.currentTarget.style.boxShadow = 'none'
+        }}
+      >
+        📊 VER GRÁFICO TV
+      </button>
     </div>
   )
 }
@@ -1106,6 +1148,72 @@ function TableCard({ title, data, type }: { title: string, data: any[], type: 's
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+function TradingViewWidget({ symbol }: { symbol: string }) {
+  const containerId = `tv-chart-${symbol}`;
+  const containerRef = useRef<HTMLDivElement>(null);
+  
+  useEffect(() => {
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => {
+      if ((window as any).TradingView && containerRef.current) {
+        // Formato para Binance si es Crypto
+        const tvSymbol = symbol.includes('USDT') ? `BINANCE:${symbol}` : symbol;
+        
+        new (window as any).TradingView.widget({
+          "autosize": true,
+          "symbol": tvSymbol,
+          "interval": "15",
+          "timezone": "America/Lima",
+          "theme": "dark",
+          "style": "1",
+          "locale": "es",
+          "toolbar_bg": "#161922",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "container_id": containerId,
+          "backgroundColor": "#0F1117",
+          "gridColor": "rgba(255, 255, 255, 0.05)",
+          "hide_side_toolbar": false,
+          "studies": [
+            "BB@tv-basicstudies",
+            "MAExp@tv-basicstudies",
+            "MAExp@tv-basicstudies"
+          ],
+          "overrides": {
+            "mainSeriesProperties.style": 1,
+          }
+        });
+      }
+    };
+    document.head.appendChild(script);
+  }, [symbol, containerId]);
+
+  return (
+    <div ref={containerRef} id={containerId} className="w-full h-full rounded-2xl overflow-hidden border border-white/10" />
+  );
+}
+
+function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+        <div className="bg-[#0F1117] w-full max-w-[95%] h-[90vh] rounded-[2rem] border border-blue-500/50 overflow-hidden flex flex-col shadow-[0_0_50px_rgba(59,130,246,0.2)]">
+            <div className="px-8 py-5 bg-slate-900/50 flex justify-between items-center border-b border-white/5">
+                <div className="flex items-center gap-4">
+                  <span className="text-2xl">📊</span>
+                  <h3 className="text-sm font-black text-white uppercase tracking-[0.2em]">Gráfico Técnico TV: {symbol}</h3>
+                </div>
+                <button onClick={onClose} className="bg-rose-500 hover:bg-rose-600 text-white px-6 py-2 rounded-xl text-[0.65rem] font-black uppercase tracking-widest transition-all">Cerrar Gráfico</button>
+            </div>
+            <div className="flex-1 bg-black">
+                <TradingViewWidget symbol={symbol} />
+            </div>
+        </div>
     </div>
   )
 }
