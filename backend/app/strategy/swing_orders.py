@@ -132,7 +132,7 @@ async def cancel_swing_orders(symbol: str, timeframe: str = None, reason: str = 
         'status': 'cancelled',
         'cancelled_at': datetime.now(timezone.utc).isoformat(),
         'updated_at': datetime.now(timezone.utc).isoformat(),
-        'rejection_reason': reason
+        'rejection_reason': (reason or "unknown")[:10]
     }
     query = sb.table('pending_orders').update(data).eq('symbol', symbol).eq('status', 'pending')
     if timeframe: query = query.eq('timeframe', timeframe)
@@ -144,15 +144,19 @@ async def cancel_swing_order(symbol: str, direction: str, reason: str, sb):
     await cancel_swing_orders(symbol=symbol, direction=direction, reason=reason, sb=sb)
 
 async def create_smart_limit_order(symbol, direction, limit_price, sl_price, tp1_price, tp2_price, band_target, sizing_pct, movement_type, signal_quality, fib_zone_entry, ttl_hours, supabase):
+    # Truncate strings to avoid DB length errors (varchar 10)
+    safe_trade_type = "smart_lim"  # 9 chars
+    safe_movement = (movement_type or "unknown")[:10]
+    
     new_order = {
-        'symbol': symbol, 'direction': direction, 'order_type': 'limit', 'trade_type': 'smart_limit',
+        'symbol': symbol, 'direction': direction, 'order_type': 'limit', 'trade_type': safe_trade_type,
         'rule_code': 'SMART' if direction == 'long' else 'SMART_S',
         'limit_price': limit_price, 'sl_price': sl_price, 'tp1_price': tp1_price, 'tp2_price': tp2_price,
         'band_name': band_target, 'status': 'pending',
         'mode': 'paper' if BOT_STATE.config_cache.get("paper_trading", True) else 'real',
         'expires_at': (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat(),
         'sizing_pct': sizing_pct, 'timeframe': '15m',
-        'movement_type': movement_type, 'signal_quality': signal_quality, 'fib_zone_entry': fib_zone_entry
+        'movement_type': safe_movement, 'signal_quality': signal_quality, 'fib_zone_entry': fib_zone_entry
     }
     supabase.table('pending_orders').insert(new_order).execute()
 

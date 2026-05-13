@@ -201,6 +201,8 @@ class StandaloneForexWorker:
             print(f"[{ts}] [ERROR] Failed to log to DB: {e}")
 
     def start(self):
+        from app.core.safety_manager import set_current_worker
+        set_current_worker('forex_worker')
         self.log(f"Iniciando Worker v3.1 (Rutas Windows OK)...")
         self._load_dynamic_symbols()
         self.client.startService()

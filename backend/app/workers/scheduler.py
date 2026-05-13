@@ -1311,7 +1311,7 @@ def load_config_to_memory():
 async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
     """Procesamiento asíncrono para UN símbolo en el ciclo 15m (Parallel)."""
     # ── 1. Heartbeat & Safety Manager ─────────
-    register_heartbeat('crypto_scheduler_15m')
+    register_heartbeat('crypto_scheduler')
     
     # ── 2. Circuit Breaker Global ────────────
     cb = await check_circuit_breaker(sb, 'crypto_futures')
@@ -2113,6 +2113,8 @@ async def main():
     sb = get_supabase()
     engine = StrategyEngine.get_instance(sb)
     await engine.load()
+    from app.core.safety_manager import set_current_worker
+    set_current_worker('crypto_scheduler')
     log_info('STARTUP', 'Strategy Engine v1.0 cargado')
     
     # Persistent providers to keep connections alive

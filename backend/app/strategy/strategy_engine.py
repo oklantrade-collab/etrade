@@ -212,6 +212,7 @@ class StrategyEngine:
 
         return {
             # Precio
+            'symbol':            str(snap.get('symbol', '')),
             'price':             safe_float(snap.get('price')),
             'dist_basis_pct':    safe_float(snap.get('dist_basis_pct')),
             # ADX
@@ -382,6 +383,49 @@ class StrategyEngine:
 
         return result, 1.0 if result else 0.0
 
+    def _check_mtf_entry_filter(self, symbol: str, mtf: float, rule_code: str) -> dict:
+        """
+        Verifica el filtro MTF para entradas.
+        Bloquea señales cuando el MTF es neutro en activos muy volátiles.
+        """
+        try:
+            from app.strategy.capital_protection import VOLATILE_TRAILING_CONFIG
+            cfg = VOLATILE_TRAILING_CONFIG.get(symbol)
+        except ImportError:
+            cfg = None
+            
+        if not cfg:
+            return {'blocked': False}
+
+        mtf_min = cfg.get('mtf_entry_min', 0.15)
+
+        scalping_rules = [
+            'Aa31a', 'Aa31b',
+            'Bb31a', 'Bb31b',
+            'Aa11', 'Aa12',
+            'Bb11', 'Bb12',
+        ]
+        if rule_code not in scalping_rules:
+            return {'blocked': False}
+
+        if abs(mtf) < mtf_min:
+            return {
+                'blocked': True,
+                'mtf':     mtf,
+                'mtf_min': mtf_min,
+                'reason': (
+                    f'FILTRO MTF: {symbol}/{rule_code} bloqueada. MTF={mtf:.2f} '
+                    f'< mínimo {mtf_min:.2f}. Sin confirmación de tendencia '
+                    f'en 4H/1H → alta probabilidad de reversión rápida en activo volátil'
+                ),
+            }
+
+        return {
+            'blocked': False,
+            'mtf':     mtf,
+            'reason':  f'MTF={mtf:.2f} OK >= {mtf_min:.2f}',
+        }
+
     def evaluate_rule(
         self,
         rule:    dict,
@@ -391,6 +435,28 @@ class StrategyEngine:
         Evalúa una regla completa.
         Calcula score ponderado de condiciones.
         """
+        symbol = context.get('symbol', '')
+        mtf = context.get('mtf_score', 0.0)
+        rule_code = rule.get('rule_code', '')
+        
+        if symbol:
+            mtf_filter = self._check_mtf_entry_filter(symbol, mtf, rule_code)
+            if mtf_filter.get('blocked'):
+                log_info('STRATEGY_ENGINE', f'🚫 {mtf_filter["reason"]}')
+                return {
+                    'triggered': False,
+                    'score': 0.0,
+                    'min_score': float(rule.get('min_score', 0.60)),
+                    'rule_code': rule_code,
+                    'rule_name': rule.get('name'),
+                    'direction': rule.get('direction'),
+                    'cycle': rule.get('cycle'),
+                    'conditions': {},
+                    'all_passed': False,
+                    'blocked_by': 'mtf_filter',
+                    'reason': mtf_filter['reason'],
+                }
+
         cond_ids  = rule.get('condition_ids', [])
         weights   = rule.get('condition_weights') or {}
         min_score = float(rule.get('min_score', 0.60))

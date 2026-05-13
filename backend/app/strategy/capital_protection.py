@@ -11,6 +11,7 @@ Compatible con:
   - Stocks: IB TWS (acciones US)
 """
 
+import pandas as pd
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict
 from app.core.logger import log_info, log_error
@@ -86,6 +87,258 @@ PIP_SIZES = {
     'XAUUSD': 0.01,   'AUDUSD': 0.0001,
 }
 
+# Configuración de trailing dinámico por símbolo
+VOLATILE_TRAILING_CONFIG = {
+    'XAUUSD': {
+        'pip_size':             0.01,
+        'min_pips_to_activate': 3,
+        'phase1_atr_mult':      1.5,
+        'candle_switch_pips':   10,
+        'candle_lookback':       2,
+        'accel_switch_pips':    25,
+        'accel_atr_mult':        0.8,
+        'asia_session_mult_adj': 0.7,
+        'mtf_entry_min':        0.20,
+        'atr_ratio_calm':       1.0,
+        'atr_ratio_volatile':   1.5,
+        'atr_mult_calm_adj':    1.3,
+        'atr_mult_volatile_adj': 1.0,
+    },
+    'GBPUSD': {
+        'pip_size':             0.0001,
+        'min_pips_to_activate': 3,
+        'phase1_atr_mult':      1.4,
+        'candle_switch_pips':   8,
+        'candle_lookback':      2,
+        'accel_switch_pips':    20,
+        'accel_atr_mult':       0.7,
+        'asia_session_mult_adj': 0.8,
+        'mtf_entry_min':        0.15,
+        'atr_ratio_calm':       1.0,
+        'atr_ratio_volatile':   1.5,
+        'atr_mult_calm_adj':    1.2,
+        'atr_mult_volatile_adj': 0.9,
+    },
+    'EURUSD': {
+        'pip_size':             0.0001,
+        'min_pips_to_activate': 2,
+        'phase1_atr_mult':      1.3,
+        'candle_switch_pips':   7,
+        'candle_lookback':      2,
+        'accel_switch_pips':    18,
+        'accel_atr_mult':       0.7,
+        'asia_session_mult_adj': 0.8,
+        'mtf_entry_min':        0.10,
+        'atr_ratio_calm':       1.0,
+        'atr_ratio_volatile':   1.5,
+        'atr_mult_calm_adj':    1.2,
+        'atr_mult_volatile_adj': 0.9,
+    },
+    'USDJPY': {
+        'pip_size':             0.01,
+        'min_pips_to_activate': 2,
+        'phase1_atr_mult':      1.3,
+        'candle_switch_pips':   7,
+        'candle_lookback':      2,
+        'accel_switch_pips':    18,
+        'accel_atr_mult':       0.7,
+        'asia_session_mult_adj': 1.0,
+        'mtf_entry_min':        0.10,
+        'atr_ratio_calm':       1.0,
+        'atr_ratio_volatile':   1.5,
+        'atr_mult_calm_adj':    1.2,
+        'atr_mult_volatile_adj': 0.9,
+    },
+}
+
+FOREX_SESSIONS = {
+    'asia':   (0,  8),
+    'london': (7,  16),
+    'new_york': (12, 21),
+}
+
+def get_current_session() -> str:
+    from datetime import datetime, timezone
+    hour = datetime.now(timezone.utc).hour
+    if 12 <= hour < 21:
+        return 'new_york'
+    elif 7 <= hour < 16:
+        return 'london'
+    else:
+        return 'asia'
+
+def get_atr_current(
+    df_15m:    pd.DataFrame,
+    period:    int = 14,
+    avg_period: int = 50,
+) -> dict:
+    if df_15m is None or len(df_15m) < max(period, avg_period):
+        return {
+            'atr':   0.0,
+            'avg':   0.0,
+            'ratio': 1.0,
+            'regime': 'normal',
+        }
+
+    df = df_15m.copy()
+    df['pc']  = df['close'].shift(1)
+    df['tr']  = df.apply(
+        lambda r: max(
+            r['high'] - r['low'],
+            abs(r['high'] - (r['pc'] or r['close'])),
+            abs(r['low']  - (r['pc'] or r['close']))
+        ), axis=1
+    )
+
+    atr_now = float(df['tr'].tail(period).mean())
+    atr_avg = float(df['tr'].tail(avg_period).mean())
+    ratio   = atr_now / atr_avg if atr_avg > 0 else 1.0
+
+    return {
+        'atr':   round(atr_now, 6),
+        'avg':   round(atr_avg, 6),
+        'ratio': round(ratio, 3),
+        'regime': (
+            'calm'    if ratio < 1.0 else
+            'volatile' if ratio > 1.5 else
+            'normal'
+        ),
+    }
+
+def evaluate_volatile_trailing(
+    symbol:        str,
+    side:          str,
+    entry_price:   float,
+    current_price: float,
+    highest_price: float,
+    current_sl:    float,
+    df_15m:        pd.DataFrame,
+    atr_snap:      float = 0,
+) -> dict:
+    cfg = VOLATILE_TRAILING_CONFIG.get(symbol)
+    if not cfg:
+        return {'action': 'none', 'reason': 'Sin config dinámica'}
+
+    pip      = cfg['pip_size']
+    min_pips = cfg['min_pips_to_activate']
+
+    if side in ('long', 'buy'):
+        pnl_pips  = (current_price - entry_price) / pip
+        max_price = max(highest_price, current_price)
+    else:
+        pnl_pips  = (entry_price - current_price) / pip
+        max_price = min(highest_price, current_price)
+
+    if pnl_pips < min_pips:
+        return {
+            'action':   'none',
+            'pnl_pips': round(pnl_pips, 1),
+            'reason': f'Ganancia {pnl_pips:.1f} pips < mínimo {min_pips} pips',
+        }
+
+    atr_data = get_atr_current(df_15m)
+    atr      = atr_data['atr'] if atr_data['atr'] > 0 else atr_snap
+    if atr <= 0:
+        atr = pip * 5
+
+    regime = atr_data['regime']
+    if regime == 'calm':
+        mult_adj = cfg['atr_mult_calm_adj']
+    elif regime == 'volatile':
+        mult_adj = cfg['atr_mult_volatile_adj']
+    else:
+        mult_adj = 1.0
+
+    session = get_current_session()
+    if session == 'asia':
+        sess_adj = cfg['asia_session_mult_adj']
+    else:
+        sess_adj = 1.0
+
+    phase1_mult = cfg['phase1_atr_mult'] * mult_adj * sess_adj
+    atr_dist    = atr * phase1_mult
+
+    if side in ('long', 'buy'):
+        sl_phase1 = max_price - atr_dist
+    else:
+        sl_phase1 = max_price + atr_dist
+
+    active_phase = 1
+    sl_phases    = {'phase1': round(sl_phase1, 6)}
+
+    sl_phase2    = None
+    candle_pips  = cfg['candle_switch_pips']
+    lookback     = cfg['candle_lookback']
+
+    if pnl_pips >= candle_pips and df_15m is not None and len(df_15m) >= lookback + 1:
+        closed = df_15m.iloc[-(lookback+1):-1]
+        if side in ('long', 'buy'):
+            sl_phase2 = float(closed['low'].min())
+        else:
+            sl_phase2 = float(closed['high'].max())
+        sl_phases['phase2'] = round(sl_phase2, 6)
+
+    sl_phase3    = None
+    accel_pips   = cfg['accel_switch_pips']
+    accel_mult   = cfg['accel_atr_mult'] * sess_adj
+
+    if pnl_pips >= accel_pips:
+        accel_dist = atr * accel_mult
+        if side in ('long', 'buy'):
+            sl_phase3 = current_price - accel_dist
+        else:
+            sl_phase3 = current_price + accel_dist
+        sl_phases['phase3'] = round(sl_phase3, 6)
+
+    candidates = [sl_phase1]
+    if sl_phase2 is not None: candidates.append(sl_phase2)
+    if sl_phase3 is not None: candidates.append(sl_phase3)
+
+    if side in ('long', 'buy'):
+        best_sl = max(candidates)
+        final_sl = max(best_sl, current_sl)
+        final_sl = min(final_sl, current_price - (pip * 2))
+    else:
+        best_sl = min(candidates)
+        final_sl = min(best_sl, current_sl)
+        final_sl = max(final_sl, current_price + (pip * 2))
+
+    final_sl = round(final_sl, 6)
+
+    if sl_phase3 is not None and abs(final_sl - sl_phase3) < pip:
+        active_phase = 3
+    elif sl_phase2 is not None and abs(final_sl - sl_phase2) < pip:
+        active_phase = 2
+    else:
+        active_phase = 1
+
+    improved = (
+        (side in ('long','buy') and final_sl > current_sl + pip) or
+        (side not in ('long','buy') and final_sl < current_sl - pip)
+    )
+
+    dist_pips = abs(current_price - final_sl) / pip
+
+    return {
+        'action':       'update_sl' if improved else 'none',
+        'sl_price':     final_sl,
+        'active_phase': active_phase,
+        'sl_phases':    sl_phases,
+        'improved':     improved,
+        'pnl_pips':     round(pnl_pips, 1),
+        'dist_pips':    round(dist_pips, 1),
+        'atr':          round(atr, 6),
+        'regime':       regime,
+        'session':      session,
+        'mult_used':    round(phase1_mult, 3),
+        'reason': (
+            f'Trail dinámico {symbol} [Fase {active_phase}]: '
+            f'SL={final_sl:.5f} ({dist_pips:.1f} pips). '
+            f'PnL=+{pnl_pips:.1f} pips. Régimen={regime}. Sesión={session}. '
+            f'ATR×{phase1_mult:.2f}={atr_dist/pip:.1f}pips'
+        ),
+    }
+
 @dataclass
 class ProtectionState:
     """
@@ -158,11 +411,53 @@ def calculate_pnl(
 def evaluate_trailing_stop(
     state:         ProtectionState,
     current_price: float,
+    df_15m:        pd.DataFrame = None,
+    snap:          dict = None,
 ) -> dict:
     """
     REGLA 4: Trailing Stop Escalonado.
     Evalúa si el SL debe subir al siguiente nivel. El SL NUNCA retrocede.
     """
+    symbol = state.symbol
+
+    # ── Símbolos con trailing dinámico ────────
+    if symbol in VOLATILE_TRAILING_CONFIG and state.market_type == 'forex_futures':
+        atr_snap = float(snap.get('atr', 0)) if snap else 0
+        
+        result = evaluate_volatile_trailing(
+            symbol        = symbol,
+            side          = state.side,
+            entry_price   = state.entry_price,
+            current_price = current_price,
+            highest_price = state.highest_price,
+            current_sl    = state.current_sl,
+            df_15m        = df_15m,
+            atr_snap      = atr_snap,
+        )
+
+        if result['action'] == 'update_sl':
+            state.current_sl = result['sl_price']
+            if state.side in ('long','buy'):
+                state.highest_price = max(state.highest_price, current_price)
+            else:
+                state.lowest_price = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+            return {
+                'action':     'update_sl',
+                'new_sl':     result['sl_price'],
+                'new_level':  result['active_phase'],
+                'trigger':    f'+{result["pnl_pips"]:.1f} pips',
+                'reason':     result['reason'],
+                'dynamic':    True,
+                'phase':      result['active_phase'],
+                'dist_pips':  result['dist_pips'],
+            }
+
+        return {
+            'action': 'none',
+            'reason': result['reason'],
+        }
+
+    # ── Trailing escalónado original ──────────
     cfg  = PROTECTION_CONFIG.get(state.market_type, {})
     side = state.side.lower()
     is_long = side in ('long', 'buy')
@@ -429,6 +724,7 @@ def evaluate_all_protections(
     current_price: float,
     snap:          Optional[dict] = None,
     inverse_rule:  Optional[str] = None,
+    df_15m:        pd.DataFrame = None,
 ) -> dict:
     """
     Función principal de evaluación por prioridades.
@@ -441,7 +737,7 @@ def evaluate_all_protections(
         actions.append({'priority': 1, 'type': 'break_even', **be})
 
     # 2. Trailing Stop
-    trail = evaluate_trailing_stop(state, current_price)
+    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, snap=snap)
     if trail['action'] == 'update_sl':
         actions.append({'priority': 2, 'type': 'trailing', **trail})
 

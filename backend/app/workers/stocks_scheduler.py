@@ -821,6 +821,8 @@ async def run_stocks_cycle(force=False):
     Main stocks cycle — runs every 5 minutes during market hours.
     """
     cycle_start = time.time()
+    from app.core.safety_manager import register_heartbeat
+    register_heartbeat('stocks_scheduler')
     log_info(MODULE, "═══ STOCKS CYCLE START ═══" if not force else "═══ STOCKS CYCLE START (FORCED) ═══")
 
     try:
@@ -1189,6 +1191,9 @@ async def start_stocks_scheduler(force=False):
       2. Inversión Pro: once at market close (16:05 ET, Mon-Fri)
       3. Market Sweep: daily at 2:00 AM ET (Mon-Fri)
     """
+    from app.core.safety_manager import set_current_worker
+    set_current_worker('stocks_scheduler')
+
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.interval import IntervalTrigger
     from apscheduler.triggers.cron import CronTrigger

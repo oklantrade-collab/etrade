@@ -40,6 +40,12 @@ _worker_heartbeats:      dict = {}
 _consecutive_sl:         dict = {}
 _circuit_breaker_active: bool = False
 _circuit_breaker_since         = None
+_current_worker:         str  = None
+
+def set_current_worker(name: str):
+    global _current_worker
+    _current_worker = name
+    register_heartbeat(name)
 
 
 # ════════════════════════════════════════
@@ -352,19 +358,73 @@ async def cleanup_zombie_signals(supabase) -> int:
 
 async def check_all_heartbeats() -> list:
     """Verifica que todos los workers están vivos. Alerta por Telegram si no."""
-    workers = [
-        'crypto_scheduler',
-        'forex_worker',
-        'stocks_scheduler',
-    ]
-    dead = [w for w in workers if not check_worker_alive(w)]
+    from app.core.supabase_client import get_supabase
+    sb = get_supabase()
+    
+    workers_map = {
+        'crypto_scheduler': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+        'forex_worker':     ['EURUSD', 'GBPUSD', 'XAUUSD'],
+        'stocks_scheduler': ['NVDA', 'AAPL', 'TSLA', 'AMD']
+    }
+    
+    dead = []
+    now = datetime.now(timezone.utc)
+    max_age = SAFETY_CONFIG['worker_heartbeat_minutes']
+    
+    for w_name, symbols in workers_map.items():
+        # 1. Si es el worker actual, chequear memoria
+        if w_name == _current_worker:
+            if not check_worker_alive(w_name):
+                dead.append(w_name)
+            continue
+            
+        # 2. Si no, chequear DB (market_snapshot) como proxy
+        try:
+            # Especial para stocks: si el mercado está cerrado, no reportar caída
+            if w_name == 'stocks_scheduler':
+                from app.core.market_hours import is_market_open
+                is_open, _ = is_market_open()
+                if not is_open:
+                    continue
+
+            res = sb.table('market_snapshot').select('updated_at').in_('symbol', symbols).execute()
+            if not res.data:
+                # Si no hay datos de esos símbolos, podría ser que el worker no los está procesando.
+                # Intentamos ver si ALGÚN símbolo se actualizó para ese tipo de worker si tuviéramos exchange, 
+                # pero como no lo tenemos, confiamos en los representativos.
+                dead.append(w_name)
+                continue
+            
+            # Ver si el más reciente es joven
+            latest_update = None
+            for row in res.data:
+                ts_str = row.get('updated_at')
+                if ts_str:
+                    ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                    if latest_update is None or ts > latest_update:
+                        latest_update = ts
+            
+            if not latest_update:
+                dead.append(w_name)
+            else:
+                elapsed = (now - latest_update).total_seconds() / 60
+                if elapsed > max_age + 5: # Damos 5 min extra de margen por latencia DB
+                    dead.append(w_name)
+        except Exception as e:
+            log_error('SAFETY', f'Error verificando heartbeat DB para {w_name}: {e}')
+            # Si falla la DB, no marcamos como muerto para evitar spam si es solo un problema de red
+            pass
+
     if dead:
-        log_error('SAFETY', f'💀 Workers caídos: {", ".join(dead)}')
-        await _send_telegram(
-            '💀 WORKERS CAÍDOS:\n'
-            + '\n'.join(f'  ❌ {w}' for w in dead)
-            + '\n\nReiniciando automáticamente...'
-        )
+        log_error('SAFETY', f'💀 Workers caídos (DB/Mem): {", ".join(dead)}')
+        # Solo enviar alerta si el fallo persiste o si somos el worker principal (crypto_scheduler)
+        if _current_worker == 'crypto_scheduler':
+            await _send_telegram(
+                '💀 ALERTA DE SISTEMA SAFETY\n'
+                'Se detectaron workers sin actividad reciente:\n'
+                + '\n'.join(f'  ❌ {w}' for w in dead)
+                + '\n\nRevisar estado de procesos en el servidor.'
+            )
     return dead
 
 

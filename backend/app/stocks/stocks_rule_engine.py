@@ -324,17 +324,23 @@ class StocksRuleEngine:
                     failures.append(f'SIPV "{sipv_val}" != "{sipv_rule}"')
 
         # ── CHECK 5: RVOL mínimo ─────────────────────────
+        # Usar el rvol_min de la regla, o el global de Settings como piso (V5.1)
+        global_rvol_min = float(self.config.get("rvol_min", 1.5))
         rvol_min = float(rule.get("rvol_min") or 0)
-        if rvol_min > 0:
+        
+        # Si la regla no tiene rvol_min definido (>0), usamos el global
+        effective_rvol_min = rvol_min if rvol_min > 0 else global_rvol_min
+
+        if effective_rvol_min > 0:
             rvol_val = float(context.get("rvol", 0))
-            rvol_ok = rvol_val >= rvol_min
+            rvol_ok = rvol_val >= effective_rvol_min
             checks["rvol"] = {
                 "passed": rvol_ok,
                 "value": rvol_val,
-                "required": rvol_min,
+                "required": effective_rvol_min,
             }
             if not rvol_ok:
-                failures.append(f"RVOL {rvol_val:.2f}x < {rvol_min}x")
+                failures.append(f"RVOL {rvol_val:.2f}x < {effective_rvol_min}x")
 
         # ── CHECK 6: Proximidad al precio LIMIT ──────────
         if order_type == "limit":
