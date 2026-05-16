@@ -433,9 +433,9 @@ async def upsert_candles_to_db(symbol: str, timeframe: str, df, sb):
                 "low":       float(r['low']),
                 "close":     float(r['close']),
                 "volume":    float(r['volume']),
-                "quote_volume": float(r.get('quote_volume', 0)),
+                "quote_volume": float(r.get('quote_volume') or 0),
                 "trades_count": int(r.get('trades_count', 0)),
-                "taker_buy_volume": float(r.get('taker_buy_volume', 0)),
+                "taker_buy_volume": float(r.get('taker_buy_volume') or 0),
                 "is_closed":  True,
                 # FIBONACCI BANDS PER CANDLE:
                 "basis":   float(r.get('basis', 0) or 0) if pd.notna(r.get('basis')) else None,
@@ -956,7 +956,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
 
         # 7. STRATEGY ENGINE v1.0 EVALUATION (5m)
         use_v2_global = bool(BOT_STATE.config_cache.get('use_strategy_engine_v2', False))
-        pilot_v2_symbols = ['ETHUSDT', 'SOLUSDT']
+        pilot_v2_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
         use_v2 = use_v2_global and symbol in pilot_v2_symbols
 
         if use_v2 and symbol not in BOT_STATE.positions:
@@ -1163,6 +1163,10 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
 async def cycle_5m():
     """Speed 2A: Monitor BE, SL, Emergencies & Reconcile (Parallel)."""
     log_debug(MODULE, "--- Speed 2A: 5m Cycle (Parallel) ---")
+    
+    from app.core.safety_manager import register_heartbeat
+    register_heartbeat('crypto_scheduler')
+    
     sb = get_supabase()
     raw_symbols = BOT_STATE.config_cache.get("symbols_active") or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]
     symbols = list(set([s.replace("/", "") for s in raw_symbols]))
@@ -1759,6 +1763,8 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                         blocked_by = f"market_ambiguous ({ambiguity['reason']})"
                         sm.set_ambiguous(symbol, ambiguity['reason'])
                     else:
+                        # SYNC WITH DB BEFORE CHECK (Critical to avoid race conditions)
+                        sm.sync_single_symbol(symbol, table_name="positions")
                         sm_check = sm.can_open(symbol, rule_match['direction'], float(last_row['close']), max_per_symbol)
                         
                         if not sm_check['allowed']:

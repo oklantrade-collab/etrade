@@ -346,8 +346,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
     """
     min_score = float(cfg.get('apex_min_score', 60))
 
-    # Obtener todos los tickers activos del watchlist diario
-    today = datetime.now().date().isoformat()
+    # Obtener todos los tickers activos del watchlist diario (con fallback a días anteriores si hoy está vacío)
+    from datetime import date, timedelta
+    today_dt = date.today()
+    today = today_dt.isoformat()
+    
+    # 1. Intentar hoy
     wl_res = supabase \
         .table('watchlist_daily') \
         .select('ticker') \
@@ -356,7 +360,31 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
         .limit(500) \
         .execute()
 
-    tickers = list(set(r['ticker'] for r in (wl_res.data or [])))
+    tickers_set = set(r['ticker'] for r in (wl_res.data or []))
+
+    # 2. Si no hay hoy, buscar lo más reciente (últimos 3 días)
+    if not tickers_set:
+        recent_date = (today_dt - timedelta(days=3)).isoformat()
+        res_recent = supabase.table("watchlist_daily")\
+            .select("ticker, date")\
+            .gte("date", recent_date)\
+            .eq("hard_filter_pass", True)\
+            .order("date", desc=True)\
+            .order("catalyst_score", desc=True)\
+            .limit(500)\
+            .execute()
+        
+        if res_recent.data and len(res_recent.data) > 0:
+            latest_date_in_db = res_recent.data[0]["date"]
+            tickers_set = set(
+                r["ticker"] for r in res_recent.data 
+                if r["date"] == latest_date_in_db
+            )
+            log_info(MODULE, f"Watchlist para cola obtenida de fallback (date={latest_date_in_db}): {len(tickers_set)} tickers")
+    else:
+        log_info(MODULE, f"Watchlist para cola obtenida de hoy: {len(tickers_set)} tickers")
+
+    tickers = list(tickers_set)
 
     # Obtener posiciones ya abiertas
     pos_res = supabase \
@@ -431,10 +459,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 df_15m            = df_15m,
                 df_4h             = df_4h,
                 df_daily          = df_daily,
+                ia_score          = float(fund_cache.get('fundamental_score', 50)) / 10,
             )
 
-            apex_4h = float(apex.get('apex_score_4h') or 50)
-            apex_1d = float(apex.get('apex_score_1d') or 50)
+            # Priorizar los valores de APEX ya calculados en el market_snapshot (para consistencia UI)
+            apex_4h = float(snap.get('apex_4h') or apex.get('apex_score_4h') or 50)
+            apex_1d = float(snap.get('apex_1d') or apex.get('apex_score_1d') or 50)
             ret_exp = float(apex.get('return_expected_4h') or 0)
             conf    = str(apex.get('confidence') or 'medium')
 
@@ -444,9 +474,18 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             # Calcular Composite Rank
             rank = calculate_composite_rank(apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg)
 
+            # ── REGLA 4: Confirmación de Volumen (15m Spike) ──
+            # El volumen actual debe ser >= 2x el promedio de las últimas 5 velas
+            vol_spike_ok = True
+            if df_15m is not None and len(df_15m) >= 6:
+                last_vol = df_15m['volume'].iloc[-1]
+                avg_vol_5 = df_15m['volume'].iloc[-6:-1].mean()
+                if avg_vol_5 > 0:
+                    vol_spike_ok = last_vol >= (avg_vol_5 * 2)
+
             # Criterios de entrada a la cola de alta prioridad
-            enters_by_apex = apex_4h >= min_score
-            enters_by_rule = rule_signal['has_signal']
+            enters_by_apex = (apex_4h >= min_score) and vol_spike_ok
+            enters_by_rule = rule_signal['has_signal'] and vol_spike_ok
 
             # Definir estado inicial
             # Si tiene señal de regla o score alto -> pending (lista para comprar)
@@ -705,6 +744,15 @@ async def run_orchestrator_cycle(supabase=None):
     if not cfg:
         return
 
+    # ── REGLA 1: Filtro de Horario + After-Hours Toggle ──
+    from app.core.market_hours import is_market_open
+    is_open, status = is_market_open()
+    allow_ah = cfg.get('allow_after_hours', False)
+    
+    if not is_open and not allow_ah:
+        log_info(MODULE, f'⏸️ Ciclo omitido: Mercado cerrado ({status}) y After-hours desactivado.')
+        return
+
     # 2. Capital disponible
     capital = await calculate_available_capital(cfg, supabase)
     log_info(MODULE, capital['reason'])
@@ -716,6 +764,11 @@ async def run_orchestrator_cycle(supabase=None):
     # 3. Macro context
     from app.stocks.stocks_adaptive_tp import fetch_macro_data
     macro = await fetch_macro_data(supabase)
+
+    # ── REGLA 2: Bloqueo de Compras en Mercado Bearish ──
+    if macro.get('sentiment') == 'bearish':
+        log_warning(MODULE, f"🛑 BLOQUEO MACRO: El sentimiento de mercado es BEARISH ({macro.get('score')}). No se permiten nuevas compras.")
+        return
 
     # 4. Construir cola de prioridad
     queue = await build_priority_queue(cfg, supabase, macro)
@@ -746,3 +799,7 @@ async def run_orchestrator_cycle(supabase=None):
         'capital':    capital,
         'top_ticker': queue[0]['ticker'] if queue else None,
     }
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(run_orchestrator_cycle())

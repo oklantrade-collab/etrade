@@ -364,7 +364,9 @@ class UniverseBuilder:
                 "rs_score_6m": round(float(c.get("rs_score_6m", 0) or 0), 2),
                 "inst_ownership_pct": round(float(c.get("inst_ownership_pct", 0) or 0), 2),
                 "market_cap_mln": round(float(c.get("market_cap_mln", 0) or 0), 2),
-                "gap_pct": round(float(c.get("_change_pct", 0) or 0), 2)  # Proxy for opening gap
+                "gap_pct": round(float(c.get("_change_pct", 0) or 0), 2),
+                "intrinsic_value": round(float(c.get("intrinsic_value", 0) or 0), 2),
+                "is_overvalued": bool(c.get("is_overvalued", False))
             })
 
         # Log sample for debugging

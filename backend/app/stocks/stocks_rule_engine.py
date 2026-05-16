@@ -82,10 +82,11 @@ class StocksRuleEngine:
         sm_score: float = 0.0,
         piotroski_score: int = 0,
         sipv_signal: str = "",
+        ema_20: float = None,
         ema_3: float = None,
         ema_9: float = None,
-        ema_20: float = None,
         bb_expanding: bool = False,
+        ema_exhaustion: bool = False,
     ) -> dict:
         """
         Construye el contexto de evaluación para un ticker.
@@ -116,10 +117,11 @@ class StocksRuleEngine:
             "sm_score": sm_score,
             "piotroski_score": piotroski_score,
             "sipv_signal": sipv_signal,
-            "ema_3": ema_3,
-            "ema_9": ema_9,
-            "ema_20": ema_20,
-            "bb_expanding": bb_expanding,
+            "ema_3": ema_3 if ema_3 is not None else snap.get("ema_3"),
+            "ema_9": ema_9 if ema_9 is not None else snap.get("ema_9"),
+            "ema_20": ema_20 if ema_20 is not None else snap.get("ema_20"),
+            "bb_expanding": bb_expanding or bool(snap.get("bb_expanding", False)),
+            "ema_exhaustion": ema_exhaustion or bool(snap.get("ema_exhaustion", False)),
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -491,6 +493,30 @@ class StocksRuleEngine:
             fib_ok = -6 <= fib_z <= 3
             if not fib_ok:
                 failures.append(f"Fibonacci Zone {fib_z} is OUT of range [-6, 3]")
+
+        # ── CHECK 8: Regla Específica BOLLINGER_EXPLOSION ──
+        if normalized_code == "BOLLINGER_EXPLOSION":
+            bb_exp = context.get("bb_expanding", False)
+            ema_exh = context.get("ema_exhaustion", False)
+            rvol = float(context.get("rvol") or 1.0)
+            ema3 = context.get("ema_3")
+            ema9 = context.get("ema_9")
+            
+            # Requisito 1: Expansión de bandas activa
+            if not bb_exp:
+                failures.append("BB Not Expanding: Bands are not opening explosively")
+            
+            # Requisito 2: Volumen masivo (RVOL > 2.0)
+            if rvol < 2.0:
+                failures.append(f"Low RVOL: {rvol:.2f} < 2.0x (Needed for explosion confirmation)")
+            
+            # Requisito 3: Alineación mínima EMA3 > EMA9
+            if ema3 and ema9 and ema3 < ema9:
+                failures.append(f"EMA Bearish: EMA3 {ema3:.2f} < EMA9 {ema9:.2f}")
+
+            # Requisito 4: No agotamiento (Si se están pegando, no es inicio de explosión)
+            if ema_exh:
+                failures.append("EMA Exhaustion: EMA3 and EMA9 are too close (Possible reversal)")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

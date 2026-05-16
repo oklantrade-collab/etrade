@@ -63,22 +63,39 @@ class SymbolStateMachine:
             self.load_from_db(symbol)
         return self._contexts[symbol]
 
-    def sync_single_symbol(self, symbol: str):
+    def sync_single_symbol(self, symbol: str, table_name: str = "positions"):
         """Force a fresh sync from DB for one specific symbol (Last defense)."""
         from app.core.crypto_symbols import normalize_crypto_symbol, crypto_symbol_match_variants
-        symbol = normalize_crypto_symbol(symbol)
-        sb = get_supabase()
-        variants = crypto_symbol_match_variants(symbol)
-        res = sb.table("positions").select("*").in_("symbol", variants).eq("status", "open").execute()
-        self.sync_from_positions(symbol, res.data or [])
-        log_info('STATE_SYNC', f'{symbol}: On-demand sync found {len(res.data or [])} positions.')
+        is_stock = table_name == "stocks_positions"
+        
+        # For stocks, we don't normalize with slash
+        if not is_stock:
+            symbol = normalize_crypto_symbol(symbol)
+            variants = crypto_symbol_match_variants(symbol)
+        else:
+            variants = [symbol]
 
-    def sync_from_positions(self, symbol: str, positions: list):
+        sb = get_supabase()
+        # Use 'symbol' column for crypto, 'ticker' column for stocks
+        col_name = "ticker" if is_stock else "symbol"
+        
+        res = sb.table(table_name).select("*").in_(col_name, variants).eq("status", "open").execute()
+        self.sync_from_positions(symbol, res.data or [], is_stock=is_stock)
+        log_info('STATE_SYNC', f'{symbol}: On-demand sync found {len(res.data or [])} positions in {table_name}.')
+
+    def sync_from_positions(self, symbol: str, positions: list, is_stock: bool = False):
         from app.core.crypto_symbols import normalize_crypto_symbol
-        symbol = normalize_crypto_symbol(symbol)
+        if not is_stock:
+            symbol = normalize_crypto_symbol(symbol)
+            
         ctx = self.get(symbol)
+        
         # Filter positions matching this symbol (normalized)
-        open_pos = [p for p in positions if p.get('status') == 'open' and normalize_crypto_symbol(p.get('symbol', '')) == symbol]
+        if is_stock:
+            open_pos = [p for p in positions if p.get('status') == 'open' and p.get('ticker') == symbol]
+        else:
+            open_pos = [p for p in positions if p.get('status') == 'open' and normalize_crypto_symbol(p.get('symbol', '')) == symbol]
+            
         ctx.open_positions = open_pos
 
         if not open_pos:

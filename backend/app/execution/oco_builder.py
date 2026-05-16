@@ -25,6 +25,7 @@ def build_oco_params(
     rr_ratio     = float(risk_config.get('rr_ratio', 2.5))
     risk_pct     = float(risk_config.get('max_risk_per_trade_pct', 1.0)) / 100
     slippage     = float(risk_config.get('slippage_estimate_pct', 0.05)) / 100
+    leverage     = int(signal.get('leverage') or risk_config.get('leverage_crypto') or risk_config.get('leverage', 5))
     
     # PASO 2 — Verificar que tenemos ATR válido
     if atr_4h is None or atr_4h <= 0:
@@ -80,9 +81,11 @@ def build_oco_params(
         logging.warning(f'Order value ${order_value:.2f} < min ${min_notional}')
         return None
         
-    # PASO 8 — Verificar que el balance alcanza:
-    if order_value > balance_usdt * 0.95:  # 5% de margen de seguridad
-        logging.warning(f'Balance insuficiente: necesita ${order_value:.2f}')
+    # PASO 8 — Verificar que el balance alcanza (considerando apalancamiento):
+    # En futuros, el nocional puede ser hasta balance * leverage
+    max_allowed_notional = balance_usdt * leverage * 0.95
+    if order_value > max_allowed_notional:
+        logging.warning(f'Balance insuficiente (con {leverage}x leverage): necesita ${order_value:.2f}, máx ${max_allowed_notional:.2f}')
         return None
         
     return {

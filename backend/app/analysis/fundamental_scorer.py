@@ -91,24 +91,42 @@ class FundamentalScorer:
 
             total_score = s_rev + s_margin + s_eps + s_rs + s_inst + s_analyst
 
+            # --- VALUACIÓN (GRAHAM NUMBER / INTRINSIC VALUE) ---
+            eps_ttm = info.get('trailingEps', 0)
+            book_value = info.get('bookValue', 0)
+            intrinsic_value = 0
+            is_overvalued = False
+            
+            if eps_ttm > 0 and book_value > 0:
+                # Fórmula de Graham Simplificada: sqrt(22.5 * EPS * BVPS)
+                val_base = 22.5 * eps_ttm * book_value
+                if val_base > 0:
+                    intrinsic_value = np.sqrt(val_base)
+            
+            # Margen de seguridad del 10% sobre el valor intrínseco
+            if intrinsic_value > 0:
+                is_overvalued = current_price > (intrinsic_value * 1.1)
+
             # --- LÓGICA DE CLASIFICACIÓN DE POOLS ---
             pools = []
             
-            # A. FUTURE_GIANT
+            # A. FUTURE_GIANT (Solo si NO está sobrevalorada)
             if (settings.get("fg_mcap_min", 100) <= mcap <= settings.get("fg_mcap_max", 10000) and 
                 rev_growth_yoy > settings.get("fg_rev_growth_min", 20) and 
                 1 <= current_price <= settings.get("fg_price_max", 50) and 
                 rs_score > settings.get("fg_rs_min", 70) and 
-                (eps_growth_qoq > 0 or gross_margins > 20)):
+                (eps_growth_qoq > 0 or gross_margins > 20) and
+                not is_overvalued):
                 pools.append("GIANT")
                 
-            # B. GROWTH_LEADER
+            # B. GROWTH_LEADER (Solo si NO está sobrevalorada)
             if (mcap >= settings.get("gl_mcap_min", 5000) and 
                 rev_growth_yoy > settings.get("gl_rev_growth_min", 12) and 
                 gross_margins > settings.get("gl_margin_min", 30) and 
                 rs_score > settings.get("gl_rs_min", 75) and 
                 inst_ownership > settings.get("gl_inst_min", 40) and 
-                1 <= current_price <= settings.get("gl_price_max", 500)):
+                1 <= current_price <= settings.get("gl_price_max", 500) and
+                not is_overvalued):
                 pools.append("LEADER")
 
             # C. SCALPING (HOT) - Momentum Puro
@@ -120,53 +138,37 @@ class FundamentalScorer:
             quality_flag = "PASS"
             exclusion_reason = ""
             
+            # ... (Lógica de exclusión existente) ...
             avg_vol_30d = info.get('averageDailyVolume3Month', 0)
-            debt_equity = info.get('debtToEquity', 0) / 100 # yfinance lo da en % (ej: 300 = 3.0 ratio)
+            debt_equity = info.get('debtToEquity', 0) / 100 
             sector = info.get('sector', '')
             revenue_ttm = info.get('totalRevenue', 0)
             
-            # 1. Baja Liquidez
             if avg_vol_30d < settings["ex_vol_min"]:
                 quality_flag = "EXCLUDED"
                 exclusion_reason = "Low Liquidity"
             
-            # 2. Zombies (Deuda/Equity > X Y Rev Growth < 10%)
             if debt_equity > settings["ex_debt_equity_max"] and rev_growth_yoy < 10:
                 quality_flag = "✗ EXCLUDED"
                 exclusion_reason = "Zombie (Debt/Low Growth)"
             
-            # 3. Quiebra o Reestructuración (Basado en financialStatus)
             if "bankruptcy" in str(info.get('financialStatus', '')).lower():
                 quality_flag = "✗ EXCLUDED"
                 exclusion_reason = "Bankruptcy/Restructuring"
             
-            # 4. Pérdidas Crónicas sin Crecimiento
-            # Excluir si EPS es negativo Y Revenue Growth < 30% (Future Amazon Protection)
-            # Notas: earningsQuarterlyGrowth es proxy de tendencia de EPS
             if eps_growth_qoq < 0 and rev_growth_yoy < 30:
-                if info.get('trailingEps', 0) < 0: # Confirmamos pérdida real
+                if info.get('trailingEps', 0) < 0:
                     quality_flag = "✗ EXCLUDED"
                     exclusion_reason = "Chronic Losses w/o Growth"
             
-            # 5. Biotech Traps (Sector: Biotech y Rev < $10M)
             if "biotechnology" in sector.lower() and revenue_ttm < 10_000_000:
                 quality_flag = "✗ EXCLUDED"
                 exclusion_reason = "Biotech Pre-Revenue Trap"
 
-            # 6. Alerta (Review) - Si tiene deuda moderada > 2.0 pero crece
-            if quality_flag == "PASS" and debt_equity > 2.0:
-                quality_flag = "REVIEW"
-
-            # 4. EXCURSIÓN: Métricas S09 (Para Valor Intrínseco Complejo)
-            eps_ttm = info.get('trailingEps', 0)
-            sector = info.get('sector', 'Other')
-            forward_pe = info.get('forwardPE', 0)
-            trailing_pe = info.get('trailingPE', 0)
-            
-            # Nuevas métricas S09
-            revenue_per_share = info.get('revenuePerShare', 0)
-            total_revenue = info.get('totalRevenue', 0)
-            price_to_sales = info.get('priceToSalesTrailing12Months', 0)
+            # Marcar como sobrevalorada si aplica
+            if is_overvalued and quality_flag == "PASS":
+                quality_flag = "OVERVALUED"
+                exclusion_reason = f"Price (${current_price}) > Intrinsic (${intrinsic_value:.2f})"
 
             return {
                 "ticker": ticker,
@@ -179,16 +181,10 @@ class FundamentalScorer:
                 "rs_score_6m": round(rs_score, 2),
                 "inst_ownership_pct": round(inst_ownership, 2),
                 "market_cap_mln": round(mcap, 2),
-                "analyst_rating": analyst_rating_10, # Calificación 1-10 balanceada
+                "analyst_rating": analyst_rating_10,
                 "exclusion_reason": exclusion_reason,
-                # CAMPOS PARA VALORACIÓN S09
-                "eps_ttm": eps_ttm,
-                "sector": sector,
-                "trailing_pe": trailing_pe,
-                "forward_pe": forward_pe,
-                "revenue_per_share": revenue_per_share,
-                "total_revenue": total_revenue,
-                "price_to_sales": price_to_sales,
+                "intrinsic_value": round(intrinsic_value, 2),
+                "is_overvalued": is_overvalued,
                 "last_update": datetime.now().isoformat()
             }
 

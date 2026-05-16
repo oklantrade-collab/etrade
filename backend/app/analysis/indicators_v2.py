@@ -138,6 +138,21 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     df = detect_ema_crosses(df)
     df = calculate_parabolic_sar(df)
     
+    # --- CALCULO DE EXPANSIÓN DE BOLLINGER (SQUEEZE RELEASE) ---
+    if 'upper_6' in df.columns and 'lower_6' in df.columns:
+        df['bb_width'] = (df['upper_6'] - df['lower_6']) / df['basis']
+        df['bb_width_avg'] = df['bb_width'].rolling(20).mean()
+        # Expansión: el ancho actual es 50% mayor al promedio reciente
+        df['bb_expanding'] = df['bb_width'] > (df['bb_width_avg'] * 1.5)
+    
+    # --- DISTANCIA ENTRE EMAS (AGOTAMIENTO) ---
+    if 'ema1' in df.columns and 'ema2' in df.columns:
+        # ema1=3, ema2=9
+        df['ema_dist_pct'] = (df['ema1'] - df['ema2']).abs() / df['ema2'] * 100
+        # Media de la distancia para detectar contracción
+        df['ema_dist_avg'] = df['ema_dist_pct'].rolling(10).mean()
+        df['ema_exhaustion'] = df['ema_dist_pct'] < (df['ema_dist_avg'] * 0.3)
+
     # Fill any NaNs that might cause issues in calculation
     df = df.ffill().fillna(0)
     

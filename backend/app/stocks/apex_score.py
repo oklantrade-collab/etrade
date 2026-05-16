@@ -181,6 +181,7 @@ def calculate_b2_technical(
     score      = 0.0
     components = {}
     price = float(snap.get('price') or 0)
+    ema20 = float(snap.get('ema20') or snap.get('ema_20') or 0)
 
     # ── RSI ───────────────────────────────────
     rsi = float(snap.get('rsi_14') or 50)
@@ -217,7 +218,6 @@ def calculate_b2_technical(
     }
 
     # ── Posición vs EMA ───────────────────────
-    ema20 = float(snap.get('ema20') or snap.get('ema_20') or 0)
     ema50 = float(snap.get('ema50') or snap.get('ema_50') or 0)
     ema_score = 50
 
@@ -418,70 +418,83 @@ def calculate_b4_regime(
 # BLOQUE 5 — SENTIMIENTO (10%)
 # ════════════════════════════════════════════
 
-def calculate_b5_sentiment(fundamental_cache: dict, snap: dict) -> dict:
+def calculate_b5_sentiment(fundamental_cache: dict, snap: dict, ia_score: float = None) -> dict:
     """
     Sentimiento específico para stocks.
-    Variables: Analyst rating, Short interest, Earnings proximity, Valuation status.
+    Variables: Analyst rating, Short interest, Earnings proximity, Valuation status, AI Score.
     """
     score      = 0.0
     components = {}
 
-    # ── Analyst Rating ────────────────────────
+    # ── Analyst Rating (30%) ──────────────────
     analyst_rating = float(fundamental_cache.get('analyst_rating', 5) or 5)
     analyst_score = analyst_rating * 10
     components['analyst'] = {
-        'rating': analyst_rating, 'score': analyst_score, 'weight': 0.40,
+        'rating': analyst_rating, 'score': analyst_score, 'weight': 0.30,
     }
 
-    # ── Short Interest ────────────────────────
+    # ── AI Score (Gemini/Qwen) (30%) ───────────
+    if ia_score is not None:
+        # ia_score is usually 0-10
+        final_ia_score = ia_score * 10
+        components['ai_sentiment'] = {
+            'value': ia_score, 'score': final_ia_score, 'weight': 0.30,
+        }
+    else:
+        final_ia_score = 50 # Fallback neutral
+        components['ai_sentiment'] = {
+            'value': 5.0, 'score': 50, 'weight': 0.30, 'fallback': True
+        }
+
+    # ── Short Interest (10%) ──────────────────
     short_pct = float(fundamental_cache.get('short_interest_pct', 5) or 5)
     if short_pct < 5:
-        short_score = 65
+        short_score = 70
     elif short_pct < 10:
         short_score = 55
     elif short_pct < 20:
         short_score = 45
     else:
-        short_score = 35
+        short_score = 30
     components['short_interest'] = {
-        'pct': short_pct, 'score': short_score, 'weight': 0.20,
+        'pct': short_pct, 'score': short_score, 'weight': 0.10,
     }
 
-    # ── Earnings Proximity ────────────────────
+    # ── Earnings Proximity (20%) ──────────────
     days_to_earnings = int(fundamental_cache.get('days_to_earnings', 30) or 30)
     if days_to_earnings < 3:
-        earnings_score = 30
+        earnings_score = 25
     elif days_to_earnings < 7:
-        earnings_score = 45
+        earnings_score = 40
     elif days_to_earnings < 14:
         earnings_score = 55
     elif days_to_earnings < 30:
         earnings_score = 65
     else:
-        earnings_score = 70
+        earnings_score = 75
     components['earnings'] = {
-        'days_to': days_to_earnings, 'score': earnings_score, 'weight': 0.25,
+        'days_to': days_to_earnings, 'score': earnings_score, 'weight': 0.20,
     }
 
-    # ── Valuation Status ─────────────────────
+    # ── Valuation Status (10%) ────────────────
     val_status = str(fundamental_cache.get('valuation_status', 'fairly_valued'))
     val_score = {
-        'undervalued': 80, 'fairly_valued': 60,
-        'overvalued': 35, 'unknown': 50,
+        'undervalued': 85, 'fairly_valued': 60,
+        'overvalued': 30, 'unknown': 50,
     }.get(val_status, 50)
     components['valuation'] = {
-        'status': val_status, 'score': val_score, 'weight': 0.15,
+        'status': val_status, 'score': val_score, 'weight': 0.10,
     }
 
     score = (
-        analyst_score * 0.40 + short_score * 0.20 +
-        earnings_score * 0.25 + val_score * 0.15
+        analyst_score * 0.30 + final_ia_score * 0.30 +
+        short_score * 0.10 + earnings_score * 0.20 + val_score * 0.10
     )
 
     return {
         'score': round(score, 2),
         'components': components,
-        'reason': f'Sentimiento: Analyst={analyst_rating:.1f}/10 DaysEarnings={days_to_earnings} score={score:.1f}/100',
+        'reason': f'Sentimiento: Analyst={analyst_rating:.1f} AI={ia_score if ia_score else 5.0} DaysEarn={days_to_earnings} score={score:.1f}/100',
     }
 
 
@@ -498,6 +511,7 @@ def calculate_apex_score(
     df_15m:            pd.DataFrame = None,
     df_4h:             pd.DataFrame = None,
     df_daily:          pd.DataFrame = None,
+    ia_score:          float = None,
 ) -> dict:
     """
     Función principal del APEX Score.
@@ -512,7 +526,7 @@ def calculate_apex_score(
     b2 = calculate_b2_technical(snap, df_15m, df_4h)
     b3 = calculate_b3_fundamental(fundamental_cache)
     b4 = calculate_b4_regime(macro, snap, df_daily)
-    b5 = calculate_b5_sentiment(fundamental_cache, snap)
+    b5 = calculate_b5_sentiment(fundamental_cache, snap, ia_score=ia_score)
 
     blocks = {
         'b1_momentum':    b1['score'],

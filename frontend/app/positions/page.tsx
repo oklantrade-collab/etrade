@@ -11,10 +11,12 @@ export default function PositionsPage() {
   const [positions, setPositions] = useState<any[]>([])
   const [closedPositions, setClosedPositions] = useState<any[]>([])
   const [tab, setTab] = useState<'open'|'closed'>('open')
+  const [maxPositions, setMaxPositions] = useState<number>(4)
 
   useEffect(() => {
     loadPositions()
     loadClosedPositions()
+    loadMaxPositions()
     const channel = supabase
       .channel('positions-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'positions' }, () => { loadPositions(); loadClosedPositions(); })
@@ -39,6 +41,14 @@ export default function PositionsPage() {
       .order('closed_at', { ascending: false })
       .limit(50)
     if (data) setClosedPositions(data)
+  }
+  async function loadMaxPositions() {
+    const { data } = await supabase
+      .from('risk_config')
+      .select('max_open_trades')
+      .limit(1)
+      .maybe_single()
+    if (data?.max_open_trades) setMaxPositions(data.max_open_trades)
   }
 
   async function handleClose(id: string) {
@@ -76,7 +86,7 @@ export default function PositionsPage() {
       <div className="stats-grid" style={{ marginBottom: 32 }}>
         <div className="card">
           <div className="card-title">Open Risk</div>
-          <div className="card-value neutral">{positions.length}/3</div>
+          <div className="card-value neutral">{positions.length}/{maxPositions}</div>
           <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Max open operations</p>
         </div>
         <div className="card">

@@ -246,6 +246,17 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
 
       {/* SECCIÓN GENERAL SIEMPRE VISIBLE */}
       <SettingsSection title="💰 Configuración de Cuenta & Riesgo">
+          <div style={{ background: 'rgba(239,68,68,0.05)', padding: '12px 18px', borderBottom: '1px solid rgba(239,68,68,0.1)', marginBottom: '8px' }}>
+             <SettingToggle 
+                label="🚀 ACTIVAR OPERACIÓN AFTER-HOURS (Post-Cierre)" 
+                value={generalForm.allow_after_hours === true || generalForm.allow_after_hours === 'true'} 
+                onChange={(v: any) => setGeneralForm({ ...generalForm, allow_after_hours: v })} 
+             />
+             <div style={{ color: '#EF4444', fontSize: '10px', marginTop: '4px', fontWeight: 700, fontStyle: 'italic' }}>
+                ⚠️ ADVERTENCIA: Si está desactivado, el sistema dejará de comprar y monitorizar al cierre del mercado (4:00 PM ET).
+             </div>
+          </div>
+
           <SettingRow label="Capital asignado (Base)" value={generalForm.capital_stocks_spot ?? 0} type="number" prefix="$" onChange={(v: any) => setGeneralForm({ ...generalForm, capital_stocks_spot: v })} />
           <SettingRow label="Ganancia o Profit de la cuenta" value={generalForm.accumulated_profit_stocks ?? 0} type="number" prefix="$" onChange={(v: any) => setGeneralForm({ ...generalForm, accumulated_profit_stocks: v })} />
           <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
@@ -257,8 +268,8 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
           </div>
          <SettingRow label="Apalancamiento (Leverage)" value={generalForm.leverage_stocks ?? 1} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, leverage_stocks: v })} />
          <SettingRow label="% Inversión por Operación" value={generalForm.max_pct_per_trade} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, max_pct_per_trade: v })} />
-         <SettingToggle label="Paper Trading Active" value={generalForm.paper_mode_active === true || generalForm.paper_mode_active === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, paper_mode_active: v })} />
-         <SettingRow label="RVOL Mínimo (V5.1)" value={generalForm.rvol_min || 1.5} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, rvol_min: v })} />
+          <SettingToggle label="Paper Trading Active" value={generalForm.paper_mode_active === true || generalForm.paper_mode_active === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, paper_mode_active: v })} />
+          <SettingRow label="RVOL Mínimo (V5.1)" value={generalForm.rvol_min || 1.5} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, rvol_min: v })} />
       </SettingsSection>
 
       <SettingsSection title="🛡️ Stop Loss Adaptativo">

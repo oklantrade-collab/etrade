@@ -228,12 +228,12 @@ async def cleanup_low_volume_opportunities():
         if to_delete:
             log_info(MODULE, f"🗑️ Cleaning up {len(to_delete)} low volume/stale opportunities: {to_delete}")
             sb.table("technical_scores").delete().in_("ticker", to_delete).execute()
-            
     except Exception as e:
         log_error(MODULE, f"Error in opportunity cleanup: {e}")
 
 
 async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, is_pro_member: bool = False, market_open: bool = True) -> dict | None:
+    sb = get_supabase()
     from app.data.yfinance_provider import YFinanceProvider
     from app.analysis.stocks_indicators import calculate_stock_indicators
 
@@ -508,7 +508,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             det = CandlePatternDetector(market="stocks")
             last_c = df_15m.iloc[-1]
             curr = CandleOHLC(open=float(last_c['open']), high=float(last_c['high']), low=float(last_c['low']), close=float(last_c['close']), volume=float(last_c.get('volume', 0)))
-            hist = [CandleOHLC(open=float(r['open']), high=float(r['high']), low=float(r['low']), close=float(r['close']), volume=float(r.get('volume',0))) for _, r in df_15m.tail(10).iloc[:-1].iterrows()]
+            hist = [CandleOHLC(open=float(r['open']), high=float(r['high']), low=float(r['low']), close=float(r['close']), volume=float(r.get('volume') or 0)) for _, r in df_15m.tail(10).iloc[:-1].iterrows()]
             res_sipv = det.evaluate(curr, history=hist)
             sipv_signal_15m = res_sipv.action # "BUY", "SELL", or "HOLD"
         limit_long_15m  = calculate_smart_limit_price(df_15m, 'long',  movement_15m['movement_type'])
@@ -525,7 +525,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         from app.analysis.stocks_indicators import upsert_technical_score
         is_acceptable = t01_confirmed and t02_confirmed and candle_4h_green
         
-        current_time_str = datetime.now().strftime("%H:%M")
+        from app.core.market_hours import get_lima_now
+        current_time_str = get_lima_now().strftime("%H:%M")
         ind_15m["last_scan_time"] = current_time_str
 
         # Inyectar ambos en ind_15m para señales_json
@@ -533,6 +534,49 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["fib_zone_15m"] = movement_15m["fib_zone_current"]
         ind_15m["smart_limit_long_15m"] = limit_long_15m.get("limit_price")
         ind_15m["smart_limit_short_15m"] = limit_short_15m.get("limit_price")
+
+        # ── 11. APEX SCORE — Probabilidad de subida ──
+        # Sync positions with state machine for accurate logic
+        all_pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+        sm.sync_from_positions(ticker, all_pos_res.data or [], is_stock=True)
+        sm.cleanup_zombie_states(ticker, all_pos_res.data or [])
+
+        snap_for_sm = {
+            'price': current_price,
+            'adx': ind_15m.get('adx', 25),
+            'mtf_score': base_score / 100,
+            'fibonacci_zone': movement_15m['fib_zone_current'],
+            'sar_trend_15m': 1 if (ind_15m.get("last_pinescript_signal") == "Buy") else 0,
+            'sar_trend_4h': 1 if (ind_4h.get("last_pinescript_signal") == "Buy") else 0
+        }
+
+        apex_result = None
+        try:
+            from app.stocks.apex_score import calculate_apex_score
+            from app.stocks.stocks_adaptive_tp import fetch_macro_data
+
+            macro_data = await fetch_macro_data(sb)
+            fund_cache = {
+                'piotroski_score': ind_15m.get('piotroski_score', 4),
+                'margin_of_safety': ind_15m.get('margin_of_safety', 0),
+                'altman_zone': fundamental_res.get('components', {}).get('altman', {}).get('zone', 'grey'),
+                'fundamental_score': ind_15m.get('fundamental_score', 50),
+                'analyst_rating': a_rating or 5,
+                'valuation_status': fundamental_res.get('valuation_status', 'fairly_valued'),
+                'days_to_earnings': f_data.get('days_to_earnings', 30) if f_data else 30,
+                'short_interest_pct': f_data.get('short_interest_pct', 5) if f_data else 5,
+            }
+            apex_result = calculate_apex_score(
+                ticker=ticker,
+                snap={**ind_15m, **snap_for_sm, 'price': current_price},
+                fundamental_cache=fund_cache,
+                macro=macro_data,
+                df_5m=df_5m, df_15m=df_15m,
+                df_4h=df_4h, df_daily=df_1d,
+                ia_score=ia_ia,
+            )
+        except Exception as apex_e:
+            log_warning(MODULE, f"APEX skip {ticker}: {apex_e}")
 
         # ── NUEVO: ACTUALIZAR MARKET SNAPSHOT (Para Dashboard Portfolio) ──
         try:
@@ -551,26 +595,19 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 'basis': float(ema20),
                 'fibonacci_zone': int(zone),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
-                'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None
+                'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None,
+                'apex_4h': apex_result['apex_score_4h'] if apex_result else None,
+                'apex_1d': apex_result['apex_score_1d'] if apex_result else None,
+                'apex_signal': apex_result['signal'] if apex_result else None,
+                'apex_conf': apex_result['confidence'] if apex_result else None,
             }
-            # Solo incluir atr si la tabla lo soporta (evitar PGRST204)
-            if 'atr' in str(ind_15m.keys()): # Hint: This is a hack, better to handle the error
-                 snap_data['atr'] = float(atr)
 
-            sb = get_supabase()
             try:
                 sb.table('market_snapshot').upsert(snap_data, on_conflict='symbol').execute()
             except Exception as snap_upsert_e:
-                err_str = str(snap_upsert_e).lower()
-                if "column" in err_str and ("atr" in err_str or "bb_expanding" in err_str):
-                    # Limpieza de columnas nuevas que fallan por cache de schema
-                    for col in ['atr', 'bb_expanding']:
-                        if col in snap_data: del snap_data[col]
-                    sb.table('market_snapshot').upsert(snap_data, on_conflict='symbol').execute()
-                else:
-                    raise snap_upsert_e
+                log_warning(MODULE, f"Error upserting snapshot for {ticker}: {snap_upsert_e}")
         except Exception as snap_e:
-            log_warning(MODULE, f"Error updating snapshot for {ticker}: {snap_e}")
+            log_warning(MODULE, f"Error preparing snapshot for {ticker}: {snap_e}")
 
         ind_15m["movement_1d"] = movement_1d["movement_type"]
         ind_15m["fib_zone_1d"] = movement_1d["fib_zone_current"]
@@ -582,23 +619,11 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["t03_confirmed"] = bool(candle_4h_green)
         ind_15m["t04_confirmed"] = (rsi_val is not None and 40 <= rsi_val <= 70)
         
-        # ── DETECCIÓN DE EXPANSIÓN BOLLINGER (5m & 15m) ──
-        bb_expanding_15m = False
-        df_15m_calc = ind_15m["_df"]
-        if len(df_15m_calc) >= 2:
-            l15 = df_15m_calc.iloc[-1]
-            p15 = df_15m_calc.iloc[-2]
-            bb_expanding_15m = l15["bb_upper"] > p15["bb_upper"] and l15["bb_lower"] < p15["bb_lower"]
-
-        bb_expanding_5m = False
-        df_5m_calc = ind_5m["_df"]
-        if len(df_5m_calc) >= 2:
-            l5 = df_5m_calc.iloc[-1]
-            p5 = df_5m_calc.iloc[-2]
-            bb_expanding_5m = l5["bb_upper"] > p5["bb_upper"] and l5["bb_lower"] < p5["bb_lower"]
-
-        bb_expanding = bb_expanding_15m or bb_expanding_5m
+        # ── DETECCIÓN DE EXPANSIÓN BOLLINGER (Integrada) ──
+        bb_expanding = bool(ind_15m.get("bb_expanding", False)) or bool(ind_5m.get("bb_expanding", False))
+        ema_exhaustion = bool(ind_15m.get("ema_exhaustion", False))
         ind_15m["bb_expanding"] = bb_expanding
+        ind_15m["ema_exhaustion"] = ema_exhaustion
         
         upsert_technical_score(ticker, ind_15m, base_score, is_acceptable, pro_score)
 
@@ -628,7 +653,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             ema_3=ind_15m.get("ema_3"),
             ema_9=ind_15m.get("ema_9"),
             ema_20=ind_15m.get("ema_20"),
-            bb_expanding=bb_expanding
+            bb_expanding=bb_expanding,
+            ema_exhaustion=ema_exhaustion
         )
         rule_ctx["revenue_growth_yoy"] = ind_15m.get("revenue_growth_yoy", 0)
         rule_ctx["sm_score"] = ind_15m.get("sm_score", 1.0)
@@ -643,34 +669,21 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         elif t01_confirmed:
              rule_ctx["pine_signal"] = "Buy" # Default 4h signal
         
-        # Sync positions with state machine for accurate can_open/can_close logic
-        all_pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
-        sm.sync_from_positions(ticker, all_pos_res.data or [])
-        
-        # ── NUEVO: AUTO-CLEANUP DE ESTADOS ZOMBIES ──
-        sm.cleanup_zombie_states(ticker, all_pos_res.data or [])
-
-        snap_for_sm = {
-            'price': current_price,
-            'adx': ind_15m.get('adx', 25),
-            'mtf_score': base_score / 100, # Use technical score as proxy for MTF in stocks
-            'fibonacci_zone': movement_15m['fib_zone_current'],
-            'sar_trend_15m': 1 if sipv_signal_15m == "BUY" else (-1 if sipv_signal_15m == "SELL" else 0),
-            'sar_trend_4h': 1 if ps_signal_4h == "Buy" else (-1 if ps_signal_4h == "Sell" else 0)
-        }
         ambiguity = detect_market_ambiguity(snap_for_sm)
         if ambiguity['is_ambiguous']:
             log_info(MODULE, f"Skipping {ticker}: Market ambiguous ({ambiguity['reason']})")
             sm.set_ambiguous(ticker, ambiguity['reason'])
             return None
 
-        # 9. EVALUATE BUY RULES (Only if market is open)
-        if market_open:
+        # 9. EVALUATE BUY RULES (Only if market is open or After-Hours is enabled)
+        allow_after_hours = str(config.get("allow_after_hours", "false")).lower() == "true"
+        if market_open or allow_after_hours:
             buying_results = re.evaluate_all(rule_ctx, direction="buy")
             for res in buying_results:
                 if res["triggered"]:
                     # Check State Machine
-                    max_pos = int(config.get("max_concurrent_positions", 5))
+                    max_pos = int(config.get("max_per_symbol", 4))
+                    sm.sync_single_symbol(ticker, table_name="stocks_positions")
                     sm_check = sm.can_open(ticker, "long", current_price, max_pos)
                     if not sm_check['allowed']:
                         log_info(MODULE, f"🚀 RULE TRIGGERED: {res['rule_code']} for {ticker} BLOCKED BY SM: {sm_check['reason']}")
@@ -711,43 +724,6 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             else:
                 log_debug(MODULE, f"Skipping sell rules for {ticker}: age {age_mins:.1f} < 6.0m")
 
-        # ── 11. APEX SCORE — Probabilidad de subida ──
-        apex_result = None
-        try:
-            from app.stocks.apex_score import calculate_apex_score
-            from app.stocks.stocks_adaptive_tp import fetch_macro_data
-
-            macro_data = await fetch_macro_data(sb)
-            fund_cache = {
-                'piotroski_score': ind_15m.get('piotroski_score', 4),
-                'margin_of_safety': ind_15m.get('margin_of_safety', 0),
-                'altman_zone': fundamental_res.get('components', {}).get('altman', {}).get('zone', 'grey'),
-                'fundamental_score': ind_15m.get('fundamental_score', 50),
-                'analyst_rating': a_rating or 5,
-                'valuation_status': fundamental_res.get('valuation_status', 'fairly_valued'),
-                'days_to_earnings': f_data.get('days_to_earnings', 30) if f_data else 30,
-                'short_interest_pct': f_data.get('short_interest_pct', 5) if f_data else 5,
-            }
-            apex_result = calculate_apex_score(
-                ticker=ticker,
-                snap={**ind_15m, **snap_for_sm, 'price': current_price},
-                fundamental_cache=fund_cache,
-                macro=macro_data,
-                df_5m=df_5m, df_15m=df_15m,
-                df_4h=df_4h, df_daily=df_1d,
-            )
-            # Persist APEX to market_snapshot
-            try:
-                sb.table('market_snapshot').update({
-                    'apex_4h': apex_result['apex_score_4h'],
-                    'apex_1d': apex_result['apex_score_1d'],
-                    'apex_signal': apex_result['signal'],
-                    'apex_conf': apex_result['confidence'],
-                }).eq('symbol', ticker).execute()
-            except Exception:
-                pass
-        except Exception as apex_e:
-            log_warning(MODULE, f"APEX skip {ticker}: {apex_e}")
 
         # ── 12. PERSISTENCE — technical_scores ──
         try:
@@ -838,17 +814,22 @@ async def run_stocks_cycle(force=False):
 
         # Check market hours
         is_open, status_text = is_market_open()
+        allow_after_hours = str(config.get("allow_after_hours", "false")).lower() == "true"
         
         # Determine if we should run anyway (e.g. if we have open positions to monitor)
         open_tickers = await get_open_positions_tickers()
         has_positions = len(open_tickers) > 0
         
-        if not force and not is_open and not has_positions:
-            log_info(MODULE, f"Cycle skipped: Market is {status_text} and no active positions")
-            return
+        if not force and not is_open:
+            if not allow_after_hours:
+                log_info(MODULE, f"Cycle skipped: Market is {status_text} and After-Hours is DISABLED.")
+                return
+            elif not has_positions:
+                log_info(MODULE, f"Cycle skipped: Market is {status_text} and no active positions to monitor.")
+                return
         
         if not is_open and has_positions:
-            log_info(MODULE, f"Market is {status_text}, but running cycle to monitor {len(open_tickers)} active positions")
+            log_info(MODULE, f"Market is {status_text}, but running cycle to monitor {len(open_tickers)} active positions (After-Hours ENABLED)")
 
         # ── CAPA 0: Dynamic Scanner — Refresh universe every cycle ──
         scanner_max_price = float(config.get("scanner_max_price", 20))

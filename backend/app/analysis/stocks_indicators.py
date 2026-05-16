@@ -142,6 +142,19 @@ def calculate_stock_indicators(
     df["volume_sma_20"] = SMAIndicator(close=volume.astype(float), window=20).sma_indicator()
     df["rvol"] = volume / df["volume_sma_20"]
 
+    # --- CALCULO DE EXPANSIÓN DE BOLLINGER (SQUEEZE RELEASE) ---
+    df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+    df['bb_width_avg'] = df['bb_width'].rolling(20).mean()
+    # Expansión: el ancho actual es 50% mayor al promedio reciente
+    df['bb_expanding'] = df['bb_width'] > (df['bb_width_avg'] * 1.5)
+
+    # --- DISTANCIA ENTRE EMAS (AGOTAMIENTO) ---
+    # ema_3 y ema_9
+    df['ema_dist_pct'] = (df['ema_3'] - df['ema_9']).abs() / df['ema_9'] * 100
+    # Media de la distancia para detectar contracción (exhaustion)
+    df['ema_dist_avg'] = df['ema_dist_pct'].rolling(10).mean()
+    df['ema_exhaustion'] = df['ema_dist_pct'] < (df['ema_dist_avg'] * 0.3)
+
     # ── EMA Alignment ──
     last = df.iloc[-1]
     ema_alignment = _classify_ema_alignment(last)
@@ -164,7 +177,9 @@ def calculate_stock_indicators(
         "stoch_k", "stoch_d",
         "volume_sma_20", "rvol",
         "psar", "psar_direction",
-        "change_pct"
+        "change_pct",
+        "bb_expanding", "bb_width",
+        "ema_dist_pct", "ema_exhaustion"
     ]
 
     result = {}

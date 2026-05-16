@@ -73,6 +73,10 @@ from ctrader_open_api import Client, Protobuf, TcpProtocol, EndPoints
 from ctrader_open_api.messages.OpenApiMessages_pb2 import *
 from ctrader_open_api.messages.OpenApiModelMessages_pb2 import *
 from supabase import create_client
+from dataclasses import field
+from app.strategy.proactive_exit import evaluate_proactive_exit
+from app.strategy.dynamic_sl_manager import evaluate_sl_action
+from app.strategy.capital_protection import ProtectionState, evaluate_volatile_trailing_v2
 
 #     PASO 3: Config    
 CLIENT_ID     = os.getenv('CTRADER_CLIENT_ID')
@@ -88,6 +92,7 @@ SUPABASE_KEY  = os.getenv('SUPABASE_SERVICE_KEY')
 DEFAULT_FOREX_SYMBOLS = ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']
 
 TF_MAP = {
+    '5m':  ProtoOATrendbarPeriod.M5,
     '15m': ProtoOATrendbarPeriod.M15,
     '1h':  ProtoOATrendbarPeriod.H1,
     '4h':  ProtoOATrendbarPeriod.H4,
@@ -405,6 +410,9 @@ class StandaloneForexWorker:
         delay = 0.5
         for sym in self.symbols:
             self.log(f"-> Programando carga de {sym}...")
+            # 5m (NUEVO para Trailing SHORT)
+            reactor.callLater(delay, self.request_bars, sym, '5m', 200)
+            delay += 1.5
             # 15m
             reactor.callLater(delay, self.request_bars, sym, '15m', 300)
             delay += 2.0
@@ -557,26 +565,165 @@ class StandaloneForexWorker:
         cycle = STATE['cycle_count']
         delay = 0
         for sym in self.symbols:
-            # 15m cada minuto - Aumentamos a 100 para ATR estable
-            reactor.callLater(delay, self.request_bars, sym, '15m', 100)
+            # 5m (NUEVO para Trailing SHORT)
+            reactor.callLater(delay, self.request_bars, sym, '5m', 100)
+            
+            # 15m cada minuto
+            reactor.callLater(delay + 1.0, self.request_bars, sym, '15m', 100)
             
             # 1h cada 4 ciclos (~4 min)
             if cycle % 4 == 0:
-                reactor.callLater(delay + 1.0, self.request_bars, sym, '1h', 50)
+                reactor.callLater(delay + 2.0, self.request_bars, sym, '1h', 50)
             
             # 4h cada 12 ciclos (~12 min)
             if cycle % 12 == 0:
-                reactor.callLater(delay + 2.0, self.request_bars, sym, '4h', 50)
+                reactor.callLater(delay + 3.0, self.request_bars, sym, '4h', 50)
             
             # 1d cada 60 ciclos (~1 hora)
             if cycle % 60 == 0:
-                reactor.callLater(delay + 3.0, self.request_bars, sym, '1d', 50)
+                reactor.callLater(delay + 4.0, self.request_bars, sym, '1d', 50)
 
             # Snapshot real-time
-            reactor.callLater(delay + 4.0, self.save_snapshot, sym)
-            delay += 5.0 
+            reactor.callLater(delay + 5.0, self.save_snapshot, sym)
+            
+            # Gestión de posiciones 5m (Trailing SHORT)
+            # Solo ejecutamos si tenemos las velas cargadas (con un pequeño delay tras request_bars)
+            reactor.callLater(delay + 7.0, self._manage_position_5m, sym)
+            
+            delay += 8.0 
         
-        self.log(f'Cycle {cycle} complete. TFs updated as scheduled.')
+        self.log(f'Cycle {cycle} complete. TFs updated and 5m management scheduled.')
+
+    def _get_candles_df(self, symbol, tf):
+        """Convierte la lista de velas en un DataFrame compatible."""
+        key = f"{symbol}_{tf}"
+        data = STATE['candles'].get(key, [])
+        if not data: return None
+        df = pd.DataFrame(data)
+        # Renombrar para compatibilidad con el engine
+        df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'})
+        return df
+
+    def _manage_position_5m(self, symbol: str):
+        """
+        Gestión de posiciones en ciclo rápido (5m).
+        Implementa el trailing dinámico reactivo para SHORT/SELL.
+        """
+        try:
+            # 1. Obtener posiciones abiertas del símbolo
+            res = self.safe_db_execute(sb.table('forex_positions').select('*').eq('symbol', symbol).eq('status', 'open'))
+            positions = res.data or []
+            if not positions: return
+
+            # 2. Obtener dataframes (15m y 5m)
+            df_15m = self._get_candles_df(symbol, '15m')
+            df_5m  = self._get_candles_df(symbol, '5m')
+            
+            # 3. Obtener snapshot para indicadores
+            snap_res = self.safe_db_execute(sb.table('market_snapshot').select('*').eq('symbol', symbol).limit(1))
+            snap = snap_res.data[0] if snap_res.data else {}
+
+            price_data = STATE['prices'].get(symbol, {})
+            current_price = price_data.get('mid', 0)
+            if current_price <= 0 and snap:
+                current_price = snap.get('price', 0)
+
+            if current_price <= 0: return
+
+            for pos in positions:
+                side = pos['side'].lower()
+                is_short = side in ('short', 'sell')
+                
+                # El trailing dinámico reactivo es mandatorio para SHORT en 5m
+                # Para LONG mantenemos 15m (según requerimiento)
+                
+                # Crear objeto de estado temporal para evaluación
+                state = ProtectionState(
+                    position_id = str(pos['id']),
+                    symbol      = symbol,
+                    side        = side,
+                    entry_price = float(pos.get('entry_price') or 0),
+                    current_sl  = float(pos.get('sl_price') or 0),
+                    original_sl = float(pos.get('original_sl') or pos.get('sl_price') or 0),
+                    market_type = 'forex_futures',
+                    highest_price = float(pos.get('highest_price') or 0),
+                    lowest_price  = float(pos.get('lowest_price') or 0)
+                )
+
+                # Precio base para el trailing (mejor precio alcanzado)
+                if is_short:
+                    best_p = state.lowest_price if state.lowest_price > 0 else state.entry_price
+                else:
+                    best_p = state.highest_price if state.highest_price > 0 else state.entry_price
+
+                # Evaluar Trailing Dinámico v2
+                res_trail = evaluate_volatile_trailing_v2(
+                    symbol        = symbol,
+                    side          = side,
+                    entry_price   = state.entry_price,
+                    current_price = current_price,
+                    best_price    = best_p,
+                    current_sl    = state.current_sl,
+                    df_15m        = df_15m,
+                    df_5m         = df_5m,
+                    atr_snap      = float(snap.get('atr') or 0)
+                )
+
+                if res_trail['action'] == 'update_sl':
+                    new_sl = res_trail['sl_price']
+                    self.log(f"[TRAILING-5M] {symbol} {side.upper()} -> Nuevo SL: {new_sl:.5f} ({res_trail['reason']})")
+                    
+                    # 1. Actualizar en cTrader
+                    c_id = pos.get('ctrader_pos_id')
+                    if c_id:
+                        self.amend_position(c_id, sl_price=new_sl, symbol=symbol)
+                    
+                    # 2. Actualizar en Supabase
+                    upd_data = {'sl_price': new_sl}
+                    if is_short:
+                        upd_data['lowest_price'] = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+                    else:
+                        upd_data['highest_price'] = max(state.highest_price, current_price)
+                        
+                    self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
+                
+                # --- NUEVO: CIERRE PROACTIVO (AaEXT/AaEXH) ---
+                proactive_res = evaluate_proactive_exit(
+                    position      = pos,
+                    current_price = current_price,
+                    snap          = snap,
+                    df_4h         = df_4h,
+                    market_type   = 'forex_futures'
+                )
+                
+                if proactive_res['should_close']:
+                    self.log(f"[PROACTIVE-EXIT] {symbol} {side.upper()} @ {current_price} | Regla: {proactive_res['rule_code']} | Razón: {proactive_res['reason']}", "WARNING")
+                    # Cerrar en cTrader
+                    c_id = pos.get('ctrader_pos_id')
+                    if c_id:
+                        self.close_position(c_id, symbol=symbol)
+                    # Cerrar en DB
+                    self.safe_db_execute(sb.table('forex_positions').update({'status': 'closed', 'closed_at': datetime.now(timezone.utc).isoformat(), 'exit_reason': proactive_res['rule_code']}).eq('id', pos['id']))
+                    continue
+
+                else:
+                    # Si no hay update de SL, al menos actualizamos highest/lowest price si mejoró
+                    upd_price = {}
+                    if is_short:
+                        low = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+                        if low < (state.lowest_price if state.lowest_price > 0 else 999999):
+                            upd_price['lowest_price'] = low
+                    else:
+                        high = max(state.highest_price, current_price)
+                        if high > state.highest_price:
+                            upd_price['highest_price'] = high
+                    
+                    if upd_price:
+                        self.safe_db_execute(sb.table('forex_positions').update(upd_price).eq('id', pos['id']))
+
+        except Exception as e:
+            self.log(f"Error en _manage_position_5m para {symbol}: {e}", "ERROR")
+            self.log(traceback.format_exc(), "ERROR")
 
     def save_snapshot(self, symbol):
         try:
@@ -657,12 +804,33 @@ class StandaloneForexWorker:
             prev = df.iloc[-2] if len(df) >= 2 else last
             bb_expanding = bool((last.get('bb_up', 0) > prev.get('bb_up', 0)) and (last.get('bb_low', 0) < prev.get('bb_low', 0)))
             
+            # EMA Exhaustion detection
+            ema_dist = abs(ema3 - ema9) / (ema9 + 1e-10) * 100
+            ema_dist_avg = df['ema3'].sub(df['ema9']).abs().div(df['ema9'].add(1e-10)).mul(100).rolling(10).mean().iloc[-1]
+            ema_exhaustion = bool(ema_dist < (ema_dist_avg * 0.3))
+
             multipliers = [1.0, 1.618, 2.618, 3.618, 4.236, 5.618]
             zone = 0
             if atr > 0:
                 for i in range(6, 0, -1):
                     if price > ema20 + (atr * multipliers[i-1]): zone = i; break
                     if price < ema20 - (atr * multipliers[i-1]): zone = -i; break
+
+            # Upsert to market_snapshot
+            snap_data = {
+                'symbol': symbol,
+                'price': price,
+                'ema20': ema20,
+                'ema9': ema9,
+                'ema3': ema3,
+                'atr': atr,
+                'adx': adx,
+                'fibonacci_zone': zone,
+                'bb_expanding': bb_expanding,
+                'ema_exhaustion': ema_exhaustion,
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            }
+            self.safe_db_execute(sb.table('market_snapshot').upsert(snap_data))
 
             # --- CALCULO DE MTF SCORE ---
             mtf_score = 0.0

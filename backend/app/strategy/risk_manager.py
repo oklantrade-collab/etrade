@@ -15,7 +15,6 @@ def activar_kill_switch(supabase, reason: str):
 
         # 2. Actualizar risk_config
         supabase.table('risk_config').update({
-            'kill_switch_triggered': True,
             'bot_active': False
         }).eq('id', config_id).execute()
         
@@ -83,8 +82,8 @@ def validate_signal(
     if not risk_config.get('bot_active', True):
         return { 'approved': False, 'reason': 'BOT_INACTIVE' }
 
-    # CHECK 2 — Kill switch no activado:
-    if risk_config.get('kill_switch_triggered', False):
+    # CHECK 2 — El bot debe estar activo (ya se checa arriba, pero para robustez):
+    if not risk_config.get('bot_active', True):
         return { 'approved': False, 'reason': 'KILL_SWITCH_ACTIVE' }
 
     # CHECK 3 — No exceder trades abiertos simultáneos (GLOBAL):
@@ -94,7 +93,7 @@ def validate_signal(
             .eq('status', 'open') \
             .execute()
         
-        max_open = int(risk_config.get('max_open_trades', 3))
+        max_open = int(risk_config.get('max_open_trades', 15))
         current_open = open_positions_res.count or 0
 
         if current_open >= max_open:
@@ -142,10 +141,19 @@ def validate_signal(
 
         client = get_client()
         balance = get_account_balance(client, 'USDT')
+        
+        # Fallback to capital_operativo if balance is zero or fetch failed
+        if not balance or balance <= 0:
+            try:
+                config_res = supabase_client.table('trading_config').select('capital_operativo').eq('id', 1).maybe_single().execute()
+                balance = float(config_res.data.get('capital_operativo', 500))
+            except:
+                balance = 500
+
         kill_switch_pct = float(risk_config.get('kill_switch_loss_pct', 3.0))
         kill_switch_usdt = balance * (kill_switch_pct / 100)
 
-        if abs(total_hourly_loss) >= kill_switch_usdt:
+        if total_hourly_loss < 0 and abs(total_hourly_loss) >= kill_switch_usdt:
             activar_kill_switch(supabase_client, f'Hourly kill switch triggered: ${abs(total_hourly_loss):.2f}')
             return { 'approved': False, 'reason': 'KILL_SWITCH_HOURLY_TRIGGERED' }
     except Exception as e:

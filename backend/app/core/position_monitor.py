@@ -269,7 +269,11 @@ async def check_protections(
             log_error(MODULE, f"Error actualizando BE para {symbol}: {e}")
 
     # ── CHECK 2: Trailing Stop ────────────────
-    trail = evaluate_trailing_stop(state, current_price)
+    from app.core.memory_store import get_memory_df
+    df_15m = get_memory_df(symbol, "15m")
+    df_5m = get_memory_df(symbol, "5m")
+    
+    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
     if trail['action'] == 'update_sl':
         new_sl = trail['new_sl']
         try:
@@ -655,7 +659,18 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
         )
     
     state = BOT_STATE.protection_cache[pos_id]
-    result = evaluate_all_protections(state, price, None)
+    
+    # Track highest and lowest price continuously for accurate dynamic trailing stop
+    if state.side in ('long', 'buy'):
+        state.highest_price = max(state.highest_price, price) if state.highest_price > 0 else max(state.entry_price, price)
+    else:
+        state.lowest_price = min(state.lowest_price, price) if state.lowest_price > 0 else min(state.entry_price, price)
+        
+    from app.core.memory_store import get_memory_df
+    df_15m = get_memory_df(symbol, "15m")
+    df_5m = get_memory_df(symbol, "5m")
+    
+    result = evaluate_all_protections(state, price, None, df_15m=df_15m, df_5m=df_5m)
     
     if result.get('has_action') and 'primary' in result:
         primary = result['primary']

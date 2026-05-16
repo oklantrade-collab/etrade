@@ -240,6 +240,18 @@ def evaluate_proactive_exit(
             'urgency':      'urgent'
         }
 
+    # ── NUEVO: Protección por Agotamiento de EMAs (EMA_EXHAUSTION) ──
+    # Cuando EMA3 y EMA9 se pegan después de un movimiento fuerte, indica posible reversión.
+    ema_exh = bool(snap.get('ema_exhaustion', False))
+    if ema_exh and pnl['has_profit']:
+        return {
+            'should_close': True,
+            'rule_code':    'AaEXH' if is_long else 'BbEXH',
+            'reason':       'Agotamiento detectado: EMAs 3/9 se han comprimido significativamente. Asegurando ganancias.',
+            'pnl':          pnl,
+            'urgency':      'normal'
+        }
+
     # ── Calcular P&L actual ───────────────────
     pnl = calculate_position_pnl(position, current_price, market_type)
 

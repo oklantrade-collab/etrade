@@ -71,31 +71,35 @@ async def cleanup_database() -> dict:
     # 1. MARKET CANDLES (por conteo)
     # ───────────────────────────────────────
     total_candles_deleted = 0
+
+    # [OPTIMIZACIÓN DE EGRESS] Evitar descargar la tabla entera para buscar símbolos.
+    # Obtenemos los símbolos de market_snapshot y probamos los exchanges conocidos.
+    pairs = set()
+    try:
+        snap_res = sb.table("market_snapshot").select("symbol").execute()
+        if snap_res and snap_res.data:
+            # Añadimos combinaciones de exchanges para cada símbolo
+            for row in snap_res.data:
+                sym = row["symbol"]
+                for ex in ["binance", "icmarkets", "ibkr"]:
+                    pairs.add((sym, ex))
+    except Exception as e:
+        log_error(MODULE, f"Error pre-cargando símbolos: {e}")
+
     for tf, keep_count in CANDLE_RETENTION.items():
-        try:
-            # Obtener todos los símbolos+exchange que tienen este TF
-            symbols_res = sb.table("market_candles") \
-                .select("symbol, exchange") \
-                .eq("timeframe", tf) \
-                .execute()
+        if not pairs:
+            break
 
-            if not symbols_res.data:
-                continue
-
-            # Obtener combinaciones únicas
-            pairs = set()
-            for row in symbols_res.data:
-                pairs.add((row["symbol"], row.get("exchange", "binance")))
-
-            for symbol, exchange in pairs:
-                try:
-                    # Contar cuántas velas tiene
-                    count_res = sb.table("market_candles") \
-                        .select("id", count="exact") \
-                        .eq("symbol", symbol) \
-                        .eq("exchange", exchange) \
-                        .eq("timeframe", tf) \
-                        .execute()
+        for symbol, exchange in pairs:
+            try:
+                # Contar cuántas velas tiene (limit=0 para no transferir body, solo count headers)
+                count_res = sb.table("market_candles") \
+                    .select("id", count="exact") \
+                    .eq("symbol", symbol) \
+                    .eq("exchange", exchange) \
+                    .eq("timeframe", tf) \
+                    .limit(0) \
+                    .execute()
 
                     total_rows = count_res.count or 0
                     if total_rows <= keep_count:

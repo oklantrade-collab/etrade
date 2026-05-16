@@ -76,6 +76,17 @@ async def process_swing_orders(
     except Exception as e:
         log_error('SWING_LIMIT', f"Error en proactive limit check para {symbol}: {e}")
 
+    # --- CONSULTAR ÓRDENES PENDIENTES EXISTENTES ---
+    try:
+        res_pending = sb.table('pending_orders').select('direction, limit_price').eq('symbol', symbol).eq('status', 'pending').execute()
+        existing_limits = {}
+        if res_pending and res_pending.data:
+            for p in res_pending.data:
+                existing_limits[p['direction'].lower()] = float(p['limit_price'])
+    except Exception as e:
+        log_error('SWING_LIMIT', f"Error consultando órdenes pendientes existentes para {symbol}: {e}")
+        existing_limits = {}
+
     for direction in ['long', 'short']:
         # 1. Clasificar movimiento
         movement = classify_movement(df=df, lookback=20)
@@ -95,7 +106,17 @@ async def process_swing_orders(
         if not limit_result or not limit_result.get('limit_price') or limit_result['signal_quality'] == 'low':
             continue
 
-        # 3. Cancelar orden anterior
+        new_limit_price = float(limit_result['limit_price'])
+
+        # 2.5 Evitar spam: Si ya existe una orden en la misma dirección y el precio es casi igual (< 0.5% de diff)
+        if direction in existing_limits:
+            old_price = existing_limits[direction]
+            diff_pct = abs(new_limit_price - old_price) / old_price * 100
+            if diff_pct < 0.5:
+                log_debug('SMART_LIMIT', f"{symbol}/{direction}: Orden existente similar ({old_price:.4f} vs {new_limit_price:.4f}). Saltando.")
+                continue
+
+        # 3. Cancelar orden anterior (si el precio cambió significativamente o se había vencido)
         await cancel_swing_order(symbol=symbol, direction=direction, reason='smart_limit_recalculated', sb=sb)
 
         # 4. Calcular SL y TP

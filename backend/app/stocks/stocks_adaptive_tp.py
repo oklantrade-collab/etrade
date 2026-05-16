@@ -724,86 +724,45 @@ def evaluate_adaptive_tp(
 
 async def fetch_macro_data(supabase) -> dict:
     """
-    Obtiene VIX, SPY y NDX de IB TWS o de
-    market_data_5m si ya están cacheados.
-    Falls back to market_snapshot if market_data_5m
-    is not available.
+    Obtiene VIX, SPY y NDX de yfinance para calcular el score macro real.
+    Calcula el % de cambio diario para SPY y QQQ.
     """
     try:
-        # Try market_data_5m first
+        import yfinance as yf
+        
+        # 1. Obtener VIX
         vix = 15.0
+        try:
+            vix_ticker = yf.Ticker("^VIX")
+            vix_hist = vix_ticker.history(period="1d")
+            if not vix_hist.empty:
+                vix = float(vix_hist['Close'].iloc[-1])
+        except Exception:
+            pass
+
+        # 2. Obtener SPY (con historial de 2 días para el cambio %)
         spy_chg = 0.0
+        try:
+            spy_ticker = yf.Ticker("SPY")
+            spy_hist = spy_ticker.history(period="5d")
+            if len(spy_hist) >= 2:
+                last_close = spy_hist['Close'].iloc[-1]
+                prev_close = spy_hist['Close'].iloc[-2]
+                spy_chg = ((last_close - prev_close) / prev_close) * 100
+        except Exception:
+            pass
+
+        # 3. Obtener QQQ (NDX)
         ndx_chg = 0.0
-
         try:
-            vix_res = supabase \
-                .table('market_data_5m') \
-                .select('close') \
-                .eq('ticker', 'VIX') \
-                .order('timestamp', desc=True) \
-                .limit(1) \
-                .execute()
-            if vix_res.data:
-                vix = float(vix_res.data[0]['close'])
+            qqq_ticker = yf.Ticker("QQQ")
+            qqq_hist = qqq_ticker.history(period="5d")
+            if len(qqq_hist) >= 2:
+                last_close = qqq_hist['Close'].iloc[-1]
+                prev_close = qqq_hist['Close'].iloc[-2]
+                ndx_chg = ((last_close - prev_close) / prev_close) * 100
         except Exception:
-            # Try market_snapshot as fallback
-            try:
-                vix_snap = supabase \
-                    .table('market_snapshot') \
-                    .select('price') \
-                    .eq('symbol', 'VIX') \
-                    .limit(1) \
-                    .execute()
-                if vix_snap.data:
-                    vix = float(vix_snap.data[0]['price'])
-            except Exception:
-                pass
-
-        try:
-            spy_res = supabase \
-                .table('market_data_5m') \
-                .select('close') \
-                .eq('ticker', 'SPY') \
-                .order('timestamp', desc=True) \
-                .limit(1) \
-                .execute()
-            if spy_res.data:
-                spy_chg = 0.0  # Or manual calculation if needed
-        except Exception:
-            try:
-                spy_snap = supabase \
-                    .table('market_snapshot') \
-                    .select('price') \
-                    .eq('symbol', 'SPY') \
-                    .limit(1) \
-                    .execute()
-                if spy_snap.data:
-                    spy_chg = 0.0
-            except Exception:
-                pass
-
-        try:
-            ndx_res = supabase \
-                .table('market_data_5m') \
-                .select('close') \
-                .eq('ticker', 'QQQ') \
-                .order('timestamp', desc=True) \
-                .limit(1) \
-                .execute()
-            if ndx_res.data:
-                ndx_chg = 0.0
-        except Exception:
-            try:
-                ndx_snap = supabase \
-                    .table('market_snapshot') \
-                    .select('price') \
-                    .eq('symbol', 'QQQ') \
-                    .limit(1) \
-                    .execute()
-                if ndx_snap.data:
-                    ndx_chg = 0.0
-            except Exception:
-                pass
+            pass
 
         macro = calculate_macro_score(
             vix        = vix,
@@ -812,13 +771,11 @@ async def fetch_macro_data(supabase) -> dict:
         )
         macro.update({
             'vix':       vix,
-            'spy_change': spy_chg,
-            'ndx_change': ndx_chg,
+            'spy_change': round(spy_chg, 2),
+            'ndx_change': round(ndx_chg, 2),
         })
         return macro
 
     except Exception as e:
-        log_error(MODULE,
-            f'Error obteniendo macro: {e}'
-        )
+        log_error(MODULE, f'Error obteniendo macro: {e}')
         return calculate_macro_score()

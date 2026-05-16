@@ -364,17 +364,17 @@ def _process_symbol(
                 risk_config=risk_config
             )
             
-            if oco_params:
-                # Forzar la cantidad calculada por nuestro módulo de sizing
-                oco_params['quantity'] = sizing['quantity']
-                oco_params['order_value_usdt'] = sizing['nocional']
-
-            if oco_params is None:
-                sb.table('trading_signals').update({
-                    'status': 'rejected',
-                    'rejection_reason': 'OCO_PARAMS_CALCULATION_FAILED'
-                }).eq('id', signal['signal_id']).execute()
+            if not oco_params:
+                if signal.get('signal_id'):
+                    sb.table('trading_signals').update({
+                        'status': 'rejected',
+                        'rejection_reason': 'OCO_PARAMS_CALCULATION_FAILED'
+                    }).eq('id', signal['signal_id']).execute()
                 return
+
+            # Forzar la cantidad calculada por nuestro módulo de sizing
+            oco_params['quantity'] = sizing['quantity']
+            oco_params['order_value_usdt'] = sizing['nocional']
 
             log_info(MODULE, f"{symbol}: OCO params -> qty={oco_params['quantity']} | SL=${oco_params['stop_loss']:,.4f} | TP=${oco_params['take_profit']:,.4f} | Valor=${oco_params['order_value_usdt']:,.2f}", cycle_id=cycle_id)
 

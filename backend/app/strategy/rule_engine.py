@@ -62,12 +62,11 @@ DEFAULT_RULES = [
         "confidence": "medium",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema20_angle", "operator": ">=", "value": 0},
             {"indicator": "price_touched_lower_5_6", "operator": "==", "value": True},
             {"indicator": "reversal_confirmation_long", "operator": "==", "value": True},
         ],
         "logic": "AND",
-        "notes": "Rebote desde zona de sobreventa extrema. No requiere filtro de basis. (v2 forced)",
+        "notes": "Rebote desde zona de sobreventa extrema. Funciona contra-tendencia. (v2 forced)",
     },
     {
         "id": 1001,

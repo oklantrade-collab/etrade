@@ -221,15 +221,52 @@ class ForexExecutionService:
             mtf_directional = mtf < 0  # Al menos momentum negativo
 
         # Aa31/Bb31: SAR alignment + Momentum + No opposite Pine (STRICT - Require MTF alignment)
+        # REFINAMIENTO V2: Añadimos filtro de ADX y confirmación de EMAs rápidas para evitar fakeouts en XAUUSD.
         rule_alignment_triggered = False
+        adx   = context.get('adx', 0)
+        ema3  = context.get('ema_3', 0)
+        ema9  = context.get('ema_9', 0)
+        
+        symbol = context.get('symbol', '')
+        ema20 = context.get('ema_20', 0)
+        
+        # Símbolos que requieren alineación estricta y cascada de EMAs
+        strict_symbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY']
+        
         if direction == 'long':
-            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.25 Y no se al contraria de Pine Y no en techo
-            # TIGHTEN: fib_zone <= 3 (was 4) to leave room for profit before tp_band
-            rule_alignment_triggered = (sar_15m_ok and (sar_4h_ok or mtf >= 0.5) and mtf >= 0.25 and pine_not_opposite and struct_ok and fib_zone <= 3)
+            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.4 Y no opuesto Pine Y no en techo Y ADX > 25 Y EMA3 > EMA9
+            if symbol in strict_symbols:
+                # REFINAMIENTO V3: Alineación Macro Obligatoria (SAR 4h) + Cascada EMA (3 > 9 > 20)
+                rule_alignment_triggered = (
+                    sar_15m_ok and sar_4h_ok and 
+                    mtf >= 0.4 and pine_not_opposite and 
+                    struct_ok and fib_zone <= 3 and 
+                    adx > 25 and (ema3 > ema9 > ema20 if ema3 and ema9 and ema20 else True)
+                )
+            else:
+                rule_alignment_triggered = (
+                    sar_15m_ok and (sar_4h_ok or mtf >= 0.5) and 
+                    mtf >= 0.4 and pine_not_opposite and 
+                    struct_ok and fib_zone <= 3 and 
+                    adx > 25 and (ema3 > ema9 if ema3 and ema9 else True)
+                )
         else:
-            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.25 Y no se al contraria de Pine Y no en piso
-            # TIGHTEN: fib_zone >= -3 (was -4) to leave room for profit before tp_band
-            rule_alignment_triggered = (sar_15m_ok and (sar_4h_ok or mtf <= -0.5) and mtf <= -0.25 and pine_not_opposite and struct_ok and fib_zone >= -3)
+            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.4 Y no opuesto Pine Y no en piso Y ADX > 25 Y EMA3 < EMA9
+            if symbol in strict_symbols:
+                # REFINAMIENTO V3: Alineación Macro Obligatoria (SAR 4h) + Cascada EMA (3 < 9 < 20)
+                rule_alignment_triggered = (
+                    sar_15m_ok and sar_4h_ok and 
+                    mtf <= -0.4 and pine_not_opposite and 
+                    struct_ok and fib_zone >= -3 and 
+                    adx > 25 and (ema3 < ema9 < ema20 if ema3 and ema9 and ema20 else True)
+                )
+            else:
+                rule_alignment_triggered = (
+                    sar_15m_ok and (sar_4h_ok or mtf <= -0.5) and 
+                    mtf <= -0.4 and pine_not_opposite and 
+                    struct_ok and fib_zone >= -3 and 
+                    adx > 25 and (ema3 < ema9 if ema3 and ema9 else True)
+                )
 
         results.append({
             'rule_code': 'Aa31a' if direction == 'long' else 'Bb31a', 
@@ -256,9 +293,13 @@ class ForexExecutionService:
             'score': 0.95 # Alta prioridad
         })
 
-        # Dd Reversal
+        # Dd Reversal: Solo si alinea con tendencia 4h (sar_4h_ok)
         fib_reversal = (direction == 'long' and fib_zone <= -2) or (direction == 'short' and fib_zone >= 2)
-        results.append({'rule_code': 'Dd21_15m' if direction == 'long' else 'Dd11_15m', 'triggered': (fib_reversal and sar_15m_ok and struct_ok), 'score': 0.9})
+        results.append({
+            'rule_code': 'Dd21_15m' if direction == 'long' else 'Dd11_15m', 
+            'triggered': (fib_reversal and sar_15m_ok and sar_4h_ok and struct_ok), 
+            'score': 0.9
+        })
 
         triggered = [r for r in results if r.get('triggered')]
         return max(triggered, key=lambda x: x['score']) if triggered else None
@@ -757,7 +798,30 @@ class ForexExecutionService:
         # Actualizar precio actual en el estado
         state.entry_price = self._safe_float(pos['entry_price'])
         
-        result = evaluate_all_protections(state, price, snap)
+        # Track highest and lowest price continuously for accurate dynamic trailing stop
+        if state.side in ('long', 'buy'):
+            state.highest_price = max(state.highest_price, price) if state.highest_price > 0 else max(state.entry_price, price)
+        else:
+            state.lowest_price = min(state.lowest_price, price) if state.lowest_price > 0 else min(state.entry_price, price)
+            
+        # Extraer dataframes si están disponibles
+        import pandas as pd
+        
+        def _get_df(tf):
+            bars = self.state['candles'].get(f'{symbol}_{tf}', [])
+            if not bars: return None
+            df = pd.DataFrame(bars)
+            df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'ts': 'open_time'})
+            df['open_time'] = pd.to_datetime(df['open_time'], unit='s')
+            df = df.set_index('open_time')
+            df = df.dropna(subset=['open', 'high', 'low', 'close'])
+            for col in ['open','high','low','close']: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            return df
+            
+        df_15m = _get_df('15m')
+        df_5m = _get_df('5m')
+
+        result = evaluate_all_protections(state, price, snap, df_15m=df_15m, df_5m=df_5m)
         
         if result.get('has_action') and 'primary' in result:
             primary = result['primary']

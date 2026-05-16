@@ -44,22 +44,39 @@ async def get_stocks_opportunities():
             # 2. Get today's date in Lima/NYC
             today = get_nyc_now().date().isoformat()
 
-            # 3. Fetch Technical Scores (Most recent)
+            # 3. Fetch Technical Scores (Today only)
+            today_dt = get_nyc_now().date()
+            today_str = today_dt.isoformat()
+            
             res_tech = sb.table("technical_scores")\
                 .select("*")\
+                .gte("timestamp", today_str)\
                 .order("timestamp", desc=True)\
-                .limit(100)\
+                .limit(200)\
                 .execute()
             
             tech_data = res_tech.data or []
 
-            # 3.5 Fetch Queue Statuses to join
+            # 3.4 Fetch Watchlist Daily to identify PRO members
+            wl_res = sb.table("watchlist_daily")\
+                .select("ticker, pool_type, fundamental_score, margin_of_safety")\
+                .eq("date", today_str)\
+                .execute()
+            wl_map = {r["ticker"]: r for r in (wl_res.data or [])}
+
+            # 3.5 Fetch Market Snapshot for latest APEX scores (Sync with Queue)
+            snap_res = sb.table("market_snapshot")\
+                .select("symbol, apex_4h, apex_1d, apex_signal, apex_conf")\
+                .execute()
+            snap_map = {r["symbol"]: r for r in (snap_res.data or [])}
+
+            # 3.6 Fetch Queue Statuses to join
             q_res = sb.table("stocks_priority_queue")\
                 .select("ticker, status, is_overbought")\
                 .execute()
             q_map = {r["ticker"]: r for r in (q_res.data or [])}
             
-            # 3.6 Fetch Open Positions to correct status
+            # 3.7 Fetch Open Positions to correct status
             pos_res = sb.table("stocks_positions")\
                 .select("ticker")\
                 .eq("status", "open")\
@@ -80,9 +97,28 @@ async def get_stocks_opportunities():
                     
                     # Combine item and sigs
                     merged = {**item, **sigs}
-                    merged["ticker"] = item.get("ticker") or sigs.get("ticker", "UNKNOWN")
+                    ticker = item.get("ticker") or sigs.get("ticker", "UNKNOWN")
+                    merged["ticker"] = ticker
                     merged["created_at"] = item.get("timestamp")
+
+                    # SYNC APEX with Market Snapshot (Authoritative source)
+                    s_info = snap_map.get(ticker, {})
+                    if s_info:
+                        merged["apex_4h"] = s_info.get("apex_4h") or merged.get("apex_4h")
+                        merged["apex_1d"] = s_info.get("apex_1d") or merged.get("apex_1d")
+                        merged["apex_signal"] = s_info.get("apex_signal") or merged.get("apex_signal")
+                        merged["apex_conf"] = s_info.get("apex_conf") or merged.get("apex_conf")
                     
+                    # Identify if it's PRO member
+                    wl_info = wl_map.get(ticker, {})
+                    pool = wl_info.get("pool_type", "HOT")
+                    f_score = float(wl_info.get("fundamental_score") or 0)
+                    mos = float(wl_info.get("margin_of_safety") or 0)
+                    
+                    is_pro = (pool in ["PRO", "PREMIUM"]) or (f_score >= 80 and mos > 0)
+                    merged["is_pro_member"] = is_pro
+                    merged["pool_type"] = pool
+
                     # Ensure last_scan_time is present (extract from timestamp if missing)
                     ts = item.get("timestamp")
                     if not merged.get("last_scan_time") and ts:
@@ -97,9 +133,9 @@ async def get_stocks_opportunities():
                         merged["last_scan_time"] = "--:--"
 
                     # Join Queue Status
-                    q_info = q_map.get(merged["ticker"], {})
+                    q_info = q_map.get(ticker, {})
                     
-                    if merged["ticker"] in owned_tickers:
+                    if ticker in owned_tickers:
                         merged["queue_status"] = "owned"
                     else:
                         merged["queue_status"] = q_info.get("status", "watching")
@@ -492,36 +528,48 @@ async def get_priority_queue():
             log_warning("stocks_api", f"Error cleaning stale queue: {clean_e}")
 
         # 2. Get queue items (excluding owned)
+        today_str = datetime.now(timezone.utc).date().isoformat()
         q_res = sb.table("stocks_priority_queue") \
             .select("*") \
-            .in_("status", ["pending", "buying", "blocked", "watching"]) \
+            .in_("status", ["pending", "buying", "blocked"]) \
+            .gte("last_updated", today_str) \
             .order("composite_rank", desc=True) \
             .limit(20) \
             .execute()
 
-        queue = q_res.data or []
+        db_queue = q_res.data or []
         
-        # Filter out owned tickers from the display queue
-        queue = [q for q in queue if q["ticker"] not in owned_tickers]
+        # Filter out owned tickers and low APEX scores from DB queue
+        queue = []
+        existing_tickers = owned_tickers.copy()
+        
+        for q in db_queue:
+            ticker = q["ticker"]
+            if ticker in existing_tickers: continue
+            
+            # Use apex_score_4h from queue or fallback to 0
+            apex_4h = float(q.get("apex_score_4h") or 0)
+            if apex_4h < 60: continue
+            
+            queue.append(q)
+            existing_tickers.add(ticker)
 
         # 3. If queue is too small, generate dynamic candidates from market_snapshot
-        if len(queue) < 5:
+        if len(queue) < 10:
             try:
                 # Get top APEX-scoring tickers from market_snapshot
-                existing_tickers = {q["ticker"] for q in queue} | owned_tickers
-                
                 limit_time_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
                 
                 snap_res = sb.table("market_snapshot")\
-                    .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf")\
+                    .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf, rvol")\
                     .not_.is_("apex_4h", "null")\
                     .gt("updated_at", limit_time_iso)\
                     .order("apex_4h", desc=True)\
-                    .limit(30)\
+                    .limit(40)\
                     .execute()
                 
                 for snap in (snap_res.data or []):
-                    if len(queue) >= 10:
+                    if len(queue) >= 15:
                         break
                     ticker = snap.get("symbol")
                     if not ticker or ticker in existing_tickers:
@@ -529,12 +577,17 @@ async def get_priority_queue():
                     
                     apex_4h = float(snap.get("apex_4h") or 0)
                     apex_1d = float(snap.get("apex_1d") or 0)
+                    rvol = float(snap.get("rvol") or 1.0)
                     
                     # Only include decent APEX scores
                     if apex_4h < 60:
                         continue
                     
-                    # Build a dynamic queue entry
+                    # Build a dynamic queue entry with consistent ranking logic
+                    # Rank = 30% 4H + 25% 1D + 25% RVOL + 5% Conf + 15% Gain(0 fallback)
+                    conf_score = {'high': 90, 'medium': 60, 'low': 30}.get(snap.get("apex_conf", "medium"), 60)
+                    rank = (apex_4h * 0.30) + (apex_1d * 0.25) + (min(100, rvol * 20) * 0.25) + (conf_score * 0.05)
+                    
                     dynamic_entry = {
                         "ticker": ticker,
                         "group_name": "",
@@ -542,7 +595,7 @@ async def get_priority_queue():
                         "apex_score_1d": apex_1d,
                         "return_expected": 0,
                         "confidence": snap.get("apex_conf") or "medium",
-                        "composite_rank": round(apex_4h * 0.6 + apex_1d * 0.4, 2),
+                        "composite_rank": round(rank, 2),
                         "status": "watching",
                         "entry_reason": "dynamic_scan",
                         "triggered_rule": None,

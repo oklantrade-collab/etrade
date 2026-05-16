@@ -67,13 +67,33 @@ def calculate_backstop_sl(
     Para BUY: lower_6 o -8% del precio.
     Para SELL: upper_6 o +8% del precio.
 
-    NO se envía al exchange todavía.
-    Solo se registra en la BD como backstop.
+    NUEVO (Stocks): Usa ATR_14 (2x) si está disponible para mayor precisión.
     """
     pct = SL_CONFIG.get(
         f'backstop_pct_{market_type.split("_")[0]}',
         0.08
     )
+
+    # ── REGLA 3: ATR-based SL para Stocks ──
+    if market_type == 'stocks_spot':
+        atr = float(snap.get('atr_14') or 0)
+        if atr > 0:
+            # SL = Entry +/- 2*ATR
+            atr_sl = entry_price - (2.0 * atr) if side in ('long', 'buy') else entry_price + (2.0 * atr)
+            # Limitar a un máximo de pérdida del 'pct' configurado (ej: 10%)
+            fixed_sl = entry_price * (1 - pct) if side in ('long', 'buy') else entry_price * (1 + pct)
+            
+            if side in ('long', 'buy'):
+                # Usamos el que sea más cercano al precio (más conservador)
+                backstop = max(atr_sl, fixed_sl)
+            else:
+                backstop = min(atr_sl, fixed_sl)
+                
+            return {
+                'backstop_price': round(backstop, 8),
+                'source':         'atr_2x',
+                'pct_from_entry': abs(backstop - entry_price) / entry_price * 100,
+            }
 
     if side in ('long', 'buy'):
         # Intentar usar lower_6

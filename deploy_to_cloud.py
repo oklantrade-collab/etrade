@@ -12,11 +12,31 @@ files_to_sync = [
     "app/analysis/indicators_v2.py",
     "app/strategy/strategy_engine.py",
     "app/workers/forex_worker_standalone.py",
+    "app/workers/forex_scheduler.py",
     "app/workers/forex_execution_service.py",
     "app/workers/stocks_scheduler.py",
+    "app/analysis/stocks_indicators.py",
     "app/stocks/apex_score.py",
     "app/stocks/stocks_rule_engine.py",
-    "app/stocks/stocks_orchestrator.py"
+    "app/stocks/stocks_orchestrator.py",
+    "app/core/safety_manager.py",
+    "app/strategy/swing_orders.py",
+    "app/strategy/capital_protection.py",
+    "app/strategy/proactive_exit.py",
+    "app/core/position_monitor.py",
+    "app/strategy/rule_engine.py",
+    "app/workers/unified_trading_worker.py",
+    "app/execution/oco_builder.py",
+    "app/core/position_sizing.py",
+    "app/strategy/dynamic_sl_manager.py",
+    "app/stocks/stocks_adaptive_tp.py",
+    "app/strategy/risk_manager.py",
+    "app/strategy/signal_generator.py",
+    "app/api/stocks.py",
+    "app/analysis/fundamental_scorer.py",
+    "app/stocks/universe_builder.py",
+    "app/stocks/stocks_rule_engine.py",
+    "app/workers/stocks_scheduler.py"
 ]
 
 def deploy():
@@ -27,13 +47,18 @@ def deploy():
         print(f"Desplegando {f}...")
         cmd = [
             "scp", "-i", SSH_KEY,
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
             local_file, remote_file
         ]
         subprocess.run(cmd, check=True)
 
     print("\nReiniciando servicios en el servidor...")
     restart_cmd = [
-        "ssh", "-i", SSH_KEY, f"root@{SERVER_IP}",
+        "ssh", "-i", SSH_KEY, 
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        f"root@{SERVER_IP}",
         "systemctl restart etrade-crypto etrade-forex etrade-api etrade-stocks"
     ]
     subprocess.run(restart_cmd, check=True)

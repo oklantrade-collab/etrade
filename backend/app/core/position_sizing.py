@@ -88,14 +88,24 @@ def calculate_position_size(
         if not c:
             raise ValueError("No se pudo cargar la configuración de trading_config (id=1)")
 
+        # Jerarquía de capital: 
+        # 1. Específico por mercado (capital_crypto_futures, etc)
+        # 2. General operativo (capital_operativo)
+        # 3. Total (capital_total)
+        # 4. Default 500
+        capital_op_fallback = float(c.get('capital_operativo', c.get('capital_total', 500)))
+
         if market_type == 'crypto_futures':
-            capital_base = float(c.get('capital_crypto_futures', 500))
+            capital_base = float(c.get('capital_crypto_futures', capital_op_fallback))
             leverage = int(c.get('leverage_crypto', 5))
         elif market_type == 'crypto_spot':
-            capital_base = float(c.get('capital_crypto_spot', 0))
+            capital_base = float(c.get('capital_crypto_spot', capital_op_fallback))
             leverage = 1
+        elif market_type == 'forex_futures':
+            capital_base = float(c.get('capital_forex_futures', capital_op_fallback))
+            leverage = int(c.get('leverage_forex', 100))
         else:
-            capital_base = float(c.get('capital_total', 500))
+            capital_base = capital_op_fallback
             leverage = 1
 
         # Capital operativo (90% del capital base para margen/seguridad)

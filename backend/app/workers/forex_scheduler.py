@@ -304,6 +304,8 @@ async def write_forex_snapshot(
             'allow_short_4h':        struct_4h['allow_short'],
             'reverse_signal_4h':     struct_4h['reverse_signal'],
             'structure_reason_4h':   struct_4h['reason'],
+            'bb_expanding':          bool(last.get('bb_expanding', False)),
+            'ema_exhaustion':        bool(last.get('ema_exhaustion', False)),
             'updated_at':            datetime.now(timezone.utc).isoformat(),
         }
 
@@ -347,7 +349,7 @@ async def upsert_forex_candles(symbol: str, timeframe: str, df: pd.DataFrame, sb
                 'high':      float(r['high']),
                 'low':       float(r['low']),
                 'close':     float(r['close']),
-                'volume':    float(r.get('volume', 0)),
+                'volume':    float(r.get('volume') or 0),
                 'is_closed': True,
                 'basis':     float(r.get('basis', 0) or 0) if pd.notna(r.get('basis')) else None,
                 'upper_6':   float(r.get('upper_6', 0) or 0) if pd.notna(r.get('upper_6')) else None,

@@ -92,62 +92,119 @@ VOLATILE_TRAILING_CONFIG = {
     'XAUUSD': {
         'pip_size':             0.01,
         'min_pips_to_activate': 3,
-        'phase1_atr_mult':      1.5,
-        'candle_switch_pips':   10,
-        'candle_lookback':       2,
-        'accel_switch_pips':    25,
-        'accel_atr_mult':        0.8,
-        'asia_session_mult_adj': 0.7,
-        'mtf_entry_min':        0.20,
-        'atr_ratio_calm':       1.0,
-        'atr_ratio_volatile':   1.5,
-        'atr_mult_calm_adj':    1.3,
-        'atr_mult_volatile_adj': 1.0,
+
+        # ── Parámetros LONG ───────────────────
+        'long': {
+            'phase1_atr_mult':      1.5,
+            'candle_switch_pips':   10,
+            'candle_lookback':       2,
+            'candle_timeframe':     '15m',
+            'accel_switch_pips':    25,
+            'accel_atr_mult':        0.8,
+        },
+
+        # ── Parámetros SHORT ──────────────────
+        'short': {
+            'phase1_atr_mult':      1.3,
+            'candle_switch_pips':   8,
+            'candle_lookback':      2,
+            'candle_timeframe':     '5m',
+            'accel_switch_pips':    18,
+            'accel_atr_mult':       0.7,
+            'accel_atr_mult_5m':    0.6,
+        },
+
+        # ── Parámetros compartidos ────────────
+        'asia_session_mult_adj':    0.7,
+        'mtf_entry_min':            0.20,
+        'atr_ratio_calm':           1.0,
+        'atr_ratio_volatile':       1.5,
+        'atr_mult_calm_adj':        1.3,
+        'atr_mult_volatile_adj':    1.0,
     },
+
     'GBPUSD': {
         'pip_size':             0.0001,
         'min_pips_to_activate': 3,
-        'phase1_atr_mult':      1.4,
-        'candle_switch_pips':   8,
-        'candle_lookback':      2,
-        'accel_switch_pips':    20,
-        'accel_atr_mult':       0.7,
-        'asia_session_mult_adj': 0.8,
-        'mtf_entry_min':        0.15,
-        'atr_ratio_calm':       1.0,
-        'atr_ratio_volatile':   1.5,
-        'atr_mult_calm_adj':    1.2,
-        'atr_mult_volatile_adj': 0.9,
+        'long': {
+            'phase1_atr_mult':      1.4,
+            'candle_switch_pips':   8,
+            'candle_lookback':      2,
+            'candle_timeframe':     '15m',
+            'accel_switch_pips':    20,
+            'accel_atr_mult':       0.7,
+        },
+        'short': {
+            'phase1_atr_mult':      1.2,
+            'candle_switch_pips':   6,
+            'candle_lookback':      2,
+            'candle_timeframe':     '5m',
+            'accel_switch_pips':    15,
+            'accel_atr_mult':       0.65,
+            'accel_atr_mult_5m':    0.55,
+        },
+        'asia_session_mult_adj':    0.8,
+        'mtf_entry_min':            0.15,
+        'atr_ratio_calm':           1.0,
+        'atr_ratio_volatile':       1.5,
+        'atr_mult_calm_adj':        1.2,
+        'atr_mult_volatile_adj':    0.9,
     },
+
     'EURUSD': {
         'pip_size':             0.0001,
         'min_pips_to_activate': 2,
-        'phase1_atr_mult':      1.3,
-        'candle_switch_pips':   7,
-        'candle_lookback':      2,
-        'accel_switch_pips':    18,
-        'accel_atr_mult':       0.7,
-        'asia_session_mult_adj': 0.8,
-        'mtf_entry_min':        0.10,
-        'atr_ratio_calm':       1.0,
-        'atr_ratio_volatile':   1.5,
-        'atr_mult_calm_adj':    1.2,
-        'atr_mult_volatile_adj': 0.9,
+        'long': {
+            'phase1_atr_mult':      1.3,
+            'candle_switch_pips':   7,
+            'candle_lookback':      2,
+            'candle_timeframe':     '15m',
+            'accel_switch_pips':    18,
+            'accel_atr_mult':       0.7,
+        },
+        'short': {
+            'phase1_atr_mult':      1.1,
+            'candle_switch_pips':   5,
+            'candle_lookback':      2,
+            'candle_timeframe':     '5m',
+            'accel_switch_pips':    14,
+            'accel_atr_mult':       0.65,
+            'accel_atr_mult_5m':    0.55,
+        },
+        'asia_session_mult_adj':    0.8,
+        'mtf_entry_min':            0.10,
+        'atr_ratio_calm':           1.0,
+        'atr_ratio_volatile':       1.5,
+        'atr_mult_calm_adj':        1.2,
+        'atr_mult_volatile_adj':    0.9,
     },
+
     'USDJPY': {
         'pip_size':             0.01,
         'min_pips_to_activate': 2,
-        'phase1_atr_mult':      1.3,
-        'candle_switch_pips':   7,
-        'candle_lookback':      2,
-        'accel_switch_pips':    18,
-        'accel_atr_mult':       0.7,
-        'asia_session_mult_adj': 1.0,
-        'mtf_entry_min':        0.10,
-        'atr_ratio_calm':       1.0,
-        'atr_ratio_volatile':   1.5,
-        'atr_mult_calm_adj':    1.2,
-        'atr_mult_volatile_adj': 0.9,
+        'long': {
+            'phase1_atr_mult':      1.3,
+            'candle_switch_pips':   7,
+            'candle_lookback':      2,
+            'candle_timeframe':     '15m',
+            'accel_switch_pips':    18,
+            'accel_atr_mult':       0.7,
+        },
+        'short': {
+            'phase1_atr_mult':      1.1,
+            'candle_switch_pips':   5,
+            'candle_lookback':      2,
+            'candle_timeframe':     '5m',
+            'accel_switch_pips':    14,
+            'accel_atr_mult':       0.65,
+            'accel_atr_mult_5m':    0.55,
+        },
+        'asia_session_mult_adj':    1.0,
+        'mtf_entry_min':            0.10,
+        'atr_ratio_calm':           1.0,
+        'atr_ratio_volatile':       1.5,
+        'atr_mult_calm_adj':        1.2,
+        'atr_mult_volatile_adj':    0.9,
     },
 }
 
@@ -205,6 +262,89 @@ def get_atr_current(
         ),
     }
 
+def get_atr_5m(
+    df_5m:      pd.DataFrame,
+    period:     int = 14,
+    avg_period: int = 50,
+) -> dict:
+    """
+    Calcula el ATR en temporaridad de 5m.
+    Más sensible a la volatilidad inmediata que el ATR de 15m.
+    """
+    if df_5m is None or len(df_5m) < period:
+        return {
+            'atr':    0.0,
+            'avg':    0.0,
+            'ratio':  1.0,
+            'regime': 'normal',
+        }
+
+    df     = df_5m.copy()
+    df['pc'] = df['close'].shift(1)
+    df['tr'] = df.apply(
+        lambda r: max(
+            r['high'] - r['low'],
+            abs(r['high'] - (r['pc'] if pd.notna(r['pc']) else r['close'])),
+            abs(r['low']  - (r['pc'] if pd.notna(r['pc']) else r['close']))
+        ), axis=1
+    )
+
+    atr_now = float(df['tr'].tail(period).mean())
+    atr_avg = float(
+        df['tr'].tail(avg_period).mean()
+    ) if len(df) >= avg_period else atr_now
+
+    ratio = atr_now / atr_avg if atr_avg > 0 else 1.0
+
+    return {
+        'atr':    round(atr_now, 6),
+        'avg':    round(atr_avg, 6),
+        'ratio':  round(ratio, 3),
+        'regime': (
+            'calm'     if ratio < 0.8 else
+            'volatile' if ratio > 1.4 else
+            'normal'
+        ),
+    }
+
+def get_candle_sl_short_5m(
+    df_5m:     pd.DataFrame,
+    side:      str,
+    lookback:  int = 2,
+) -> dict:
+    """
+    Para SHORT/SELL en 5m: SL = max(HIGH de las últimas N velas de 5m)
+    Para LONG/BUY en 5m: SL = min(LOW de las últimas N velas de 5m)
+    """
+    if df_5m is None or len(df_5m) < lookback + 1:
+        return {
+            'sl_price':    None,
+            'valid':       False,
+            'candles_used': 0,
+            'reason':      'Datos insuficientes en 5m',
+        }
+
+    # Excluir la vela vigente (última). Solo usar velas YA CERRADAS
+    closed = df_5m.iloc[-(lookback + 1):-1]
+
+    if side in ('short', 'sell'):
+        # Para SHORT: SL en el máximo de los highs
+        sl_price = float(closed['high'].max())
+        desc     = f'Max high de {lookback} velas cerradas (5m): {sl_price:.5f}'
+    else:
+        # Para LONG en 5m
+        sl_price = float(closed['low'].min())
+        desc     = f'Min low de {lookback} velas cerradas (5m): {sl_price:.5f}'
+
+    return {
+        'sl_price':     round(sl_price, 6),
+        'valid':        True,
+        'lookback':     lookback,
+        'candles_used': len(closed),
+        'timeframe':    '5m',
+        'reason':       desc,
+    }
+
 def evaluate_volatile_trailing(
     symbol:        str,
     side:          str,
@@ -214,6 +354,7 @@ def evaluate_volatile_trailing(
     current_sl:    float,
     df_15m:        pd.DataFrame,
     atr_snap:      float = 0,
+    df_5m:         pd.DataFrame = None,
 ) -> dict:
     cfg = VOLATILE_TRAILING_CONFIG.get(symbol)
     if not cfg:
@@ -270,8 +411,11 @@ def evaluate_volatile_trailing(
     candle_pips  = cfg['candle_switch_pips']
     lookback     = cfg['candle_lookback']
 
-    if pnl_pips >= candle_pips and df_15m is not None and len(df_15m) >= lookback + 1:
-        closed = df_15m.iloc[-(lookback+1):-1]
+    # PREFER 5m candles for Phase 2 (faster reaction to volatility)
+    fast_df = df_5m if df_5m is not None else df_15m
+    
+    if pnl_pips >= candle_pips and fast_df is not None and len(fast_df) >= lookback + 1:
+        closed = fast_df.iloc[-(lookback+1):-1]
         if side in ('long', 'buy'):
             sl_phase2 = float(closed['low'].min())
         else:
@@ -339,6 +483,182 @@ def evaluate_volatile_trailing(
         ),
     }
 
+def evaluate_volatile_trailing_v2(
+    symbol:        str,
+    side:          str,
+    entry_price:   float,
+    current_price: float,
+    best_price:    float,
+    # LONG: precio máximo alcanzado. SHORT: precio mínimo alcanzado
+    current_sl:    float,
+    df_15m:        pd.DataFrame,
+    df_5m:         pd.DataFrame = None,
+    atr_snap:      float = 0,
+) -> dict:
+    """
+    Trailing Stop Dinámico v2. Compatible con LONG y SHORT.
+    Usa 5m para SHORT y 15m para LONG.
+    """
+    cfg_sym = VOLATILE_TRAILING_CONFIG.get(symbol)
+    if not cfg_sym:
+        return {'action': 'none', 'reason': f'{symbol} sin config dinámica'}
+
+    is_long  = side in ('long', 'buy')
+    is_short = not is_long
+
+    # Seleccionar configuración por dirección
+    dir_cfg = cfg_sym.get('long' if is_long else 'short', {})
+    pip          = cfg_sym['pip_size']
+    min_pips     = cfg_sym['min_pips_to_activate']
+    candle_tf    = dir_cfg.get('candle_timeframe', '15m')
+
+    # ── P&L actual en pips ────────────────────
+    if is_long:
+        pnl_pips = (current_price - entry_price) / pip
+    else:
+        pnl_pips = (entry_price - current_price) / pip
+
+    if pnl_pips < min_pips:
+        return {
+            'action':   'none',
+            'side':     side,
+            'pnl_pips': round(pnl_pips, 1),
+            'reason': f'Ganancia {pnl_pips:.1f} pips < mínimo {min_pips} pips',
+        }
+
+    # ── ATR según temporaridad ─────────────────
+    if is_short and df_5m is not None:
+        atr_data = get_atr_5m(df_5m)
+    else:
+        atr_data = get_atr_current(df_15m)
+
+    atr    = atr_data['atr'] if atr_data['atr'] > 0 else atr_snap
+    if atr <= 0:
+        atr = pip * 4  # fallback
+
+    # ── Ajuste por régimen y sesión ───────────
+    regime   = atr_data.get('regime', 'normal')
+    session  = get_current_session()
+
+    if regime == 'calm':
+        mult_adj = cfg_sym['atr_mult_calm_adj']
+    elif regime == 'volatile':
+        mult_adj = cfg_sym['atr_mult_volatile_adj']
+    else:
+        mult_adj = 1.0
+
+    if session == 'asia':
+        sess_adj = cfg_sym['asia_session_mult_adj']
+    else:
+        sess_adj = 1.0
+
+    # ── FASE 1: ATR Chandelier ────────────────
+    phase1_mult = dir_cfg.get('phase1_atr_mult', 1.3) * mult_adj * sess_adj
+    atr_dist = atr * phase1_mult
+
+    if is_long:
+        sl_phase1 = best_price - atr_dist
+    else:
+        sl_phase1 = best_price + atr_dist
+
+    phases = {'phase1': round(sl_phase1, 6)}
+
+    # ── FASE 2: Velas (5m para SHORT) ────────
+    sl_phase2         = None
+    candle_pips_thr   = dir_cfg.get('candle_switch_pips', 8)
+    candle_lookback   = dir_cfg.get('candle_lookback', 2)
+
+    if pnl_pips >= candle_pips_thr:
+        if is_short and df_5m is not None:
+            # SHORT: usar velas de 5m
+            candle_data = get_candle_sl_short_5m(df_5m, side, candle_lookback)
+        else:
+            # LONG: usar velas de 15m
+            candle_data = get_candle_sl_short_5m(df_15m, side, candle_lookback)
+
+        if candle_data['valid']:
+            sl_phase2 = candle_data['sl_price']
+            phases['phase2'] = round(sl_phase2, 6)
+
+    # ── FASE 3: Aceleración ───────────────────
+    sl_phase3       = None
+    accel_pips_thr  = dir_cfg.get('accel_switch_pips', 18)
+
+    # Para SHORT en 5m: usar accel_atr_mult_5m
+    if is_short and '5m' in candle_tf:
+        accel_mult = dir_cfg.get('accel_atr_mult_5m', dir_cfg.get('accel_atr_mult', 0.65))
+    else:
+        accel_mult = dir_cfg.get('accel_atr_mult', 0.7)
+    accel_mult *= sess_adj
+
+    if pnl_pips >= accel_pips_thr:
+        accel_dist = atr * accel_mult
+        if is_long:
+            sl_phase3 = current_price - accel_dist
+        else:
+            sl_phase3 = current_price + accel_dist
+        phases['phase3'] = round(sl_phase3, 6)
+
+    # ── Elegir el mejor SL ────────────────────
+    candidates = [sl_phase1]
+    if sl_phase2 is not None:
+        candidates.append(sl_phase2)
+    if sl_phase3 is not None:
+        candidates.append(sl_phase3)
+
+    if is_long:
+        # LONG: SL más ALTO = mayor protección
+        best_sl  = max(candidates)
+        final_sl = max(best_sl, current_sl)
+        # Nunca superar el precio actual
+        final_sl = min(final_sl, current_price - (pip * 2))
+    else:
+        # SHORT: SL más BAJO = mayor protección
+        best_sl  = min(candidates)
+        final_sl = min(best_sl, current_sl)
+        # Nunca bajar del precio actual
+        final_sl = max(final_sl, current_price + (pip * 2))
+
+    final_sl = round(final_sl, 6)
+
+    # ── Fase activa ───────────────────────────
+    tol = pip * 0.5
+    if sl_phase3 is not None and abs(final_sl - sl_phase3) <= tol:
+        active_phase = 3
+    elif sl_phase2 is not None and abs(final_sl - sl_phase2) <= tol:
+        active_phase = 2
+    else:
+        active_phase = 1
+
+    # ── ¿Mejoró el SL? ───────────────────────
+    improved = (
+        (is_long  and final_sl > current_sl + pip) or
+        (is_short and final_sl < current_sl - pip)
+    )
+
+    dist_pips = abs(current_price - final_sl) / pip
+
+    return {
+        'action':       'update_sl' if improved else 'none',
+        'sl_price':     final_sl,
+        'active_phase': active_phase,
+        'phases':       phases,
+        'improved':     improved,
+        'pnl_pips':     round(pnl_pips, 1),
+        'dist_pips':    round(dist_pips, 1),
+        'atr':          round(atr, 6),
+        'regime':       regime,
+        'session':      session,
+        'timeframe':    candle_tf,
+        'side':         side,
+        'reason': (
+            f'Trail {side.upper()} {symbol} [Fase {active_phase}/{candle_tf}]: '
+            f'SL={final_sl:.5f} ({dist_pips:.1f} pips del precio). '
+            f'PnL=+{pnl_pips:.1f} pips. ATR×{phase1_mult:.2f}. '
+            f'Régimen={regime}. Sesión={session}'
+        ),
+    }
+
 @dataclass
 class ProtectionState:
     """
@@ -354,26 +674,32 @@ class ProtectionState:
     market_type:       str
 
     # Trailing
+    # Trailing
     trailing_level:    int   = 0
     highest_pnl_pct:   float = 0.0
-    highest_price:     float = 0.0
-    lowest_price:      float = 0.0
 
-    # Break-Even
-    be_activated:      bool  = False
-    be_price:          float = 0.0
+    # LONG: precio más alto alcanzado
+    highest_price:      float = 0.0
+    # SHORT: precio más bajo alcanzado ← NUEVO
+    lowest_price:       float = 0.0
 
-    # Partial Close
-    partial_closed:    bool  = False
-    partial_size:      float = 0.0
-    remaining_size:    float = 0.0
+    be_activated:       bool  = False
+    be_price:           float = 0.0
 
-    # Cooldown
-    cycles_open:       int   = 0
-    last_close_cycle:  int   = 0
+    partial_closed:     bool  = False
+    partial_size:       float = 0.0
+    remaining_size:     float = 0.0
 
-    # Señal inversa
+    cycles_open:        int   = 0
+    last_close_cycle:   int   = 0
     inverse_signal_cycles: int = 0
+
+    # NUEVO: para trailing dinámico SHORT
+    lowest_sl_achieved: float = 0.0
+    # El SL más ceñido que hemos logrado
+    # (para SHORT: el valor más ALTO del SL mientras el precio bajaba)
+    phase_history:      list  = field(default_factory=list)
+    # Historial de fases del trailing
 
 
 def calculate_pnl(
@@ -413,6 +739,7 @@ def evaluate_trailing_stop(
     current_price: float,
     df_15m:        pd.DataFrame = None,
     snap:          dict = None,
+    df_5m:         pd.DataFrame = None,
 ) -> dict:
     """
     REGLA 4: Trailing Stop Escalonado.
@@ -424,23 +751,32 @@ def evaluate_trailing_stop(
     if symbol in VOLATILE_TRAILING_CONFIG and state.market_type == 'forex_futures':
         atr_snap = float(snap.get('atr', 0)) if snap else 0
         
-        result = evaluate_volatile_trailing(
+        # best_price: máximo para LONG, mínimo para SHORT
+        if state.side in ('long', 'buy'):
+            best_price = max(state.highest_price, state.entry_price)
+        else:
+            best_price = state.lowest_price if state.lowest_price > 0 else state.entry_price
+
+        result = evaluate_volatile_trailing_v2(
             symbol        = symbol,
             side          = state.side,
             entry_price   = state.entry_price,
             current_price = current_price,
-            highest_price = state.highest_price,
+            best_price    = best_price,
             current_sl    = state.current_sl,
             df_15m        = df_15m,
+            df_5m         = df_5m,
             atr_snap      = atr_snap,
         )
 
         if result['action'] == 'update_sl':
             state.current_sl = result['sl_price']
-            if state.side in ('long','buy'):
+            # Actualizar marcas históricas
+            if state.side in ('long', 'buy'):
                 state.highest_price = max(state.highest_price, current_price)
             else:
                 state.lowest_price = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+            
             return {
                 'action':     'update_sl',
                 'new_sl':     result['sl_price'],
@@ -450,6 +786,7 @@ def evaluate_trailing_stop(
                 'dynamic':    True,
                 'phase':      result['active_phase'],
                 'dist_pips':  result['dist_pips'],
+                'timeframe':  result.get('timeframe', '15m')
             }
 
         return {
@@ -725,6 +1062,7 @@ def evaluate_all_protections(
     snap:          Optional[dict] = None,
     inverse_rule:  Optional[str] = None,
     df_15m:        pd.DataFrame = None,
+    df_5m:         pd.DataFrame = None,
 ) -> dict:
     """
     Función principal de evaluación por prioridades.
@@ -737,7 +1075,7 @@ def evaluate_all_protections(
         actions.append({'priority': 1, 'type': 'break_even', **be})
 
     # 2. Trailing Stop
-    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, snap=snap)
+    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
     if trail['action'] == 'update_sl':
         actions.append({'priority': 2, 'type': 'trailing', **trail})
 

@@ -183,9 +183,14 @@ def _save_signal(signal_data: dict, cycle_id: str | None = None) -> str | None:
         row = {**signal_data, "symbol": internal_sym}
 
         sb = get_supabase()
-        result = sb.table("trading_signals").insert(row).execute()
-        if result.data:
-            return result.data[0]["id"]
+        result = sb.table("trading_signals").insert(row).select().execute()
+        
+        # Log result for debugging
+        if not result.data:
+            log_warning(MODULE, f"Insert into trading_signals returned no data for {internal_sym}")
+            return None
+            
+        return result.data[0].get("id")
     except Exception as e:
         log_warning(MODULE, f"Failed to save signal: {e}", cycle_id=cycle_id)
 
