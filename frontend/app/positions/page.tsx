@@ -139,7 +139,7 @@ export default function PositionsPage() {
                         <tr key={p.id}>
                           <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: '1.2' }}>
                             <div>{new Date(p.opened_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}</div>
-                            <div style={{ fontWeight: 'bold' }}>{new Date(p.opened_at).toLocaleTimeString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
+                            <div style={{ fontWeight: 'bold' }}>{new Date(p.opened_at).toLocaleTimeString('en-US', { timeZone: 'America/Lima', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
                           </td>
                           <td>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -268,7 +268,7 @@ export default function PositionsPage() {
                 </thead>
                 <tbody>
                   {closedPositions.map((p) => {
-                    const time = new Date(p.closed_at).toLocaleString('en-US', { timeZone: 'UTC' })
+                    const time = new Date(p.closed_at).toLocaleString('en-US', { timeZone: 'America/Lima' })
                     const pnl = parseFloat(p.realized_pnl || '0')
                     const pnlPct = parseFloat(p.realized_pnl_pct || '0')
                     return (

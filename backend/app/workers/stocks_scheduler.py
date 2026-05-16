@@ -256,6 +256,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         if df_1d is None or df_1d.empty or len(df_1d) < 10:
             log_warning(MODULE, f"Skipping {ticker}: no 1d data")
             return None
+        if df_4h is None or df_4h.empty or len(df_4h) < 10:
+            log_warning(MODULE, f"Skipping {ticker}: no 4h data")
+            return None
 
         # 2. CALCULATE INDICATORS
         ind_5m  = calculate_stock_indicators(df_5m,  "5m",  ticker)
@@ -555,6 +558,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             from app.stocks.apex_score import calculate_apex_score
             from app.stocks.stocks_adaptive_tp import fetch_macro_data
 
+            # Garantizar que sb esté disponible para fetch_macro_data
+            if 'sb' not in locals(): sb = get_supabase()
             macro_data = await fetch_macro_data(sb)
             fund_cache = {
                 'piotroski_score': ind_15m.get('piotroski_score', 4),

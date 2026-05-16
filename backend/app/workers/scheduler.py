@@ -1172,7 +1172,7 @@ async def cycle_5m():
     symbols = list(set([s.replace("/", "") for s in raw_symbols]))
     
     # Create LOCAL provider for this cycle to avoid concurrency issues with globals
-    provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret)
+    provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret, testnet=settings.binance_testnet)
     
     try:
         
@@ -1206,7 +1206,12 @@ async def cycle_5m():
         closed_symbols = [e['symbol'] for e in events if e['event'] == 'unexpected_close']
         active_symbols = [s for s in symbols if s not in closed_symbols]
 
-        tasks = [_process_symbol_5m(s, provider, gs_data, sb) for s in active_symbols]
+        sem = asyncio.Semaphore(2)
+        async def sem_process(s):
+            async with sem:
+                return await _process_symbol_5m(s, provider, gs_data, sb)
+
+        tasks = [sem_process(s) for s in active_symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
         
         # Executive heartbeat is still global but restricted to columns that exist
@@ -1316,6 +1321,13 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
     """Procesamiento asíncrono para UN símbolo en el ciclo 15m (Parallel)."""
     # ── 1. Heartbeat & Safety Manager ─────────
     register_heartbeat('crypto_scheduler')
+    
+    # ── 1.1 TICK STATE MACHINE ───────────────
+    # Advance waiting/ambiguous cycles for this symbol
+    from app.core.symbol_state import SymbolStateMachine
+    sm = SymbolStateMachine.get_instance()
+    sm.tick_waiting(symbol)
+    sm.tick_ambiguous(symbol)
     
     # ── 2. Circuit Breaker Global ────────────
     cb = await check_circuit_breaker(sb, 'crypto_futures')
@@ -2050,7 +2062,7 @@ async def cycle_15m():
     BOT_STATE.cycle_count_15m += 1
     
     # Create LOCAL provider for this cycle
-    provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret)
+    provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret, testnet=settings.binance_testnet)
     # Check paper mode
     is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
     if is_paper:
@@ -2074,8 +2086,15 @@ async def cycle_15m():
         except Exception as e:
             log_warning(MODULE, f"global_state fetch error: {e}")
 
-        # Ejecución paralela real de todos los símbolos (Sprint 3)
-        tasks = [_process_symbol_15m(s, provider, gs_data, sb) for s in symbols]
+        # Ejecución paralela controlada (Sprint 3)
+        # Usamos un semáforo para no saturar a Binance (evita 418 IP Ban)
+        sem = asyncio.Semaphore(3)
+        
+        async def sem_process(s):
+            async with sem:
+                return await _process_symbol_15m(s, provider, gs_data, sb)
+
+        tasks = [sem_process(s) for s in symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
         
         # --- PHASE 1: Performance Alerts ---
@@ -2124,7 +2143,7 @@ async def main():
     log_info('STARTUP', 'Strategy Engine v1.0 cargado')
     
     # Persistent providers to keep connections alive
-    real_binance = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret)
+    real_binance = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret, testnet=settings.binance_testnet)
     symbols = BOT_STATE.config_cache.get("symbols_active", ["BTCUSDT"])
     
     # 1. Warm-up
