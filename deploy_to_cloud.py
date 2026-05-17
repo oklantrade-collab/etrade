@@ -33,6 +33,8 @@ files_to_sync = [
     "app/strategy/risk_manager.py",
     "app/strategy/signal_generator.py",
     "app/api/stocks.py",
+    "app/api/forex.py",
+    "app/api/crypto.py",
     "app/analysis/fundamental_scorer.py",
     "app/stocks/universe_builder.py",
     "app/stocks/stocks_rule_engine.py",

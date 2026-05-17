@@ -146,14 +146,14 @@ export default function ForexPositions() {
         <div className="glass-card !p-0 overflow-hidden border-white/10 shadow-3xl bg-white/[0.01] backdrop-blur-3xl rounded-[32px]">
            <div className="flex border-b border-white/5 bg-white/[0.02]">
               <button 
-                onClick={() => setActiveTab('open')}
+                onClick={() => { setActiveTab('open'); setClosedPage(0); }}
                 className={`flex-1 py-6 text-[0.6rem] font-black uppercase tracking-[0.3em] transition-all ${activeTab === 'open' ? 'text-blue-400 bg-blue-500/5' : 'text-slate-500 hover:text-slate-300'}`}
               >
                 Posiciones Abiertas ({positions.length})
                 {activeTab === 'open' && <div className="h-0.5 w-12 bg-blue-500 mx-auto mt-2 rounded-full shadow-[0_0_10px_#3b82f6]" />}
               </button>
               <button 
-                onClick={() => setActiveTab('closed')}
+                onClick={() => { setActiveTab('closed'); setClosedPage(0); }}
                 className={`flex-1 py-6 text-[0.6rem] font-black uppercase tracking-[0.3em] transition-all ${activeTab === 'closed' ? 'text-blue-400 bg-blue-500/5' : 'text-slate-500 hover:text-slate-300'}`}
               >
                 Closed History ({closedPositions.length})
@@ -395,27 +395,41 @@ export default function ForexPositions() {
 
                 {/* PAGINATION CONTROLS */}
                 {activeTab === 'closed' && closedPositions.length > ITEMS_PER_PAGE && (
-                  <div className="flex justify-center items-center gap-4 pt-8 pb-8 border-t border-white/5 bg-white/[0.01]">
+                  <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', padding: '24px 0', borderTop: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.01)', flexWrap: 'wrap' }}>
                     <button 
                       onClick={() => setClosedPage(p => Math.max(0, p - 1))}
                       disabled={closedPage === 0}
-                      className="px-6 py-3 rounded-xl bg-white/5 border border-white/5 text-[0.6rem] font-black uppercase tracking-widest hover:bg-white/10 disabled:opacity-20 transition-all text-slate-400 disabled:cursor-not-allowed">
+                      style={{ padding: '8px 16px', borderRadius: '8px', background: '#12161F', border: '1px solid rgba(255,255,255,0.1)', color: '#FFF', cursor: 'pointer', fontSize: '0.8rem', opacity: closedPage === 0 ? 0.3 : 1 }}
+                    >
                       Anterior
                     </button>
-                    <div className="flex gap-2">
-                       {[...Array(Math.ceil(closedPositions.length / ITEMS_PER_PAGE))].map((_, i) => (
-                          <button 
-                             key={i}
-                             onClick={() => setClosedPage(i)}
-                             className={`w-8 h-8 rounded-lg text-[0.6rem] font-black flex items-center justify-center transition-all ${closedPage === i ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>
-                             {i + 1}
-                          </button>
-                       ))}
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                      {[...Array(Math.ceil(closedPositions.length / ITEMS_PER_PAGE))].map((_, i) => (
+                        <button 
+                          key={i}
+                          onClick={() => setClosedPage(i)}
+                          style={{ 
+                            width: '32px', 
+                            height: '32px', 
+                            borderRadius: '6px', 
+                            cursor: 'pointer', 
+                            fontWeight: 'bold', 
+                            fontSize: '0.8rem', 
+                            background: closedPage === i ? '#3b82f6' : '#12161F', 
+                            color: closedPage === i ? '#fff' : '#888',
+                            border: closedPage === i ? 'none' : '1px solid rgba(255,255,255,0.1)',
+                            boxShadow: closedPage === i ? '0 0 10px rgba(59,130,246,0.5)' : 'none'
+                          }}
+                        >
+                          {i + 1}
+                        </button>
+                      ))}
                     </div>
                     <button 
                       onClick={() => setClosedPage(p => Math.min(Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1, p + 1))}
                       disabled={closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1}
-                      className="px-6 py-3 rounded-xl bg-white/5 border border-white/5 text-[0.6rem] font-black uppercase tracking-widest hover:bg-white/10 disabled:opacity-20 transition-all text-slate-400 disabled:cursor-not-allowed">
+                      style={{ padding: '8px 16px', borderRadius: '8px', background: '#12161F', border: '1px solid rgba(255,255,255,0.1)', color: '#FFF', cursor: 'pointer', fontSize: '0.8rem', opacity: closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1 ? 0.3 : 1 }}
+                    >
                       Siguiente
                     </button>
                   </div>
