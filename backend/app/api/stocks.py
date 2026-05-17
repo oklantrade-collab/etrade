@@ -57,12 +57,32 @@ async def get_stocks_opportunities():
             
             tech_data = res_tech.data or []
 
+            # FALLBACK: If no data for today (e.g. Weekend), fetch last 3 days
+            if not tech_data:
+                three_days_ago = (get_nyc_now() - timedelta(days=3)).date().isoformat()
+                res_tech = sb.table("technical_scores")\
+                    .select("*")\
+                    .gte("timestamp", three_days_ago)\
+                    .order("timestamp", desc=True)\
+                    .limit(200)\
+                    .execute()
+                tech_data = res_tech.data or []
+
             # 3.4 Fetch Watchlist Daily to identify PRO members
             wl_res = sb.table("watchlist_daily")\
-                .select("ticker, pool_type, fundamental_score, margin_of_safety")\
+                .select("ticker, pool_type, fundamental_score")\
                 .eq("date", today_str)\
                 .execute()
             wl_map = {r["ticker"]: r for r in (wl_res.data or [])}
+
+            # If empty, try to get from any date to have some metadata
+            if not wl_map:
+                wl_res = sb.table("watchlist_daily")\
+                    .select("ticker, pool_type, fundamental_score")\
+                    .order("date", desc=True)\
+                    .limit(100)\
+                    .execute()
+                wl_map = {r["ticker"]: r for r in (wl_res.data or [])}
 
             # 3.5 Fetch Market Snapshot for latest APEX scores (Sync with Queue)
             snap_res = sb.table("market_snapshot")\
@@ -113,9 +133,9 @@ async def get_stocks_opportunities():
                     wl_info = wl_map.get(ticker, {})
                     pool = wl_info.get("pool_type", "HOT")
                     f_score = float(wl_info.get("fundamental_score") or 0)
-                    mos = float(wl_info.get("margin_of_safety") or 0)
+                    mos = float(wl_info.get("margin_of_safety") or sigs.get("margin_of_safety") or 0)
                     
-                    is_pro = (pool in ["PRO", "PREMIUM"]) or (f_score >= 80 and mos > 0)
+                    is_pro = (pool in ["PRO", "PREMIUM"]) or (f_score >= 80)
                     merged["is_pro_member"] = is_pro
                     merged["pool_type"] = pool
 
@@ -561,7 +581,7 @@ async def get_priority_queue():
                 limit_time_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
                 
                 snap_res = sb.table("market_snapshot")\
-                    .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf, rvol")\
+                    .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf")\
                     .not_.is_("apex_4h", "null")\
                     .gt("updated_at", limit_time_iso)\
                     .order("apex_4h", desc=True)\

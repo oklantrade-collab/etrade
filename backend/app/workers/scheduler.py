@@ -338,6 +338,11 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
              upsert_data['sar_phase_changed_at'] = changed_at_iso
 
         supabase.table('market_snapshot').upsert(upsert_data).execute()
+        
+        # Actualizar cache local para otros ciclos (ej: 5m)
+        from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+        MARKET_SNAPSHOT_CACHE[symbol] = upsert_data
+        
         log_info('SNAPSHOT', f'Snapshot OK para {symbol}: mtf={mtf_score:.4f}')
     except Exception as e:
         log_error('SNAPSHOT', f'FALLO snapshot para {symbol}: {e}')
@@ -837,7 +842,17 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
         # Requirement 1: SIEMPRE escribir snapshot (Reflejar precio actual)
         # Obtenemos el MTF del cache ya que en 5m no se recalcula
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
-        current_mtf_cached = float(MARKET_SNAPSHOT_CACHE.get(symbol, {}).get('mtf_score', 0.0))
+        snap_cached = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+        current_mtf_cached = float(snap_cached.get('mtf_score', 0.0))
+        
+        # Fallback si el cache está vacío (recuperar de DB)
+        if not snap_cached:
+            try:
+                res_db = sb.table('market_snapshot').select('*').eq('symbol', symbol).maybe_single().execute()
+                if res_db.data:
+                    MARKET_SNAPSHOT_CACHE[symbol] = res_db.data
+                    current_mtf_cached = float(res_db.data.get('mtf_score', 0.0))
+            except: pass
         
         # Clasificar régimen de riesgo rápido para el snapshot
         from app.strategy.market_regime import classify_market_risk
@@ -1641,7 +1656,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             # Gradual rollout: ETH y SOL primero
             pilot_v2_symbols = ['ETHUSDT', 'SOLUSDT']
             use_v2 = use_v2_global and symbol in pilot_v2_symbols
-            direction_checked = 'none'
+            direction_checked = allowed_direction or 'none'
             
             if use_v2:
                 # --- NEW STRATEGY ENGINE v1.0 EVALUATION ---

@@ -468,8 +468,18 @@ async def open_forex_position(
     except:
         cfg = {}
 
-    capital = float(cfg.get('capital_total', 1000))
-    risk_pct = FOREX_RISK_CONFIG['max_risk_per_trade'] * 100  # 1%
+    capital_op_fallback = float(cfg.get('capital_operativo', cfg.get('capital_total', 1000)))
+    capital = float(cfg.get('capital_forex_futures', capital_op_fallback))
+    
+    risk_pct = FOREX_RISK_CONFIG['max_risk_per_trade'] * 100  # 1% default
+    try:
+        rc_res = sb.table('risk_config').select('max_risk_per_trade_pct').limit(1).execute()
+        if rc_res.data:
+            risk_pct = float(rc_res.data[0].get('max_risk_per_trade_pct', 2.0))
+        else:
+            risk_pct = float(cfg.get('max_trade_loss_pct', 1.0))
+    except Exception:
+        risk_pct = float(cfg.get('max_trade_loss_pct', 1.0))
 
     # 1. Calcular SL/TP usando Fibonacci
     levels = calculate_forex_sl_tp(

@@ -47,5 +47,33 @@ def test_forex_urgent_exit():
     assert result['urgency'] == 'urgent'
     assert result['conditions']['c3_candle']['passed'] == False
 
+def test_ema_trend_reversal_cut():
+    from app.core.memory_store import MEMORY_STORE
+    
+    # Short trade in loss (-0.5%), EMA3 > EMA9 (bullish crossover -> adverse for short)
+    position = {'symbol': 'BTCUSDT', 'side': 'short', 'avg_entry_price': 80000.0, 'size': 0.1}
+    snap = {}
+    df_4h = pd.DataFrame([
+        {'open': 80000, 'high': 81000, 'low': 79000, 'close': 80500},
+        {'open': 80500, 'high': 81000, 'low': 79000, 'close': 80500},
+        {'open': 80500, 'high': 81000, 'low': 79000, 'close': 80500}
+    ])
+    current_price = 80400.0 # -0.5% loss for short
+    
+    # Mock MEMORY_STORE with 15m dataframe having EMA crossover
+    # We want trending market (ADX=30) and EMA3=80600 > EMA9=80400 (adverse for short)
+    df_15m = pd.DataFrame([
+        {'ema_3': 80000, 'ema_9': 80200, 'ema_20': 80300, 'adx_14': 30},
+        {'ema_3': 80600, 'ema_9': 80400, 'ema_20': 80300, 'adx_14': 30} # last candle
+    ])
+    
+    MEMORY_STORE['BTCUSDT'] = {'15m': {'df': df_15m}}
+    
+    result = evaluate_proactive_exit(position, current_price, snap, df_4h, 'crypto_futures')
+    
+    assert result['should_close'] == True
+    assert result['rule_code'] == 'BbTRC'
+    assert 'Corte Preventivo' in result['reason']
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

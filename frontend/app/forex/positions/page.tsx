@@ -22,8 +22,11 @@ export default function ForexPositions() {
   const [closedPositions, setClosedPositions] = useState<ForexPosition[]>([])
   const [snapshots, setSnapshots] = useState<any>({})
   const [activeTab, setActiveTab] = useState<'open' | 'closed'>('open')
+  const [closedPage, setClosedPage] = useState(0)
+  const ITEMS_PER_PAGE = 10
   const [showChart, setShowChart] = useState(false)
   const [selectedTicker, setSelectedTicker] = useState('')
+
 
 
   useEffect(() => {
@@ -318,7 +321,7 @@ export default function ForexPositions() {
                   </thead>
                   <tbody className="divide-y divide-white/5">
                     {closedPositions.length > 0 ? (
-                      closedPositions.map((pos: any) => {
+                      closedPositions.slice(closedPage * ITEMS_PER_PAGE, (closedPage + 1) * ITEMS_PER_PAGE).map((pos: any) => {
                         const isLong = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy'
                         const exitPrice = pos.exit_price || pos.close_price || pos.current_price || 0
                         const realPnl = parseFloat(pos.pnl_usd || 0)
@@ -388,6 +391,34 @@ export default function ForexPositions() {
                     )}
                   </tbody>
                 </table>
+
+                {/* PAGINATION CONTROLS */}
+                {activeTab === 'closed' && closedPositions.length > ITEMS_PER_PAGE && (
+                  <div className="flex justify-center items-center gap-4 pt-8 pb-8 border-t border-white/5 bg-white/[0.01]">
+                    <button 
+                      onClick={() => setClosedPage(p => Math.max(0, p - 1))}
+                      disabled={closedPage === 0}
+                      className="px-6 py-3 rounded-xl bg-white/5 border border-white/5 text-[0.6rem] font-black uppercase tracking-widest hover:bg-white/10 disabled:opacity-20 transition-all text-slate-400 disabled:cursor-not-allowed">
+                      Anterior
+                    </button>
+                    <div className="flex gap-2">
+                       {[...Array(Math.ceil(closedPositions.length / ITEMS_PER_PAGE))].map((_, i) => (
+                          <button 
+                             key={i}
+                             onClick={() => setClosedPage(i)}
+                             className={`w-8 h-8 rounded-lg text-[0.6rem] font-black flex items-center justify-center transition-all ${closedPage === i ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]' : 'bg-white/5 text-slate-500 hover:bg-white/10'}`}>
+                             {i + 1}
+                          </button>
+                       ))}
+                    </div>
+                    <button 
+                      onClick={() => setClosedPage(p => Math.min(Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1, p + 1))}
+                      disabled={closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1}
+                      className="px-6 py-3 rounded-xl bg-white/5 border border-white/5 text-[0.6rem] font-black uppercase tracking-widest hover:bg-white/10 disabled:opacity-20 transition-all text-slate-400 disabled:cursor-not-allowed">
+                      Siguiente
+                    </button>
+                  </div>
+                )}
               )}
            </div>
         </div>

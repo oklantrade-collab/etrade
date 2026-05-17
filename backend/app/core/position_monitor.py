@@ -894,6 +894,28 @@ async def _execute_paper_open_unlocked(
     except Exception as slv_e:
         log_warning(MODULE, f'SLVM calc error for {symbol}: {slv_e}')
         slv_price = None
+        slv_hs_pips = None
+
+    # ── CALCULAR TAMAÑO DINÁMICO DE POSICIÓN BASADO EN RIESGO Y CAPITAL CONFIGURADO ──
+    try:
+        from app.core.position_sizing import calculate_position_size
+        is_forex = any(x in symbol for x in ['EUR', 'GBP', 'JPY', 'XAU', 'XAG'])
+        m_type = 'forex_futures' if is_forex else 'crypto_futures'
+        
+        sizing_res = calculate_position_size(
+            symbol=symbol,
+            entry_price=price,
+            sl_price=sl_final,
+            market_type=m_type,
+            trade_number=1, # T1 inicial
+            regime=regime.get('category', 'riesgo_medio') if isinstance(regime, dict) else 'riesgo_medio',
+            supabase=supabase
+        )
+        if sizing_res and sizing_res.get('quantity', 0) > 0:
+            size = sizing_res['quantity']
+            log_info(MODULE, f"📏 Dynamic Sizing exitoso para {symbol}: size={size} (notional={sizing_res['nocional']} USD)")
+    except Exception as sizing_e:
+        log_warning(MODULE, f"Error calculando tamaño dinámico en _execute_paper_open_unlocked: {sizing_e}. Usando size original: {size}")
 
     # Persistir
     data = {

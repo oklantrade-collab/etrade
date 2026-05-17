@@ -134,9 +134,17 @@ def calculate_position_size(
         trade_idx = min(trade_number - 1, len(dist) - 1)
         usd_amount = capital_op * dist[trade_idx]
 
-        # PARA FUTUROS: Dimensionar por RIESGO (1% del capital base)
-        # riesgo_usd = capital_base * 1%
-        risk_pct = 0.01  # 1% de riesgo máximo sobre capital base
+        # PARA FUTUROS: Dimensionar por RIESGO dinámico (Inversión x Operación en UI/DB)
+        risk_pct = 0.01  # 1% de riesgo máximo default
+        try:
+            rc_res = supabase.table('risk_config').select('max_risk_per_trade_pct').limit(1).execute()
+            if rc_res.data:
+                risk_pct = float(rc_res.data[0].get('max_risk_per_trade_pct', 2.0)) / 100
+            else:
+                risk_pct = float(c.get('max_trade_loss_pct', 1.0)) / 100
+        except Exception:
+            risk_pct = float(c.get('max_trade_loss_pct', 1.0)) / 100
+
         risk_usd = capital_base * risk_pct
         
         # sl_distance como porcentaje (distancia fraccional)

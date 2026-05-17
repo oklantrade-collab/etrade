@@ -12,6 +12,8 @@ export default function PositionsPage() {
   const [closedPositions, setClosedPositions] = useState<any[]>([])
   const [tab, setTab] = useState<'open'|'closed'>('open')
   const [maxPositions, setMaxPositions] = useState<number>(4)
+  const [closedPage, setClosedPage] = useState(0)
+  const ITEMS_PER_PAGE = 10
 
   useEffect(() => {
     loadPositions()
@@ -39,7 +41,7 @@ export default function PositionsPage() {
       .select('*')
       .eq('status', 'closed')
       .order('closed_at', { ascending: false })
-      .limit(50)
+      .limit(100)
     if (data) setClosedPositions(data)
   }
   async function loadMaxPositions() {
@@ -267,7 +269,7 @@ export default function PositionsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {closedPositions.map((p) => {
+                  {closedPositions.slice(closedPage * ITEMS_PER_PAGE, (closedPage + 1) * ITEMS_PER_PAGE).map((p) => {
                     const time = new Date(p.closed_at).toLocaleString('en-US', { timeZone: 'America/Lima' })
                     const pnl = parseFloat(p.realized_pnl || '0')
                     const pnlPct = parseFloat(p.realized_pnl_pct || '0')
@@ -340,6 +342,47 @@ export default function PositionsPage() {
                   })}
                 </tbody>
               </table>
+
+              {/* PAGINATION CONTROLS */}
+              {closedPositions.length > ITEMS_PER_PAGE && (
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', padding: '24px 0', borderTop: '1px solid var(--border)' }}>
+                  <button 
+                    onClick={() => setClosedPage(p => Math.max(0, p - 1))}
+                    disabled={closedPage === 0}
+                    style={{ padding: '8px 16px', borderRadius: '8px', background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: '0.8rem', opacity: closedPage === 0 ? 0.3 : 1 }}
+                  >
+                    Anterior
+                  </button>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {[...Array(Math.ceil(closedPositions.length / ITEMS_PER_PAGE))].map((_, i) => (
+                      <button 
+                        key={i}
+                        onClick={() => setClosedPage(i)}
+                        style={{ 
+                          width: '32px', 
+                          height: '32px', 
+                          borderRadius: '6px', 
+                          cursor: 'pointer', 
+                          fontWeight: 'bold', 
+                          fontSize: '0.8rem', 
+                          background: closedPage === i ? 'var(--accent-blue)' : 'var(--bg-card)', 
+                          color: closedPage === i ? '#ffffff' : 'var(--text-muted)',
+                          border: closedPage === i ? 'none' : '1px solid var(--border)'
+                        }}
+                      >
+                        {i + 1}
+                      </button>
+                    ))}
+                  </div>
+                  <button 
+                    onClick={() => setClosedPage(p => Math.min(Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1, p + 1))}
+                    disabled={closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1}
+                    style={{ padding: '8px 16px', borderRadius: '8px', background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: '0.8rem', opacity: closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1 ? 0.3 : 1 }}
+                  >
+                    Siguiente
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
             <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>

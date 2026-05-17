@@ -820,9 +820,9 @@ class StandaloneForexWorker:
             snap_data = {
                 'symbol': symbol,
                 'price': price,
-                'ema20': ema20,
-                'ema9': ema9,
-                'ema3': ema3,
+                'ema_20': ema20,
+                'ema_9': ema9,
+                'ema_3': ema3,
                 'atr': atr,
                 'adx': adx,
                 'fibonacci_zone': zone,

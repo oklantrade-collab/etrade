@@ -5,9 +5,13 @@ from app.analysis.parabolic_sar import calculate_parabolic_sar
 def calculate_emas(df: pd.DataFrame,
                    v1=3, v2=9, v3=20, v4=50, v5=200) -> pd.DataFrame:
     df = df.copy()
-    for i, span in enumerate([v1, v2, v3, v4, v5], start=1):
-        # Asegurar que close no sea None
-        df[f'ema{i}'] = df['close'].ffill().ewm(span=span, adjust=False).mean()
+    spans = [v1, v2, v3, v4, v5]
+    for i, span in enumerate(spans, start=1):
+        # Nombres internos (v2)
+        col_name = f'ema{i}'
+        df[col_name] = df['close'].ffill().ewm(span=span, adjust=False).mean()
+        # Alias estándar (v1 compatibility)
+        df[f'ema_{span}'] = df[col_name]
     return df
 
 
@@ -72,12 +76,14 @@ def classify_ema20_phase(df: pd.DataFrame,
     return df
 
 def calculate_macd_4c(df: pd.DataFrame,
-                       fast: int = 12, slow: int = 26) -> pd.DataFrame:
+                       fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
     df = df.copy()
-    df['macd'] = (
-        df['close'].ewm(span=fast, adjust=False).mean() -
-        df['close'].ewm(span=slow, adjust=False).mean()
-    )
+    ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
+    df['macd'] = ema_fast - ema_slow
+    df['macd_signal'] = df['macd'].ewm(span=signal, adjust=False).mean()
+    df['macd_histogram'] = df['macd'] - df['macd_signal']
+    
     prev = df['macd'].shift(1)
     df['macd_4c'] = np.select(
         [(df['macd'] > 0) & (df['macd'] > prev),
@@ -138,6 +144,13 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     df = detect_ema_crosses(df)
     df = calculate_parabolic_sar(df)
     
+    # --- RSI 14 ---
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['rsi_14'] = 100 - (100 / (1 + rs))
+    
     # --- CALCULO DE EXPANSIÓN DE BOLLINGER (SQUEEZE RELEASE) ---
     if 'upper_6' in df.columns and 'lower_6' in df.columns:
         df['bb_width'] = (df['upper_6'] - df['lower_6']) / df['basis']
@@ -167,7 +180,7 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     # pinescript_signal='Buy' ocurre exactamente cuando macd_buy=True (alias 1:1).
     # signal_age cuenta las barras desde la ultima señal activa.
     df['pinescript_signal'] = np.where(df['macd_buy'], 'Buy', 
-                                np.where(df['macd_sell'], 'Sell', ""))
+                                np.where(df['macd_sell'], 'Sell', None))
     
     # Calcular la edad de la señal (cuántas barras han pasado desde el último 'Buy' o 'Sell')
     def calc_signal_data(series):
@@ -178,11 +191,11 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
         cur_signal = None
         
         for val in series:
-            if val is not None:
+            if val in ('Buy', 'Sell'):
                 cur_age = 0
                 cur_signal = val
             else:
-                cur_age += 1
+                cur_age += 1 if cur_age < 999 else 0
             
             ages.append(cur_age)
             last_signals.append(cur_signal)
