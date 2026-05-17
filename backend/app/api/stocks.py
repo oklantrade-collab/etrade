@@ -280,7 +280,7 @@ async def get_stocks_status():
         return {"capital_usd": 5000, "universe_size": 0, "paper_mode": True}
 
 @router.get("/journal")
-async def get_stocks_journal(limit: int = 50):
+async def get_stocks_journal(limit: int = 100):
     """Get trade journal history from closed positions with retry logic."""
     max_retries = 2
     for attempt in range(max_retries):

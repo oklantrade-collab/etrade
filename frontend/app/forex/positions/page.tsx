@@ -306,6 +306,7 @@ export default function ForexPositions() {
                   </tbody>
                </table>
               ) : (
+                <>
                 <table className="w-full text-left">
                   <thead className="bg-white/[0.01] text-[0.6rem] text-slate-500 font-black uppercase tracking-[0.2em] border-b border-white/5">
                     <tr>
@@ -419,6 +420,7 @@ export default function ForexPositions() {
                     </button>
                   </div>
                 )}
+                </>
               )}
            </div>
         </div>

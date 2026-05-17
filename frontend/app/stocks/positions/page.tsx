@@ -11,6 +11,8 @@ export default function StocksPositions() {
   const [tab, setTab] = useState<'open' | 'closed'>('open')
   const [showChart, setShowChart] = useState(false)
   const [selectedTicker, setSelectedTicker] = useState('')
+  const [closedPage, setClosedPage] = useState(0)
+  const ITEMS_PER_PAGE = 10
 
   useEffect(() => {
     setHasMounted(true)
@@ -23,7 +25,7 @@ export default function StocksPositions() {
     try {
       const [openRes, closedRes] = await Promise.all([
         fetch('/api/v1/stocks/positions'),
-        fetch('/api/v1/stocks/journal?limit=50')
+        fetch('/api/v1/stocks/journal?limit=100')
       ])
       
       if (!openRes.ok || !closedRes.ok) throw new Error('API Error')
@@ -350,7 +352,7 @@ export default function StocksPositions() {
 
               {closedPositions.length === 0 && <div style={LoadingStyle}>No hay historial de posiciones cerradas.</div>}
               
-              {closedPositions.map((pos, i) => (
+              {closedPositions.slice(closedPage * ITEMS_PER_PAGE, (closedPage + 1) * ITEMS_PER_PAGE).map((pos, i) => (
                 <div key={`closed-${pos.id || i}`} style={{ ...TableRowClosedStyle, background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <div style={{ 
@@ -413,6 +415,47 @@ export default function StocksPositions() {
                   </div>
                 </div>
               ))}
+
+              {/* PAGINATION CONTROLS */}
+              {closedPositions.length > ITEMS_PER_PAGE && (
+                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', padding: '24px 0', borderTop: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.01)' }}>
+                  <button 
+                    onClick={() => setClosedPage(p => Math.max(0, p - 1))}
+                    disabled={closedPage === 0}
+                    style={{ padding: '8px 16px', borderRadius: '8px', background: '#12161F', border: '1px solid rgba(255,255,255,0.1)', color: '#FFF', cursor: 'pointer', fontSize: '0.8rem', opacity: closedPage === 0 ? 0.3 : 1 }}
+                  >
+                    Anterior
+                  </button>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {[...Array(Math.ceil(closedPositions.length / ITEMS_PER_PAGE))].map((_, i) => (
+                      <button 
+                        key={i}
+                        onClick={() => setClosedPage(i)}
+                        style={{ 
+                          width: '32px', 
+                          height: '32px', 
+                          borderRadius: '6px', 
+                          cursor: 'pointer', 
+                          fontWeight: 'bold', 
+                          fontSize: '0.8rem', 
+                          background: closedPage === i ? '#00C896' : '#12161F', 
+                          color: closedPage === i ? '#000' : '#888',
+                          border: closedPage === i ? 'none' : '1px solid rgba(255,255,255,0.1)'
+                        }}
+                      >
+                        {i + 1}
+                      </button>
+                    ))}
+                  </div>
+                  <button 
+                    onClick={() => setClosedPage(p => Math.min(Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1, p + 1))}
+                    disabled={closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1}
+                    style={{ padding: '8px 16px', borderRadius: '8px', background: '#12161F', border: '1px solid rgba(255,255,255,0.1)', color: '#FFF', cursor: 'pointer', fontSize: '0.8rem', opacity: closedPage >= Math.ceil(closedPositions.length / ITEMS_PER_PAGE) - 1 ? 0.3 : 1 }}
+                  >
+                    Siguiente
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
