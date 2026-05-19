@@ -155,8 +155,8 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     if 'upper_6' in df.columns and 'lower_6' in df.columns:
         df['bb_width'] = (df['upper_6'] - df['lower_6']) / df['basis']
         df['bb_width_avg'] = df['bb_width'].rolling(20).mean()
-        # Expansión: el ancho actual es 50% mayor al promedio reciente
-        df['bb_expanding'] = df['bb_width'] > (df['bb_width_avg'] * 1.5)
+        # Expansión: el ancho actual es 15% mayor al promedio reciente (Calibrado de alta sensibilidad)
+        df['bb_expanding'] = df['bb_width'] > (df['bb_width_avg'] * 1.15)
     
     # --- DISTANCIA ENTRE EMAS (AGOTAMIENTO) ---
     if 'ema1' in df.columns and 'ema2' in df.columns:

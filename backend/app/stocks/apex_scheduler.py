@@ -134,6 +134,14 @@ async def run_apex_cycle(supabase=None):
                 df_4h = await _get_df(ticker, '4h')
                 df_daily = await _get_df(ticker, '1d')
 
+                # Robust validation check - skip ticker if any dataframe is empty or insufficient
+                if (df_5m is None or df_5m.empty or len(df_5m) < 5 or
+                    df_15m is None or df_15m.empty or len(df_15m) < 5 or
+                    df_4h is None or df_4h.empty or len(df_4h) < 5 or
+                    df_daily is None or df_daily.empty or len(df_daily) < 5):
+                    log_warning(MODULE, f"Skipping APEX calculation for {ticker}: missing or insufficient time-series dataframes")
+                    continue
+
                 result = calculate_apex_score(
                     ticker=ticker,
                     snap=snap,

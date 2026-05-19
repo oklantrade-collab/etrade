@@ -77,7 +77,11 @@ def validate_signal(
     risk_config: dict,
     supabase_client
 ) -> dict:
-    
+    # CHECK 0 — Bloqueos de Seguridad por Subprocesos
+    from app.core.safety_manager import is_crypto_safety_blocked, check_db_safety_block
+    if is_crypto_safety_blocked() or check_db_safety_block('crypto_futures'):
+        return { 'approved': False, 'reason': 'SAFETY_BLOCK_CRYPTO_ACTIVE' }
+
     # CHECK 1 — Bot activo:
     if not risk_config.get('bot_active', True):
         return { 'approved': False, 'reason': 'BOT_INACTIVE' }

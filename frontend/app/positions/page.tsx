@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { formatDateInTimezone } from '@/lib/timezone'
 
 /** Canonical crypto symbol for display (matches backend SOLUSDT). */
 function normalizeCryptoSymbol(s: string) {
@@ -13,6 +14,16 @@ export default function PositionsPage() {
   const [tab, setTab] = useState<'open'|'closed'>('open')
   const [maxPositions, setMaxPositions] = useState<number>(4)
   const [closedPage, setClosedPage] = useState(0)
+  const [tz, setTz] = useState('America/Lima')
+
+  useEffect(() => {
+    const handleTzUpdate = () => {
+      setTz(localStorage.getItem('app_timezone') || 'America/Lima')
+    }
+    window.addEventListener('timezoneUpdated', handleTzUpdate)
+    handleTzUpdate()
+    return () => window.removeEventListener('timezoneUpdated', handleTzUpdate)
+  }, [])
   const ITEMS_PER_PAGE = 10
 
   useEffect(() => {
@@ -140,8 +151,8 @@ export default function PositionsPage() {
                       return (
                         <tr key={p.id}>
                           <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: '1.2' }}>
-                            <div>{new Date(p.opened_at).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit' })}</div>
-                            <div style={{ fontWeight: 'bold' }}>{new Date(p.opened_at).toLocaleTimeString('en-US', { timeZone: 'America/Lima', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}</div>
+                            <div>{formatDateInTimezone(p.opened_at, 'date')}</div>
+                            <div style={{ fontWeight: 'bold' }}>{formatDateInTimezone(p.opened_at, 'time')}</div>
                           </td>
                           <td>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
@@ -270,12 +281,14 @@ export default function PositionsPage() {
                 </thead>
                 <tbody>
                   {closedPositions.slice(closedPage * ITEMS_PER_PAGE, (closedPage + 1) * ITEMS_PER_PAGE).map((p) => {
-                    const time = new Date(p.closed_at).toLocaleString('en-US', { timeZone: 'America/Lima' })
                     const pnl = parseFloat(p.realized_pnl || '0')
                     const pnlPct = parseFloat(p.realized_pnl_pct || '0')
                     return (
                       <tr key={p.id}>
-                        <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{time}</td>
+                        <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                          <div>{formatDateInTimezone(p.closed_at, 'date')}</div>
+                          <div style={{ fontWeight: 'bold' }}>{formatDateInTimezone(p.closed_at, 'time')}</div>
+                        </td>
                         <td>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                               <div style={{ 

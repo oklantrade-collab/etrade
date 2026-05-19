@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useRef } from 'react'
 import ForexWelcomeScreen from '../WelcomeScreen'
+import { formatDateInTimezone } from '@/lib/timezone'
 
 interface ForexPosition {
   id: string
@@ -23,6 +24,16 @@ export default function ForexPositions() {
   const [snapshots, setSnapshots] = useState<any>({})
   const [activeTab, setActiveTab] = useState<'open' | 'closed'>('open')
   const [closedPage, setClosedPage] = useState(0)
+  const [tz, setTz] = useState('America/Lima')
+
+  useEffect(() => {
+    const handleTzUpdate = () => {
+      setTz(localStorage.getItem('app_timezone') || 'America/Lima')
+    }
+    window.addEventListener('timezoneUpdated', handleTzUpdate)
+    handleTzUpdate()
+    return () => window.removeEventListener('timezoneUpdated', handleTzUpdate)
+  }, [])
   const ITEMS_PER_PAGE = 10
   const [showChart, setShowChart] = useState(false)
   const [selectedTicker, setSelectedTicker] = useState('')
@@ -198,7 +209,10 @@ export default function ForexPositions() {
                                  </div>
                               </td>
                               <td className="py-8">
-                                 <span className="text-[0.65rem] font-bold text-slate-500 uppercase">{new Date(pos.opened_at).toLocaleTimeString()}</span>
+                                 <div className="flex flex-col">
+                                   <span className="text-[0.65rem] font-bold text-slate-400 uppercase">{formatDateInTimezone(pos.opened_at, 'date')}</span>
+                                   <span className="text-[0.55rem] font-medium text-slate-600 uppercase">{formatDateInTimezone(pos.opened_at, 'time')}</span>
+                                 </div>
                               </td>
                                <td className="py-8">
                                  <span className={`font-mono text-sm font-black ${pos.lots >= 0 ? 'text-white' : 'text-rose-400'}`}>
@@ -342,8 +356,8 @@ export default function ForexPositions() {
                              </td>
                              <td className="py-8">
                                 <div className="flex flex-col">
-                                  <span className="text-[0.65rem] font-bold text-slate-400 uppercase">{new Date(pos.closed_at || pos.opened_at).toLocaleDateString()}</span>
-                                  <span className="text-[0.55rem] font-medium text-slate-600 uppercase">{new Date(pos.closed_at || pos.opened_at).toLocaleTimeString()}</span>
+                                  <span className="text-[0.65rem] font-bold text-slate-400 uppercase">{formatDateInTimezone(pos.closed_at || pos.opened_at, 'date')}</span>
+                                  <span className="text-[0.55rem] font-medium text-slate-600 uppercase">{formatDateInTimezone(pos.closed_at || pos.opened_at, 'time')}</span>
                                 </div>
                              </td>
                              <td className="py-8">

@@ -10,6 +10,7 @@ from app.workers.stocks_scheduler import process_ticker, get_stocks_config
 from app.core.logger import log_info
 
 async def test_cycle():
+    sys.stdout.reconfigure(encoding='utf-8')
     print("\n" + "="*50)
     print(" INICIANDO PRUEBA DE FLUJO COMPLETO (Capa 0 + Capas 1-2)")
     print("="*50)

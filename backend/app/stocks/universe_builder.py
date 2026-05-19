@@ -277,7 +277,7 @@ class UniverseBuilder:
             return final_candidates
 
         except Exception as e:
-            log_error(MODULE, f"Yahoo Screener failed: {e}")
+            log_warning(MODULE, f"Yahoo Screener failed: {e}")
             return []
 
     async def _calculate_gap(self, ticker: str, current_price: float) -> float:
@@ -323,7 +323,7 @@ class UniverseBuilder:
             return candidates
 
         except Exception as e:
-            log_error(MODULE, f"Alpha Vantage fallback failed: {e}")
+            log_warning(MODULE, f"Alpha Vantage fallback failed: {e}")
             return []
 
     # ─── 4. Static Curated Fallback ────────────────────────────
@@ -376,7 +376,8 @@ class UniverseBuilder:
                              f"fund_score={sample['fundamental_score']} | pool={sample['pool_type']}")
 
         # 3. Guardar con Reintentos (PGRST002/Timeout protection)
-        max_retries = 3
+        max_retries = 5
+        current_rows = [dict(r) for r in rows]
         for attempt in range(max_retries):
             try:
                 # LIMPIEZA SELECTIVA: Borramos lo que el escáner automático encontró hoy, 
@@ -387,11 +388,30 @@ class UniverseBuilder:
                     .neq("catalyst_type", "MANUAL_ADD")\
                     .execute() 
                 
-                sb.table("watchlist_daily").insert(rows).execute()
-                log_info(MODULE, f"DB OK: {len(rows)} tickers saved for {today}")
+                sb.table("watchlist_daily").insert(current_rows).execute()
+                log_info(MODULE, f"DB OK: {len(current_rows)} tickers saved for {today}")
                 return # Exit on success
             except Exception as e:
-                if "PGRST002" in str(e) or "schema cache" in str(e) or "Timeout" in str(e):
+                e_str = str(e)
+                # Check for missing columns in Supabase schema cache
+                missing_col = None
+                if "Could not find the" in e_str and "column of 'watchlist_daily' in the schema cache" in e_str:
+                    # Extract the missing column name
+                    import re
+                    match = re.search(r"Could not find the '([^']+)' column", e_str)
+                    if match:
+                        missing_col = match.group(1)
+                
+                if missing_col:
+                    log_warning(MODULE, f"Schema mismatch: column '{missing_col}' does not exist in watchlist_daily table. Removing it and retrying...")
+                    # Remove the missing column from all rows
+                    for r in current_rows:
+                        if missing_col in r:
+                            del r[missing_col]
+                    # Retry immediately without waiting
+                    continue
+                    
+                if "PGRST002" in e_str or "schema cache" in e_str or "Timeout" in e_str:
                     log_warning(MODULE, f"Supabase busy (Attempt {attempt+1}/{max_retries}). Retrying in 1s...")
                     await asyncio.sleep(1)
                     continue

@@ -122,7 +122,7 @@ def get_divisor(symbol):
     return SYMBOL_DIVISORS.get(symbol, 100000)
 
 
-STATE = { 'symbol_ids': {}, 'prices': {}, 'candles': {}, 'cycle_count': 0 }
+STATE = { 'symbol_ids': {}, 'prices': {}, 'candles': {}, 'cycle_count': 0, 'highest_prices_cache': {}, 'lowest_prices_cache': {} }
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def calculate_parabolic_sar(df, start=0.02, increment=0.02, maximum=0.20):
@@ -615,9 +615,10 @@ class StandaloneForexWorker:
             positions = res.data or []
             if not positions: return
 
-            # 2. Obtener dataframes (15m y 5m)
+            # 2. Obtener dataframes (15m, 5m y 4h)
             df_15m = self._get_candles_df(symbol, '15m')
             df_5m  = self._get_candles_df(symbol, '5m')
+            df_4h  = self._get_candles_df(symbol, '4h')
             
             # 3. Obtener snapshot para indicadores
             snap_res = self.safe_db_execute(sb.table('market_snapshot').select('*').eq('symbol', symbol).limit(1))
@@ -637,7 +638,10 @@ class StandaloneForexWorker:
                 # El trailing dinámico reactivo es mandatorio para SHORT en 5m
                 # Para LONG mantenemos 15m (según requerimiento)
                 
-                # Crear objeto de estado temporal para evaluación
+                # Crear objeto de estado temporal para evaluación, recuperando marcas históricas de memoria
+                h_p = STATE['highest_prices_cache'].get(pos['id']) or float(pos.get('highest_price') or pos.get('entry_price') or 0)
+                l_p = STATE['lowest_prices_cache'].get(pos['id']) or float(pos.get('lowest_price') or pos.get('entry_price') or 0)
+                
                 state = ProtectionState(
                     position_id = str(pos['id']),
                     symbol      = symbol,
@@ -646,8 +650,8 @@ class StandaloneForexWorker:
                     current_sl  = float(pos.get('sl_price') or 0),
                     original_sl = float(pos.get('original_sl') or pos.get('sl_price') or 0),
                     market_type = 'forex_futures',
-                    highest_price = float(pos.get('highest_price') or 0),
-                    lowest_price  = float(pos.get('lowest_price') or 0)
+                    highest_price = h_p,
+                    lowest_price  = l_p
                 )
 
                 # Precio base para el trailing (mejor precio alcanzado)
@@ -681,9 +685,9 @@ class StandaloneForexWorker:
                     # 2. Actualizar en Supabase
                     upd_data = {'sl_price': new_sl}
                     if is_short:
-                        upd_data['lowest_price'] = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+                        STATE['lowest_prices_cache'][pos['id']] = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
                     else:
-                        upd_data['highest_price'] = max(state.highest_price, current_price)
+                        STATE['highest_prices_cache'][pos['id']] = max(state.highest_price, current_price)
                         
                     self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
                 
@@ -707,19 +711,15 @@ class StandaloneForexWorker:
                     continue
 
                 else:
-                    # Si no hay update de SL, al menos actualizamos highest/lowest price si mejoró
-                    upd_price = {}
+                    # Si no hay update de SL, al menos actualizamos en memoria local el mejor precio si mejoró
                     if is_short:
                         low = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
                         if low < (state.lowest_price if state.lowest_price > 0 else 999999):
-                            upd_price['lowest_price'] = low
+                            STATE['lowest_prices_cache'][pos['id']] = low
                     else:
                         high = max(state.highest_price, current_price)
                         if high > state.highest_price:
-                            upd_price['highest_price'] = high
-                    
-                    if upd_price:
-                        self.safe_db_execute(sb.table('forex_positions').update(upd_price).eq('id', pos['id']))
+                            STATE['highest_prices_cache'][pos['id']] = high
 
         except Exception as e:
             self.log(f"Error en _manage_position_5m para {symbol}: {e}", "ERROR")
@@ -816,21 +816,8 @@ class StandaloneForexWorker:
                     if price > ema20 + (atr * multipliers[i-1]): zone = i; break
                     if price < ema20 - (atr * multipliers[i-1]): zone = -i; break
 
-            # Upsert to market_snapshot
-            snap_data = {
-                'symbol': symbol,
-                'price': price,
-                'ema_20': ema20,
-                'ema_9': ema9,
-                'ema_3': ema3,
-                'atr': atr,
-                'adx': adx,
-                'fibonacci_zone': zone,
-                'bb_expanding': bb_expanding,
-                'ema_exhaustion': ema_exhaustion,
-                'updated_at': datetime.now(timezone.utc).isoformat()
-            }
-            self.safe_db_execute(sb.table('market_snapshot').upsert(snap_data))
+            # Eliminado upsert duplicado síncrono propenso a errores.
+            # Los datos se de-duplican y se guardan de forma segura en la sección inferior.
 
             # --- CALCULO DE MTF SCORE ---
             mtf_score = 0.0
@@ -892,6 +879,7 @@ class StandaloneForexWorker:
                 'ema_9': ema9,
                 'ema_20': ema20,
                 'bb_expanding': bb_expanding,
+                'ema_exhaustion': ema_exhaustion,
                 'adx': adx,
                 'pinescript_signal': 'Buy' if last.get('macd_buy') else ('Sell' if last.get('macd_sell') else None)
             }
@@ -906,9 +894,9 @@ class StandaloneForexWorker:
                     return q.execute()
                 except Exception as e:
                     err_str = str(e).lower()
-                    if "column" in err_str and ("atr" in err_str or "bb_expanding" in err_str or "ema_" in err_str):
+                    if "column" in err_str and ("atr" in err_str or "bb_expanding" in err_str or "ema_" in err_str or "ema_exhaustion" in err_str):
                         # Limpieza agresiva de columnas conflictivas
-                        for col in ['atr', 'bb_expanding', 'ema_3', 'ema_9', 'ema_20']:
+                        for col in ['atr', 'bb_expanding', 'ema_3', 'ema_9', 'ema_20', 'ema_exhaustion']:
                             if col in s: del s[col]
                         return sb.table('market_snapshot').upsert(s, on_conflict='symbol').execute()
 

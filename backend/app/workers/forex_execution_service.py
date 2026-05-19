@@ -52,16 +52,16 @@ def normalize_forex_price(symbol, price):
 # sin esperar confirmaciones tecnicas.
 HARD_CAP_LOSS_PIPS = {
     'EURUSD': 40,
-    'GBPUSD': 40,
-    'USDJPY': 40,
-    'XAUUSD': 80,
+    'GBPUSD': 60,   # Aumentado de 40 a 60 pips por la volatilidad natural de la Libra (Cable)
+    'USDJPY': 100, # Aumentado de 40 a 100 pips para dar espacio a la alta volatilidad del Yen
+    'XAUUSD': 1200, # Aumentado de 80 a 1200 pips ($12.00 USD) para dar margen a la volatilidad del Oro
 }
 HARD_CAP_LOSS_USD = 25.0  # Pérdida máxima de emergencia en USD por trade
 MAX_SL_PIPS = {
     'EURUSD': 30,
-    'GBPUSD': 30,
-    'USDJPY': 30,
-    'XAUUSD': 60,
+    'GBPUSD': 50,   # Aumentado de 30 a 50 pips para evitar salidas prematuras en la Libra
+    'USDJPY': 80,  # Aumentado de 30 a 80 pips para evitar cierres prematuros en el Yen
+    'XAUUSD': 1000, # Aumentado de 60 a 1000 pips ($10.00 USD) para evitar cierres prematuros en Oro
 }
 
 class ForexExecutionService:
@@ -103,6 +103,22 @@ class ForexExecutionService:
         try:
             # 1. Recargar posiciones frescas desde DB para evitar discrepancias
             self._load_open_positions()
+            
+            # Verificación de Día y Hora para Protecciones en Forex (Viernes 3 PM GMT-5 es 20:00 UTC)
+            now = datetime.now(timezone.utc)
+            weekday = now.weekday()  # 4 = Viernes, 6 = Domingo
+            hour = now.hour
+
+            # A. Bloqueo de Nuevas Entradas el Viernes a partir de las 3:00 PM local (20:00 UTC)
+            if weekday == 4 and hour >= 20:
+                self.log("⚠️ [PROTECCIÓN VIERNES] Bloqueo de nuevas señales activo después de las 3:00 PM local.")
+                return
+
+            # B. Filtro de Estabilización de Reapertura Dominical (22:00 a 23:59 UTC)
+            if weekday == 6 and hour >= 22:
+                self.log("⏳ [ESTABILIZACIÓN DOMINGO] Esperando normalización de spreads dominicales. Nuevas señales omitidas.")
+                return
+
             open_count = len(self._open_positions_list)
 
             # 2. Cargar config de riesgo dinamica
@@ -233,15 +249,29 @@ class ForexExecutionService:
         # Símbolos que requieren alineación estricta y cascada de EMAs
         strict_symbols = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY']
         
+        price = context.get('price', 0)
+        pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+
+        # Ventanas de pullback dinámicas en pips por volatilidad (Evita falsas señales y cuchillos caídos)
+        PULLBACK_WINDOW_PIPS = {
+            'EURUSD': 5,
+            'GBPUSD': 5,
+            'USDJPY': 15,
+            'XAUUSD': 50,
+        }
+        pb_pips = PULLBACK_WINDOW_PIPS.get(symbol, 5)
+
         if direction == 'long':
-            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.4 Y no opuesto Pine Y no en techo Y ADX > 25 Y EMA3 > EMA9
+            # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.4 Y no opuesto Pine Y no en techo Y ADX > 25 Y pullback confirmado
             if symbol in strict_symbols:
-                # REFINAMIENTO V3: Alineación Macro Obligatoria (SAR 4h) + Cascada EMA (3 > 9 > 20)
+                # REFINAMIENTO V4: Entrada en pullback ordenado (precio entre EMA20 y EMA9 + pb_pips) + gatillo de ruptura de EMA3 + confirmación de giro (EMA3 > EMA9)
+                # NOTA CRÍTICA: Se exige (ema3 > ema9) para evitar el bucle de cierre inmediato del stop de protección contrario
+                pullback_confirmed = (ema9 > ema20) and (ema20 <= price <= ema9 + (pb_pips * pip_size)) and (price > ema3) and (ema3 > ema9) if (ema3 and ema9 and ema20) else True
                 rule_alignment_triggered = (
                     sar_15m_ok and sar_4h_ok and 
                     mtf >= 0.4 and pine_not_opposite and 
                     struct_ok and fib_zone <= 3 and 
-                    adx > 25 and (ema3 > ema9 > ema20 if ema3 and ema9 and ema20 else True)
+                    adx > 25 and pullback_confirmed
                 )
             else:
                 rule_alignment_triggered = (
@@ -251,14 +281,16 @@ class ForexExecutionService:
                     adx > 25 and (ema3 > ema9 if ema3 and ema9 else True)
                 )
         else:
-            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.4 Y no opuesto Pine Y no en piso Y ADX > 25 Y EMA3 < EMA9
+            # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.4 Y no opuesto Pine Y no en piso Y ADX > 25 Y pullback confirmado
             if symbol in strict_symbols:
-                # REFINAMIENTO V3: Alineación Macro Obligatoria (SAR 4h) + Cascada EMA (3 < 9 < 20)
+                # REFINAMIENTO V4: Entrada en pullback ordenado (precio entre EMA9 - pb_pips y EMA20) + gatillo de ruptura de EMA3 + confirmación de giro (EMA3 < EMA9)
+                # NOTA CRÍTICA: Se exige (ema3 < ema9) para evitar el bucle de cierre inmediato del stop de protección contrario
+                pullback_confirmed = (ema9 < ema20) and (ema9 - (pb_pips * pip_size) <= price <= ema20) and (price < ema3) and (ema3 < ema9) if (ema3 and ema9 and ema20) else True
                 rule_alignment_triggered = (
                     sar_15m_ok and sar_4h_ok and 
                     mtf <= -0.4 and pine_not_opposite and 
                     struct_ok and fib_zone >= -3 and 
-                    adx > 25 and (ema3 < ema9 < ema20 if ema3 and ema9 and ema20 else True)
+                    adx > 25 and pullback_confirmed
                 )
             else:
                 rule_alignment_triggered = (
@@ -293,11 +325,129 @@ class ForexExecutionService:
             'score': 0.95 # Alta prioridad
         })
 
+        # NUEVA ESTRATEGIA: Aa61 (Squeeze Breakout / Bollinger Explosion)
+        explosion_triggered = False
+        if ema3 and ema9 and ema20:
+            if direction == 'long':
+                # LONG Aa61: Expansión de Bollinger + cruce de EMAs alcista + precio sobre Basis + ADX > 20
+                explosion_triggered = (
+                    ema3 > ema9 > ema20 and
+                    price > ema20 and
+                    bb_exp and
+                    adx > 20 and
+                    sar_15m_ok and
+                    pine_not_opposite and
+                    fib_zone <= 3
+                )
+            else:
+                # SHORT Aa61_short: Expansión de Bollinger + cruce de EMAs bajista + precio bajo Basis + ADX > 20
+                explosion_triggered = (
+                    ema3 < ema9 < ema20 and
+                    price < ema20 and
+                    bb_exp and
+                    adx > 20 and
+                    sar_15m_ok and
+                    pine_not_opposite and
+                    fib_zone >= -3
+                )
+
+        results.append({
+            'rule_code': 'Aa61' if direction == 'long' else 'Aa61_short',
+            'triggered': explosion_triggered,
+            'score': 0.98 # Prioridad ultra alta
+        })
+
         # Dd Reversal: Solo si alinea con tendencia 4h (sar_4h_ok)
         fib_reversal = (direction == 'long' and fib_zone <= -2) or (direction == 'short' and fib_zone >= 2)
+        
+        # Propuesta 2: Filtro de fuerza de contratendencia (Evitar cuchillos caídos)
+        # Si la tendencia contraria es ultra-fuerte (ADX > 35) y alineada en contra, se bloquea la entrada Swing.
+        adx_val = context.get('adx', 0)
+        strong_contratrend = (
+            (direction == 'long' and adx_val > 35 and mtf <= -0.5) or
+            (direction == 'short' and adx_val > 35 and mtf >= 0.5)
+        )
+        
+        # NUEVA LÓGICA SWING AVANZADA (SIPV + Giro de Bandas de Bollinger + RSI)
+        from app.core.memory_store import MEMORY_STORE
+        df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+        
+        swing_triggered = False
+        
+        if df_15m is not None and len(df_15m) >= 6:
+            last_row = df_15m.iloc[-1].to_dict()
+            
+            if direction == 'long':
+                # Swing Long (Dd21_15m): 
+                # 1. Pendiente de lower_6 plana o girando alcista
+                lower6_flat = False
+                lower6_slope = 0.0
+                if 'lower_6' in df_15m.columns:
+                    lower6_now = float(df_15m['lower_6'].iloc[-1])
+                    lower6_prev = float(df_15m['lower_6'].iloc[-5])
+                    if lower6_prev > 0:
+                        lower6_slope = (lower6_now - lower6_prev) / lower6_prev * 100
+                        lower6_flat = lower6_slope >= -0.15
+                
+                # 2. Señal SIPV de reversión alcista
+                sipv_signal = (
+                    bool(last_row.get('is_dragonfly', False)) or
+                    bool(last_row.get('is_bullish_engulfing', False)) or
+                    bool(last_row.get('low_higher_than_prev', False)) or
+                    bool(last_row.get('is_doji', False))
+                )
+                
+                # 3. RSI en sobreventa (<= 35)
+                rsi_val = float(last_row.get('rsi_14', 30.0))
+                rsi_ok = rsi_val <= 35
+                
+                # 4. Precio interactuando con banda lower_5 o inferior
+                lower5 = float(last_row.get('lower_5', 0))
+                near_support = price <= lower5 if lower5 > 0 else True
+                
+                swing_triggered = (
+                    lower6_flat and sipv_signal and rsi_ok and near_support and
+                    sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend
+                )
+            else:
+                # Swing Short (Dd11_15m):
+                # 1. Pendiente de upper_6 plana o girando bajista
+                upper6_flat = False
+                upper6_slope = 0.0
+                if 'upper_6' in df_15m.columns:
+                    upper6_now = float(df_15m['upper_6'].iloc[-1])
+                    upper6_prev = float(df_15m['upper_6'].iloc[-5])
+                    if upper6_prev > 0:
+                        upper6_slope = (upper6_now - upper6_prev) / upper6_prev * 100
+                        upper6_flat = upper6_slope <= 0.15
+                
+                # 2. Señal SIPV de reversión bajista
+                sipv_signal = (
+                    bool(last_row.get('is_gravestone', False)) or
+                    bool(last_row.get('is_bearish_engulfing', False)) or
+                    bool(last_row.get('high_lower_than_prev', False)) or
+                    bool(last_row.get('is_doji', False))
+                )
+                
+                # 3. RSI en sobrecompra (>= 65)
+                rsi_val = float(last_row.get('rsi_14', 70.0))
+                rsi_ok = rsi_val >= 65
+                
+                # 4. Precio interactuando con banda upper_5 o superior
+                upper5 = float(last_row.get('upper_5', 0))
+                near_resistance = price >= upper5 if upper5 > 0 else True
+                
+                swing_triggered = (
+                    upper6_flat and sipv_signal and rsi_ok and near_resistance and
+                    sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend
+                )
+        else:
+            # Fallback en caso de no tener histórico en memoria (mantiene la lógica básica)
+            swing_triggered = fib_reversal and sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend
+
         results.append({
             'rule_code': 'Dd21_15m' if direction == 'long' else 'Dd11_15m', 
-            'triggered': (fib_reversal and sar_15m_ok and sar_4h_ok and struct_ok), 
+            'triggered': swing_triggered, 
             'score': 0.9
         })
 
@@ -305,6 +455,12 @@ class ForexExecutionService:
         return max(triggered, key=lambda x: x['score']) if triggered else None
 
     def _execute_signal(self, symbol, direction, signal, snap):
+        # CHECK 0: Bloqueos de Seguridad por Subprocesos
+        from app.core.safety_manager import is_forex_safety_blocked, check_db_safety_block
+        if is_forex_safety_blocked() or check_db_safety_block('forex_futures'):
+            self.log(f"⚠️ ORDEN ABORTADA para {symbol} ({direction.upper()}): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.", "CRITICAL")
+            return
+
         # 1. Reglas Multi-layer (Misma estrategia)
         same_strat = [p for p in self._open_positions_list if p['symbol'] == symbol and p['rule_code'] == signal['rule_code']]
         
@@ -362,26 +518,7 @@ class ForexExecutionService:
             self.log(f'LIMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
 
-        # 4. Reversion forzada: No permitimos BUY y SELL a la vez (Hedge OFF) - MANDATORIO
-        # Normalizamos el simbolo para asegurar coincidencia
-        opposite = 'short' if direction == 'long' else 'long'
-        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == opposite]
-        if opp_positions:
-            self.log(f'[REVERSION] Cerrando {len(opp_positions)} posiciones {opposite.upper()} por entrada {direction.upper()}')
-            price = self._safe_float(snap.get('price'))
-            for p in opp_positions:
-                entry = self._safe_float(p.get('entry_price'))
-                # Lots ya es negativo para shorts en _save_position, usamos absoluto para pips
-                lots_abs = abs(self._safe_float(p.get('lots'), 0.01))
-                pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-                
-                side = p.get('side', 'long').lower()
-                pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
-                self._close_position(p, price, f'reversal_{direction}', pips)
-            # Recargar posiciones tras cerrar opuestas
-            self._load_open_positions()
-
-        # 2. Ejecutar nueva se al
+        # 4. Calcular parámetros e idoneidad de la nueva orden ANTES de revertir
         price = self._safe_float(snap.get('price'))
         sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal["rule_code"])
         lots = self._calculate_lot_size(symbol, sl_pips)
@@ -391,7 +528,7 @@ class ForexExecutionService:
         pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
         riesgo_real = lots * sl_pips * pip_val
 
-        # Verificar Riesgo Total Acumulado (M ximo 30%)
+        # Verificar Riesgo Total Acumulado (Máximo 30%)
         total_risk_usd = 0
         for p in self._open_positions_list:
             try:
@@ -406,18 +543,44 @@ class ForexExecutionService:
         max_accumulated = f_config['capital_usd'] * f_config['max_total_risk_pct'] / 100
         
         if (total_risk_usd + riesgo_real) > max_accumulated:
-            self.log(f'RIESGO TOTAL EXCEDIDO (${total_risk_usd:.2f} + ${riesgo_real:.2f} > ${max_accumulated:.2f})', 'WARNING')
+            self.log(f'RIESGO TOTAL EXCEDIDO (${total_risk_usd:.2f} + ${riesgo_real:.2f} > ${max_accumulated:.2f}). Nueva señal abortada sin revertir.', 'WARNING')
             return
 
-        if riesgo_real > (riesgo_limite * 1.5): # Margen de holgura por el m nimo de 0.01 lotes
+        if riesgo_real > (riesgo_limite * 1.5): # Margen de holgura por el mínimo de 0.01 lotes
             self.log(
                 f'ABORTANDO {symbol}: Riesgo proyectado ${riesgo_real:.2f} '
-                f'excede el l mite de ${riesgo_limite:.2f} '
-                f'(SL Pips: {sl_pips:.1f}, Lots: {lots})',
+                f'excede el límite de ${riesgo_limite:.2f} '
+                f'(SL Pips: {sl_pips:.1f}, Lots: {lots}). Sin revertir.',
                 'WARNING'
             )
             return
 
+        # 5. Reversion forzada condicional con exclusión estricta de Swing (Hedge OFF) - MANDATORIO
+        opposite = 'short' if direction == 'long' else 'long'
+        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == opposite]
+        
+        opp_to_close = []
+        for p in opp_positions:
+            p_rule = (p.get('rule_code') or '').lower()
+            if 'dd11' in p_rule or 'dd21' in p_rule:
+                self.log(f"[SWING SAFE] Omitiendo cierre por reversión para la posición Swing {p['id']} ({p_rule})")
+                continue
+            opp_to_close.append(p)
+
+        if opp_to_close:
+            self.log(f'[REVERSION] Cerrando {len(opp_to_close)} posiciones {opposite.upper()} por entrada {direction.upper()} viable')
+            for p in opp_to_close:
+                entry = self._safe_float(p.get('entry_price'))
+                lots_abs = abs(self._safe_float(p.get('lots'), 0.01))
+                pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                
+                side = p.get('side', 'long').lower()
+                pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
+                self._close_position(p, price, f'reversal_{direction}', pips)
+            # Recargar posiciones tras cerrar opuestas
+            self._load_open_positions()
+
+        # 6. Ejecutar nueva señal
         self.log(f'[ORDEN] {direction.upper()} {symbol} ({signal["rule_code"]}): lots={lots} risk=${riesgo_real:.2f}')
         if self.mode == 'live': self._execute_live_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
         else: self._execute_paper_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
@@ -457,17 +620,38 @@ class ForexExecutionService:
         atr = abs(u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
         
         # Usamos niveles de Fibonacci para consistencia con Crypto
+        ema20 = self._safe_float(snap.get('ema_20'))
+        
+        # Configurar offset de SL dinámico por símbolo para dar suficiente espacio
+        SL_OFFSET_PIPS = {
+            'EURUSD': 10,
+            'GBPUSD': 15,  # Aumentado de 10 a 15 pips por la volatilidad de la Libra
+            'USDJPY': 30,  # Aumentado de 10 a 30 pips ($0.30 JPY) para evitar que quede demasiado pegado a la EMA20 en el Yen
+            'XAUUSD': 300, # 300 pips ($3.00 USD) para evitar que quede demasiado pegado a la EMA20
+        }
+        offset_pips = SL_OFFSET_PIPS.get(symbol, 10)
+        
         if direction == 'long':
-            # SL: Lower 6 - 0.5 * ATR
-            sl = self._safe_float(snap.get('lower_6'), (entry - 50 * pip_size)) - (0.5 * atr)
-            if sl >= entry: sl = entry - (10 * pip_size)  # fallback
+            # SL dinámico: offset_pips por debajo de la EMA20 (si está disponible)
+            if ema20 > 0:
+                sl = ema20 - (offset_pips * pip_size)
+            else:
+                sl = self._safe_float(snap.get('lower_6'), (entry - 50 * pip_size)) - (0.5 * atr)
+            
+            if sl >= entry: sl = entry - (offset_pips * pip_size)  # fallback
+            
             # TP: Upper 3 (Partial Target)
             tp = self._safe_float(snap.get('upper_3'), entry + (3 * atr))
             if tp <= entry: tp = entry + (2 * atr)  # Forzar TP rentable
         else:
-            # SL: Upper 6 + 0.5 * ATR
-            sl = self._safe_float(snap.get('upper_6'), (entry + 50 * pip_size)) + (0.5 * atr)
-            if sl <= entry: sl = entry + (10 * pip_size)  # fallback
+            # SL dinámico: offset_pips por encima de la EMA20 (si está disponible)
+            if ema20 > 0:
+                sl = ema20 + (offset_pips * pip_size)
+            else:
+                sl = self._safe_float(snap.get('upper_6'), (entry + 50 * pip_size)) + (0.5 * atr)
+            
+            if sl <= entry: sl = entry + (offset_pips * pip_size)  # fallback
+            
             # TP: Lower 3 (Partial Target)
             tp = self._safe_float(snap.get('lower_3'), entry - (3 * atr))
             if tp >= entry: tp = entry - (2 * atr)  # Forzar TP rentable
@@ -551,6 +735,30 @@ class ForexExecutionService:
 
     def run_position_management(self):
         """Gestiona SL, TP, HardCap y Protecciones. Optimizada para MEMORIA."""
+        # A. Viernes Fin de Semana Auto-Close:
+        # A partir del Viernes a las 20:55 UTC (15:55 local GMT-5 / 3:55 PM local), liquidamos posiciones abiertas
+        # para protegernos del riesgo de Gap del fin de semana.
+        now = datetime.now(timezone.utc)
+        if now.weekday() == 4 and now.hour == 20 and now.minute >= 55:
+            self.log(f"🚨 [WEEKEND CLOSE] Liquidando posiciones por cierre de sesión del Viernes (20:55 UTC).")
+            for p in list(self._open_positions_list):
+                try:
+                    symbol = p['symbol']
+                    price_data = self.state['prices'].get(symbol)
+                    price = self._safe_float(price_data.get('mid')) if price_data else 0
+                    if price <= 0:
+                        price = self._safe_float(p.get('current_price'))
+                    if price <= 0:
+                        continue
+                    entry = self._safe_float(p.get('entry_price'))
+                    pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                    side = p.get('side', 'long').lower()
+                    pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
+                    self._close_position(p, price, 'weekend_close', pips)
+                except Exception as e:
+                    self.log(f"Error cerrando posición en fin de semana: {e}", "ERROR")
+            return
+
         if not self._open_positions_list: return
         
         snaps = {}
@@ -633,6 +841,73 @@ class ForexExecutionService:
                 # Requiere snap (indicadores), solo corre si tenemos snap fresco
                 if snap:
                     self._run_protection_forex(pos, snap)
+
+                    # Cruce contrario de EMAs (Propuesta D - Corte rápido de pérdidas para estrategias de Momentum)
+                    ema3_val = self._safe_float(snap.get('ema_3'))
+                    ema9_val = self._safe_float(snap.get('ema_9'))
+                    rule = pos.get('rule_code', '')
+                    is_momentum_rule = '31a' in rule or 'HOT' in rule or '61' in rule
+                    
+                    if is_momentum_rule and ema3_val > 0 and ema9_val > 0:
+                        side = pos['side'].lower()
+                        entry = self._safe_float(pos.get('entry_price'))
+                        pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                        pips_pnl = (price - entry) / pip_size if side in ['long', 'buy'] else (entry - price) / pip_size
+                        
+                        # --- CIERRE PROACTIVO PERSONALIZADO Bb61 (Aa61 / Aa61_short) ---
+                        if '61' in rule:
+                            triggered_exit_61 = False
+                            exit_reason = ""
+                            
+                            # 1. Chequeo en 5 minutos para corte ultra rápido: si EMA3 < EMA9 (para LONG)
+                            from app.core.memory_store import MEMORY_STORE
+                            df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                            
+                            if df_5m is not None and len(df_5m) >= 2:
+                                last_5m = df_5m.iloc[-1]
+                                ema3_5m = self._safe_float(last_5m.get('ema1'))
+                                ema9_5m = self._safe_float(last_5m.get('ema2'))
+                                
+                                if side in ['long', 'buy'] and ema3_5m > 0 and ema9_5m > 0 and ema3_5m < ema9_5m:
+                                    triggered_exit_61 = True
+                                    exit_reason = f"Bb61 (5m contrary cross: EMA3 {ema3_5m:.5f} < EMA9 {ema9_5m:.5f})"
+                                elif side in ['short', 'sell'] and ema3_5m > 0 and ema9_5m > 0 and ema3_5m > ema9_5m:
+                                    triggered_exit_61 = True
+                                    exit_reason = f"Bb61 (5m contrary cross: EMA3 {ema3_5m:.5f} > EMA9 {ema9_5m:.5f})"
+                            
+                            # 2. Chequeo en 15m: si tiende a cruzar (proximidad estrecha)
+                            if not triggered_exit_61:
+                                proximity = abs(ema3_val - ema9_val) / ema9_val * 100
+                                if side in ['long', 'buy']:
+                                    if ema3_val < ema9_val:
+                                        triggered_exit_61 = True
+                                        exit_reason = f"Bb61 (15m cross: EMA3 {ema3_val:.5f} < EMA9 {ema9_val:.5f})"
+                                    elif proximity < 0.02:  # Menos de 0.02% de distancia: tiende a cruzar
+                                        triggered_exit_61 = True
+                                        exit_reason = f"Bb61 (15m proximity: EMA3 se acerca a EMA9, dist={proximity:.3f}%)"
+                                elif side in ['short', 'sell']:
+                                    if ema3_val > ema9_val:
+                                        triggered_exit_61 = True
+                                        exit_reason = f"Bb61 (15m cross: EMA3 {ema3_val:.5f} > EMA9 {ema9_val:.5f})"
+                                    elif proximity < 0.02:
+                                        triggered_exit_61 = True
+                                        exit_reason = f"Bb61 (15m proximity: EMA3 se acerca a EMA9, dist={proximity:.3f}%)"
+                            
+                            if triggered_exit_61:
+                                self.log(f"[EARLY EXIT Bb61] {symbol} {side.upper()}: {exit_reason}. Cerrando.")
+                                self._close_position(pos, price, 'Bb61', pips_pnl)
+                                self._send_telegram(f"🔔 [EARLY EXIT Bb61] {symbol} {side.upper()} cerrado proactivamente por: {exit_reason} (PnL: {pips_pnl:.1f} pips)")
+                                continue
+                        
+                        # --- CORTES CONTRARIOS ESTANDAR ---
+                        elif side in ['long', 'buy'] and ema3_val < ema9_val:
+                            self.log(f"[EARLY EXIT] {symbol} LONG ({rule}): EMA3 ({ema3_val:.5f}) < EMA9 ({ema9_val:.5f}) - Cruce contrario. Cerrando.")
+                            self._close_position(pos, price, 'ema_contrary_cross', pips_pnl)
+                            continue
+                        elif side in ['short', 'sell'] and ema3_val > ema9_val:
+                            self.log(f"[EARLY EXIT] {symbol} SHORT ({rule}): EMA3 ({ema3_val:.5f}) > EMA9 ({ema9_val:.5f}) - Cruce contrario. Cerrando.")
+                            self._close_position(pos, price, 'ema_contrary_cross', pips_pnl)
+                            continue
 
                     # 1. TP Adaptativo
                     tp_res = evaluate_forex_tp(symbol, [pos], price, snap)

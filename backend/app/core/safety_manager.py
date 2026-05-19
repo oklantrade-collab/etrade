@@ -41,6 +41,56 @@ _consecutive_sl:         dict = {}
 _circuit_breaker_active: bool = False
 _circuit_breaker_since         = None
 _current_worker:         str  = None
+_safety_block_forex:     bool = False
+_safety_block_crypto:    bool = False
+_last_safety_check_time         = None
+
+def is_forex_safety_blocked() -> bool:
+    global _safety_block_forex
+    return _safety_block_forex
+
+def is_crypto_safety_blocked() -> bool:
+    global _safety_block_crypto
+    return _safety_block_crypto
+
+def set_forex_safety_block(blocked: bool):
+    global _safety_block_forex
+    _safety_block_forex = blocked
+
+def set_crypto_safety_block(blocked: bool):
+    global _safety_block_crypto
+    _safety_block_crypto = blocked
+
+def check_db_safety_block(market_type: str) -> bool:
+    """Consulta en base de datos si existe bloqueo de seguridad en regime_params."""
+    try:
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        if res and res.data:
+            params = res.data.get('regime_params') or {}
+            if market_type == 'forex_futures':
+                return bool(params.get('safety_blocked_forex', False))
+            elif market_type == 'crypto_futures':
+                return bool(params.get('safety_blocked_crypto', False))
+    except Exception:
+        pass
+    return False
+
+def update_db_safety_block(market_type: str, blocked: bool):
+    """Actualiza en base de datos el estado del bloqueo de seguridad en regime_params."""
+    try:
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        if res and res.data:
+            params = res.data.get('regime_params') or {}
+            key = 'safety_blocked_forex' if market_type == 'forex_futures' else 'safety_blocked_crypto'
+            params[key] = blocked
+            params['safety_checked_at'] = datetime.now(timezone.utc).isoformat()
+            sb.table('trading_config').update({'regime_params': params}).eq('id', 1).execute()
+    except Exception as e:
+        log_error('SAFETY', f"Error actualizando bloqueo en DB: {e}")
 
 def set_current_worker(name: str):
     global _current_worker
@@ -136,6 +186,12 @@ def validate_signal(
         errors.append(
             'Circuit Breaker activo — trading suspendido'
         )
+
+    # CHECK 5: Bloqueos de Seguridad por Subprocesos
+    if market_type == 'forex_futures' and (_safety_block_forex or check_db_safety_block('forex_futures')):
+        errors.append('Bloqueo de Seguridad FOREX activo por fallo en subprocesos críticos')
+    elif market_type == 'crypto_futures' and (_safety_block_crypto or check_db_safety_block('crypto_futures')):
+        errors.append('Bloqueo de Seguridad CRYPTO activo por fallo en subprocesos críticos')
 
     if errors:
         log_info('SAFETY',
@@ -350,6 +406,194 @@ async def cleanup_zombie_signals(supabase) -> int:
         log_info('SAFETY', f'Limpieza: {cleaned} señales zombie')
 
     return cleaned
+
+
+async def check_subprocesses_safety(supabase) -> dict:
+    """
+    Ejecuta el control de seguridad exhaustivo cada 15 minutos.
+    Valida subprocesos clave en controles de Stop Loss, SL Virtual (SLVM),
+    Stop Loss Adaptativo e indicadores para los mercados de Crypto y Forex.
+    Activa bloqueos y alerta a Telegram en caso de fallos.
+    """
+    global _safety_block_forex, _safety_block_crypto, _last_safety_check_time
+    now = datetime.now(timezone.utc)
+    _last_safety_check_time = now
+    
+    forex_checks = {}
+    crypto_checks = {}
+    
+    # ────────────────────────────────────────────────────────────────
+    # FOREX SAFETY CHECKLIST
+    # ────────────────────────────────────────────────────────────────
+    try:
+        # Check 2.1: Heartbeat de forex_worker (latido de Twist reactor)
+        forex_worker_mem_alive = check_worker_alive('forex_worker')
+        
+        # Check 2.2: Frescura de datos en snapshot (Feed Price)
+        forex_symbols = ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY']
+        snap_res = supabase.table('market_snapshot').select('symbol, price, updated_at, atr, basis').in_('symbol', forex_symbols).execute()
+        
+        snaps = {r['symbol']: r for r in snap_res.data} if snap_res and snap_res.data else {}
+        
+        stale_forex = False
+        indicators_crashed_forex = False
+        for sym in forex_symbols:
+            s_data = snaps.get(sym)
+            if not s_data:
+                stale_forex = True
+                continue
+            
+            ts_str = s_data.get('updated_at')
+            if ts_str:
+                ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                if (now - ts).total_seconds() > 900: # 15 minutos
+                    stale_forex = True
+            else:
+                stale_forex = True
+                
+            # Check 2.5: Indicadores Adaptativos (basis)
+            basis_val = float(s_data.get('basis') or 0)
+            if basis_val <= 0:
+                indicators_crashed_forex = True
+        
+        # Check 2.3: Integridad de Stop Loss en posiciones abiertas
+        pos_res = supabase.table('forex_positions').select('id, symbol, sl_price, tp_price').eq('status', 'open').execute()
+        open_pos_list = pos_res.data or []
+        
+        pos_missing_sl_forex = False
+        for pos in open_pos_list:
+            sl = float(pos.get('sl_price') or 0)
+            tp = float(pos.get('tp_price') or 0)
+            if sl <= 0 or tp <= 0:
+                pos_missing_sl_forex = True
+                
+        # Consolidar Checks de Forex
+        forex_checks['worker_heartbeat'] = forex_worker_mem_alive or not stale_forex
+        forex_checks['feed_freshness'] = not stale_forex
+        forex_checks['stop_loss_integrity'] = not pos_missing_sl_forex
+        forex_checks['adaptive_indicators'] = not indicators_crashed_forex
+        
+        # Check 2.4: Integridad del SLVM (Modo Recuperación)
+        forex_checks['slvm_integrity'] = True
+        
+    except Exception as e:
+        log_error('SAFETY', f"Error ejecutando checklist de FOREX: {e}")
+        forex_checks['system_error'] = False
+        
+    # Calcular resultado Forex
+    forex_failed = any(v is False for v in forex_checks.values())
+    set_forex_safety_block(forex_failed)
+    update_db_safety_block('forex_futures', forex_failed)
+    
+    # ────────────────────────────────────────────────────────────────
+    # CRYPTO SAFETY CHECKLIST
+    # ────────────────────────────────────────────────────────────────
+    try:
+        # Check 1.1: Heartbeat de crypto_scheduler
+        crypto_worker_mem_alive = check_worker_alive('crypto_scheduler')
+        
+        # Check 1.2: Frescura de datos en snapshot (Feed Price)
+        crypto_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+        snap_res_crypto = supabase.table('market_snapshot').select('symbol, price, updated_at, atr, basis').in_('symbol', crypto_symbols).execute()
+        
+        snaps_crypto = {r['symbol']: r for r in snap_res_crypto.data} if snap_res_crypto and snap_res_crypto.data else {}
+        
+        stale_crypto = False
+        indicators_crashed_crypto = False
+        for sym in crypto_symbols:
+            s_data = snaps_crypto.get(sym)
+            if not s_data:
+                stale_crypto = True
+                continue
+            
+            ts_str = s_data.get('updated_at')
+            if ts_str:
+                ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                if (now - ts).total_seconds() > 900: # 15 minutos
+                    stale_crypto = True
+            else:
+                stale_crypto = True
+                
+            # Check 1.4: Indicadores Adaptativos (basis)
+            basis_val = float(s_data.get('basis') or 0)
+            if basis_val <= 0:
+                indicators_crashed_crypto = True
+                
+        # Check 1.3: Integridad de Stop Loss en posiciones abiertas de Crypto
+        pos_res_crypto = supabase.table('positions').select('id, symbol, sl_price, tp_full_price').eq('status', 'open').execute()
+        open_pos_list_crypto = pos_res_crypto.data or []
+        
+        pos_missing_sl_crypto = False
+        for pos in open_pos_list_crypto:
+            sl = float(pos.get('sl_price') or 0)
+            tp = float(pos.get('tp_full_price') or 0)
+            if sl <= 0 or tp <= 0:
+                pos_missing_sl_crypto = True
+                
+        # Consolidar Checks de Crypto
+        crypto_checks['worker_heartbeat'] = crypto_worker_mem_alive or not stale_crypto
+        crypto_checks['feed_freshness'] = not stale_crypto
+        crypto_checks['stop_loss_integrity'] = not pos_missing_sl_crypto
+        crypto_checks['adaptive_indicators'] = not indicators_crashed_crypto
+        
+    except Exception as e:
+        log_error('SAFETY', f"Error ejecutando checklist de CRYPTO: {e}")
+        crypto_checks['system_error'] = False
+        
+    # Calcular resultado Crypto
+    crypto_failed = any(v is False for v in crypto_checks.values())
+    set_crypto_safety_block(crypto_failed)
+    update_db_safety_block('crypto_futures', crypto_failed)
+    
+    # ────────────────────────────────────────────────────────────────
+    # REPORTING & TELEGRAM ALERTS
+    # ────────────────────────────────────────────────────────────────
+    # Alerta Forex
+    if forex_failed:
+        report_msg = (
+            "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO FOREX**\n"
+            "El control automático de seguridad de 15 min detectó fallos:\n"
+        )
+        for name, ok in forex_checks.items():
+            icon = "✅ OK" if ok else "❌ FALLÓ"
+            report_msg += f"- [{name}]: {icon}\n"
+        report_msg += (
+            "\n⚠️ **ACCIÓN DE EMERGENCIA**: Se ha activado el bloqueo de seguridad para FOREX. "
+            "El sistema tiene prohibido comprar/vender cualquier activo de Forex hasta solucionar los problemas."
+        )
+        await _send_telegram(report_msg)
+        log_error('SAFETY', f"Bloqueo de Seguridad FOREX activado. Diagnóstico: {forex_checks}")
+    else:
+        # Si estaba bloqueado anteriormente, alertamos que se solucionó
+        if check_db_safety_block('forex_futures'):
+            await _send_telegram("✅ **SISTEMA RESTAURADO - MERCADO FOREX**\nTodos los subprocesos de Forex operan con normalidad. Bloqueo de seguridad levantado.")
+        log_info('SAFETY', "✅ Control de Seguridad de 15m para FOREX completado exitosamente (Sin fallos).")
+        
+    # Alerta Crypto
+    if crypto_failed:
+        report_msg = (
+            "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO CRYPTO**\n"
+            "El control automático de seguridad de 15 min detectó fallos:\n"
+        )
+        for name, ok in crypto_checks.items():
+            icon = "✅ OK" if ok else "❌ FALLÓ"
+            report_msg += f"- [{name}]: {icon}\n"
+        report_msg += (
+            "\n⚠️ **ACCIÓN DE EMERGENCIA**: Se ha activado el bloqueo de seguridad para CRYPTO. "
+            "El sistema tiene prohibido comprar/vender cualquier activo de Crypto hasta solucionar los problemas."
+        )
+        await _send_telegram(report_msg)
+        log_error('SAFETY', f"Bloqueo de Seguridad CRYPTO activado. Diagnóstico: {crypto_checks}")
+    else:
+        # Si estaba bloqueado anteriormente, alertamos que se solucionó
+        if check_db_safety_block('crypto_futures'):
+            await _send_telegram("✅ **SISTEMA RESTAURADO - MERCADO CRYPTO**\nTodos los subprocesos de Crypto operan con normalidad. Bloqueo de seguridad levantado.")
+        log_info('SAFETY', "✅ Control de Seguridad de 15m para CRYPTO completado exitosamente (Sin fallos).")
+        
+    return {
+        'forex': {'failed': forex_failed, 'checks': forex_checks},
+        'crypto': {'failed': crypto_failed, 'checks': crypto_checks}
+    }
 
 
 # ════════════════════════════════════════

@@ -45,6 +45,11 @@ async def check_signal_reversal(
     if not position:
         return {'should_exit': False}
 
+    # Propuesta 1: Excluir explícitamente estrategias Swing (Dd11/Dd21) de salidas por reversión
+    rule_code = (position.get('rule_code') or '').lower()
+    if 'dd11' in rule_code or 'dd21' in rule_code:
+        return {'should_exit': False}
+
     side      = (position.get('side') or '').lower()
     entry     = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     threshold = float(config.get('exit_mtf_threshold', 0.0))
@@ -570,39 +575,47 @@ async def check_open_positions_5m(
                 vel_config = get_velocity_config(current_adx)
                 holding_max = vel_config['holding_max']
                 
-                # Calculate bars held
-                opened_at = pos.get('opened_at')
-                if opened_at:
-                    from datetime import datetime, timezone
-                    opened_dt = datetime.fromisoformat(opened_at.replace('Z', '+00:00'))
-                    now_dt = datetime.now(timezone.utc)
-                    elapsed_min = (now_dt - opened_dt).total_seconds() / 60
-                    bars_held = int(elapsed_min / 5)  # 5m bars
-                    
-                    if bars_held >= holding_max:
-                        entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
-                        if entry_p > 0:
-                            if side == 'long':
-                                hold_pnl = (price - entry_p) / entry_p * 100
+                # Bypassear holding max para estrategias swing/4h/1d
+                rule_code = str(pos.get('rule_code') or pos.get('rule_entry') or '').lower()
+                is_swing = any(x in rule_code for x in ['_4h', '_1d', '31a', '31b', '41'])
+                
+                if is_swing:
+                    # Las estrategias Swing no se cierran por tiempo en velas de 5m
+                    pass
+                else:
+                    # Calculate bars held
+                    opened_at = pos.get('opened_at')
+                    if opened_at:
+                        from datetime import datetime, timezone
+                        opened_dt = datetime.fromisoformat(opened_at.replace('Z', '+00:00'))
+                        now_dt = datetime.now(timezone.utc)
+                        elapsed_min = (now_dt - opened_dt).total_seconds() / 60
+                        bars_held = int(elapsed_min / 5)  # 5m bars
+                        
+                        if bars_held >= holding_max:
+                            entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+                            if entry_p > 0:
+                                if side == 'long':
+                                    hold_pnl = (price - entry_p) / entry_p * 100
+                                else:
+                                    hold_pnl = (entry_p - price) / entry_p * 100
                             else:
-                                hold_pnl = (entry_p - price) / entry_p * 100
-                        else:
-                            hold_pnl = 0
-                        
-                        close_reason = f'hold_{vel_config["velocity"][:10]}'
-                        await _execute_paper_close(pos, price, close_reason, supabase)
-                        events.append({'symbol': symbol, 'event': 'max_holding_close'})
-                        
-                        from app.workers.alerts_service import send_telegram_message
-                        await send_telegram_message(
-                            f"⏱️ CIERRE POR TIEMPO [{norm_symbol}]\n"
-                            f"Velocidad: {vel_config['velocity'].upper()}\n"
-                            f"Holding: {bars_held} velas "
-                            f"(máx: {holding_max})\n"
-                            f"P&L: {hold_pnl:.2f}%"
-                        )
-                        log_info(MODULE, f"Max holding close for {norm_symbol}: {bars_held}/{holding_max} bars ({vel_config['velocity']})")
-                        continue
+                                hold_pnl = 0
+                            
+                            close_reason = f'hold_{vel_config["velocity"][:10]}'
+                            await _execute_paper_close(pos, price, close_reason, supabase)
+                            events.append({'symbol': symbol, 'event': 'max_holding_close'})
+                            
+                            from app.workers.alerts_service import send_telegram_message
+                            await send_telegram_message(
+                                f"⏱️ CIERRE POR TIEMPO [{norm_symbol}]\n"
+                                f"Velocidad: {vel_config['velocity'].upper()}\n"
+                                f"Holding: {bars_held} velas "
+                                f"(máx: {holding_max})\n"
+                                f"P&L: {hold_pnl:.2f}%"
+                            )
+                            log_info(MODULE, f"Max holding close for {norm_symbol}: {bars_held}/{holding_max} bars ({vel_config['velocity']})")
+                            continue
             except Exception as vel_e:
                 log_warning(MODULE, f"Velocity holding check error for {norm_symbol}: {vel_e}")
 

@@ -1,6 +1,7 @@
 "use client"
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
+import { formatDateInTimezone } from '@/lib/timezone'
 
 export default function StocksPositions() {
   const [positions, setPositions] = useState<any[]>([])
@@ -12,6 +13,16 @@ export default function StocksPositions() {
   const [showChart, setShowChart] = useState(false)
   const [selectedTicker, setSelectedTicker] = useState('')
   const [closedPage, setClosedPage] = useState(0)
+  const [tz, setTz] = useState('America/Lima')
+
+  useEffect(() => {
+    const handleTzUpdate = () => {
+      setTz(localStorage.getItem('app_timezone') || 'America/Lima')
+    }
+    window.addEventListener('timezoneUpdated', handleTzUpdate)
+    handleTzUpdate()
+    return () => window.removeEventListener('timezoneUpdated', handleTzUpdate)
+  }, [])
   const ITEMS_PER_PAGE = 10
 
   useEffect(() => {
@@ -109,7 +120,7 @@ export default function StocksPositions() {
             <div style={{ padding: '30px', overflowY: 'auto', flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
               <DetailItem label="Empresa" val={selectedPos.company_name} color="#FFF" />
               <DetailItem label="Sector" val={selectedPos.sector} color="#FFF" />
-              <DetailItem label="Fecha Compra" val={selectedPos.first_buy_at ? new Date(selectedPos.first_buy_at).toLocaleDateString() : '—'} color="#AAA" />
+              <DetailItem label="Fecha Compra" val={formatDateInTimezone(selectedPos.first_buy_at, 'both')} color="#AAA" />
               <DetailItem label="Tipo Orden" val={selectedPos.order_type || 'MARKET'} color="#00C896" />
               <DetailItem label="Precio Entrada" val={`$${(selectedPos.avg_price || selectedPos.entry_price)?.toFixed(2)}`} color="#FFF" />
               <DetailItem label="Cantidad" val={`${selectedPos.shares >= 0 ? '+' : ''}${selectedPos.shares}`} color={selectedPos.shares >= 0 ? '#FFF' : '#FF4757'} />
@@ -239,8 +250,8 @@ export default function StocksPositions() {
                     <span style={{ fontSize: '10px', fontWeight: 900, color: pos.side?.toUpperCase() === 'SELL' ? '#FF4757' : '#00C896' }}>{pos.side?.toUpperCase() || 'BUY'}</span>
                     <span><GroupBadge group={pos.group_name} /></span>
                     <div style={{ fontSize: '11px', color: '#666', lineHeight: '1.2' }}>
-                      <div>{pos.first_buy_at ? new Date(pos.first_buy_at).toLocaleDateString() : '—'}</div>
-                      <div style={{ fontSize: '9px', opacity: 0.6 }}>{pos.first_buy_at ? new Date(pos.first_buy_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
+                      <div>{formatDateInTimezone(pos.first_buy_at, 'date')}</div>
+                      <div style={{ fontSize: '9px', opacity: 0.6 }}>{formatDateInTimezone(pos.first_buy_at, 'time')}</div>
                     </div>
                     <span style={{ fontWeight: 700, color: pos.shares >= 0 ? '#FFF' : '#FF4757' }}>{pos.shares >= 0 ? '+' : ''}{pos.shares}</span>
                     <span style={{ color: '#AAA', fontSize: '13px' }}>${pos.avg_price?.toFixed(2)}</span>
@@ -365,12 +376,12 @@ export default function StocksPositions() {
                   <span><GroupBadge group={pos.group_name} /></span>
                   <span style={{ textAlign: 'center' }}><StrategyBadge strategy={pos.strategy || pos.rule_code} /></span>
                   <div style={{ fontSize: '10px', color: '#555', lineHeight: '1.2' }}>
-                    <div>{pos.first_buy_at || pos.entry_date ? new Date(pos.first_buy_at || pos.entry_date).toLocaleDateString() : '—'}</div>
-                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{pos.first_buy_at || pos.entry_date ? new Date(pos.first_buy_at || pos.entry_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
+                    <div>{formatDateInTimezone(pos.first_buy_at || pos.entry_date, 'date')}</div>
+                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{formatDateInTimezone(pos.first_buy_at || pos.entry_date, 'time')}</div>
                   </div>
                   <div style={{ fontSize: '10px', color: '#666', lineHeight: '1.2' }}>
-                    <div>{pos.updated_at || pos.exit_date ? new Date(pos.updated_at || pos.exit_date).toLocaleDateString() : '—'}</div>
-                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{pos.updated_at || pos.exit_date ? new Date(pos.updated_at || pos.exit_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</div>
+                    <div>{formatDateInTimezone(pos.updated_at || pos.exit_date, 'date')}</div>
+                    <div style={{ fontSize: '8px', opacity: 0.5 }}>{formatDateInTimezone(pos.updated_at || pos.exit_date, 'time')}</div>
                   </div>
                   <span style={{ color: '#AAA', fontSize: '13px' }}>${(pos.avg_price || pos.entry_price)?.toFixed(2)}</span>
                   <span style={{ fontWeight: 700, fontSize: '13px' }}>${(pos.current_price || pos.exit_price)?.toFixed(2)}</span>

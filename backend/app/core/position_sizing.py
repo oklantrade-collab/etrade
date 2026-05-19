@@ -163,6 +163,13 @@ def calculate_position_size(
         # Cantidad en unidades del activo
         quantity = nocional / entry_price if entry_price > 0 else 0
 
+        # Propuesta 3: Ajuste de seguridad (reducción de lotaje del 30%) para pares con JPY y Oro (XAU)
+        # debido a su altísima volatilidad nominal y spreads/deslizamientos en picos de mercado.
+        sym_upper = (symbol or '').upper()
+        if 'JPY' in sym_upper or 'XAU' in sym_upper:
+            quantity = quantity * 0.70
+            nocional = nocional * 0.70
+
         return {
             'capital_base': capital_base,
             'capital_op':   round(capital_op, 2),

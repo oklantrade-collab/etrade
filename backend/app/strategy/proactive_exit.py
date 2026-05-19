@@ -222,6 +222,63 @@ def evaluate_proactive_exit(
     except Exception as e:
         log_error(MODULE, f"Error en protección EOD: {e}")
 
+    # ── NUEVO: Cierre Preventivo Bb61 (Aa61 / Aa61_short) ──
+    rule_code_pos = str(position.get('rule_code', ''))
+    if '61' in rule_code_pos:
+        try:
+            triggered_exit_61 = False
+            exit_reason = ""
+            
+            # 1. Chequeo rápido en 5 minutos
+            from app.core.memory_store import MEMORY_STORE
+            df_5m = MEMORY_STORE.get(position['symbol'], {}).get('5m', {}).get('df')
+            
+            if df_5m is not None and len(df_5m) >= 2:
+                last_5m = df_5m.iloc[-1]
+                ema3_5m = safe_float(last_5m.get('ema1', last_5m.get('ema_3')))
+                ema9_5m = safe_float(last_5m.get('ema2', last_5m.get('ema_9')))
+                
+                if ema3_5m > 0 and ema9_5m > 0:
+                    if is_long and ema3_5m < ema9_5m:
+                        triggered_exit_61 = True
+                        exit_reason = f"Bb61 (Cruce rápido 5m: EMA3 {ema3_5m:.5f} < EMA9 {ema9_5m:.5f})"
+                    elif not is_long and ema3_5m > ema9_5m:
+                        triggered_exit_61 = True
+                        exit_reason = f"Bb61 (Cruce rápido 5m: EMA3 {ema3_5m:.5f} > EMA9 {ema9_5m:.5f})"
+            
+            # 2. Chequeo de Convergencia / Cruce en 15m
+            if not triggered_exit_61:
+                ema3_val = safe_float(snap.get('ema_3', snap.get('ema3')))
+                ema9_val = safe_float(snap.get('ema_9', snap.get('ema9')))
+                
+                if ema3_val > 0 and ema9_val > 0:
+                    proximity = abs(ema3_val - ema9_val) / ema9_val * 100
+                    if is_long:
+                        if ema3_val < ema9_val:
+                            triggered_exit_61 = True
+                            exit_reason = f"Bb61 (Cruce 15m: EMA3 {ema3_val:.5f} < EMA9 {ema9_val:.5f})"
+                        elif proximity < 0.02:
+                            triggered_exit_61 = True
+                            exit_reason = f"Bb61 (Proximidad 15m: EMAs se acercan, dist={proximity:.3f}%)"
+                    else:
+                        if ema3_val > ema9_val:
+                            triggered_exit_61 = True
+                            exit_reason = f"Bb61 (Cruce 15m: EMA3 {ema3_val:.5f} > EMA9 {ema9_val:.5f})"
+                        elif proximity < 0.02:
+                            triggered_exit_61 = True
+                            exit_reason = f"Bb61 (Proximidad 15m: EMAs se acercan, dist={proximity:.3f}%)"
+            
+            if triggered_exit_61:
+                return {
+                    'should_close': True,
+                    'rule_code':    'Bb61',
+                    'reason':       f'Cierre Preventivo Squeeze: {exit_reason}',
+                    'pnl':          calculate_position_pnl(position, current_price, market_type),
+                    'urgency':      'urgent'
+                }
+        except Exception as e61:
+            log_error(MODULE, f"Error en evaluación Bb61 para Crypto: {e61}")
+
     # ── NUEVO: Protección por Zona Extrema (UPPER_6) ──
     # Se requiere profit mínimo y señal SIPV para evitar cierres prematuros en spikes.
     fib_zone = safe_int(snap.get('fibonacci_zone', 0))

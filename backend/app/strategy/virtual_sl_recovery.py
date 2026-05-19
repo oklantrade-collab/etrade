@@ -94,7 +94,14 @@ def calculate_pips(entry: float, current: float, side: str, symbol: str) -> floa
 
 def calculate_hard_stop_pips(symbol: str, market_type: str, snap: dict) -> float:
     """Calcula el Hard Stop basado en volatilidad (ATR)."""
-    rules = ATR_HARD_STOP_RULES.get(market_type, {'pips_base': 10, 'atr_factor': 1.0})
+    if symbol in ('XAUUSD', 'XAU/USD'):
+        rules = {'pips_base': 800, 'atr_factor': 1.5}
+    elif symbol in ('USDJPY', 'USD/JPY'):
+        rules = {'pips_base': 60, 'atr_factor': 1.2}
+    elif symbol in ('GBPUSD', 'GBP/USD'):
+        rules = {'pips_base': 30, 'atr_factor': 1.1}
+    else:
+        rules = ATR_HARD_STOP_RULES.get(market_type, {'pips_base': 10, 'atr_factor': 1.0})
     atr = safe_float(snap.get('atr', 0))
     pip_size = get_pip_size(symbol)
     
@@ -333,17 +340,17 @@ def check_slv_trigger(position: dict, current_price: float) -> bool:
     else:
         return current_price >= slv_price
 
-def activate_recovery_mode_sync(position: dict, current_price: float, symbol: str, market_type: str, sb):
+def activate_recovery_mode_sync(position: dict, current_price: float, symbol: str, market_type: str, sb, table='positions'):
     """Activa el flag de recovery_mode en la DB."""
-    log_info('SLVM', f"ACTIVATING RECOVERY MODE for {symbol} at {current_price}")
+    log_info('SLVM', f"ACTIVATING RECOVERY MODE for {symbol} at {current_price} on table {table}")
     try:
-        sb.table('positions').update({
+        sb.table(table).update({
             'recovery_mode': True,
             'recovery_cycles': 0,
             'recovery_activated_at': datetime.now(timezone.utc).isoformat()
         }).eq('id', position['id']).execute()
     except Exception as e:
-        log_error('SLVM', f"Error activating recovery mode: {e}")
+        log_error('SLVM', f"Error activating recovery mode on table {table}: {e}")
 
 # (Mantenemos funciones de cálculo de SLV para integración)
 def evaluate_recovery_mode(position: dict, current_price: float, snap: dict, symbol: str, market_type: str = 'crypto_futures'):
@@ -390,6 +397,12 @@ def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market
     # Metodo 1: Pips fijos (recomendado para forex)
     if config['slv_method'] == 'fixed_pips':
         fixed_pips = config.get('slv_fixed_pips', 25)
+        if symbol in ('XAUUSD', 'XAU/USD'):
+            fixed_pips = 600 # 600 pips ($6.00 USD) para evitar gatillar modo recuperacion prematuro en Oro
+        elif symbol in ('USDJPY', 'USD/JPY'):
+            fixed_pips = 50  # 50 pips ($0.50 JPY) para evitar gatillar modo recuperacion prematuro en el Yen
+        elif symbol in ('GBPUSD', 'GBP/USD'):
+            fixed_pips = 35  # 35 pips ($0.0035 USD) para evitar gatillar modo recuperacion prematuro en la Libra
         if side.lower() in ('long', 'buy'):
             slv_price = entry_price - (fixed_pips * pip_size)
         else:
@@ -412,8 +425,8 @@ def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market
         if atr > 0:
             mult = config.get('slv_atr_mult', 1.5)
             dist = atr * mult
-            # CAP: No permitir mas de 30 pips para forex
-            max_dist = 30 * pip_size
+            # CAP: No permitir mas de 30 pips para forex (excepto Oro/Yen/Libra)
+            max_dist = 600 * pip_size if symbol in ('XAUUSD', 'XAU/USD') else (50 * pip_size if symbol in ('USDJPY', 'USD/JPY') else (40 * pip_size if symbol in ('GBPUSD', 'GBP/USD') else 30 * pip_size))
             dist = min(dist, max_dist)
             if side.lower() in ('long', 'buy'):
                 slv_price = entry_price - dist
@@ -424,8 +437,8 @@ def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market
     # Fallback: Porcentaje fijo
     if slv_price <= 0:
         dist = entry_price * config.get('slv_fallback_pct', 0.02)
-        # CAP: No mas de 30 pips
-        max_dist = 30 * pip_size
+        # CAP: No mas de 30 pips (excepto Oro/Yen/Libra)
+        max_dist = 600 * pip_size if symbol in ('XAUUSD', 'XAU/USD') else (50 * pip_size if symbol in ('USDJPY', 'USD/JPY') else (40 * pip_size if symbol in ('GBPUSD', 'GBP/USD') else 30 * pip_size))
         dist = min(dist, max_dist)
         slv_price = entry_price - dist if side.lower() in ('long','buy') else entry_price + dist
         source = 'fallback_pct_capped'

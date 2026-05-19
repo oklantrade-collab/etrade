@@ -30,6 +30,9 @@ async def check_performance_alerts():
         for t in trades:
             rc = t.get('rule_code')
             if not rc: continue
+            # Filtrar códigos de regla obsoletos con _OLD o viejos
+            if '_old' in rc.lower() or rc.lower() == 'dd61':
+                continue
             if rc not in rule_groups:
                 rule_groups[rc] = []
             rule_groups[rc].append(t)

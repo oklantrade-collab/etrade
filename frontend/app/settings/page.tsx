@@ -494,6 +494,7 @@ const ForexSettings = ({ config, onSave }: any) => {
 
 const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
   const [form, setForm] = useState({ telegram_enabled: config.telegram_enabled ?? true, ai_enabled: config.ai_enabled ?? true, paper_trading: config.paper_trading ?? true })
+  const [timezone, setTimezone] = useState<string>('America/Lima')
   const [theme, setTheme] = useState<any>({
     bgColor: '#0a0e17',
     bgImage: '',
@@ -502,6 +503,17 @@ const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
     contentFont: 'Inter',
     contentColor: '#e2e8f0'
   })
+
+  useEffect(() => {
+    const tz = localStorage.getItem('app_timezone') || 'America/Lima'
+    setTimezone(tz)
+  }, [])
+
+  const handleTimezoneChange = (newTz: string) => {
+    setTimezone(newTz)
+    localStorage.setItem('app_timezone', newTz)
+    window.dispatchEvent(new Event('timezoneUpdated'))
+  }
 
   useEffect(() => {
     const saved = localStorage.getItem('app_theme_custom')
@@ -536,11 +548,24 @@ const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
         <SettingToggle label="Telegram Activado" value={form.telegram_enabled} onChange={(v: any) => setForm({ ...form, telegram_enabled: v })} />
       </SettingsSection>
       
+      <SettingsSection title="🕒 Zona Horaria (Sistema)">
+        <div style={{ padding: '10px 18px', display:'flex', alignItems:'center', gap:'16px' }}>
+            <div style={{ flex:1, color:'var(--text-secondary)', fontSize:'13px' }}>Zona Horaria de Reportes, Tablas y Gráficos</div>
+            <select value={timezone} onChange={(e) => handleTimezoneChange(e.target.value)} style={SelectStyle}>
+                <option value="America/Lima" style={{ color: '#000' }}>America/Lima (Lima, GMT-5)</option>
+                <option value="America/New_York" style={{ color: '#000' }}>America/New_York (New York, GMT-4/GMT-5)</option>
+                <option value="UTC" style={{ color: '#000' }}>UTC (Coordinated Universal Time)</option>
+                <option value="Europe/Madrid" style={{ color: '#000' }}>Europe/Madrid (Madrid, GMT+1/GMT+2)</option>
+            </select>
+        </div>
+      </SettingsSection>
+
       <SettingsSection title="🧠 Algoritmo Core">
         <div style={{ padding: '12px 18px' }}>
             <button onClick={onOpenRules} style={{ width: '100%', padding: '10px', background: 'rgba(79,195,247,0.1)', border: '1px solid rgba(79,195,247,0.3)', borderRadius: '8px', color: '#4FC3F7', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}>⚙️ EDITAR REGLAS (RULE ENGINE)</button>
         </div>
       </SettingsSection>
+
 
       <SettingsSection title="🎨 Apariencia (Customización UI)">
         <div style={{ padding: '10px 18px', display:'flex', alignItems:'center', gap:'16px' }}>

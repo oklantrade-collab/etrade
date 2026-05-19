@@ -159,12 +159,14 @@ def get_trade_events(
 
     # 3. STOCKS
     try:
-        stocks_res = sb.table('stocks_positions').select('*').eq('ticker', symbol_clean).gte('opened_at', cutoff).execute().data or []
+        stocks_res = sb.table('stocks_positions').select('*').eq('ticker', symbol_clean).execute().data or []
         for t in stocks_res:
-            events.append({
-                'type': 'entry', 'direction': 'long', 'timestamp': to_ts(t.get('opened_at')),
-                'price': float(t.get('avg_price', 0) or 0), 'rule_code': t.get('rule_code', '—'), 'blocked_reason': None
-            })
+            opened_time = t.get('first_buy_at') or t.get('created_at')
+            if opened_time and opened_time >= cutoff:
+                events.append({
+                    'type': 'entry', 'direction': 'long', 'timestamp': to_ts(opened_time),
+                    'price': float(t.get('avg_price', 0) or 0), 'rule_code': t.get('rule_code', '—'), 'blocked_reason': None
+                })
     except Exception as e: print(f"Error Stocks events: {e}")
 
     # 4. BLOCKED

@@ -69,7 +69,13 @@ def check_time_based_sl(position: dict, snap: dict = None) -> dict:
     market_type = position.get('market_type', 'crypto_futures')
     cfg = TIME_BASED_SL_CONFIG.get(market_type, {}).get(
         velocity, {'max_hours': 48, 'min_profit_to_extend': 0.005}
-    )
+    ).copy()
+
+    # Para estrategias swing, triplicar el tiempo máximo permitido (e.g. 12h -> 36h) para permitir maduración
+    rule_code = str(position.get('rule_code') or position.get('rule_entry') or '').lower()
+    is_swing = any(x in rule_code for x in ['_4h', '_1d', '31a', '31b', '41'])
+    if is_swing:
+        cfg['max_hours'] = cfg['max_hours'] * 3
 
     max_hours = cfg['max_hours']
     min_profit_ext = cfg.get('min_profit_to_extend', 0.005)

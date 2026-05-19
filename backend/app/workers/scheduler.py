@@ -60,7 +60,8 @@ from app.strategy.proactive_exit import (
 from app.core.symbol_state import SymbolStateMachine, detect_market_ambiguity
 from app.core.safety_manager import (
     register_heartbeat, validate_signal, check_circuit_breaker,
-    register_sl_event, reset_sl_counter, check_all_heartbeats
+    register_sl_event, reset_sl_counter, check_all_heartbeats,
+    check_subprocesses_safety
 )
 from app.strategy.macro_filter import fetch_macro_context
 from app.strategy.crypto_adaptive_exit import (
@@ -2211,10 +2212,18 @@ async def main():
         await check_all_heartbeats()
     
     scheduler.add_job(heartbeat_check_job, CronTrigger(minute='*/5'), id='heartbeat_check', replace_existing=True)
+
+    # 8. Subprocess Checklist Validation Check (Every 15 minutes)
+    async def subprocess_safety_check_job():
+        from app.core.safety_manager import check_subprocesses_safety
+        await check_subprocesses_safety(sb)
+    
+    scheduler.add_job(subprocess_safety_check_job, CronTrigger(minute='*/15'), id='subprocess_safety_check', replace_existing=True)
     
     log_info(MODULE, "v4 Scheduler Started. Running initial cycles...")
     
-    # Run once at startup to populate dashboard immediately
+    # Run once at startup to populate dashboard immediately and run safety check
+    asyncio.create_task(check_subprocesses_safety(sb))
     asyncio.create_task(cycle_15m())
     asyncio.create_task(cycle_5m())
     

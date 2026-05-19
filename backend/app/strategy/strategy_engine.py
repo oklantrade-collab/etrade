@@ -220,12 +220,13 @@ class StrategyEngine:
             'plus_di':           safe_float(last_15m.get('plus_di')),
             'minus_di':          safe_float(last_15m.get('minus_di')),
             'adx_velocity':      velocity,
+            'bb_expanding':      safe_bool(last_15m.get('bb_expanding')),
             # EMAs
-            'ema3':              safe_float(last_15m.get('ema3')),
-            'ema9':              safe_float(last_15m.get('ema9')),
-            'ema20':             safe_float(last_15m.get('ema20')),
-            'ema50':             safe_float(last_15m.get('ema50')),
-            'ema200':            safe_float(last_15m.get('ema200')),
+            'ema3':              safe_float(last_15m.get('ema_3') if last_15m.get('ema_3') is not None else last_15m.get('ema3')),
+            'ema9':              safe_float(last_15m.get('ema_9') if last_15m.get('ema_9') is not None else last_15m.get('ema9')),
+            'ema20':             safe_float(last_15m.get('ema_20') if last_15m.get('ema_20') is not None else last_15m.get('ema20')),
+            'ema50':             safe_float(last_15m.get('ema_50') if last_15m.get('ema_50') is not None else last_15m.get('ema50')),
+            'ema200':            safe_float(last_15m.get('ema_200') if last_15m.get('ema_200') is not None else last_15m.get('ema200')),
             'ema3_angle':        safe_float(last_15m.get('ema3_angle')),
             'ema9_angle':        safe_float(last_15m.get('ema9_angle')),
             'ema20_angle':       safe_float(last_15m.get('ema20_angle')),
@@ -297,6 +298,9 @@ class StrategyEngine:
             'ai_opportune_buy':  safe_bool(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('opportune_buy', False)),
             'ai_opportune_sell': safe_bool(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('opportune_sell', False)),
             'ai_candle_color':   str(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('current_candle_color', 'neutral')),
+            
+            # Referencia al DataFrame original para reglas personalizadas avanzadas
+            'df_15m': df_15m
         }
 
 
@@ -438,6 +442,239 @@ class StrategyEngine:
         symbol = context.get('symbol', '')
         mtf = context.get('mtf_score', 0.0)
         rule_code = rule.get('rule_code', '')
+        price = context.get('price', 0.0)
+        
+        # --- PROPOSAL: CUSTOM PROCEDURAL OVERRIDES FOR VOLATILE SWING/PINE RULES ---
+        if rule_code in ['Aa31a', 'Bb31a', 'Aa31b', 'Bb31b']:
+            direction = rule.get('direction', 'long')
+            
+            sar_4h = context.get('sar_trend_4h', 0)
+            sar_15m = context.get('sar_trend_15m', 0)
+            pine = context.get('pinescript_signal', '')
+            struct_ok = context.get('allow_long_4h', True) if direction == 'long' else context.get('allow_short_4h', True)
+            fib_zone = context.get('fibonacci_zone', 0)
+            adx = context.get('adx', 0.0)
+            
+            ema3 = context.get('ema3', 0.0)
+            ema9 = context.get('ema9', 0.0)
+            ema20 = context.get('ema20', 0.0)
+            
+            pb_pct = 0.0015  # 0.15% dynamic pullback window suitable for Crypto
+            
+            if direction == 'long':
+                sar_4h_ok = (sar_4h > 0)
+                sar_15m_ok = (sar_15m > 0)
+                pine_not_opposite = (pine != 'Sell')
+                
+                # REFINAMIENTO V4: Pullback ordenado + gatillo de ruptura EMA3 + confirmación de giro
+                pullback_confirmed = (ema9 > ema20) and (ema20 <= price <= ema9 * (1.0 + pb_pct)) and (price > ema3) and (ema3 > ema9) if (ema3 and ema9 and ema20) else True
+                
+                # Para la variante 'b' (zona extrema), exigimos zona lower_3 o inferior
+                zone_ok = (fib_zone <= -3) if '31b' in rule_code else (fib_zone <= 3)
+                
+                triggered = (
+                    sar_15m_ok and sar_4h_ok and
+                    mtf >= 0.4 and pine_not_opposite and
+                    struct_ok and zone_ok and
+                    adx > 25 and pullback_confirmed
+                )
+                
+                min_score = float(rule.get('min_score', 0.70))
+                score = 0.75 if triggered else 0.40
+                
+                details = {
+                    'sar_15m_ok': {'name': 'SAR 15m alcista', 'passed': sar_15m_ok, 'weight': 0.15, 'current_value': sar_15m},
+                    'sar_4h_ok': {'name': 'SAR 4h alcista', 'passed': sar_4h_ok, 'weight': 0.15, 'current_value': sar_4h},
+                    'mtf_ok': {'name': 'MTF Score >= 0.4', 'passed': mtf >= 0.4, 'weight': 0.20, 'current_value': mtf},
+                    'pine_not_opposite': {'name': 'Pine no opuesto (No Sell)', 'passed': pine_not_opposite, 'weight': 0.15, 'current_value': pine},
+                    'struct_ok': {'name': 'allow_long_4h', 'passed': struct_ok, 'weight': 0.10, 'current_value': struct_ok},
+                    'zone_ok': {'name': f"Fibonacci Zone {'<= -3' if '31b' in rule_code else '<= 3'}", 'passed': zone_ok, 'weight': 0.10, 'current_value': fib_zone},
+                    'adx_ok': {'name': 'ADX > 25', 'passed': adx > 25, 'weight': 0.10, 'current_value': adx},
+                    'pullback_confirmed': {'name': 'Pullback EMA ordenado', 'passed': pullback_confirmed, 'weight': 0.05, 'current_value': f"price={price}, ema3={ema3}, ema9={ema9}, ema20={ema20}"}
+                }
+            else:  # short
+                sar_4h_ok = (sar_4h < 0)
+                sar_15m_ok = (sar_15m < 0)
+                pine_not_opposite = (pine != 'Buy')
+                
+                # REFINAMIENTO V4: Pullback ordenado + gatillo de ruptura EMA3 + confirmación de giro
+                pullback_confirmed = (ema9 < ema20) and (ema9 * (1.0 - pb_pct) <= price <= ema20) and (price < ema3) and (ema3 < ema9) if (ema3 and ema9 and ema20) else True
+                
+                # Para la variante 'b' (zona extrema), exigimos zona upper_3 o superior
+                zone_ok = (fib_zone >= 3) if '31b' in rule_code else (fib_zone >= -3)
+                
+                triggered = (
+                    sar_15m_ok and sar_4h_ok and
+                    mtf <= -0.4 and pine_not_opposite and
+                    struct_ok and zone_ok and
+                    adx > 25 and pullback_confirmed
+                )
+                
+                min_score = float(rule.get('min_score', 0.70))
+                score = 0.75 if triggered else 0.40
+                
+                details = {
+                    'sar_15m_ok': {'name': 'SAR 15m bajista', 'passed': sar_15m_ok, 'weight': 0.15, 'current_value': sar_15m},
+                    'sar_4h_ok': {'name': 'SAR 4h bajista', 'passed': sar_4h_ok, 'weight': 0.15, 'current_value': sar_4h},
+                    'mtf_ok': {'name': 'MTF Score <= -0.4', 'passed': mtf <= -0.4, 'weight': 0.20, 'current_value': mtf},
+                    'pine_not_opposite': {'name': 'Pine no opuesto (No Buy)', 'passed': pine_not_opposite, 'weight': 0.15, 'current_value': pine},
+                    'struct_ok': {'name': 'allow_short_4h', 'passed': struct_ok, 'weight': 0.10, 'current_value': struct_ok},
+                    'zone_ok': {'name': f"Fibonacci Zone {'>= 3' if '31b' in rule_code else '>= -3'}", 'passed': zone_ok, 'weight': 0.10, 'current_value': fib_zone},
+                    'adx_ok': {'name': 'ADX > 25', 'passed': adx > 25, 'weight': 0.10, 'current_value': adx},
+                    'pullback_confirmed': {'name': 'Pullback EMA ordenado', 'passed': pullback_confirmed, 'weight': 0.05, 'current_value': f"price={price}, ema3={ema3}, ema9={ema9}, ema20={ema20}"}
+                }
+                
+            return {
+                'triggered':  triggered,
+                'score':      score,
+                'min_score':  min_score,
+                'rule_code':  rule_code,
+                'rule_name':  rule.get('name'),
+                'direction':  direction,
+                'cycle':      rule.get('cycle'),
+                'conditions': details,
+                'all_passed': triggered,
+                'reason': f"{'✅' if triggered else '❌'} {rule_code} score={score:.2f}/{min_score} (pullback={pullback_confirmed}, adx={adx:.1f})"
+            }
+
+        if rule_code in ['Aa61', 'Aa61_short']:
+            direction = rule.get('direction', 'long')
+            
+            sar_15m = context.get('sar_trend_15m', 0)
+            pine = context.get('pinescript_signal', '')
+            fib_zone = context.get('fibonacci_zone', 0)
+            adx = context.get('adx', 0.0)
+            bb_exp = context.get('bb_expanding', False)
+            
+            ema3 = context.get('ema3', 0.0)
+            ema9 = context.get('ema9', 0.0)
+            ema20 = context.get('ema20', 0.0)
+            
+            if direction == 'long':
+                sar_15m_ok = (sar_15m > 0)
+                pine_not_opposite = (pine != 'Sell')
+                ema_alignment = (ema3 > ema9 > ema20) if (ema3 and ema9 and ema20) else True
+                price_above_basis = (price > ema20) if ema20 else True
+                
+                triggered = (
+                    ema_alignment and
+                    price_above_basis and
+                    bb_exp and
+                    adx > 20 and
+                    sar_15m_ok and
+                    pine_not_opposite and
+                    fib_zone <= 3
+                )
+                min_score = float(rule.get('min_score', 0.95))
+                score = 0.98 if triggered else 0.40
+                
+                details = {
+                    'ema_alignment': {'name': 'EMA3 > EMA9 > EMA20', 'passed': ema_alignment, 'weight': 0.20, 'current_value': f"ema3={ema3:.5f}, ema9={ema9:.5f}, ema20={ema20:.5f}"},
+                    'price_above_basis': {'name': 'Price > EMA20', 'passed': price_above_basis, 'weight': 0.15, 'current_value': f"price={price:.5f}, ema20={ema20:.5f}"},
+                    'bb_expanding': {'name': 'Bollinger Bands expanding', 'passed': bb_exp, 'weight': 0.20, 'current_value': bb_exp},
+                    'adx_ok': {'name': 'ADX > 20', 'passed': adx > 20, 'weight': 0.15, 'current_value': adx},
+                    'sar_15m_ok': {'name': 'SAR 15m alcista', 'passed': sar_15m_ok, 'weight': 0.10, 'current_value': sar_15m},
+                    'pine_not_opposite': {'name': 'Pine no opuesto (No Sell)', 'passed': pine_not_opposite, 'weight': 0.10, 'current_value': pine},
+                    'zone_ok': {'name': 'Fibonacci Zone <= 3', 'passed': fib_zone <= 3, 'weight': 0.10, 'current_value': fib_zone}
+                }
+            else: # short
+                sar_15m_ok = (sar_15m < 0)
+                pine_not_opposite = (pine != 'Buy')
+                ema_alignment = (ema3 < ema9 < ema20) if (ema3 and ema9 and ema20) else True
+                price_below_basis = (price < ema20) if ema20 else True
+                
+                triggered = (
+                    ema_alignment and
+                    price_below_basis and
+                    bb_exp and
+                    adx > 20 and
+                    sar_15m_ok and
+                    pine_not_opposite and
+                    fib_zone >= -3
+                )
+                min_score = float(rule.get('min_score', 0.95))
+                score = 0.98 if triggered else 0.40
+                
+                details = {
+                    'ema_alignment': {'name': 'EMA3 < EMA9 < EMA20', 'passed': ema_alignment, 'weight': 0.20, 'current_value': f"ema3={ema3:.5f}, ema9={ema9:.5f}, ema20={ema20:.5f}"},
+                    'price_below_basis': {'name': 'Price < EMA20', 'passed': price_below_basis, 'weight': 0.15, 'current_value': f"price={price:.5f}, ema20={ema20:.5f}"},
+                    'bb_expanding': {'name': 'Bollinger Bands expanding', 'passed': bb_exp, 'weight': 0.20, 'current_value': bb_exp},
+                    'adx_ok': {'name': 'ADX > 20', 'passed': adx > 20, 'weight': 0.15, 'current_value': adx},
+                    'sar_15m_ok': {'name': 'SAR 15m bajista', 'passed': sar_15m_ok, 'weight': 0.10, 'current_value': sar_15m},
+                    'pine_not_opposite': {'name': 'Pine no opuesto (No Buy)', 'passed': pine_not_opposite, 'weight': 0.10, 'current_value': pine},
+                    'zone_ok': {'name': 'Fibonacci Zone >= -3', 'passed': fib_zone >= -3, 'weight': 0.10, 'current_value': fib_zone}
+                }
+                
+            return {
+                'triggered':  triggered,
+                'score':      score,
+                'min_score':  min_score,
+                'rule_code':  rule_code,
+                'rule_name':  rule.get('name'),
+                'direction':  direction,
+                'cycle':      rule.get('cycle'),
+                'conditions': details,
+                'all_passed': triggered,
+                'reason': f"{'✅' if triggered else '❌'} {rule_code} score={score:.2f}/{min_score} (bb_exp={bb_exp}, adx={adx:.1f})"
+            }
+
+        if rule_code == 'Dd61_15m':
+            df_15m = context.get('df_15m')
+            
+            # 1. Pendiente de lower_6 (Desaceleración de Bollinger Band inferior)
+            lower6_flat = False
+            lower6_slope = 0.0
+            if df_15m is not None and len(df_15m) >= 6:
+                lower6_now = float(df_15m['lower_6'].iloc[-1]) if 'lower_6' in df_15m.columns else 0
+                lower6_prev = float(df_15m['lower_6'].iloc[-5]) if 'lower_6' in df_15m.columns else 0
+                if lower6_prev > 0:
+                    lower6_slope = (lower6_now - lower6_prev) / lower6_prev * 100
+                    lower6_flat = lower6_slope >= -0.15
+
+            # 2. Señal SIPV de reversión alcista
+            last_row = df_15m.iloc[-1].to_dict() if df_15m is not None and len(df_15m) > 0 else {}
+            sipv_signal = (
+                bool(last_row.get('is_dragonfly', False)) or
+                bool(last_row.get('is_bullish_engulfing', False)) or
+                bool(last_row.get('low_higher_than_prev', False)) or
+                bool(last_row.get('is_doji', False))
+            )
+
+            # 3. RSI en zona de sobreventa
+            rsi_val = float(last_row.get('rsi_14', 30.0))
+            rsi_ok = rsi_val <= 35
+
+            # 4. Precio interactuando con las bandas inferiores
+            price = float(context.get('price', 0))
+            lower5 = float(context.get('lower_5', 0))
+            near_support = price <= lower5 if lower5 > 0 else True
+
+            # 5. Tendencia macro no bajista (No 4h red candle)
+            is_4h_red = context.get('is_4h_red', False)
+            macro_ok = not is_4h_red
+
+            triggered = lower6_flat and sipv_signal and rsi_ok and near_support and macro_ok
+            min_score = float(rule.get('min_score', 0.75))
+
+            details = {
+                'lower6_flat': {'name': 'lower_6 Flat (slope >= -0.15%)', 'passed': lower6_flat, 'weight': 0.35, 'current_value': f"{lower6_slope:.4f}%"},
+                'sipv_signal': {'name': 'Vela de Reversión SIPV', 'passed': sipv_signal, 'weight': 0.30, 'current_value': sipv_signal},
+                'rsi_ok': {'name': 'RSI en Sobreventa (15-35)', 'passed': rsi_ok, 'weight': 0.20, 'current_value': rsi_val},
+                'macro_ok': {'name': 'No 4h Red Candle', 'passed': macro_ok, 'weight': 0.15, 'current_value': not is_4h_red}
+            }
+
+            return {
+                'triggered':  triggered,
+                'score':      1.0 if triggered else 0.4,
+                'min_score':  min_score,
+                'rule_code':  rule_code,
+                'rule_name':  rule.get('name'),
+                'direction':  rule.get('direction'),
+                'cycle':      rule.get('cycle'),
+                'conditions': details,
+                'all_passed': triggered,
+                'reason': f"{'✅' if triggered else '❌'} Dd61_15m score={1.0 if triggered else 0.4:.2f}/{min_score} (lower6_slope={lower6_slope:.4f}%, rsi={rsi_val:.1f})"
+            }
         
         if symbol:
             mtf_filter = self._check_mtf_entry_filter(symbol, mtf, rule_code)
