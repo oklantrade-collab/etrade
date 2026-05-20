@@ -454,101 +454,229 @@ function LiveEvalPanel({ symbols, liveEvals }: { symbols: string[], liveEvals: R
 }
 
 const EditRuleModal = ({ rule, conditions, onSave, onClose }: { 
-    rule: StrategyRule, 
-    conditions: Condition[], 
-    onSave: () => void, 
-    onClose: () => void 
-  }) => {
-    const [selectedCycles, setSelectedCycles] = useState<string[]>(rule.applicable_cycles || [rule.cycle] || ['15m'])
-    const [form, setForm] = useState({
-      name: rule.name,
-      min_score: rule.min_score,
-      condition_ids: rule.condition_ids || [],
-      condition_weights: rule.condition_weights || {},
-      enabled: rule.enabled,
-      notes: rule.notes || '',
-      confidence: rule.confidence || 'medium'
-    })
-  
-    const [saving, setSaving] = useState(false)
-  
-    const toggleCycle = (tf: string) => {
-      if (selectedCycles.includes(tf)) {
-        if (selectedCycles.length > 1) {
-          setSelectedCycles(selectedCycles.filter(c => c !== tf))
-        }
-      } else {
-        setSelectedCycles([...selectedCycles, tf])
+  rule: StrategyRule, 
+  conditions: Condition[], 
+  onSave: () => void, 
+  onClose: () => void 
+}) => {
+  const [selectedCycles, setSelectedCycles] = useState<string[]>(rule.applicable_cycles || [rule.cycle] || ['15m'])
+  const [form, setForm] = useState({
+    name: rule.name,
+    min_score: rule.min_score,
+    condition_ids: rule.condition_ids || [],
+    condition_weights: rule.condition_weights || {},
+    enabled: rule.enabled,
+    notes: rule.notes || '',
+    confidence: rule.confidence || 'medium'
+  })
+
+  const [saving, setSaving] = useState(false)
+
+  const toggleCycle = (tf: string) => {
+    if (selectedCycles.includes(tf)) {
+      if (selectedCycles.length > 1) {
+        setSelectedCycles(selectedCycles.filter(c => c !== tf))
       }
+    } else {
+      setSelectedCycles([...selectedCycles, tf])
     }
-  
-    const handleSave = async () => {
-      setSaving(true)
-      try {
-        const payload = {
-          ...form,
-          applicable_cycles: selectedCycles,
-          cycle: selectedCycles[0]
-        }
-        await fetch(`/api/v1/strategies/rules/${rule.rule_code}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        })
-        onSave()
-      } catch (err) {
-        console.error('Error saving rule:', err)
-      } finally {
-        setSaving(false)
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      const payload = {
+        ...form,
+        applicable_cycles: selectedCycles,
+        cycle: selectedCycles[0] // Compatibilidad
       }
+      await fetch(`/api/v1/strategies/rules/${rule.rule_code}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      onSave()
+    } catch (err) {
+      console.error('Error saving rule:', err)
+    } finally {
+      setSaving(false)
     }
-  
-    return (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 sm:p-12">
-        <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md" onClick={onClose} />
-        <div className="relative w-full max-w-2xl bg-[#131B2E] border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-300">
-          <div className="p-8 sm:p-10 space-y-8 max-h-[85vh] overflow-y-auto">
-            <div className="flex justify-between items-start">
-              <div>
-                <span className="text-[0.6rem] font-black text-blue-500 uppercase tracking-[0.3em] mb-2 block">Rule Configuration</span>
-                <h2 className="text-3xl font-black italic text-white tracking-tighter">Edit Rule <span className="text-blue-500">_</span> {rule.rule_code}</h2>
+  }
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 sm:p-12">
+      <div 
+        className="absolute inset-0 bg-slate-950/80 backdrop-blur-md" 
+        onClick={onClose} 
+      />
+      <div className="relative w-full max-w-2xl bg-[#131B2E] border border-white/10 rounded-[2.5rem] shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-300">
+        <div className="p-8 sm:p-10 space-y-8 max-h-[85vh] overflow-y-auto custom-scrollbar">
+          <div className="flex justify-between items-start">
+            <div>
+              <span className="text-[0.6rem] font-black text-blue-500 uppercase tracking-[0.3em] mb-2 block">Rule Configuration</span>
+              <h2 className="text-3xl font-black italic text-white tracking-tighter">Edit Rule <span className="text-blue-500">_</span> {rule.rule_code}</h2>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-full text-slate-500 transition-colors">✕</button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+             <div className="space-y-4 col-span-full">
+               <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Rule Name</label>
+               <input 
+                 value={form.name} 
+                 onChange={e => setForm({...form, name: e.target.value})}
+                 className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-sm font-bold text-white focus:border-blue-500 focus:outline-none transition-all"
+               />
+             </div>
+
+             <div className="space-y-4">
+               <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Minimum Activation Score</label>
+               <input 
+                 type="number" step="0.05" min="0" max="1"
+                 value={form.min_score} 
+                 onChange={e => setForm({...form, min_score: parseFloat(e.target.value)})}
+                 className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-sm font-mono font-bold text-blue-400 focus:border-blue-500 focus:outline-none transition-all"
+               />
+             </div>
+
+             <div className="space-y-4">
+               <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Confidence Level</label>
+               <select 
+                 value={form.confidence}
+                 onChange={e => setForm({...form, confidence: e.target.value})}
+                 className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-sm font-bold text-white focus:border-blue-500 focus:outline-none transition-all"
+               >
+                 <option value="low">Low</option>
+                 <option value="medium_low">Medium-Low</option>
+                 <option value="medium">Medium</option>
+                 <option value="medium_high">Medium-High</option>
+                 <option value="high">High</option>
+               </select>
+             </div>
+          </div>
+
+          <div className="space-y-4">
+            <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">APPLICABLE TIMEFRAMES</label>
+            <div className="flex gap-2">
+              {AVAILABLE_CYCLES.map(tf => {
+                const isSelected = selectedCycles.includes(tf)
+                const colors = CYCLE_COLORS[tf]
+                return (
+                  <button
+                    key={tf}
+                    onClick={() => toggleCycle(tf)}
+                    className={`px-6 py-2.5 rounded-xl text-xs font-bold transition-all border ${
+                      isSelected 
+                      ? 'shadow-lg shadow-black/20' 
+                      : 'border-white/5 text-slate-500 hover:border-white/10'
+                    }`}
+                    style={{
+                      background: isSelected ? colors.bg : 'transparent',
+                      color: isSelected ? colors.text : undefined,
+                      borderColor: isSelected ? `${colors.text}66` : undefined,
+                    }}
+                  >
+                    {tf.toUpperCase()}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Condition Set & Weights</label>
+              <span className="text-[0.6rem] font-black text-slate-600 bg-black/20 px-2 py-1 rounded">Sum: {Object.values(form.condition_weights).reduce((a, b: any) => a + (parseFloat(b) || 0), 0).toFixed(2)}</span>
+            </div>
+
+            <div className="space-y-3">
+              {form.condition_ids.map(cid => {
+                const cond = conditions.find(c => c.id === cid)
+                const weight = form.condition_weights[cid] ?? (1 / (form.condition_ids.length || 1))
+                return (
+                  <div key={cid} className="flex items-center gap-4 bg-slate-900/50 p-4 rounded-2xl border border-white/5 hover:border-white/10 transition-all">
+                    <div className="flex-1 flex flex-col">
+                      <span className="text-[0.65rem] font-bold text-slate-300 mb-0.5">{cond?.name || `Condition #${cid}`}</span>
+                      <span className="text-[0.55rem] font-black text-slate-500 uppercase font-mono">{cond?.variable?.source_field || 'System Variable'}</span>
+                    </div>
+                    <div className="w-20">
+                       <input 
+                         type="number" step="0.05" min="0" max="1"
+                         value={weight}
+                         onChange={e => setForm({
+                           ...form,
+                           condition_weights: { ...form.condition_weights, [cid]: parseFloat(e.target.value) }
+                         })}
+                         className="w-full bg-black/40 border border-white/5 rounded-xl px-2 py-2 text-xs font-mono font-bold text-center text-blue-400 focus:border-blue-400 focus:outline-none"
+                       />
+                    </div>
+                    <button 
+                      onClick={() => {
+                        const newIds = form.condition_ids.filter(id => id !== cid)
+                        const newWeights = { ...form.condition_weights }
+                        delete newWeights[cid]
+                        setForm({ ...form, condition_ids: newIds, condition_weights: newWeights })
+                      }}
+                      className="text-rose-500 hover:text-rose-400 p-2"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )
+              })}
+
+              <div className="pt-2">
+                <select 
+                  onChange={e => {
+                    const id = parseInt(e.target.value)
+                    if (id && !form.condition_ids.includes(id)) {
+                      setForm({
+                        ...form,
+                        condition_ids: [...form.condition_ids, id],
+                        condition_weights: { ...form.condition_weights, [id]: 0.1 }
+                      })
+                    }
+                  }}
+                  className="w-full bg-white/5 border border-white/5 border-dashed rounded-2xl px-5 py-4 text-xs font-black text-blue-500 uppercase tracking-widest hover:bg-white/10 transition-all focus:outline-none cursor-pointer"
+                >
+                  <option value="">+ Add Processing Unit (Condition)</option>
+                  {conditions.filter(c => !form.condition_ids.includes(c.id)).map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
               </div>
-              <button onClick={onClose} className="p-2 hover:bg-white/5 rounded-full text-slate-500">✕</button>
             </div>
-  
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-               <div className="space-y-4 col-span-full">
-                 <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Rule Name</label>
-                 <input 
-                   value={form.name} 
-                   onChange={e => setForm({...form, name: e.target.value})}
-                   className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-sm font-bold text-white outline-none"
-                 />
-               </div>
-  
-               <div className="space-y-4">
-                 <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Min Score</label>
-                 <input 
-                   type="number" step="0.05"
-                   value={form.min_score} 
-                   onChange={e => setForm({...form, min_score: parseFloat(e.target.value)})}
-                   className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-sm font-mono font-bold text-blue-400 outline-none"
-                 />
-               </div>
-            </div>
-  
-            <div className="flex gap-4 pt-4">
-              <button onClick={onClose} className="flex-1 px-8 py-4 rounded-2xl text-xs font-black uppercase text-slate-500 hover:text-white transition-all">Discard</button>
-              <button 
-                onClick={handleSave}
-                disabled={saving}
-                className="flex-[2] bg-blue-600 hover:bg-blue-500 text-white px-8 py-4 rounded-2xl text-xs font-black uppercase tracking-widest shadow-xl transition-all"
-              >
-                {saving ? 'Processing...' : 'Apply Configuration'}
-              </button>
-            </div>
+          </div>
+
+          <div className="space-y-4">
+            <label className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest block">Intelligence Notes</label>
+            <textarea 
+              rows={3}
+              value={form.notes} 
+              onChange={e => setForm({...form, notes: e.target.value})}
+              placeholder="Analysis rationale, logic updates, or performance observations..."
+              className="w-full bg-slate-900 border border-white/5 rounded-2xl px-5 py-4 text-sm font-medium text-slate-400 focus:border-blue-500 focus:outline-none transition-all resize-none"
+            />
+          </div>
+
+          <div className="flex gap-4 pt-4">
+            <button 
+              onClick={onClose}
+              className="flex-1 px-8 py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-slate-500 hover:text-white hover:bg-white/5 transition-all"
+            >
+              Discard Changes
+            </button>
+            <button 
+              onClick={handleSave}
+              disabled={saving}
+              className="flex-[2] bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-8 py-4 rounded-2xl text-xs font-black uppercase tracking-widest shadow-xl shadow-blue-600/20 transition-all flex items-center justify-center gap-2"
+            >
+              {saving ? 'Processing...' : 'Apply Logic Configuration'}
+            </button>
           </div>
         </div>
       </div>
-    )
-  }
+    </div>
+  )
+}
+
