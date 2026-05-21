@@ -118,8 +118,10 @@ def get_ema_trend(
     ema3_prev = 0.0
     if len(df) >= 4:
         # Calculate previous EMA3 to determine if it is curving down
-        ema3_series = df['close'].ewm(span=3, adjust=False).mean()
-        ema3_prev = float(ema3_series.iloc[-2])
+        close_col = 'close' if 'close' in df.columns else 'Close'
+        if close_col in df.columns:
+             ema3_series = df[close_col].ewm(span=3, adjust=False).mean()
+             ema3_prev = float(ema3_series.iloc[-2])
 
     if ema3 <= 0 or ema9 <= 0:
         return {
