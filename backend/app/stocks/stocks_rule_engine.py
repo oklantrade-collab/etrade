@@ -127,6 +127,7 @@ class StocksRuleEngine:
             "bb_expanding": bb_expanding or bool(snap.get("bb_expanding", False)),
             "ema_exhaustion": ema_exhaustion or bool(snap.get("ema_exhaustion", False)),
             "ema3_cross_age": ema3_cross_age,
+            "rsi_14": float(snap.get("rsi_14", 50.0)),
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -478,6 +479,7 @@ class StocksRuleEngine:
             cross_age = int(context.get("ema3_cross_age", 999))
             bb_upper = float(context.get("bb_upper") or 99999)
             high_price = float(context.get("high") or 0)
+            rsi = float(context.get("rsi_14") or 50.0)
             
             # Requisito 1: Volumen Mínimo (Evitar acciones sin tracción)
             if vol_24h < 1_000_000:
@@ -488,10 +490,12 @@ class StocksRuleEngine:
             if rvol < dynamic_rvol_min:
                 failures.append(f"Insufficient RVOL: {rvol:.2f}x < {dynamic_rvol_min}x (No momentum projection)")
 
-            # Requisito 3: Momentum Técnico FRESCO (Cruce EMA3 > EMA9 y HIGH <= BB_UPPER o BB Expansion)
+            # Requisito 3: Momentum Técnico FRESCO (Cruce EMA3 > EMA9, HIGH <= BB_UPPER, RSI < 60)
             ema_ok = (ema3 and ema9 and ema3 > ema9 and high_price <= bb_upper)
             if not (ema_ok or bb_exp):
                 failures.append(f"No Fresh Momentum: Need (EMA3 > EMA9 AND High {high_price} <= BB_Upper {bb_upper}) OR (BB Expanding)")
+            if rsi >= 60:
+                failures.append(f"RSI Exhausted: {rsi:.1f} >= 60 (Overbought)")
             
             # Requisito 4: Alineación de tendencia (EMA20 como base)
             if ema3 and ema20 and ema3 < ema20:
