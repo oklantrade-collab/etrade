@@ -302,6 +302,67 @@ DEFAULT_RULES = [
         "logic": "AND",
         "notes": "Comprar SHORT al primer Sell del PineScript. Sizing: T1. (v2 forced)",
     },
+    # ═══ HOT MOMENTUM RULES (15m) — RAMA HOT ═══
+    {
+        "id": 1016,
+        "rule_code": "Aa_HOT",
+        "name": "HOT Momentum LONG",
+        "description": "Entrada quirúrgica agresiva LONG con EMA ultra-cerca y ADX>22",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 10,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "ema_cross_long_hot", "operator": "==", "value": True},
+            {"indicator": "mtf_score", "operator": ">", "value": 0},
+            {"indicator": "mtf_score", "operator": ">=", "value": -0.6},
+            {"indicator": "bb_expanding_or_mtf_long", "operator": "==", "value": True},
+            {"indicator": "fib_zone", "operator": ">=", "value": -6},
+            {"indicator": "fib_zone", "operator": "<=", "value": 2},
+            {"indicator": "sar_15m_ok_long", "operator": "==", "value": True},
+            {"indicator": "adx_floor_ok", "operator": "==", "value": True},
+            {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
+            {"indicator": "rsi_ok_long", "operator": "==", "value": True},
+            {"indicator": "not_in_ceiling", "operator": "==", "value": True},
+            {"indicator": "ema_exhaustion", "operator": "==", "value": False},
+        ],
+        "logic": "AND",
+        "notes": "Estrategia quirúrgica adaptada de Forex. Ultra rápida.",
+    },
+    {
+        "id": 1017,
+        "rule_code": "Bb_HOT",
+        "name": "HOT Momentum SHORT",
+        "description": "Entrada quirúrgica agresiva SHORT con EMA ultra-cerca y ADX>22",
+        "direction": "short",
+        "market_type": ["crypto_spot", "crypto_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 10,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "ema_cross_short_hot", "operator": "==", "value": True},
+            {"indicator": "mtf_score", "operator": "<", "value": 0},
+            {"indicator": "mtf_score", "operator": "<=", "value": 0.6},
+            {"indicator": "bb_expanding_or_mtf_short", "operator": "==", "value": True},
+            {"indicator": "fib_zone", "operator": ">=", "value": -2},
+            {"indicator": "fib_zone", "operator": "<=", "value": 6},
+            {"indicator": "sar_15m_ok_short", "operator": "==", "value": True},
+            {"indicator": "adx_floor_ok", "operator": "==", "value": True},
+            {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
+            {"indicator": "rsi_ok_short", "operator": "==", "value": True},
+            {"indicator": "not_in_floor", "operator": "==", "value": True},
+            {"indicator": "ema_exhaustion", "operator": "==", "value": False},
+        ],
+        "logic": "AND",
+        "notes": "Estrategia quirúrgica adaptada de Forex. Ultra rápida.",
+    },
     # ═══ SWING RULES (4h) — RAMA D ═══
     {
         "id": 1014,
@@ -319,6 +380,10 @@ DEFAULT_RULES = [
         "conditions": [
             {"indicator": "ema20_phase", "operator": "in", "value": ["flat", "nivel_1_long", "nivel_1_short"]},
             {"indicator": "price_touched_lower_5_6", "operator": "==", "value": True},
+            {"indicator": "ema_cross_long", "operator": "==", "value": True},
+            {"indicator": "mtf_score", "operator": ">=", "value": -0.6},
+            {"indicator": "reversal_confirmation_long", "operator": "==", "value": True},
+            {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
         ],
         "logic": "AND",
         "notes": "Swing trade; ejecuta LIMIT target.",
@@ -339,6 +404,10 @@ DEFAULT_RULES = [
         "conditions": [
             {"indicator": "ema20_phase", "operator": "in", "value": ["flat", "nivel_1_long", "nivel_1_short"]},
             {"indicator": "price_touched_upper_6", "operator": "==", "value": True},
+            {"indicator": "ema_cross_short", "operator": "==", "value": True},
+            {"indicator": "mtf_score", "operator": "<=", "value": 0.6},
+            {"indicator": "reversal_confirmation_short", "operator": "==", "value": True},
+            {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
         ],
         "logic": "AND",
         "notes": "Swing trade; ejecuta LIMIT target.",
@@ -467,15 +536,20 @@ def build_market_data_dict(
         # Price touching zones (lookback 3 bars)
         "price_touched_lower_5_6": _price_touched_lower_zones(df),
         "price_touched_upper_6": _price_touched_upper_6(df),
-        # Reversal confirmations
+        # Reversal confirmations (SIPV equivalent)
         "reversal_confirmation_long": bool(
             last.get("is_dragonfly", False)
             or last.get("low_higher_than_prev", False)
+            or last.get("is_hammer", False)
+            or last.get("is_bullish_engulfing", False)
+            or last.get("is_doji", False)
         ),
         "reversal_confirmation_short": bool(
             last.get("is_gravestone", False)
             or (last.get("is_red_candle", False) and fib_levels.get("zone", 0) >= 5)
             or last.get("high_lower_than_prev", False)
+            or last.get("is_bearish_engulfing", False)
+            or last.get("is_doji", False)
         ),
         # Volume
         "vol_entry_ok": bool(last.get("vol_entry_ok", False)),
@@ -483,7 +557,50 @@ def build_market_data_dict(
         "vol_increasing": bool(last.get("vol_increasing", False)),
         "spike_detected": bool(last.get("spike_detected", False)),
         "spike_ratio": float(last.get("spike_ratio", 0.0)),
+        # Variables para Aa_HOT / Bb_HOT
+        "adx_floor_ok": float(last.get("adx", 0)) > 22 if pd.notna(last.get("adx")) else False,
+        "sar_15m_ok_long": int(last.get("sar_trend", 0)) > 0 if pd.notna(last.get("sar_trend")) else False,
+        "sar_15m_ok_short": int(last.get("sar_trend", 0)) < 0 if pd.notna(last.get("sar_trend")) else False,
+        "bb_expanding": bool(last.get("bb_expanding", False)),
     }
+
+    ema3 = float(last.get("ema1", last.get("ema_3", 0))) if pd.notna(last.get("ema1")) or pd.notna(last.get("ema_3")) else 0.0
+    ema9 = float(last.get("ema2", last.get("ema_9", 0))) if pd.notna(last.get("ema2")) or pd.notna(last.get("ema_9")) else 0.0
+    ema_dist_pct = abs(ema3 - ema9) / ema9 * 100 if ema9 > 0 else 100
+    ema_close_enough = ema_dist_pct <= 0.05
+    ema_close_enough_03 = ema_dist_pct <= 0.03
+    mtf_score = float(last.get("mtf_score", 0)) if pd.notna(last.get("mtf_score")) else 0.0
+
+    bb_exp = bool(last.get("bb_expanding", False))
+    ema_exhaustion = (ema_dist_pct > 0.15) and not bb_exp
+
+    high_price = float(last.get("high", 0)) if pd.notna(last.get("high")) else 0.0
+    low_price = float(last.get("low", 0)) if pd.notna(last.get("low")) else 0.0
+    upper_2 = float(last.get("upper_2", 99999)) if pd.notna(last.get("upper_2")) else 99999.0
+    lower_2 = float(last.get("lower_2", 0)) if pd.notna(last.get("lower_2")) else 0.0
+
+    rsi_14_val = 50.0
+    if len(df) >= 14:
+        from ta.momentum import RSIIndicator
+        close_series = pd.to_numeric(df["close"], errors="coerce")
+        rsi_14_val = float(RSIIndicator(close=close_series, window=14).rsi().iloc[-1])
+
+    data.update({
+        "ema_cross_short": (ema3 < ema9) or ema_close_enough,
+        "ema_cross_long": (ema3 > ema9) or ema_close_enough,
+        "ema_cross_short_hot": (ema3 < ema9) or ema_close_enough_03,
+        "ema_cross_long_hot": (ema3 > ema9) or ema_close_enough_03,
+        "bb_expanding_or_mtf_long": bb_exp or mtf_score >= 0.5,
+        "bb_expanding_or_mtf_short": bb_exp or mtf_score <= -0.5,
+        "mtf_score": mtf_score,
+        "strong_contratrend_long": float(last.get("adx", 0)) > 35 and mtf_score <= -0.5,
+        "strong_contratrend_short": float(last.get("adx", 0)) > 35 and mtf_score >= 0.5,
+        "rsi_ok_long": rsi_14_val < 60,
+        "rsi_ok_short": rsi_14_val > 40,
+        "not_in_ceiling": high_price <= upper_2 if upper_2 > 0 else True,
+        "not_in_floor": low_price >= lower_2 if lower_2 > 0 else True,
+        "ema_exhaustion": ema_exhaustion,
+    })
 
     return data
 
