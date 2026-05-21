@@ -141,12 +141,33 @@ def calculate_b1_momentum(
             'score': vol_consistency, 'weight': 0.20,
         }
 
+    # ── EMA3 / EMA9 FRESH CROSS BONUS ─────────
+    ema3 = float(snap.get('ema_3') or 0)
+    ema9 = float(snap.get('ema_9') or 0)
+    ema_cross_age = int(snap.get('ema3_cross_ema9_age', 999))
+    ema_cross_score = 0
+    if ema3 > ema9:
+        if ema_cross_age <= 1:
+            ema_cross_score = 100
+        elif ema_cross_age <= 3:
+            ema_cross_score = 70
+        else:
+            ema_cross_score = 40
+    else:
+        ema_cross_score = 10
+        
+    components['ema_cross_momentum'] = {
+        'age': ema_cross_age,
+        'score': ema_cross_score, 'weight': 0.25,
+    }
+
     # ── Score final B1 ────────────────────────
     weights_used = {
-        'rvol': 0.35,
-        'price_accel': 0.25 if 'price_acceleration' in components else 0,
-        'vwap': 0.20 if 'vwap' in components else 0,
+        'rvol': 0.25,
+        'price_accel': 0.15 if 'price_acceleration' in components else 0,
+        'vwap': 0.15 if 'vwap' in components else 0,
         'vol_consist': 0.20 if 'vol_consistency' in components else 0,
+        'ema_cross': 0.25 if 'ema_cross_momentum' in components else 0,
     }
     total_w = sum(weights_used.values())
 
@@ -154,7 +175,8 @@ def calculate_b1_momentum(
         rvol_score * weights_used['rvol'] +
         price_accel * weights_used['price_accel'] +
         vwap_score * weights_used['vwap'] +
-        vol_consistency * weights_used['vol_consist']
+        vol_consistency * weights_used['vol_consist'] +
+        ema_cross_score * weights_used['ema_cross']
     ) / (total_w if total_w > 0 else 1)
     
     # ── Penalización por Sobreextensión (Evitar techos) ────────

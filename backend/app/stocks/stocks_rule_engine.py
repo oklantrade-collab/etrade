@@ -94,6 +94,7 @@ class StocksRuleEngine:
         """
         price = float(snap.get("price", 0))
         close = float(snap.get("close", price))
+        high = float(snap.get("high", close))
         basis = float(snap.get("basis", price))
 
         return {
@@ -113,6 +114,8 @@ class StocksRuleEngine:
             "limit_buy_band": limit_buy_band,
             "limit_sell_band": limit_sell_band,
             "bb_lower": bb_lower,
+            "bb_upper": snap.get("bb_upper"),
+            "high": high,
             "intrinsic_price": intrinsic_price,
             "pool_type": pool_type or "",
             "sm_score": sm_score,
@@ -473,6 +476,8 @@ class StocksRuleEngine:
             rvol  = float(context.get("rvol") or 1.0)
             vol_24h = float(context.get("volume") or 0)
             cross_age = int(context.get("ema3_cross_age", 999))
+            bb_upper = float(context.get("bb_upper") or 99999)
+            high_price = float(context.get("high") or 0)
             
             # Requisito 1: Volumen Mínimo (Evitar acciones sin tracción)
             if vol_24h < 1_000_000:
@@ -483,11 +488,10 @@ class StocksRuleEngine:
             if rvol < dynamic_rvol_min:
                 failures.append(f"Insufficient RVOL: {rvol:.2f}x < {dynamic_rvol_min}x (No momentum projection)")
 
-            # Requisito 3: Momentum Técnico FRESCO (Cruce EMA3 > EMA9 o BB Expansion)
-            # Requerir que el cruce sea muy reciente (0 a 2 velas de 15m) para evitar entrar en el techo (agotamiento).
-            ema_ok = (ema3 and ema9 and ema3 > ema9 and cross_age <= 2)
+            # Requisito 3: Momentum Técnico FRESCO (Cruce EMA3 > EMA9 y HIGH <= BB_UPPER o BB Expansion)
+            ema_ok = (ema3 and ema9 and ema3 > ema9 and high_price <= bb_upper)
             if not (ema_ok or bb_exp):
-                failures.append(f"No Fresh Momentum: Need fresh (EMA3 > EMA9, age {cross_age} <= 2) OR (BB Expanding)")
+                failures.append(f"No Fresh Momentum: Need (EMA3 > EMA9 AND High {high_price} <= BB_Upper {bb_upper}) OR (BB Expanding)")
             
             # Requisito 4: Alineación de tendencia (EMA20 como base)
             if ema3 and ema20 and ema3 < ema20:
