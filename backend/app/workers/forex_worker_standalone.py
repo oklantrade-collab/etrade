@@ -732,9 +732,10 @@ class StandaloneForexWorker:
                 self.log(f"Snapshot abortado para {symbol}: Datos insuficientes ({len(data)} velas)", "WARNING")
                 return
             df = pd.DataFrame(data)
-            df['ema20'] = df['c'].ewm(span=20).mean()
-            df['ema9']  = df['c'].ewm(span=9).mean()
-            df['ema3']  = df['c'].ewm(span=3).mean()
+            # V7: adjust=False para fórmula EMA estándar financiera (compatible con TradingView/cTrader)
+            df['ema20'] = df['c'].ewm(span=20, adjust=False).mean()
+            df['ema9']  = df['c'].ewm(span=9, adjust=False).mean()
+            df['ema3']  = df['c'].ewm(span=3, adjust=False).mean()
             df['bb_up']  = df['ema20'] + (df['c'].rolling(20).std() * 2)
             df['bb_low'] = df['ema20'] - (df['c'].rolling(20).std() * 2)
             
@@ -828,7 +829,7 @@ class StandaloneForexWorker:
                 if len(tf_data) >= 10:
                     try:
                         tf_df = pd.DataFrame(tf_data)
-                        tf_ema20 = tf_df['c'].ewm(span=20).mean().iloc[-1]
+                        tf_ema20 = tf_df['c'].ewm(span=20, adjust=False).mean().iloc[-1]
                         if price > tf_ema20: mtf_score += 0.25
                         else: mtf_score -= 0.25
                         tfs_checked += 1
@@ -850,7 +851,7 @@ class StandaloneForexWorker:
             if data_4h and len(data_4h) > 5:
                 try:
                     df_4h = pd.DataFrame(data_4h)
-                    df_4h['basis'] = df_4h['c'].ewm(span=20).mean()
+                    df_4h['basis'] = df_4h['c'].ewm(span=20, adjust=False).mean()
                     df_4h['tr'] = np.maximum(df_4h['h'] - df_4h['l'], np.maximum(abs(df_4h['h'] - df_4h['c'].shift(1)), abs(df_4h['l'] - df_4h['c'].shift(1))))
                     df_4h['atr'] = df_4h['tr'].rolling(window=14).mean()
                     calculate_parabolic_sar(df_4h)

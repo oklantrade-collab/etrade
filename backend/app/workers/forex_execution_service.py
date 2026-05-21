@@ -191,8 +191,37 @@ class ForexExecutionService:
 
         mtf_score = self._safe_float(snap.get('mtf_score'))
 
+        # REFINAMIENTO V5: Cálculo dinámico de medias en memoria para evitar fallos de base de datos
+        symbol = snap.get('symbol')
+        ema_3 = self._safe_float(snap.get('ema_3'))
+        ema_9 = self._safe_float(snap.get('ema_9'))
+        ema_20 = self._safe_float(snap.get('ema_20'))
+        bb_exp = bool(snap.get('bb_expanding', False))
+
+        if hasattr(self, 'state') and 'candles' in self.state:
+            candles_key = f"{symbol}_15m"
+            candles_data = self.state['candles'].get(candles_key, [])
+            if len(candles_data) >= 50:  # V7: Mínimo 50 velas para warm-up adecuado de EMAs
+                try:
+                    import pandas as pd
+                    closes = [float(c.get('c', c.get('close', 0.0))) for c in candles_data]
+                    df_closes = pd.Series(closes)
+                    # V7: adjust=False usa la fórmula EMA estándar financiera (compatible con TradingView/cTrader)
+                    ema_3 = float(df_closes.ewm(span=3, adjust=False).mean().iloc[-1])
+                    ema_9 = float(df_closes.ewm(span=9, adjust=False).mean().iloc[-1])
+                    ema_20 = float(df_closes.ewm(span=20, adjust=False).mean().iloc[-1])
+                    
+                    # Bollinger Expansion fallback en memoria
+                    if len(candles_data) >= 2:
+                        last_c = candles_data[-1]
+                        prev_c = candles_data[-2]
+                        if 'bb_up' in last_c and 'bb_low' in last_c and 'bb_up' in prev_c and 'bb_low' in prev_c:
+                            bb_exp = bool((last_c['bb_up'] > prev_c['bb_up']) and (last_c['bb_low'] < prev_c['bb_low']))
+                except Exception as e:
+                    self.log(f"Error calculating dynamic EMAs for {symbol}: {e}", "WARNING")
+
         return {
-            'symbol': snap.get('symbol'),
+            'symbol': symbol,
             'price': price,
             'basis': self._safe_float(snap.get('basis'), price),
             'dist_basis_pct': self._safe_float(snap.get('dist_basis_pct')),
@@ -210,10 +239,10 @@ class ForexExecutionService:
             'lower_1': self._safe_float(snap.get('lower_1')),
             'upper_6': self._safe_float(snap.get('upper_6')),
             'lower_6': self._safe_float(snap.get('lower_6')),
-            'ema_3': self._safe_float(snap.get('ema_3')),
-            'ema_9': self._safe_float(snap.get('ema_9')),
-            'ema_20': self._safe_float(snap.get('ema_20')),
-            'bb_expanding': bool(snap.get('bb_expanding', False)),
+            'ema_3': ema_3,
+            'ema_9': ema_9,
+            'ema_20': ema_20,
+            'bb_expanding': bb_exp,
         }
 
     def _check_rules(self, context: dict, direction: str) -> dict:
@@ -266,38 +295,40 @@ class ForexExecutionService:
             if symbol in strict_symbols:
                 # REFINAMIENTO V4: Entrada en pullback ordenado (precio entre EMA20 y EMA9 + pb_pips) + gatillo de ruptura de EMA3 + confirmación de giro (EMA3 > EMA9)
                 # NOTA CRÍTICA: Se exige (ema3 > ema9) para evitar el bucle de cierre inmediato del stop de protección contrario
-                pullback_confirmed = (ema9 > ema20) and (ema20 <= price <= ema9 + (pb_pips * pip_size)) and (price > ema3) and (ema3 > ema9) if (ema3 and ema9 and ema20) else True
+                # NOTA V5: default=False si faltan EMAs (fail-safe)
+                pullback_confirmed = (ema9 > ema20) and (ema20 <= price <= ema9 + (pb_pips * pip_size)) and (price > ema3) and (ema3 > ema9) if (ema3 and ema9 and ema20) else False
                 rule_alignment_triggered = (
                     sar_15m_ok and sar_4h_ok and 
                     mtf >= 0.4 and pine_not_opposite and 
-                    struct_ok and fib_zone <= 3 and 
+                    struct_ok and fib_zone <= 2 and 
                     adx > 25 and pullback_confirmed
                 )
             else:
                 rule_alignment_triggered = (
                     sar_15m_ok and (sar_4h_ok or mtf >= 0.5) and 
                     mtf >= 0.4 and pine_not_opposite and 
-                    struct_ok and fib_zone <= 3 and 
-                    adx > 25 and (ema3 > ema9 if ema3 and ema9 else True)
+                    struct_ok and fib_zone <= 2 and 
+                    adx > 25 and (ema3 > ema9 if ema3 and ema9 else False)
                 )
         else:
             # Short: SAR 15m bajista Y (SAR 4h bajista O MTF <= -0.5) Y MTF <= -0.4 Y no opuesto Pine Y no en piso Y ADX > 25 Y pullback confirmado
             if symbol in strict_symbols:
                 # REFINAMIENTO V4: Entrada en pullback ordenado (precio entre EMA9 - pb_pips y EMA20) + gatillo de ruptura de EMA3 + confirmación de giro (EMA3 < EMA9)
                 # NOTA CRÍTICA: Se exige (ema3 < ema9) para evitar el bucle de cierre inmediato del stop de protección contrario
-                pullback_confirmed = (ema9 < ema20) and (ema9 - (pb_pips * pip_size) <= price <= ema20) and (price < ema3) and (ema3 < ema9) if (ema3 and ema9 and ema20) else True
+                # NOTA V5: default=False si faltan EMAs (fail-safe)
+                pullback_confirmed = (ema9 < ema20) and (ema9 - (pb_pips * pip_size) <= price <= ema20) and (price < ema3) and (ema3 < ema9) if (ema3 and ema9 and ema20) else False
                 rule_alignment_triggered = (
                     sar_15m_ok and sar_4h_ok and 
                     mtf <= -0.4 and pine_not_opposite and 
-                    struct_ok and fib_zone >= -3 and 
+                    struct_ok and fib_zone >= -2 and 
                     adx > 25 and pullback_confirmed
                 )
             else:
                 rule_alignment_triggered = (
                     sar_15m_ok and (sar_4h_ok or mtf <= -0.5) and 
                     mtf <= -0.4 and pine_not_opposite and 
-                    struct_ok and fib_zone >= -3 and 
-                    adx > 25 and (ema3 < ema9 if ema3 and ema9 else True)
+                    struct_ok and fib_zone >= -2 and 
+                    adx > 25 and (ema3 < ema9 if ema3 and ema9 else False)
                 )
 
         results.append({
@@ -306,18 +337,51 @@ class ForexExecutionService:
             'score': 0.7
         })
 
-        # NUEVA REGLA: HOT_MOMENTUM (Especifica y Quirurgica)
+        # NUEVA REGLA: HOT_MOMENTUM (Especifica y Quirurgica) — REFINAMIENTO V6
         ema3, ema9, ema20 = context.get('ema_3'), context.get('ema_9'), context.get('ema_20')
         bb_exp = context.get('bb_expanding', False)
         
+        # Mejorada lógica de entrada para Aa_HOT (Long/Short)
+        # V6: Filtros reforzados para XAUUSD tras pérdida de -$10.38
         hot_triggered = False
         if ema3 and ema9 and ema20:
+            # Calcular distancia porcentual entre EMA3 y EMA9
+            ema_dist_pct = abs(ema3 - ema9) / ema9 * 100 if ema9 > 0 else 100
+            ema_close_enough = ema_dist_pct <= 0.03  # V6: Reducido de 0.05% a 0.03% para cruce más inminente
+            
+            # V6: Exigir ADX mínimo de 22 para confirmar tendencia real
+            adx_floor_ok = adx > 22
+            
+            # Filtros anti‑momentum y contratendencia fuerte (CORREGIDO: adx_val → adx)
+            strong_contratrend_hot = (
+                (direction == 'long' and adx > 35 and mtf <= -0.5) or
+                (direction == 'short' and adx > 35 and mtf >= 0.5)
+            )
+            
+            # V6: Para XAUUSD y símbolos estrictos, exigir SAR 4H alineado
+            hot_strict_symbols = ['XAUUSD', 'GBPUSD']
+            require_sar4h = symbol in hot_strict_symbols
+            sar4h_gate = sar_4h_ok if require_sar4h else True
+            
             if direction == 'long':
-                # LONG: EMA3 > EMA9 > EMA20 + (Bollinger abri ndose O MTF fuerte) + MTF Aligned
-                hot_triggered = (ema3 > ema9 > ema20) and (bb_exp or mtf >= 0.5) and (-6 <= fib_zone <= 3) and sar_15m_ok and mtf > 0
+                ema_condition = (ema3 > ema9) or ema_close_enough
+                mtf_not_extreme = mtf >= -0.6
+                hot_triggered = (
+                    ema_condition and ema20 and (bb_exp or mtf >= 0.5) and (-6 <= fib_zone <= 2)
+                    and sar_15m_ok and sar4h_gate and mtf > 0 and adx_floor_ok
+                    and mtf_not_extreme and not strong_contratrend_hot
+                    and struct_ok  # V6: Exigir estructura 4H favorable
+                )
             else:
-                # SHORT: EMA3 < EMA9 < EMA20 + (Bollinger abri ndose O MTF fuerte) + MTF Aligned
-                hot_triggered = (ema3 < ema9 < ema20) and (bb_exp or mtf <= -0.5) and (-6 <= fib_zone <= 3) and sar_15m_ok and mtf < 0
+                # Short
+                ema_condition = (ema3 < ema9) or ema_close_enough
+                mtf_not_extreme = mtf <= 0.6
+                hot_triggered = (
+                    ema_condition and ema20 and (bb_exp or mtf <= -0.5) and (-2 <= fib_zone <= 6)
+                    and sar_15m_ok and sar4h_gate and mtf < 0 and adx_floor_ok
+                    and mtf_not_extreme and not strong_contratrend_hot
+                    and struct_ok  # V6: Exigir estructura 4H favorable
+                )
 
         results.append({
             'rule_code': 'Aa_HOT' if direction == 'long' else 'Bb_HOT',
@@ -337,7 +401,7 @@ class ForexExecutionService:
                     adx > 20 and
                     sar_15m_ok and
                     pine_not_opposite and
-                    fib_zone <= 3
+                    fib_zone <= 2
                 )
             else:
                 # SHORT Aa61_short: Expansión de Bollinger + cruce de EMAs bajista + precio bajo Basis + ADX > 20
@@ -348,7 +412,7 @@ class ForexExecutionService:
                     adx > 20 and
                     sar_15m_ok and
                     pine_not_opposite and
-                    fib_zone >= -3
+                    fib_zone >= -2
                 )
 
         results.append({
@@ -362,10 +426,10 @@ class ForexExecutionService:
         
         # Propuesta 2: Filtro de fuerza de contratendencia (Evitar cuchillos caídos)
         # Si la tendencia contraria es ultra-fuerte (ADX > 35) y alineada en contra, se bloquea la entrada Swing.
-        adx_val = context.get('adx', 0)
+        # Filtro de fuerza de contratendencia (ADX > 35) y alineado en contra
         strong_contratrend = (
-            (direction == 'long' and adx_val > 35 and mtf <= -0.5) or
-            (direction == 'short' and adx_val > 35 and mtf >= 0.5)
+            (direction == 'long' and adx > 35 and mtf <= -0.5) or
+            (direction == 'short' and adx > 35 and mtf >= 0.5)
         )
         
         # NUEVA LÓGICA SWING AVANZADA (SIPV + Giro de Bandas de Bollinger + RSI)
@@ -397,17 +461,21 @@ class ForexExecutionService:
                     bool(last_row.get('is_doji', False))
                 )
                 
-                # 3. RSI en sobreventa (<= 35)
-                rsi_val = float(last_row.get('rsi_14', 30.0))
-                rsi_ok = rsi_val <= 35
+                # 3. EMA3 > EMA9 o EMA3 muy cerca (aprox 95% o dist mínima) de EMA9
+                ema_dist_pct = abs(ema3 - ema9) / ema9 * 100 if ema9 > 0 else 100
+                ema_close_enough = ema_dist_pct <= 0.05  # Distancia muy corta indicando giro
+                ema_ok = (ema3 > ema9) or ema_close_enough
                 
                 # 4. Precio interactuando con banda lower_5 o inferior
                 lower5 = float(last_row.get('lower_5', 0))
                 near_support = price <= lower5 if lower5 > 0 else True
                 
+                # 5. Filtro Anti-Momentum Extremo (No comprar si cae con furia absoluta)
+                mtf_not_extreme = mtf >= -0.6
+                
                 swing_triggered = (
-                    lower6_flat and sipv_signal and rsi_ok and near_support and
-                    sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend
+                    lower6_flat and sipv_signal and ema_ok and near_support and
+                    sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend and mtf_not_extreme
                 )
             else:
                 # Swing Short (Dd11_15m):
@@ -429,17 +497,21 @@ class ForexExecutionService:
                     bool(last_row.get('is_doji', False))
                 )
                 
-                # 3. RSI en sobrecompra (>= 65)
-                rsi_val = float(last_row.get('rsi_14', 70.0))
-                rsi_ok = rsi_val >= 65
+                # 3. EMA3 < EMA9 o EMA3 muy cerca (aprox 95% o dist mínima) de EMA9
+                ema_dist_pct = abs(ema3 - ema9) / ema9 * 100 if ema9 > 0 else 100
+                ema_close_enough = ema_dist_pct <= 0.05  # Distancia muy corta indicando giro
+                ema_ok = (ema3 < ema9) or ema_close_enough
                 
                 # 4. Precio interactuando con banda upper_5 o superior
                 upper5 = float(last_row.get('upper_5', 0))
                 near_resistance = price >= upper5 if upper5 > 0 else True
                 
+                # 5. Filtro Anti-Momentum Extremo (No vender si sube con furia absoluta)
+                mtf_not_extreme = mtf <= 0.6
+                
                 swing_triggered = (
-                    upper6_flat and sipv_signal and rsi_ok and near_resistance and
-                    sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend
+                    upper6_flat and sipv_signal and ema_ok and near_resistance and
+                    sar_15m_ok and sar_4h_ok and struct_ok and not strong_contratrend and mtf_not_extreme
                 )
         else:
             # Fallback en caso de no tener histórico en memoria (mantiene la lógica básica)
@@ -833,6 +905,42 @@ class ForexExecutionService:
                 except Exception as slvm_e:
                     self.log(f'SLVM error for {symbol}: {slvm_e}')
 
+                # ── V6: GUARDIA ESPECIAL Aa_HOT / Bb_HOT (XAUUSD) ──
+                # Protección reforzada para posiciones HOT en instrumentos volátiles.
+                # Usa un Hard Cap más ajustado ($8 USD) y detecta reversiones de MTF tempranas.
+                rule_code = (pos.get('rule_code') or '').upper()
+                if 'HOT' in rule_code:
+                    entry_hot = self._safe_float(pos.get('entry_price'))
+                    pip_size_hot = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                    pip_val_hot = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+                    lots_hot = abs(self._safe_float(pos.get('lots'), 0.01))
+                    side_hot = pos.get('side', 'long').lower()
+                    pips_hot = (price - entry_hot) / pip_size_hot if side_hot in ['long', 'buy'] else (entry_hot - price) / pip_size_hot
+                    pnl_usd_hot = pips_hot * pip_val_hot * lots_hot
+
+                    # a) Hard cap ajustado para HOT: $8 USD (vs $25 global)
+                    HOT_MAX_LOSS_USD = 8.0
+                    if pnl_usd_hot < -HOT_MAX_LOSS_USD:
+                        self.log(f"🛡️ [HOT GUARD] {symbol}: Pérdida HOT ${pnl_usd_hot:.2f} excede -${HOT_MAX_LOSS_USD}. CIERRE PROTECTIVO.", "WARNING")
+                        self._close_position(pos, price, 'hot_guard_loss', pips_hot)
+                        self._send_telegram(f"🛡️ [HOT GUARD] {symbol} {side_hot.upper()}: Cerrado por pérdida HOT ${pnl_usd_hot:.2f} (Límite: -${HOT_MAX_LOSS_USD})")
+                        continue
+
+                    # b) Reversión de MTF: Si el momentum revierte fuertemente contra la dirección, salir
+                    if snap:
+                        mtf_hot = self._safe_float(snap.get('mtf_score'))
+                        adx_hot = self._safe_float(snap.get('adx'), 25.0)
+                        if side_hot in ['long', 'buy'] and mtf_hot <= -0.4 and adx_hot > 30 and pnl_usd_hot < -2.0:
+                            self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF={mtf_hot} ADX={adx_hot} contra LONG con PnL=${pnl_usd_hot:.2f}. CIERRE.", "WARNING")
+                            self._close_position(pos, price, 'hot_guard_mtf_reversal', pips_hot)
+                            self._send_telegram(f"🛡️ [HOT MTF] {symbol} LONG cerrado: MTF={mtf_hot}, ADX={adx_hot}, PnL=${pnl_usd_hot:.2f}")
+                            continue
+                        elif side_hot in ['short', 'sell'] and mtf_hot >= 0.4 and adx_hot > 30 and pnl_usd_hot < -2.0:
+                            self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF={mtf_hot} ADX={adx_hot} contra SHORT con PnL=${pnl_usd_hot:.2f}. CIERRE.", "WARNING")
+                            self._close_position(pos, price, 'hot_guard_mtf_reversal', pips_hot)
+                            self._send_telegram(f"🛡️ [HOT MTF] {symbol} SHORT cerrado: MTF={mtf_hot}, ADX={adx_hot}, PnL=${pnl_usd_hot:.2f}")
+                            continue
+
                 #    Primero: Verificar cierre proactivo   
                 if snap and self._check_proactive_exit_forex(pos, snap):
                     continue # Posici n cerrada
@@ -842,13 +950,14 @@ class ForexExecutionService:
                 if snap:
                     self._run_protection_forex(pos, snap)
 
-                    # Cruce contrario de EMAs (Propuesta D - Corte rápido de pérdidas para estrategias de Momentum)
+                    # Cruce contrario de EMAs (Propuesta D - Corte rápido de pérdidas)
                     ema3_val = self._safe_float(snap.get('ema_3'))
                     ema9_val = self._safe_float(snap.get('ema_9'))
                     rule = pos.get('rule_code', '')
                     is_momentum_rule = '31a' in rule or 'HOT' in rule or '61' in rule
+                    is_swing_rule = '11' in rule or '21' in rule
                     
-                    if is_momentum_rule and ema3_val > 0 and ema9_val > 0:
+                    if (is_momentum_rule or is_swing_rule) and ema3_val > 0 and ema9_val > 0:
                         side = pos['side'].lower()
                         entry = self._safe_float(pos.get('entry_price'))
                         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
