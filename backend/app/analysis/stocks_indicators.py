@@ -155,6 +155,18 @@ def calculate_stock_indicators(
     df['ema_dist_avg'] = df['ema_dist_pct'].rolling(10).mean()
     df['ema_exhaustion'] = df['ema_dist_pct'] < (df['ema_dist_avg'] * 0.3)
 
+    # --- EMA3 / EMA9 FRESH CROSS DETECTOR ---
+    df['ema3_cross_ema9_up'] = (df['ema_3'] > df['ema_9']) & (df['ema_3'].shift(1) <= df['ema_9'].shift(1))
+    ages = []
+    cur_age = 999
+    for cross in df['ema3_cross_ema9_up']:
+        if cross:
+            cur_age = 0
+        else:
+            cur_age += 1 if cur_age < 999 else 0
+        ages.append(cur_age)
+    df['ema3_cross_ema9_age'] = ages
+
     # ── EMA Alignment ──
     last = df.iloc[-1]
     ema_alignment = _classify_ema_alignment(last)
@@ -179,7 +191,7 @@ def calculate_stock_indicators(
         "psar", "psar_direction",
         "change_pct",
         "bb_expanding", "bb_width",
-        "ema_dist_pct", "ema_exhaustion"
+        "ema_dist_pct", "ema_exhaustion", "ema3_cross_ema9_age"
     ]
 
     result = {}

@@ -232,7 +232,12 @@ async def cleanup_low_volume_opportunities():
         log_error(MODULE, f"Error in opportunity cleanup: {e}")
 
 
-async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, is_pro_member: bool = False, market_open: bool = True) -> dict | None:
+async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, is_pro_member: bool = False, market_open: bool | None = None) -> dict | None:
+    if market_open is None:
+        from app.core.market_hours import is_market_open
+        is_open, _ = is_market_open()
+        market_open = is_open
+
     sb = get_supabase()
     from app.data.yfinance_provider import YFinanceProvider
     from app.analysis.stocks_indicators import calculate_stock_indicators
@@ -659,7 +664,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             ema_9=ind_15m.get("ema_9"),
             ema_20=ind_15m.get("ema_20"),
             bb_expanding=bb_expanding,
-            ema_exhaustion=ema_exhaustion
+            ema_exhaustion=ema_exhaustion,
+            ema3_cross_age=ind_15m.get("ema3_cross_ema9_age", 999)
         )
         rule_ctx["revenue_growth_yoy"] = ind_15m.get("revenue_growth_yoy", 0)
         rule_ctx["sm_score"] = ind_15m.get("sm_score", 1.0)

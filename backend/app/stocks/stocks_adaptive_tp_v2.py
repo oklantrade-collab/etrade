@@ -114,6 +114,12 @@ def get_ema_trend(
     """
     ema3 = calculate_ema(df, 3)
     ema9 = calculate_ema(df, 9)
+    
+    ema3_prev = 0.0
+    if len(df) >= 4:
+        # Calculate previous EMA3 to determine if it is curving down
+        ema3_series = df['close'].ewm(span=3, adjust=False).mean()
+        ema3_prev = float(ema3_series.iloc[-2])
 
     if ema3 <= 0 or ema9 <= 0:
         return {
@@ -136,6 +142,7 @@ def get_ema_trend(
         trend = 'neutral'
 
     diff_pct = abs(ema3 - ema9) / ema9 * 100
+    ema3_curving_down = ema3 < ema3_prev
 
     return {
         'ema3':     round(ema3, 4),
@@ -146,6 +153,7 @@ def get_ema_trend(
         'rvol':     rvol,
         'is_up':    ema3 > ema9,
         'is_down':  ema3 < ema9,
+        'ema3_curving_down': ema3_curving_down,
         'reason': (
             f'EMA3={ema3:.2f} '
             f'{">" if ema3>ema9 else "<"} '
@@ -551,6 +559,45 @@ def evaluate_stock_tp_v2(
                 f'CIERRE TOTAL {remaining} shares por señal bajista confirmada.'
             ),
         }
+
+    # ── PASO 1.5: PROTECCIÓN TRAILING STOP (EMA3 vs EMA9) ──
+    # Condiciones solicitadas por el usuario:
+    # Vender si EMA3 < EMA9
+    # O si (EMA3 > EMA9 pero diff < 5% y EMA3 curving down)
+    # O si (RSI > 75 y Precio > BB Upper)
+    rsi_15m = float(snap.get('rsi_14', 50))
+    bb_upper = float(snap.get('bb_upper', 999999))
+    
+    rsi_overbought = (rsi_15m > 75) and (current_price > bb_upper)
+    ema_crossed_down = ema['is_down']
+    ema_squeezing_down = ema['is_up'] and (ema['diff_pct'] < 5.0) and ema['ema3_curving_down']
+    
+    if rsi_overbought or ema_crossed_down or ema_squeezing_down:
+        remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
+        trigger_name = "rsi_overbought" if rsi_overbought else ("ema_crossed_down" if ema_crossed_down else "ema_squeezing_down")
+        return {
+            'action':  'close_total',
+            'pct':     100,
+            'shares':  remaining,
+            'trigger': trigger_name,
+            'debug_indicators': debug_indicators,
+            'reason': (
+                f'TRAILING STOP TRIGGERED: '
+                f'{"RSI > 75 & Price > BB_Upper" if rsi_overbought else ("EMA3 < EMA9" if ema_crossed_down else "EMA3 converging down to EMA9")}. '
+                f'CIERRE TOTAL {remaining} shares. '
+                f'Ganancia: +{gain_pct:.2f}%'
+            ),
+        }
+
+    # Si EMA3 > EMA9 y no se cumplen las condiciones de salida anteriores, BLOQUEAMOS el cierre prematuro.
+    # El usuario pidió explícitamente: "Asegurate que ningun cierre se genere mientras el EMA3 > EMA9 sino todo lo contrario"
+    if ema['is_up'] and not ema_squeezing_down and not rsi_overbought:
+         return {
+             'action': 'hold',
+             'trigger': 'ema_trailing_active',
+             'debug_indicators': debug_indicators,
+             'reason': f'Trailing Stop Activo: EMA3 > EMA9 ({ema["diff_pct"]:.1f}% separación). Manteniendo posición para maximizar ganancia.'
+         }
 
     # ── CASO A: CLOSE >= UPPER_6 ──────────────
     if fib['band'] >= 6:

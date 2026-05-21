@@ -156,6 +156,24 @@ def calculate_b1_momentum(
         vwap_score * weights_used['vwap'] +
         vol_consistency * weights_used['vol_consist']
     ) / (total_w if total_w > 0 else 1)
+    
+    # ── Penalización por Sobreextensión (Evitar techos) ────────
+    if price > 0:
+        ema20 = float(snap.get('ema20') or snap.get('ema_20') or 0)
+        if ema20 > 0:
+            dist_ema20 = (price - ema20) / ema20 * 100
+            if dist_ema20 > 5.0: # Precio está más de 5% arriba de la EMA20 (muy extendido para scalping)
+                score *= 0.5
+                components['overextension_penalty'] = {
+                     'dist_ema20': round(dist_ema20, 2),
+                     'multiplier': 0.5
+                }
+            elif dist_ema20 > 3.0:
+                score *= 0.75
+                components['overextension_penalty'] = {
+                     'dist_ema20': round(dist_ema20, 2),
+                     'multiplier': 0.75
+                }
 
     return {
         'score': round(score, 2),

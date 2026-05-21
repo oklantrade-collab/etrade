@@ -87,6 +87,7 @@ class StocksRuleEngine:
         ema_9: float = None,
         bb_expanding: bool = False,
         ema_exhaustion: bool = False,
+        ema3_cross_age: int = 999,
     ) -> dict:
         """
         Construye el contexto de evaluación para un ticker.
@@ -122,6 +123,7 @@ class StocksRuleEngine:
             "ema_20": ema_20 if ema_20 is not None else snap.get("ema_20"),
             "bb_expanding": bb_expanding or bool(snap.get("bb_expanding", False)),
             "ema_exhaustion": ema_exhaustion or bool(snap.get("ema_exhaustion", False)),
+            "ema3_cross_age": ema3_cross_age,
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -459,7 +461,7 @@ class StocksRuleEngine:
             if len(failures) == 0:
                 smart_limit_price = current_price # Comprar ya si está barato
 
-        # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5) ──
+        # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5.2) ──
         # Normalizar rule_code para capturar variaciones con sufijos (_BUY, _SELL)
         normalized_code = rule_code.replace("_BUY", "").replace("_SELL", "")
         if normalized_code == "HOT_CANDLE":
@@ -470,6 +472,7 @@ class StocksRuleEngine:
             fib_z = int(context.get("fib_zone", 0))
             rvol  = float(context.get("rvol") or 1.0)
             vol_24h = float(context.get("volume") or 0)
+            cross_age = int(context.get("ema3_cross_age", 999))
             
             # Requisito 1: Volumen Mínimo (Evitar acciones sin tracción)
             if vol_24h < 1_000_000:
@@ -480,19 +483,26 @@ class StocksRuleEngine:
             if rvol < dynamic_rvol_min:
                 failures.append(f"Insufficient RVOL: {rvol:.2f}x < {dynamic_rvol_min}x (No momentum projection)")
 
-            # Requisito 3: Momentum Técnico (EMA OR Bollinger Expansion)
-            ema_ok = (ema3 and ema9 and ema3 > ema9)
+            # Requisito 3: Momentum Técnico FRESCO (Cruce EMA3 > EMA9 o BB Expansion)
+            # Requerir que el cruce sea muy reciente (0 a 2 velas de 15m) para evitar entrar en el techo (agotamiento).
+            ema_ok = (ema3 and ema9 and ema3 > ema9 and cross_age <= 2)
             if not (ema_ok or bb_exp):
-                failures.append("No Momentum Signal: Need (EMA3 > EMA9) OR (BB Expanding)")
+                failures.append(f"No Fresh Momentum: Need fresh (EMA3 > EMA9, age {cross_age} <= 2) OR (BB Expanding)")
             
             # Requisito 4: Alineación de tendencia (EMA20 como base)
             if ema3 and ema20 and ema3 < ema20:
                 failures.append(f"Price below EMA20: {ema3:.2f} < {ema20:.2f} (Bearish trend)")
 
-            # Requisito 5: Filtro Fibonacci (-6 hasta +3)
-            fib_ok = -6 <= fib_z <= 3
+            # Requisito 5: Filtro Fibonacci (-6 hasta +2)
+            # V5.2: Antes era <= 3. Ahora restringido a <= 2 para no comprar sobre-agotados.
+            fib_ok = -6 <= fib_z <= 2
             if not fib_ok:
-                failures.append(f"Fibonacci Zone {fib_z} is OUT of range [-6, 3]")
+                failures.append(f"Fibonacci Zone {fib_z} is OUT of range [-6, 2]")
+            
+            # Requisito 6: Evitar divergencia de agotamiento evidente
+            if context.get("ema_exhaustion"):
+                 if not bb_exp: # Si es explosión, ignoramos agotamiento
+                      failures.append("Trend Exhaustion Detected: EMAs are stalling/diverging")
 
         # ── CHECK 8: Regla Específica BOLLINGER_EXPLOSION ──
         if normalized_code == "BOLLINGER_EXPLOSION":
