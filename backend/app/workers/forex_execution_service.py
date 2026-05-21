@@ -217,6 +217,11 @@ class ForexExecutionService:
                         prev_c = candles_data[-2]
                         if 'bb_up' in last_c and 'bb_low' in last_c and 'bb_up' in prev_c and 'bb_low' in prev_c:
                             bb_exp = bool((last_c['bb_up'] > prev_c['bb_up']) and (last_c['bb_low'] < prev_c['bb_low']))
+                            
+                    # RSI 14
+                    from ta.momentum import RSIIndicator
+                    rsi_14_val = float(RSIIndicator(close=df_closes, window=14).rsi().iloc[-1])
+                    snap['rsi_14'] = rsi_14_val
                 except Exception as e:
                     self.log(f"Error calculating dynamic EMAs for {symbol}: {e}", "WARNING")
 
@@ -239,6 +244,11 @@ class ForexExecutionService:
             'lower_1': self._safe_float(snap.get('lower_1')),
             'upper_6': self._safe_float(snap.get('upper_6')),
             'lower_6': self._safe_float(snap.get('lower_6')),
+            'bb_upper': self._safe_float(snap.get('upper_2')),
+            'bb_lower': self._safe_float(snap.get('lower_2')),
+            'high': self._safe_float(snap.get('high'), price),
+            'low': self._safe_float(snap.get('low'), price),
+            'rsi_14': self._safe_float(snap.get('rsi_14'), 50.0),
             'ema_3': ema_3,
             'ema_9': ema_9,
             'ema_20': ema_20,
@@ -349,6 +359,10 @@ class ForexExecutionService:
             ema_dist_pct = abs(ema3 - ema9) / ema9 * 100 if ema9 > 0 else 100
             ema_close_enough = ema_dist_pct <= 0.03  # V6: Reducido de 0.05% a 0.03% para cruce más inminente
             
+            # Detector de Agotamiento de EMA
+            # Si están muy separadas pero el impulso es débil, asumimos agotamiento (a menos que haya bb_exp)
+            ema_exhaustion = (ema_dist_pct > 0.15) and not bb_exp
+
             # V6: Exigir ADX mínimo de 22 para confirmar tendencia real
             adx_floor_ok = adx > 22
             
@@ -363,24 +377,45 @@ class ForexExecutionService:
             require_sar4h = symbol in hot_strict_symbols
             sar4h_gate = sar_4h_ok if require_sar4h else True
             
+            rsi = context.get('rsi_14', 50)
+            high_price = context.get('high', 0)
+            low_price = context.get('low', 0)
+            bb_upper = context.get('bb_upper', 99999)
+            bb_lower = context.get('bb_lower', 0)
+            
             if direction == 'long':
                 ema_condition = (ema3 > ema9) or ema_close_enough
                 mtf_not_extreme = mtf >= -0.6
+                
+                # Nuevas reglas de protección para LONG (V8)
+                rsi_ok = rsi < 60
+                not_in_ceiling = high_price <= bb_upper if bb_upper > 0 else True
+                
                 hot_triggered = (
                     ema_condition and ema20 and (bb_exp or mtf >= 0.5) and (-6 <= fib_zone <= 2)
                     and sar_15m_ok and sar4h_gate and mtf > 0 and adx_floor_ok
                     and mtf_not_extreme and not strong_contratrend_hot
                     and struct_ok  # V6: Exigir estructura 4H favorable
+                    and rsi_ok
+                    and not_in_ceiling
+                    and not ema_exhaustion
                 )
             else:
                 # Short
                 ema_condition = (ema3 < ema9) or ema_close_enough
                 mtf_not_extreme = mtf <= 0.6
+                
+                rsi_ok = rsi > 40
+                not_in_floor = low_price >= bb_lower if bb_lower > 0 else True
+                
                 hot_triggered = (
                     ema_condition and ema20 and (bb_exp or mtf <= -0.5) and (-2 <= fib_zone <= 6)
                     and sar_15m_ok and sar4h_gate and mtf < 0 and adx_floor_ok
                     and mtf_not_extreme and not strong_contratrend_hot
                     and struct_ok  # V6: Exigir estructura 4H favorable
+                    and rsi_ok
+                    and not_in_floor
+                    and not ema_exhaustion
                 )
 
         results.append({
