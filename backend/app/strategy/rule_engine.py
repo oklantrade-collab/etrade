@@ -317,7 +317,7 @@ DEFAULT_RULES = [
         "confidence": "high",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema_cross_long_hot", "operator": "==", "value": True},
+            {"indicator": "fresh_cross_long", "operator": "==", "value": True},
             {"indicator": "mtf_score", "operator": ">", "value": 0},
             {"indicator": "mtf_score", "operator": ">=", "value": -0.6},
             {"indicator": "bb_expanding_or_mtf_long", "operator": "==", "value": True},
@@ -347,7 +347,7 @@ DEFAULT_RULES = [
         "confidence": "high",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema_cross_short_hot", "operator": "==", "value": True},
+            {"indicator": "fresh_cross_short", "operator": "==", "value": True},
             {"indicator": "mtf_score", "operator": "<", "value": 0},
             {"indicator": "mtf_score", "operator": "<=", "value": 0.6},
             {"indicator": "bb_expanding_or_mtf_short", "operator": "==", "value": True},
@@ -585,11 +585,43 @@ def build_market_data_dict(
         close_series = pd.to_numeric(df["close"], errors="coerce")
         rsi_14_val = float(RSIIndicator(close=close_series, window=14).rsi().iloc[-1])
 
+    # V9: Cross Age — cuantas velas de 15m desde el ultimo cruce EMA3/EMA9
+    ema3_cross_age = 999
+    ema_col1 = "ema1" if "ema1" in df.columns else "ema_3"
+    ema_col2 = "ema2" if "ema2" in df.columns else "ema_9"
+    if ema_col1 in df.columns and ema_col2 in df.columns and len(df) >= 5:
+        ema3_s = pd.to_numeric(df[ema_col1], errors="coerce")
+        ema9_s = pd.to_numeric(df[ema_col2], errors="coerce")
+        for i in range(len(ema3_s) - 1, 0, -1):
+            if pd.notna(ema3_s.iloc[i]) and pd.notna(ema9_s.iloc[i]) and pd.notna(ema3_s.iloc[i-1]) and pd.notna(ema9_s.iloc[i-1]):
+                curr_above = ema3_s.iloc[i] > ema9_s.iloc[i]
+                prev_above = ema3_s.iloc[i-1] > ema9_s.iloc[i-1]
+                if curr_above != prev_above:
+                    ema3_cross_age = len(ema3_s) - 1 - i
+                    break
+
+    # V9: Slope — pendiente del EMA3 (ultimas 3 velas)
+    ema3_slope = 0.0
+    ema3_slope_prev = 0.0
+    if ema_col1 in df.columns and len(df) >= 3:
+        ema3_s = pd.to_numeric(df[ema_col1], errors="coerce")
+        if pd.notna(ema3_s.iloc[-1]) and pd.notna(ema3_s.iloc[-2]) and pd.notna(ema3_s.iloc[-3]):
+            ema3_slope = float(ema3_s.iloc[-1] - ema3_s.iloc[-2])
+            ema3_slope_prev = float(ema3_s.iloc[-2] - ema3_s.iloc[-3])
+
+    # V9: Fresh cross conditions (cross age ≤3 OR accelerating slope)
+    fresh_cross_long_by_age = (ema3_cross_age <= 3) and (ema3 > ema9)
+    slope_entry_long = (ema3_slope > 0) and (ema3_slope > ema3_slope_prev) and (ema3 > ema9)
+    fresh_cross_short_by_age = (ema3_cross_age <= 3) and (ema3 < ema9)
+    slope_entry_short = (ema3_slope < 0) and (ema3_slope < ema3_slope_prev) and (ema3 < ema9)
+
     data.update({
         "ema_cross_short": (ema3 < ema9) or ema_close_enough,
         "ema_cross_long": (ema3 > ema9) or ema_close_enough,
         "ema_cross_short_hot": (ema3 < ema9) or ema_close_enough_03,
         "ema_cross_long_hot": (ema3 > ema9) or ema_close_enough_03,
+        "fresh_cross_long": fresh_cross_long_by_age or slope_entry_long,
+        "fresh_cross_short": fresh_cross_short_by_age or slope_entry_short,
         "bb_expanding_or_mtf_long": bb_exp or mtf_score >= 0.5,
         "bb_expanding_or_mtf_short": bb_exp or mtf_score <= -0.5,
         "mtf_score": mtf_score,

@@ -198,6 +198,13 @@ class ForexExecutionService:
         ema_20 = self._safe_float(snap.get('ema_20'))
         bb_exp = bool(snap.get('bb_expanding', False))
 
+        # V9: Variables de cruce fresco, pendiente y 5m
+        ema3_cross_age = 999
+        ema3_slope = 0.0
+        ema3_slope_prev = 0.0
+        ema_5m_aligned_long = False
+        ema_5m_aligned_short = False
+
         if hasattr(self, 'state') and 'candles' in self.state:
             candles_key = f"{symbol}_15m"
             candles_data = self.state['candles'].get(candles_key, [])
@@ -207,9 +214,24 @@ class ForexExecutionService:
                     closes = [float(c.get('c', c.get('close', 0.0))) for c in candles_data]
                     df_closes = pd.Series(closes)
                     # V7: adjust=False usa la fórmula EMA estándar financiera (compatible con TradingView/cTrader)
-                    ema_3 = float(df_closes.ewm(span=3, adjust=False).mean().iloc[-1])
-                    ema_9 = float(df_closes.ewm(span=9, adjust=False).mean().iloc[-1])
+                    ema3_series = df_closes.ewm(span=3, adjust=False).mean()
+                    ema9_series = df_closes.ewm(span=9, adjust=False).mean()
+                    ema_3 = float(ema3_series.iloc[-1])
+                    ema_9 = float(ema9_series.iloc[-1])
                     ema_20 = float(df_closes.ewm(span=20, adjust=False).mean().iloc[-1])
+                    
+                    # V9: Cross Age — cuantas velas de 15m pasaron desde el ultimo cruce
+                    for i in range(len(ema3_series) - 1, 0, -1):
+                        curr_above = ema3_series.iloc[i] > ema9_series.iloc[i]
+                        prev_above = ema3_series.iloc[i-1] > ema9_series.iloc[i-1]
+                        if curr_above != prev_above:
+                            ema3_cross_age = len(ema3_series) - 1 - i
+                            break
+                    
+                    # V9: Slope — pendiente del EMA3 (ultimas 3 velas)
+                    if len(ema3_series) >= 3:
+                        ema3_slope = float(ema3_series.iloc[-1] - ema3_series.iloc[-2])
+                        ema3_slope_prev = float(ema3_series.iloc[-2] - ema3_series.iloc[-3])
                     
                     # Bollinger Expansion fallback en memoria
                     if len(candles_data) >= 2:
@@ -224,6 +246,20 @@ class ForexExecutionService:
                     snap['rsi_14'] = rsi_14_val
                 except Exception as e:
                     self.log(f"Error calculating dynamic EMAs for {symbol}: {e}", "WARNING")
+
+        # V9: Confirmación 5m — verificar que el micro-momentum esté alineado
+        try:
+            from app.core.memory_store import MEMORY_STORE
+            df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+            if df_5m is not None and len(df_5m) >= 2:
+                last_5m = df_5m.iloc[-1]
+                ema3_5m = self._safe_float(last_5m.get('ema1'))
+                ema9_5m = self._safe_float(last_5m.get('ema2'))
+                if ema3_5m > 0 and ema9_5m > 0:
+                    ema_5m_aligned_long = ema3_5m > ema9_5m
+                    ema_5m_aligned_short = ema3_5m < ema9_5m
+        except Exception:
+            pass  # Si no hay datos 5m, se permite entrada solo con 15m
 
         return {
             'symbol': symbol,
@@ -253,6 +289,12 @@ class ForexExecutionService:
             'ema_9': ema_9,
             'ema_20': ema_20,
             'bb_expanding': bb_exp,
+            # V9: Fresh cross + slope + 5m alignment
+            'ema3_cross_age': ema3_cross_age,
+            'ema3_slope': ema3_slope,
+            'ema3_slope_prev': ema3_slope_prev,
+            'ema_5m_aligned_long': ema_5m_aligned_long,
+            'ema_5m_aligned_short': ema_5m_aligned_short,
         }
 
     def _check_rules(self, context: dict, direction: str) -> dict:
@@ -384,7 +426,16 @@ class ForexExecutionService:
             bb_lower = context.get('bb_lower', 0)
             
             if direction == 'long':
-                ema_condition = (ema3 > ema9) or ema_close_enough
+                # V9: Cruce fresco (≤3 velas) O pendiente acelerando, + confirmación 5m
+                cross_age = context.get('ema3_cross_age', 999)
+                slope = context.get('ema3_slope', 0)
+                slope_prev = context.get('ema3_slope_prev', 0)
+                ema_5m_ok = context.get('ema_5m_aligned_long', False)
+                
+                fresh_cross = (cross_age <= 3) and (ema3 > ema9)
+                slope_entry = (slope > 0) and (slope > slope_prev) and (ema3 > ema9)
+                ema_condition = (fresh_cross or slope_entry) and ema_5m_ok
+                
                 mtf_not_extreme = mtf >= -0.6
                 
                 # Nuevas reglas de protección para LONG (V8)
@@ -402,7 +453,16 @@ class ForexExecutionService:
                 )
             else:
                 # Short
-                ema_condition = (ema3 < ema9) or ema_close_enough
+                # V9: Cruce fresco (≤3 velas) O pendiente acelerando, + confirmación 5m
+                cross_age = context.get('ema3_cross_age', 999)
+                slope = context.get('ema3_slope', 0)
+                slope_prev = context.get('ema3_slope_prev', 0)
+                ema_5m_ok = context.get('ema_5m_aligned_short', False)
+                
+                fresh_cross = (cross_age <= 3) and (ema3 < ema9)
+                slope_entry = (slope < 0) and (slope < slope_prev) and (ema3 < ema9)
+                ema_condition = (fresh_cross or slope_entry) and ema_5m_ok
+                
                 mtf_not_extreme = mtf <= 0.6
                 
                 rsi_ok = rsi > 40
