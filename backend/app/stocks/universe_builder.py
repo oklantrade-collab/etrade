@@ -145,22 +145,62 @@ class UniverseBuilder:
     # ─── 1. IB Scanner (Primary) ───────────────────────────────
     async def _scan_ib(self, max_price, min_price, min_market_cap, min_volume, max_results) -> list[dict]:
         try:
-            from app.data.ib_scanner import scan_hot_by_volume
-            results = await scan_hot_by_volume(
+            from app.data.ib_scanner import scan_hot_by_volume, scan_top_gainers
+            
+            # 1a. HOT_BY_VOLUME (original scanner)
+            results_vol = await scan_hot_by_volume(
                 max_results=max_results,
                 min_price=min_price,
                 max_price=max_price,
                 min_volume=min_volume,
                 min_market_cap=min_market_cap,
             )
-            if not results:
-                return []
+            
+            # 1b. TOP_PERC_GAIN (momentum scanner — catches explosive movers)
+            results_gain = []
+            try:
+                results_gain = await scan_top_gainers(
+                    max_results=30,
+                    min_price=min_price,
+                    max_price=max_price,
+                    min_volume=min_volume,
+                )
+                if results_gain:
+                    log_info(MODULE, f"🚀 Top Gainers scanner: {len(results_gain)} momentum candidates found")
+            except Exception as tg_e:
+                log_warning(MODULE, f"Top Gainers scanner skipped: {tg_e}")
 
-            return [{
-                "ticker": r["ticker"].upper(),
-                "catalyst_score": max(1, 10 - r.get("rank", 50) // 5),
-                "source": "ib_scanner",
-            } for r in results]
+            if not results_vol and not results_gain:
+                return []
+            
+            # Merge and deduplicate (HOT_BY_VOLUME first, then TOP_PERC_GAIN)
+            seen_tickers = set()
+            merged = []
+            
+            for r in (results_vol or []):
+                ticker = r["ticker"].upper()
+                if ticker not in seen_tickers:
+                    seen_tickers.add(ticker)
+                    merged.append({
+                        "ticker": ticker,
+                        "catalyst_score": max(1, 10 - r.get("rank", 50) // 5),
+                        "source": "ib_scanner",
+                    })
+            
+            for r in (results_gain or []):
+                ticker = r["ticker"].upper()
+                if ticker not in seen_tickers:
+                    seen_tickers.add(ticker)
+                    merged.append({
+                        "ticker": ticker,
+                        "catalyst_score": max(1, 10 - r.get("rank", 50) // 5),
+                        "source": "ib_top_gainers",
+                    })
+            
+            log_info(MODULE, f"IB Scanners merged: {len(merged)} unique tickers "
+                             f"(Vol: {len(results_vol or [])}, Gain: {len(results_gain or [])})")
+            
+            return merged
 
         except Exception as e:
             log_warning(MODULE, f"IB Scanner not available: {e}")

@@ -167,6 +167,26 @@ async def get_stocks_opportunities():
                     log_warning("stocks_api", f"Error processing item {item.get('ticker')}: {item_e}")
                     continue
 
+            # ── APEX MINIMUM FILTER: Hide low-probability opportunities ──
+            # Read configurable threshold from stocks_config
+            apex_min = 40  # default
+            try:
+                cfg_res = sb.table("stocks_config").select("value").eq("key", "apex_min_opportunities").execute()
+                if cfg_res.data:
+                    apex_min = float(cfg_res.data[0]["value"])
+            except:
+                pass
+            
+            if apex_min > 0:
+                before_count = len(flattened)
+                flattened = [
+                    item for item in flattened
+                    if float(item.get("apex_4h") or 0) >= apex_min
+                ]
+                filtered_count = before_count - len(flattened)
+                if filtered_count > 0:
+                    log_info("stocks_api", f"APEX filter: {filtered_count} opportunities hidden (APEX < {apex_min})")
+
             return {
                 "opportunities": flattened,
                 "total": len(flattened),

@@ -283,6 +283,20 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
         <SettingToggle label="Detectar clímax de volumen" value={generalForm.sl_volume_climax_enabled === true || generalForm.sl_volume_climax_enabled === 'true'} onChange={(v: any) => setGeneralForm({ ...generalForm, sl_volume_climax_enabled: v })} />
       </SettingsSection>
 
+      <SettingsSection title="🔍 Scanner & Filtros Inteligentes">
+        <div style={{ padding: '0 20px 10px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Controla la sensibilidad del escáner de momentum y el filtro de oportunidades mínimas.
+        </div>
+        <SettingRow label="⚡ RVOL Momentum (Fast-Track)" value={generalForm.momentum_rvol_threshold || 2.5} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, momentum_rvol_threshold: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Si RVOL ≥ este valor, se relajan las reglas técnicas (T01 usa 15m, T02 se omite, RSI hasta 85).
+        </div>
+        <SettingRow label="📊 APEX Score Mínimo (Pantalla)" value={generalForm.apex_min_opportunities || 40} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, apex_min_opportunities: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Solo se mostrarán en Opportunities las acciones con APEX ≥ este valor. Si una acción sube durante el día, reaparecerá automáticamente.
+        </div>
+      </SettingsSection>
+
       {/* UNIVERSE BUILDER COMO BOTÓN DESPLEGABLE */}
       <div style={{ 
           background: 'rgba(79,195,247,0.05)', 

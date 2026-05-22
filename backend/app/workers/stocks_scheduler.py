@@ -356,13 +356,34 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             return None
 
         # 4. TECHNICAL RULES
+        # ── MOMENTUM FAST-TRACK: Relax rules for high-RVOL explosive movers ──
+        momentum_rvol_threshold = float(config.get("momentum_rvol_threshold", 2.5))
+        rvol_current = float(ind_1d.get("rvol", 1.0))
+        is_momentum_mode = (rvol_current >= momentum_rvol_threshold)
+        
+        if is_momentum_mode:
+            log_info(MODULE, f"⚡ MOMENTUM MODE for {ticker}: RVOL={rvol_current:.1f} >= {momentum_rvol_threshold}")
+
         ps_signal_4h = ind_4h.get("last_pinescript_signal")
         ps_age_4h = ind_4h.get("signal_age", 999)
         t01_confirmed = (ps_signal_4h == "Buy" and ps_age_4h <= 3)
+        
+        # Momentum: Accept 15m PineScript signal if 4h hasn't triggered yet
+        if is_momentum_mode and not t01_confirmed:
+            ps_signal_15m = ind_15m.get("last_pinescript_signal")
+            ps_age_15m = ind_15m.get("signal_age", 999)
+            if ps_signal_15m == "Buy" and ps_age_15m <= 3:
+                t01_confirmed = True
+                log_info(MODULE, f"⚡ {ticker}: T01 relaxed — using 15m Buy signal (age={ps_age_15m})")
 
         ema_50_1d = ind_1d.get("ema_50") or 0.0
         ema_200_1d = ind_1d.get("ema_200") or 999999.0
         t02_confirmed = (ema_50_1d > ema_200_1d)
+        
+        # Momentum: Skip macro trend requirement for explosive pumps
+        if is_momentum_mode and not t02_confirmed:
+            t02_confirmed = True
+            log_info(MODULE, f"⚡ {ticker}: T02 relaxed — macro trend bypassed (RVOL={rvol_current:.1f})")
 
         candle_4h_green = 1 if df_4h.iloc[-1]["close"] > df_4h.iloc[-1]["open"] else 0
 
@@ -373,7 +394,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         if candle_4h_green: base_score += 20.0
         
         rsi_val = ind_15m.get("rsi_14")
-        if rsi_val and 40 <= rsi_val <= 70:
+        # Momentum: Allow RSI up to 85 (overbought is natural for pumps)
+        rsi_upper = 85 if is_momentum_mode else 70
+        if rsi_val and 40 <= rsi_val <= rsi_upper:
             base_score += 10.0
 
         # 5. CAPA 3: UNIFIED ANALYSIS (Math + IA Enrichment)

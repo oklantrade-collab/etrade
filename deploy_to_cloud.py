@@ -22,6 +22,7 @@ files_to_sync = [
     "app/stocks/stocks_rule_engine.py",
     "app/stocks/stocks_orchestrator.py",
     "app/core/safety_manager.py",
+    "app/core/logger.py",
     "app/strategy/swing_orders.py",
     "app/strategy/capital_protection.py",
     "app/strategy/proactive_exit.py",
@@ -45,7 +46,11 @@ files_to_sync = [
     "app/analysis/fundamental_scorer.py",
     "app/stocks/universe_builder.py",
     "app/workers/performance_monitor.py",
-    "app/core/symbol_state.py"
+    "app/core/symbol_state.py",
+    "app/execution/data_provider.py",
+    "app/data/yfinance_provider.py",
+    "app/data/ib_scanner.py",
+    "app/core/startup.py"
 ]
 
 def deploy():
