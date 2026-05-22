@@ -283,10 +283,10 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             
             upper_expanding = last_5["bb_upper"] > prev_5["bb_upper"]
             lower_expanding = last_5["bb_lower"] < prev_5["bb_lower"]
-            price_breakout  = last_5["close"] > last_5["bb_upper"]
+            price_safe      = last_5["high"] < last_5["bb_upper"]
             volume_spike    = last_5["rvol"] > 2.0
             
-            if market_open and upper_expanding and lower_expanding and price_breakout and volume_spike:
+            if market_open and upper_expanding and lower_expanding and price_safe and volume_spike:
                 log_info(MODULE, f"🚀 BOLLINGER EXPLOSION detected in {ticker} (5m)!")
                 # Configurar targets específicos solicitados:
                 # B1: Upper_6 (15m) | B2: Bollinger Upper (Upper_5 15m) | B3: Trailing

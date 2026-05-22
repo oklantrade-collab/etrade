@@ -519,6 +519,9 @@ class StocksRuleEngine:
             rvol = float(context.get("rvol") or 1.0)
             ema3 = context.get("ema_3")
             ema9 = context.get("ema_9")
+            rsi = float(context.get("rsi_14") or 50.0)
+            high_price = float(context.get("high") or 0)
+            bb_upper = float(context.get("bb_upper") or 99999)
             
             # Requisito 1: Expansión de bandas activa
             if not bb_exp:
@@ -532,9 +535,17 @@ class StocksRuleEngine:
             if ema3 and ema9 and ema3 < ema9:
                 failures.append(f"EMA Bearish: EMA3 {ema3:.2f} < EMA9 {ema9:.2f}")
 
-            # Requisito 4: No agotamiento (Si se están pegando, no es inicio de explosión)
+            # Requisito 4: No agotamiento
             if ema_exh:
                 failures.append("EMA Exhaustion: EMA3 and EMA9 are too close (Possible reversal)")
+
+            # Requisito 5: RSI Máximo (Protección contra sobrecompra extrema en explosiones)
+            if rsi > 65:
+                failures.append(f"RSI Exhausted (Explosion): {rsi:.1f} > 65 (Overbought)")
+
+            # Requisito 6: Evitar perforación de banda superior
+            if high_price >= bb_upper:
+                failures.append(f"Price outside band: High {high_price} >= BB_Upper {bb_upper}")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0
