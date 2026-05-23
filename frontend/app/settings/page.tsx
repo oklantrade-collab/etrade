@@ -125,7 +125,7 @@ export default function SettingsPage() {
 
     Object.keys(data).forEach(key => {
       // Evitar enviar campos temporales del frontend que no existen en DB
-      if (['forex_symbols_str', 'active_symbols_str', 'max_total_risk_forex_pct'].includes(key)) return;
+      if (['forex_symbols_str', 'active_symbols_str', 'max_total_risk_forex_pct', 'max_total_risk_crypto_pct'].includes(key)) return;
       
       if (tradingFields.includes(key)) toUpdateTC[key] = data[key]
       else if (riskFields.includes(key)) toUpdateRC[key] = data[key]
