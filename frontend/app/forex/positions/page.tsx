@@ -36,8 +36,9 @@ export default function ForexPositions() {
   }, [])
   const ITEMS_PER_PAGE = 10
   const [showChart, setShowChart] = useState(false)
-  const [selectedTicker, setSelectedTicker] = useState('')
-  const [selectedPosition, setSelectedPosition] = useState<any | null>(null)  useEffect(() => {
+  const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
+  
+  useEffect(() => {
     async function init() {
       try {
         const statusRes = await fetch('/api/v1/forex/status')
