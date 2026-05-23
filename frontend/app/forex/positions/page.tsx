@@ -37,10 +37,7 @@ export default function ForexPositions() {
   const ITEMS_PER_PAGE = 10
   const [showChart, setShowChart] = useState(false)
   const [selectedTicker, setSelectedTicker] = useState('')
-
-
-
-  useEffect(() => {
+  const [selectedPosition, setSelectedPosition] = useState<any | null>(null)  useEffect(() => {
     async function init() {
       try {
         const statusRes = await fetch('/api/v1/forex/status')
@@ -387,9 +384,18 @@ export default function ForexPositions() {
                                 </div>
                              </td>
                              <td className="py-8 text-right px-10">
-                                <span className="bg-slate-500/10 text-slate-400 border border-white/5 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em]">
-                                   {pos.rule_code || 'S-01'}
-                                </span>
+                                <div className="flex items-center justify-end gap-3">
+                                  <span className="bg-slate-500/10 text-slate-400 border border-white/5 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em]">
+                                     {pos.rule_code || 'S-01'}
+                                  </span>
+                                  <button 
+                                    onClick={() => setSelectedPosition(pos)}
+                                    className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500 hover:bg-blue-500 hover:text-white transition-all shadow-lg shadow-blue-500/10 group-hover:scale-110"
+                                    title="Información Detallada"
+                                  >
+                                     <span className="text-[0.6rem] font-black">ℹ️</span>
+                                  </button>
+                                </div>
                              </td>
                           </tr>
                         )
@@ -454,6 +460,7 @@ export default function ForexPositions() {
         </div>
 
         {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
+        {selectedPosition && <TransactionModal position={selectedPosition} onClose={() => setSelectedPosition(null)} />}
       </div>
 
 
@@ -546,6 +553,72 @@ function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }
         </div>
         <div className="flex-1 w-full bg-black/20">
           <TradingViewWidget symbol={symbol} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TransactionModal({ position, onClose }: { position: any, onClose: () => void }) {
+  const isLong = position.side.toLowerCase() === 'long' || position.side.toLowerCase() === 'buy';
+  const exitPrice = position.exit_price || position.close_price || position.current_price || position.entry_price;
+  const pnl = parseFloat(position.pnl_usd || position.realized_pnl || '0');
+  const size = position.lots || position.size || 0;
+  
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4" onClick={onClose}>
+      <div className="relative w-full max-w-md bg-[#0a0a0f] border border-white/10 rounded-[24px] overflow-hidden shadow-2xl flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-5 border-b border-white/5 bg-white/[0.02]">
+          <h3 className="text-sm font-black uppercase tracking-[0.2em] text-white">Detalles de Transacción</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">✕</button>
+        </div>
+        <div className="p-6 space-y-4 text-sm text-slate-300">
+          <div className="flex justify-between">
+            <span className="text-slate-500">Símbolo:</span>
+            <span className="font-bold text-white">{position.symbol}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Tipo (Side):</span>
+            <span className={`px-2 py-0.5 rounded text-[0.7rem] font-black ${isLong ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+              {isLong ? 'LONG' : 'SHORT'}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Estrategia Entrada:</span>
+            <span className="font-mono text-blue-400">{position.rule_code || 'N/A'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Fecha Entrada:</span>
+            <span>{formatDateInTimezone(position.opened_at, 'date')} {formatDateInTimezone(position.opened_at, 'time')}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Precio Compra:</span>
+            <span className="font-mono">${parseFloat(position.entry_price).toFixed(5)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Tamaño:</span>
+            <span className="font-mono">{parseFloat(size).toFixed(2)}</span>
+          </div>
+          <hr className="border-white/5 my-2" />
+          <div className="flex justify-between">
+            <span className="text-slate-500">Estrategia Cierre:</span>
+            <span className="font-bold text-white">{position.close_reason || 'N/A'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Fecha Cierre:</span>
+            <span>{formatDateInTimezone(position.closed_at || position.opened_at, 'date')} {formatDateInTimezone(position.closed_at || position.opened_at, 'time')}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Precio Cierre:</span>
+            <span className="font-mono">${parseFloat(exitPrice).toFixed(5)}</span>
+          </div>
+          
+          <div className="mt-4 p-4 rounded-xl bg-white/5 flex justify-between items-center border border-white/5">
+            <span className="font-bold text-slate-400">PNL Final:</span>
+            <span className={`text-xl font-black ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+            </span>
+          </div>
         </div>
       </div>
     </div>

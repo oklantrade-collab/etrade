@@ -15,6 +15,7 @@ export default function PositionsPage() {
   const [maxPositions, setMaxPositions] = useState<number>(4)
   const [closedPage, setClosedPage] = useState(0)
   const [tz, setTz] = useState('America/Lima')
+  const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
 
   useEffect(() => {
     const handleTzUpdate = () => {
@@ -329,26 +330,35 @@ export default function PositionsPage() {
                           </div>
                         </td>
                         <td>
-                          <button 
-                            onClick={async () => {
-                              if (confirm(`¿ELIMINAR este registro histórico permanentemente de la DB?`)) {
-                                try {
-                                  const res = await fetch(`/api/v1/positions/crypto/${p.id}`, { method: 'DELETE' })
-                                  if (res.ok) {
-                                    loadClosedPositions()
-                                  } else {
-                                    alert("Error al eliminar registro")
+                          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                            <button 
+                              onClick={() => setSelectedPosition(p)}
+                              style={{ width: '28px', height: '28px', borderRadius: '50%', background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)', color: '#3B82F6', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.8rem' }}
+                              title="Información Detallada"
+                            >
+                               ℹ️
+                            </button>
+                            <button 
+                              onClick={async () => {
+                                if (confirm(`¿ELIMINAR este registro histórico permanentemente de la DB?`)) {
+                                  try {
+                                    const res = await fetch(`/api/v1/positions/crypto/${p.id}`, { method: 'DELETE' })
+                                    if (res.ok) {
+                                      loadClosedPositions()
+                                    } else {
+                                      alert("Error al eliminar registro")
+                                    }
+                                  } catch (err) {
+                                    console.error("Delete error:", err)
                                   }
-                                } catch (err) {
-                                  console.error("Delete error:", err)
                                 }
-                              }
-                            }}
-                            style={{ width: '24px', height: '24px', borderRadius: '50%', background: 'rgba(244,63,94,0.05)', border: '1px solid rgba(244,63,94,0.1)', color: '#F43F5E', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem' }}
-                            title="Eliminar del Historial"
-                          >
-                             🗑️
-                          </button>
+                              }}
+                              style={{ width: '28px', height: '28px', borderRadius: '50%', background: 'rgba(244,63,94,0.05)', border: '1px solid rgba(244,63,94,0.1)', color: '#F43F5E', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.7rem' }}
+                              title="Eliminar del Historial"
+                            >
+                               🗑️
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     )
@@ -404,6 +414,72 @@ export default function PositionsPage() {
           )
         )}
       </div>
+
+      {selectedPosition && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999, backdropFilter: 'blur(4px)' }} onClick={() => setSelectedPosition(null)}>
+          <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '12px', padding: '24px', width: '400px', maxWidth: '90%', boxShadow: '0 10px 25px rgba(0,0,0,0.5)' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border)', paddingBottom: '12px' }}>
+              <h3 style={{ margin: 0, fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                Detalles de Transacción
+              </h3>
+              <button onClick={() => setSelectedPosition(null)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.5rem', lineHeight: 1 }}>&times;</button>
+            </div>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Símbolo:</span>
+                <span style={{ fontWeight: 'bold' }}>{normalizeCryptoSymbol(selectedPosition.symbol)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Tipo (Side):</span>
+                <span className={`badge ${(selectedPosition.side || '').toLowerCase().includes('buy') || (selectedPosition.side || '').toLowerCase().includes('long') ? 'badge-green' : 'badge-red'}`}>
+                  {(selectedPosition.side || '').toUpperCase()}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Estrategia Entrada:</span>
+                <span style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>{selectedPosition.rule_code || 'N/A'}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Fecha Entrada:</span>
+                <span>{formatDateInTimezone(selectedPosition.opened_at, 'date')} {formatDateInTimezone(selectedPosition.opened_at, 'time')}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Precio Compra:</span>
+                <span>${parseFloat(selectedPosition.entry_price).toFixed(4)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Tamaño (Size):</span>
+                <span>{parseFloat(selectedPosition.size).toLocaleString('en-US')}</span>
+              </div>
+              <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Estrategia Cierre:</span>
+                <span style={{ fontWeight: 600 }}>{selectedPosition.close_reason || 'N/A'}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Fecha Cierre:</span>
+                <span>{formatDateInTimezone(selectedPosition.closed_at, 'date')} {formatDateInTimezone(selectedPosition.closed_at, 'time')}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ color: 'var(--text-muted)' }}>Precio Cierre:</span>
+                <span>${parseFloat(selectedPosition.current_price || selectedPosition.entry_price).toFixed(4)}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
+                <span style={{ color: 'var(--text-muted)', fontWeight: 'bold' }}>PNL Final:</span>
+                <span style={{ fontWeight: 'bold', fontSize: '1.2rem', color: parseFloat(selectedPosition.realized_pnl) >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                  {fmtPnl(selectedPosition.realized_pnl)}
+                </span>
+              </div>
+            </div>
+            <div style={{ marginTop: '20px', textAlign: 'center' }}>
+              <button onClick={() => setSelectedPosition(null)} style={{ background: 'var(--accent-blue)', color: '#fff', border: 'none', padding: '8px 24px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

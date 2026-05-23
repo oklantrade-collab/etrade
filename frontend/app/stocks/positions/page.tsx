@@ -120,13 +120,23 @@ export default function StocksPositions() {
             <div style={{ padding: '30px', overflowY: 'auto', flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
               <DetailItem label="Empresa" val={selectedPos.company_name} color="#FFF" />
               <DetailItem label="Sector" val={selectedPos.sector} color="#FFF" />
-              <DetailItem label="Fecha Compra" val={formatDateInTimezone(selectedPos.first_buy_at, 'both')} color="#AAA" />
+              <DetailItem label="Fecha Entrada" val={formatDateInTimezone(selectedPos.first_buy_at || selectedPos.entry_date, 'both')} color="#AAA" />
               <DetailItem label="Tipo Orden" val={selectedPos.order_type || 'MARKET'} color="#00C896" />
               <DetailItem label="Precio Entrada" val={`$${(selectedPos.avg_price || selectedPos.entry_price)?.toFixed(2)}`} color="#FFF" />
               <DetailItem label="Cantidad" val={`${selectedPos.shares >= 0 ? '+' : ''}${selectedPos.shares}`} color={selectedPos.shares >= 0 ? '#FFF' : '#FF4757'} />
-              <DetailItem label="Stop Loss (SL)" val={selectedPos.stop_loss ? `$${parseFloat(selectedPos.stop_loss).toFixed(2)}` : '—'} color="#FF4757" />
-              <DetailItem label="Take Profit (TP)" val={selectedPos.take_profit ? `$${parseFloat(selectedPos.take_profit).toFixed(2)}` : '—'} color="#00C896" />
-              <DetailItem label="Inversión" val={`$${(selectedPos.total_cost || 0).toLocaleString()}`} color="#AAA" />
+              {(selectedPos.exit_date || selectedPos.closed_at) && (
+                <>
+                  <DetailItem label="Fecha Salida" val={formatDateInTimezone(selectedPos.exit_date || selectedPos.closed_at || selectedPos.updated_at, 'both')} color="#AAA" />
+                  <DetailItem label="Precio Salida" val={`$${(selectedPos.exit_price || selectedPos.close_price || selectedPos.current_price)?.toFixed(2)}`} color="#FFF" />
+                </>
+              )}
+              {(!selectedPos.exit_date && !selectedPos.closed_at) && (
+                <>
+                  <DetailItem label="Stop Loss (SL)" val={selectedPos.stop_loss ? `$${parseFloat(selectedPos.stop_loss).toFixed(2)}` : '—'} color="#FF4757" />
+                  <DetailItem label="Take Profit (TP)" val={selectedPos.take_profit ? `$${parseFloat(selectedPos.take_profit).toFixed(2)}` : '—'} color="#00C896" />
+                </>
+              )}
+              <DetailItem label="Inversión" val={`$${((selectedPos.total_cost) || (selectedPos.entry_price * Math.abs(selectedPos.shares)) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} color="#AAA" />
               
               <div style={{ gridColumn: 'span 2', background: 'rgba(255,255,255,0.02)', padding: '15px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '10px' }}>
                 <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Estrategia de Compra</p>
@@ -150,15 +160,15 @@ export default function StocksPositions() {
               
               <div style={{ gridColumn: 'span 2', background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '16px', marginTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
-                   <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>P&L {(selectedPos.status === 'open' ? 'No Realizado' : 'Realizado')}</p>
-                   <p style={{ margin: 0, fontSize: '24px', fontWeight: 900, color: (selectedPos.unrealized_pnl || 0) >= 0 ? '#00C896' : '#FF4757' }}>
-                     {(selectedPos.unrealized_pnl || 0) >= 0 ? '+' : ''}${(selectedPos.unrealized_pnl || 0).toFixed(2)}
+                   <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>P&L {(selectedPos.status === 'open' || !selectedPos.exit_date ? 'No Realizado' : 'Realizado')}</p>
+                   <p style={{ margin: 0, fontSize: '24px', fontWeight: 900, color: (selectedPos.unrealized_pnl || selectedPos.pnl_usd || 0) >= 0 ? '#00C896' : '#FF4757' }}>
+                     {(selectedPos.unrealized_pnl || selectedPos.pnl_usd || 0) >= 0 ? '+' : ''}${(selectedPos.unrealized_pnl || selectedPos.pnl_usd || 0).toFixed(2)}
                    </p>
                 </div>
                 <div style={{ textAlign: 'right' }}>
                    <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Retorno (ROI)</p>
-                   <p style={{ margin: 0, fontSize: '20px', fontWeight: 900, color: (selectedPos.unrealized_pnl_pct || 0) >= 0 ? '#00C896' : '#FF4757' }}>
-                     {(selectedPos.unrealized_pnl_pct || 0) >= 0 ? '+' : ''}{(selectedPos.unrealized_pnl_pct || 0).toFixed(2)}%
+                   <p style={{ margin: 0, fontSize: '20px', fontWeight: 900, color: (selectedPos.unrealized_pnl_pct || selectedPos.pnl_pct || 0) >= 0 ? '#00C896' : '#FF4757' }}>
+                     {(selectedPos.unrealized_pnl_pct || selectedPos.pnl_pct || 0) >= 0 ? '+' : ''}{(selectedPos.unrealized_pnl_pct || selectedPos.pnl_pct || 0).toFixed(2)}%
                    </p>
                 </div>
               </div>
