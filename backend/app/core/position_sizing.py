@@ -138,10 +138,20 @@ def calculate_position_size(
         risk_pct = 0.01  # 1% de riesgo máximo default
         try:
             rc_res = supabase.table('risk_config').select('max_risk_per_trade_pct').limit(1).execute()
+            global_risk_pct = 2.0
             if rc_res.data:
-                risk_pct = float(rc_res.data[0].get('max_risk_per_trade_pct', 2.0)) / 100
+                global_risk_pct = float(rc_res.data[0].get('max_risk_per_trade_pct', 2.0))
             else:
-                risk_pct = float(c.get('max_trade_loss_pct', 1.0)) / 100
+                global_risk_pct = float(c.get('max_trade_loss_pct', 1.0))
+            
+            # Buscar el riesgo específico del mercado en regime_params
+            regime_params = c.get('regime_params') or {}
+            if market_type == 'crypto_futures':
+                risk_pct = float(regime_params.get('max_risk_per_trade_crypto_pct', global_risk_pct)) / 100
+            elif market_type == 'forex_futures':
+                risk_pct = float(regime_params.get('max_risk_per_trade_forex_pct', global_risk_pct)) / 100
+            else:
+                risk_pct = global_risk_pct / 100
         except Exception:
             risk_pct = float(c.get('max_trade_loss_pct', 1.0)) / 100
 
