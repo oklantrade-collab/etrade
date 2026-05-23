@@ -875,14 +875,37 @@ async def _execute_paper_open_unlocked(
         sl_buffer_pct = buffer_pct
     )
     
-    # ── VALIDACIÓN DE COHERENCIA SL vs ENTRY (V2 Engine) ──
+    # ── VALIDACIÓN DE COHERENCIA Y BLINDAJE SL vs ENTRY (V2 Engine) ──
     sl_final = sl_dict['sl_price']
-    if side.lower() in ['long', 'buy'] and sl_final >= price and sl_final > 0:
-        sl_final = price * 0.995  # Forzar SL 0.5% debajo del entry
-        log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
-    elif side.lower() in ['short', 'sell'] and sl_final <= price and sl_final > 0:
-        sl_final = price * 1.005  # Forzar SL 0.5% arriba del entry
-        log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
+    
+    # 1. Blindaje de Distancia Mínima
+    # BTC y ETH: 0.5%, Altcoins: 1.0%
+    is_major = any(x in symbol for x in ['BTC', 'ETH'])
+    min_sl_dist_pct = 0.005 if is_major else 0.010
+    
+    if side.lower() in ['long', 'buy']:
+        min_safe_sl = price * (1 - min_sl_dist_pct)
+        if sl_final > min_safe_sl:
+            from app.core.logger import log_warning
+            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL activado para LONG. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
+            sl_final = min_safe_sl
+            
+        if sl_final >= price and sl_final > 0:
+            sl_final = price * (1 - min_sl_dist_pct)
+            from app.core.logger import log_warning
+            log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
+    elif side.lower() in ['short', 'sell']:
+        min_safe_sl = price * (1 + min_sl_dist_pct)
+        if sl_final < min_safe_sl:
+            from app.core.logger import log_warning
+            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL activado para SHORT. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
+            sl_final = min_safe_sl
+            
+        if sl_final <= price and sl_final > 0:
+            sl_final = price * (1 + min_sl_dist_pct)
+            from app.core.logger import log_warning
+            log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
+            
     sl_dict['sl_price'] = sl_final
 
     # ── SLVM: Calcular Stop Loss Virtual ──
@@ -1079,7 +1102,7 @@ async def _execute_paper_close(pos, price, reason, supabase):
 
     supabase.table('positions').update({
         'status': 'closed',
-        'close_reason': reason,
+        'close_reason': reason[:20],  # Truncate to 20 chars to avoid Postgres varchar(20) 22001 error
         'current_price': price,
         'closed_at': datetime.now(timezone.utc).isoformat(),
         'realized_pnl': round(total_pnl, 4)

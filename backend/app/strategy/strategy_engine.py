@@ -210,6 +210,24 @@ class StrategyEngine:
         basis_info = detect_basis_horizontal(df_15m, lookback=10, slope_threshold=0.5)
         basis_info_4h = detect_basis_horizontal(df_4h, lookback=10, slope_threshold=0.5) if df_4h is not None else {}
 
+        # ── EMA3 OPEN_UP LOGIC ──
+        # 15m
+        ema3_15m = safe_float(last_15m.get('ema_3') if last_15m.get('ema_3') is not None else last_15m.get('ema3'))
+        open_15m = safe_float(last_15m.get('open'))
+        low_15m  = safe_float(last_15m.get('low'))
+        high_15m = safe_float(last_15m.get('high'))
+        ema3_open_up_15m = ((low_15m < ema3_15m and high_15m > ema3_15m) or (open_15m > ema3_15m)) if ema3_15m else False
+
+        # 5m
+        ema3_open_up_5m = False
+        if last_5m:
+            ema3_5m = safe_float(last_5m.get('ema_3') if last_5m.get('ema_3') is not None else last_5m.get('ema3'))
+            open_5m = safe_float(last_5m.get('open'))
+            low_5m  = safe_float(last_5m.get('low'))
+            high_5m = safe_float(last_5m.get('high'))
+            if ema3_5m:
+                ema3_open_up_5m = ((low_5m < ema3_5m and high_5m > ema3_5m) or (open_5m > ema3_5m))
+
         return {
             # Precio
             'symbol':            str(snap.get('symbol', '')),
@@ -227,6 +245,8 @@ class StrategyEngine:
             'ema20':             safe_float(last_15m.get('ema_20') if last_15m.get('ema_20') is not None else last_15m.get('ema20')),
             'ema50':             safe_float(last_15m.get('ema_50') if last_15m.get('ema_50') is not None else last_15m.get('ema50')),
             'ema200':            safe_float(last_15m.get('ema_200') if last_15m.get('ema_200') is not None else last_15m.get('ema200')),
+            'ema3_open_up_15m':  ema3_open_up_15m,
+            'ema3_open_up_5m':   ema3_open_up_5m,
             'ema3_angle':        safe_float(last_15m.get('ema3_angle')),
             'ema9_angle':        safe_float(last_15m.get('ema9_angle')),
             'ema20_angle':       safe_float(last_15m.get('ema20_angle')),
@@ -458,6 +478,22 @@ class StrategyEngine:
             ema3 = context.get('ema3', 0.0)
             ema9 = context.get('ema9', 0.0)
             ema20 = context.get('ema20', 0.0)
+            bb_exp = context.get('bb_expanding', False)
+            
+            # Extract SIPV
+            df_15m = context.get('df_15m')
+            sipv_buy = False
+            sipv_sell = False
+            if df_15m is not None and len(df_15m) > 0:
+                last_row = df_15m.iloc[-1].to_dict()
+                sipv_buy = (bool(last_row.get('is_dragonfly', False)) or
+                            bool(last_row.get('is_bullish_engulfing', False)) or
+                            bool(last_row.get('low_higher_than_prev', False)) or
+                            bool(last_row.get('is_doji', False)))
+                sipv_sell = (bool(last_row.get('is_gravestone', False)) or
+                             bool(last_row.get('is_bearish_engulfing', False)) or
+                             bool(last_row.get('high_lower_than_prev', False)) or
+                             bool(last_row.get('is_doji', False)))
             
             pb_pct = 0.0015  # 0.15% dynamic pullback window suitable for Crypto
             
@@ -476,7 +512,8 @@ class StrategyEngine:
                     sar_15m_ok and sar_4h_ok and
                     mtf >= 0.4 and pine_not_opposite and
                     struct_ok and zone_ok and
-                    adx > 25 and pullback_confirmed
+                    adx > 25 and pullback_confirmed and
+                    (not bb_exp) and sipv_buy
                 )
                 
                 min_score = float(rule.get('min_score', 0.70))
@@ -507,7 +544,8 @@ class StrategyEngine:
                     sar_15m_ok and sar_4h_ok and
                     mtf <= -0.4 and pine_not_opposite and
                     struct_ok and zone_ok and
-                    adx > 25 and pullback_confirmed
+                    adx > 25 and pullback_confirmed and
+                    (not bb_exp) and sipv_sell
                 )
                 
                 min_score = float(rule.get('min_score', 0.70))
@@ -553,7 +591,7 @@ class StrategyEngine:
             if direction == 'long':
                 sar_15m_ok = (sar_15m > 0)
                 pine_not_opposite = (pine != 'Sell')
-                ema_alignment = (ema3 > ema9 > ema20) if (ema3 and ema9 and ema20) else True
+                ema_alignment = (ema3 > ema9 > ema20) if (ema3 and ema9 and ema20) else False
                 price_above_basis = (price > ema20) if ema20 else True
                 
                 triggered = (
@@ -563,7 +601,7 @@ class StrategyEngine:
                     adx > 20 and
                     sar_15m_ok and
                     pine_not_opposite and
-                    fib_zone <= 3
+                    fib_zone <= 2
                 )
                 min_score = float(rule.get('min_score', 0.95))
                 score = 0.98 if triggered else 0.40
@@ -575,12 +613,12 @@ class StrategyEngine:
                     'adx_ok': {'name': 'ADX > 20', 'passed': adx > 20, 'weight': 0.15, 'current_value': adx},
                     'sar_15m_ok': {'name': 'SAR 15m alcista', 'passed': sar_15m_ok, 'weight': 0.10, 'current_value': sar_15m},
                     'pine_not_opposite': {'name': 'Pine no opuesto (No Sell)', 'passed': pine_not_opposite, 'weight': 0.10, 'current_value': pine},
-                    'zone_ok': {'name': 'Fibonacci Zone <= 3', 'passed': fib_zone <= 3, 'weight': 0.10, 'current_value': fib_zone}
+                    'zone_ok': {'name': 'Fibonacci Zone <= 2', 'passed': fib_zone <= 2, 'weight': 0.10, 'current_value': fib_zone}
                 }
             else: # short
                 sar_15m_ok = (sar_15m < 0)
                 pine_not_opposite = (pine != 'Buy')
-                ema_alignment = (ema3 < ema9 < ema20) if (ema3 and ema9 and ema20) else True
+                ema_alignment = (ema3 < ema9 < ema20) if (ema3 and ema9 and ema20) else False
                 price_below_basis = (price < ema20) if ema20 else True
                 
                 triggered = (
@@ -590,7 +628,7 @@ class StrategyEngine:
                     adx > 20 and
                     sar_15m_ok and
                     pine_not_opposite and
-                    fib_zone >= -3
+                    fib_zone >= -2
                 )
                 min_score = float(rule.get('min_score', 0.95))
                 score = 0.98 if triggered else 0.40
@@ -602,7 +640,7 @@ class StrategyEngine:
                     'adx_ok': {'name': 'ADX > 20', 'passed': adx > 20, 'weight': 0.15, 'current_value': adx},
                     'sar_15m_ok': {'name': 'SAR 15m bajista', 'passed': sar_15m_ok, 'weight': 0.10, 'current_value': sar_15m},
                     'pine_not_opposite': {'name': 'Pine no opuesto (No Buy)', 'passed': pine_not_opposite, 'weight': 0.10, 'current_value': pine},
-                    'zone_ok': {'name': 'Fibonacci Zone >= -3', 'passed': fib_zone >= -3, 'weight': 0.10, 'current_value': fib_zone}
+                    'zone_ok': {'name': 'Fibonacci Zone >= -2', 'passed': fib_zone >= -2, 'weight': 0.10, 'current_value': fib_zone}
                 }
                 
             return {

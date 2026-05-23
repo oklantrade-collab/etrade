@@ -342,6 +342,24 @@ class ForexExecutionService:
         }
         pb_pips = PULLBACK_WINDOW_PIPS.get(symbol, 5)
 
+        # Extraer señales SIPV
+        from app.core.memory_store import MEMORY_STORE
+        df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+        sipv_buy = False
+        sipv_sell = False
+        if df_15m is not None and len(df_15m) > 0:
+            last_row = df_15m.iloc[-1].to_dict()
+            sipv_buy = (bool(last_row.get('is_dragonfly', False)) or
+                        bool(last_row.get('is_bullish_engulfing', False)) or
+                        bool(last_row.get('low_higher_than_prev', False)) or
+                        bool(last_row.get('is_doji', False)))
+            sipv_sell = (bool(last_row.get('is_gravestone', False)) or
+                         bool(last_row.get('is_bearish_engulfing', False)) or
+                         bool(last_row.get('high_lower_than_prev', False)) or
+                         bool(last_row.get('is_doji', False)))
+                         
+        bb_exp = context.get('bb_expanding', False)
+
         if direction == 'long':
             # Long: SAR 15m alcista Y (SAR 4h alcista O MTF >= 0.5) Y MTF >= 0.4 Y no opuesto Pine Y no en techo Y ADX > 25 Y pullback confirmado
             if symbol in strict_symbols:
@@ -353,7 +371,8 @@ class ForexExecutionService:
                     sar_15m_ok and sar_4h_ok and 
                     mtf >= 0.4 and pine_not_opposite and 
                     struct_ok and fib_zone <= 2 and 
-                    adx > 25 and pullback_confirmed
+                    adx > 25 and pullback_confirmed and
+                    (not bb_exp) and sipv_buy
                 )
             else:
                 rule_alignment_triggered = (
@@ -373,7 +392,8 @@ class ForexExecutionService:
                     sar_15m_ok and sar_4h_ok and 
                     mtf <= -0.4 and pine_not_opposite and 
                     struct_ok and fib_zone >= -2 and 
-                    adx > 25 and pullback_confirmed
+                    adx > 25 and pullback_confirmed and
+                    (not bb_exp) and sipv_sell
                 )
             else:
                 rule_alignment_triggered = (
@@ -805,6 +825,11 @@ class ForexExecutionService:
             else:
                 sl = self._safe_float(snap.get('lower_6'), (entry - 50 * pip_size)) - (0.5 * atr)
             
+            # Blindaje de Distancia Mínima
+            min_safe_sl = entry - (offset_pips * pip_size)
+            if sl > min_safe_sl:
+                sl = min_safe_sl
+            
             if sl >= entry: sl = entry - (offset_pips * pip_size)  # fallback
             
             # TP: Upper 3 (Partial Target)
@@ -817,6 +842,11 @@ class ForexExecutionService:
             else:
                 sl = self._safe_float(snap.get('upper_6'), (entry + 50 * pip_size)) + (0.5 * atr)
             
+            # Blindaje de Distancia Mínima
+            min_safe_sl = entry + (offset_pips * pip_size)
+            if sl < min_safe_sl:
+                sl = min_safe_sl
+                
             if sl <= entry: sl = entry + (offset_pips * pip_size)  # fallback
             
             # TP: Lower 3 (Partial Target)

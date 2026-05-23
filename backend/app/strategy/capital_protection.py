@@ -606,6 +606,64 @@ def evaluate_volatile_trailing_v2(
     if sl_phase3 is not None:
         candidates.append(sl_phase3)
 
+    # ── FASE 4: Optimización Avanzada SIPV (Lógica de Velas en Vivo) ──
+    sl_phase4 = None
+    pine_signal = ''
+    if df_15m is not None and len(df_15m) > 0:
+        pine_signal = str(df_15m.iloc[-1].get('pinescript_signal', ''))
+        
+    bb_touch = False
+    if df_15m is not None and len(df_15m) >= 2:
+        c0 = df_15m.iloc[-1]
+        c1 = df_15m.iloc[-2]
+        
+        c0_high, c0_low = float(c0.get('high', 0)), float(c0.get('low', 0))
+        c0_open, c0_close = float(c0.get('open', 0)), float(c0.get('close', 0))
+        c1_open, c1_close = float(c1.get('open', 0)), float(c1.get('close', 0))
+        
+        bb_upper = float(c0.get('upper_2', 0))
+        bb_lower = float(c0.get('lower_2', 0))
+        
+        if is_long:
+            bb_touch = (c0_high >= bb_upper) if bb_upper > 0 else False
+            pine_trigger = (pine_signal == 'Sell')
+        else:
+            bb_touch = (c0_low <= bb_lower) if bb_lower > 0 else False
+            pine_trigger = (pine_signal == 'Buy')
+            
+        if bb_touch or pine_trigger:
+            c1_body = abs(c1_close - c1_open)
+            buffer = c1_body * 0.03
+            
+            if is_long:
+                if c1_close > c1_open: # C1 verde
+                    if c0_open >= c1_close:
+                        # Escenario A
+                        sl_phase4 = c1_close - buffer
+                    else:
+                        # Escenario B
+                        sl_phase4 = c1_open
+                else: # C1 roja
+                    # Escenario C
+                    if pine_trigger and pnl_pips > 0:
+                        sl_phase4 = current_price - (pip * 1.5)
+            else: # is_short
+                if c1_close < c1_open: # C1 roja
+                    if c0_open <= c1_close:
+                        # Escenario A
+                        sl_phase4 = c1_close + buffer
+                    else:
+                        # Escenario B
+                        sl_phase4 = c1_open
+                else: # C1 verde
+                    # Escenario C
+                    if pine_trigger and pnl_pips > 0:
+                        sl_phase4 = current_price + (pip * 1.5)
+                        
+            if sl_phase4 is not None:
+                candidates.append(sl_phase4)
+                phases['phase4_sipv'] = round(sl_phase4, 6)
+
     if is_long:
         # LONG: SL más ALTO = mayor protección
         best_sl  = max(candidates)
@@ -623,7 +681,9 @@ def evaluate_volatile_trailing_v2(
 
     # ── Fase activa ───────────────────────────
     tol = pip * 0.5
-    if sl_phase3 is not None and abs(final_sl - sl_phase3) <= tol:
+    if sl_phase4 is not None and abs(final_sl - sl_phase4) <= tol:
+        active_phase = 4
+    elif sl_phase3 is not None and abs(final_sl - sl_phase3) <= tol:
         active_phase = 3
     elif sl_phase2 is not None and abs(final_sl - sl_phase2) <= tol:
         active_phase = 2
@@ -833,6 +893,70 @@ def evaluate_trailing_stop(
     else:  # crypto / stocks
         current_gain = pnl['pct'] / 100
         levels       = cfg.get('trailing_levels', [])
+
+        # ── SIPV Override for Crypto ──
+        sl_sipv = None
+        pine_signal = ''
+        if df_15m is not None and len(df_15m) > 0:
+            pine_signal = str(df_15m.iloc[-1].get('pinescript_signal', ''))
+            
+        bb_touch = False
+        if df_15m is not None and len(df_15m) >= 2:
+            c0 = df_15m.iloc[-1]
+            c1 = df_15m.iloc[-2]
+            
+            c0_high, c0_low = float(c0.get('high', 0)), float(c0.get('low', 0))
+            c0_open, c0_close = float(c0.get('open', 0)), float(c0.get('close', 0))
+            c1_open, c1_close = float(c1.get('open', 0)), float(c1.get('close', 0))
+            
+            bb_upper = float(c0.get('upper_2', 0))
+            bb_lower = float(c0.get('lower_2', 0))
+            
+            if is_long:
+                bb_touch = (c0_high >= bb_upper) if bb_upper > 0 else False
+                pine_trigger = (pine_signal == 'Sell')
+            else:
+                bb_touch = (c0_low <= bb_lower) if bb_lower > 0 else False
+                pine_trigger = (pine_signal == 'Buy')
+                
+            if bb_touch or pine_trigger:
+                c1_body = abs(c1_close - c1_open)
+                buffer = c1_body * 0.03
+                
+                if is_long:
+                    if c1_close > c1_open: # C1 verde
+                        if c0_open >= c1_close:
+                            sl_sipv = c1_close - buffer
+                        else:
+                            sl_sipv = c1_open
+                    else: # C1 roja
+                        if pine_trigger and current_gain > 0:
+                            sl_sipv = current_price * 0.998 # 0.2% protection
+                else: # is_short
+                    if c1_close < c1_open: # C1 roja
+                        if c0_open <= c1_close:
+                            sl_sipv = c1_close + buffer
+                        else:
+                            sl_sipv = c1_open
+                    else: # C1 verde
+                        if pine_trigger and current_gain > 0:
+                            sl_sipv = current_price * 1.002
+                            
+                if sl_sipv is not None:
+                    if is_long and sl_sipv > state.current_sl:
+                        return {
+                            'action': 'update_sl',
+                            'new_sl': round(sl_sipv, 8),
+                            'new_level': 99,
+                            'reason': f'Trailing SIPV Crypto: pine={pine_trigger}, bb={bb_touch} → SL a {sl_sipv:.6f}',
+                        }
+                    elif not is_long and sl_sipv < state.current_sl:
+                        return {
+                            'action': 'update_sl',
+                            'new_sl': round(sl_sipv, 8),
+                            'new_level': 99,
+                            'reason': f'Trailing SIPV Crypto: pine={pine_trigger}, bb={bb_touch} → SL a {sl_sipv:.6f}',
+                        }
 
         for i, (trigger, new_sl_pct) in enumerate(levels):
             level_idx = i + 1
