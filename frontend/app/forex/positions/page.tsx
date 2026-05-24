@@ -517,13 +517,12 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
       "support_host": "https://www.tradingview.com",
       "studies": [
         "BB@tv-basicstudies",
-        "MAExp@tv-basicstudies",
-        "MASimple@tv-basicstudies"
+        "MAExp@tv-basicstudies"
       ],
       "studies_overrides": {
-        "moving average.length": 3,
-        "moving average.color": "#E3FF00",
-        "moving average.linewidth": 2
+        "moving average exponential.length": 3,
+        "moving average exponential.color": "#E3FF00",
+        "moving average exponential.linewidth": 2
       },
       "overrides": {
         "mainSeriesProperties.style": 1
