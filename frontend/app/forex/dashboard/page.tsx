@@ -418,12 +418,16 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
           "hide_side_toolbar": false,
           "studies": [
             "BB@tv-basicstudies",
+            "MAExp@tv-basicstudies",
             "MAExp@tv-basicstudies"
           ],
           "studies_overrides": {
-            "moving average exponential.length": 3,
-            "moving average exponential.color": "#E3FF00",
-            "moving average exponential.linewidth": 2
+            "moving average exponential.0.length": 9,
+            "moving average exponential.0.plot.color": "#3B82F6",
+            "moving average exponential.0.linewidth": 2,
+            "moving average exponential.1.length": 3,
+            "moving average exponential.1.plot.color": "#E3FF00",
+            "moving average exponential.1.linewidth": 2
           },
           "overrides": {
             "mainSeriesProperties.style": 1,
