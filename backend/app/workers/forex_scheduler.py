@@ -659,6 +659,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 current_mtf=current_mtf,
                 current_price=current_price,
                 config=trading_config,
+                snap=snap
             )
 
             if reversal.get('should_exit'):

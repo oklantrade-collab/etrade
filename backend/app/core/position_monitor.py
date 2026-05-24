@@ -30,7 +30,8 @@ async def check_signal_reversal(
     position:     dict,
     current_mtf:  float,
     current_price: float,
-    config:       dict
+    config:       dict,
+    snap:         dict = None
 ) -> dict:
     """
     Cierra la posición cuando el MTF gira en contra
@@ -93,6 +94,16 @@ async def check_signal_reversal(
     # salimos para evitar el SL completo.
     is_strong_reversal = abs(current_mtf) > 0.5
     if pnl_pct < 0 and is_strong_reversal:
+        # Validación extra: Esperar si la tendencia corta (EMA3 vs EMA9) sigue a nuestro favor
+        if snap:
+            ema3 = float(snap.get('ema_3') or 0)
+            ema9 = float(snap.get('ema_9') or 0)
+            if ema3 > 0 and ema9 > 0:
+                if side == 'long' and ema3 > ema9:
+                    return {'should_exit': False}
+                if side == 'short' and ema3 < ema9:
+                    return {'should_exit': False}
+
         return {
             'should_exit': True,
             'reason': 'sl_prevention',
@@ -631,7 +642,7 @@ async def check_open_positions_5m(
 
             # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
             # Evalúa si la tendencia giró para salir antes del SL o asegurar TP.
-            rev_res = await check_signal_reversal(pos, mtf_score, price, config)
+            rev_res = await check_signal_reversal(pos, mtf_score, price, config, snap=current_snap_obj)
             if rev_res.get('should_exit'):
                 reason = rev_res.get('reason', 'signal_reversal')
                 await _execute_paper_close(pos, price, reason, supabase)

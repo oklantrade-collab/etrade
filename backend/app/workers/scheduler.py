@@ -944,7 +944,8 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                 position      = position,
                 current_mtf   = current_mtf,
                 current_price = current_price,
-                config        = trading_config
+                config        = trading_config,
+            snap          = snap
             )
 
             if reversal.get('should_exit'):
@@ -1028,7 +1029,8 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                         next_target   = next_target,
                         mtf_score     = current_mtf,
                         ai_result     = ai_result,
-                        config        = trading_config
+                        config        = trading_config,
+            snap          = snap
                     )
 
                     # Obtener P&L actual para el mensaje de Telegram
