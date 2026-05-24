@@ -514,7 +514,22 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
       "hide_side_toolbar": false,
       "allow_symbol_change": true,
       "calendar": false,
-      "support_host": "https://www.tradingview.com"
+      "support_host": "https://www.tradingview.com",
+      "studies": [
+        "BB@tv-basicstudies",
+        "MAExp@tv-basicstudies",
+        {
+          "id": "MASimple@tv-basicstudies",
+          "inputs": { "length": 3 }
+        }
+      ],
+      "studies_overrides": {
+        "moving average.color": "#E3FF00",
+        "moving average.linewidth": 2
+      },
+      "overrides": {
+        "mainSeriesProperties.style": 1
+      }
     });
     container.current.appendChild(script);
     
