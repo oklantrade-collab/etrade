@@ -297,12 +297,10 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
           "studies": [
             "BB@tv-basicstudies",
             "MAExp@tv-basicstudies",
-            {
-              "id": "MASimple@tv-basicstudies",
-              "inputs": { "length": 3 }
-            }
+            "MASimple@tv-basicstudies"
           ],
           "studies_overrides": {
+            "moving average.length": 3,
             "moving average.color": "#E3FF00",
             "moving average.linewidth": 2
           },
