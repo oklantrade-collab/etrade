@@ -8,6 +8,7 @@ REMOTE_PATH = "/home/etrade/etrade/backend"
 
 # Archivos críticos para sincronizar
 files_to_sync = [
+    "app/strategy/erep_manager.py",
     "app/workers/scheduler.py",
     "app/analysis/indicators_v2.py",
     "app/strategy/strategy_engine.py",

@@ -203,6 +203,179 @@ async def check_sl_proximity_alert(
 # Cache en memoria para estados de protección
 _protection_cache = {}
 
+async def check_sl_with_erep(
+    symbol:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    df_15m:        pd.DataFrame,
+    df_4h:         pd.DataFrame,
+    market_type:   str,
+    supabase,
+) -> bool:
+    """
+    Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP.
+
+    Se llama en el ciclo de 15m SOLO cuando el precio está cerca o en el SL.
+    """
+    from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action
+    
+    sl_price = float(position.get('stop_loss_price') or
+                     position.get('sl_dynamic_price') or
+                     position.get('sl_price') or
+                     position.get('stop_loss') or 0)
+    side     = str(position.get('side', 'long'))
+    is_long  = side in ('long', 'buy')
+
+    if sl_price <= 0:
+        return False
+
+    # ¿Tocó el SL?
+    sl_touched = (
+        (is_long  and current_price <= sl_price) or
+        (not is_long and current_price >= sl_price)
+    )
+
+    erep_active = bool(position.get('erep_active'))
+
+    if not sl_touched and not erep_active:
+        return False  # Normal, sin acción
+
+    async def open_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
+        res = supabase.table("positions").select("*").eq("id", position["id"]).execute()
+        if res.data:
+            pos = res.data[0]
+            q1 = float(pos.get("erep_q1") or pos.get("size") or 0)
+            p1 = float(pos.get("erep_p1_price") or pos.get("entry_price") or 0)
+            
+            combined_size = q1 + size
+            combined_price = (p1 * q1 + price * size) / combined_size
+            
+            supabase.table("positions").update({
+                "size": combined_size,
+                "entry_price": combined_price,
+                "avg_entry_price": combined_price,
+            }).eq("id", pos["id"]).execute()
+            
+            now = datetime.now(timezone.utc).isoformat()
+            try:
+                supabase.table('paper_trades').insert({
+                    'symbol': symbol,
+                    'side': pos['side'],
+                    'entry_price': price,
+                    'exit_price': price,
+                    'total_pnl_usd': 0.0,
+                    'total_pnl_pct': 0.0,
+                    'close_reason': 'EREP_P2',
+                    'closed_at': now,
+                    'mode': 'paper',
+                    'rule_code': 'EREP_P2'
+                }).execute()
+            except Exception as e:
+                log_error("POSITION_MONITOR", f"Error inserting EREP order: {e}")
+
+    async def close_position(*args, **kwargs):
+        # Support both positional: close_position(symbol, price, reason, supabase)
+        # and keyword: close_position(symbol, side, size, price, reason, supabase)
+        price = current_price
+        reason = 'erep_close'
+        if len(args) >= 3:
+            reason = args[2]
+        if len(args) >= 2:
+            price = args[1]
+            
+        if 'price' in kwargs:
+            price = kwargs['price']
+        if 'reason' in kwargs:
+            reason = kwargs['reason']
+        elif 'close_reason' in kwargs:
+            reason = kwargs['close_reason']
+            
+        res = supabase.table("positions").select("*").eq("id", position["id"]).execute()
+        if res.data:
+            pos = res.data[0]
+            await _execute_paper_close(pos, price, reason, supabase)
+
+    # ── SI EREP YA ESTÁ ACTIVO ─────────────────
+    if erep_active:
+        action = evaluate_erep_phase(
+            position, current_price,
+            snap, df_15m, df_4h, market_type
+        )
+        result = await execute_erep_action(
+            action        = action,
+            position      = position,
+            current_price = current_price,
+            symbol        = symbol,
+            market_type   = market_type,
+            supabase      = supabase,
+            open_func     = open_position,
+            close_func    = close_position,
+        )
+        return result.get('executed') == 'closed'
+
+    # ── SL RECIÉN TOCADO ───────────────────────
+    if sl_touched:
+        entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+        from app.core.crypto_symbols import resolve_crypto_position_quantity
+        q1 = resolve_crypto_position_quantity(supabase, position)
+        
+        await supabase.table('positions').update({
+            'erep_phase':   1,
+            'erep_p1_price': entry,
+            'erep_q1':      q1,
+            'erep_market_type': market_type,
+        }).eq('id', position['id']).execute()
+
+        position['erep_phase']   = 1
+        position['erep_p1_price'] = entry
+        position['erep_q1']      = q1
+        position['erep_market_type'] = market_type
+
+        action = evaluate_erep_phase(
+            position, current_price,
+            snap, df_15m, df_4h, market_type
+        )
+
+        if action['action'] == 'close_sl':
+            await close_position(symbol, current_price, 'sl_normal', supabase)
+            return True
+
+        await execute_erep_action(
+            action, position, current_price,
+            symbol, market_type, supabase,
+            open_position, close_position
+        )
+        return False
+
+    return False
+
+
+async def check_crypto_erep(
+    symbol:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    supabase,
+) -> bool:
+    """
+    EREP para Crypto.
+    """
+    from app.core.memory_store import get_memory_df
+    df_15m = get_memory_df(symbol, "15m")
+    df_4h  = get_memory_df(symbol, "4h")
+    
+    return await check_sl_with_erep(
+        symbol=symbol,
+        position=position,
+        current_price=current_price,
+        snap=snap,
+        df_15m=df_15m,
+        df_4h=df_4h,
+        market_type='crypto_futures',
+        supabase=supabase
+    )
+
 async def check_protections(
     symbol:        str,
     position:      dict,
@@ -318,9 +491,22 @@ async def check_protections(
             (side not in ('long','buy') and current_price >= sl)
         )
         if sl_hit:
-            log_info('PROTECTION', f'🔴 SL HIT [{symbol}]: precio={current_price:.6f} sl={sl:.6f}')
-            # Usar la función de cierre existente en el monitor
-            await _execute_paper_close(position, current_price, f'sl_{position.get("sl_type", "backstop")}', supabase)
+            log_info('PROTECTION', f'🔴 SL HIT [{symbol}]: precio={current_price:.6f} sl={sl:.6f}. Routing to EREP Phase 1...')
+            
+            entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+            from app.core.crypto_symbols import resolve_crypto_position_quantity
+            qty = resolve_crypto_position_quantity(supabase, position)
+            
+            try:
+                supabase.table('positions').update({
+                    'erep_phase': 1,
+                    'erep_p1_price': entry,
+                    'erep_q1': qty,
+                    'erep_market_type': 'crypto_futures',
+                }).eq('id', pos_id).execute()
+            except Exception as e:
+                log_error('PROTECTION', f"Error activating EREP in check_protections: {e}")
+                
             _protection_cache.pop(pos_id, None)
             return True
 
@@ -400,48 +586,19 @@ async def check_open_positions_5m(
             # Inyectamos el monitor de protecciones dinámicas (BE, Trailing, Backstop)
             current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
 
-            # ── SLVM: Modo Recuperación (si ya está activo) ──
+            # ── EREP Integration ──
             try:
-                from app.strategy.virtual_sl_recovery import (
-                    check_slv_trigger, evaluate_recovery_mode,
-                    activate_recovery_mode_sync, update_recovery_cycle_sync,
-                    finalize_recovery_exit_sync, update_slv_from_bands_sync,
-                )
-
-                if pos.get('recovery_mode'):
-                    # Ya en Modo Recuperación — evaluar salida
-                    mr_result = evaluate_recovery_mode(
-                        position=pos, current_price=price,
-                        snap=current_snap_obj, symbol=norm_symbol,
-                        market_type='crypto_futures',
-                    )
-                    update_recovery_cycle_sync(pos, mr_result, supabase, 'positions')
-                    log_info('SLVM', f'MR [{norm_symbol}] ciclo {mr_result["recovery_cycles"]}: {mr_result["reason"]}')
-
-                    if mr_result['should_close']:
-                        finalize_recovery_exit_sync(pos, mr_result, price, norm_symbol, supabase, 'positions')
-                        await _execute_paper_close(pos, price, f'recovery_{mr_result["exit_type"]}', supabase)
-                        events.append({'symbol': norm_symbol, 'event': f'slvm_{mr_result["exit_type"]}'})
-                        continue
-                    else:
-                        # En MR: trailing sigue activo pero saltamos las señales normales
-                        closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
-                        if closed:
-                            events.append({'symbol': norm_symbol, 'event': 'protection_close_in_mr'})
-                        continue
-
-                # ── SLVM: Verificar si precio tocó el SLV ──
-                if pos.get('slv_price') and check_slv_trigger(pos, price):
-                    activate_recovery_mode_sync(pos, price, norm_symbol, 'crypto_futures', supabase, 'positions')
-                    events.append({'symbol': norm_symbol, 'event': 'slvm_activated'})
+                if await check_crypto_erep(norm_symbol, pos, price, current_snap_obj, supabase):
+                    events.append({'symbol': norm_symbol, 'event': 'erep_close'})
                     continue
-
-                # ── SLVM: Actualizar SLV desde bandas (solo mejora) ──
-                if pos.get('slv_price'):
-                    update_slv_from_bands_sync(pos, current_snap_obj, norm_symbol, 'crypto_futures', supabase, 'positions')
-
-            except Exception as slvm_e:
-                log_warning(MODULE, f'SLVM error for {norm_symbol}: {slvm_e}')
+                
+                # Recargar posición local para verificar si EREP ya está activo
+                fresh_pos = supabase.table('positions').select('erep_active', 'erep_phase').eq('id', pos['id']).execute()
+                if fresh_pos.data and (fresh_pos.data[0].get('erep_active') or fresh_pos.data[0].get('erep_phase', 0) > 0):
+                    # Si EREP está activo, salteamos el resto de las evaluaciones normales
+                    continue
+            except Exception as erep_err:
+                log_warning(MODULE, f"Error checking EREP for {norm_symbol}: {erep_err}")
 
             closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
             if closed:
@@ -512,16 +669,26 @@ async def check_open_positions_5m(
                 market_type   = 'crypto_futures',
             )
 
-            action = sl_action['action']
-
             if action == 'close_backstop':
-                await _execute_paper_close(pos, price, 'backstop_sl', supabase)
-                events.append({'symbol': symbol, 'event': 'backstop_sl_hit'})
+                log_warning(MODULE, f"🔴 BACKSTOP HIT: {norm_symbol} @ {price:.6f}. Routing to EREP Phase 1...")
+                supabase.table('positions').update({
+                    'erep_phase': 1,
+                    'erep_p1_price': entry_p,
+                    'erep_q1': current_qty,
+                    'erep_market_type': 'crypto_futures',
+                }).eq('id', pos['id']).execute()
+                events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
                 continue
 
             if action == 'trigger_dynamic_sl':
-                await _execute_paper_close(pos, price, 'dynamic_sl', supabase)
-                events.append({'symbol': symbol, 'event': 'dynamic_sl_hit'})
+                log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {norm_symbol} @ {price:.6f}. Routing to EREP Phase 1...")
+                supabase.table('positions').update({
+                    'erep_phase': 1,
+                    'erep_p1_price': entry_p,
+                    'erep_q1': current_qty,
+                    'erep_market_type': 'crypto_futures',
+                }).eq('id', pos['id']).execute()
+                events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
                 continue
 
             if action == 'activate_dynamic_sl':

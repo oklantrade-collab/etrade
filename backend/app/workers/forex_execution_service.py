@@ -992,41 +992,16 @@ class ForexExecutionService:
                 if self._manage_position_fast(pos, price, snap):
                     continue # Posicion cerrada
 
-                #    SLVM: Modo Recuperacion   
+                # ── EREP Integration for Forex ──
                 try:
-                    from app.strategy.virtual_sl_recovery import (
-                        check_slv_trigger, evaluate_recovery_mode,
-                        activate_recovery_mode_sync, update_recovery_cycle_sync,
-                        finalize_recovery_exit_sync, update_slv_from_bands_sync,
-                    )
-
-                    if pos.get('recovery_mode') and price > 0:
-                        mr_result = evaluate_recovery_mode(
-                            position=pos, current_price=price,
-                            snap=snap or {}, symbol=symbol,
-                            market_type='forex_futures',
-                        )
-                        update_recovery_cycle_sync(pos, mr_result, self.sb, 'forex_positions')
-                        self.log(f'SLVM MR [{symbol}] ciclo {mr_result["recovery_cycles"]}: {mr_result["reason"]}')
-
-                        if mr_result['should_close']:
-                            finalize_recovery_exit_sync(pos, mr_result, price, symbol, self.sb, 'forex_positions')
-                            pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-                            pips_pnl = mr_result['pnl_pips']
-                            self._close_position(pos, price, f'recovery_{mr_result["exit_type"]}', pips_pnl, mr_result=mr_result)
-                            continue
-                        else:
-                            # En MR: trailing sigue activo
-                            if snap:
-                                self._run_protection_forex(pos, snap)
-                            continue
-
-                    if pos.get('slv_price') and price > 0 and check_slv_trigger(pos, price):
-                        activate_recovery_mode_sync(pos, price, symbol, 'forex_futures', self.sb, 'forex_positions')
+                    # If EREP is active, bypass normal exits and evaluate EREP
+                    if pos.get('erep_active') or pos.get('erep_phase', 0) > 0:
+                        self.log(f"EREP is active for {symbol} (phase: {pos.get('erep_phase')}). Evaluating EREP in thread...")
+                        from twisted.internet import threads
+                        threads.deferToThread(self.run_forex_erep_sync, pos, price, snap)
                         continue
-
-                    if pos.get('slv_price') and snap:
-                        update_slv_from_bands_sync(pos, snap, symbol, 'forex_futures', self.sb, 'forex_positions')
+                except Exception as erep_err:
+                    self.log(f"Error initiating EREP check for {symbol}: {erep_err}", "WARNING")
 
                 except Exception as slvm_e:
                     self.log(f'SLVM error for {symbol}: {slvm_e}')
@@ -1166,6 +1141,201 @@ class ForexExecutionService:
 
             except Exception as e: self.log(f'Error gestion: {e}')
 
+    def run_forex_erep_sync(self, pos, price, snap):
+        """Ejecuta el chequeo async de EREP en un hilo de Twisted."""
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.check_forex_erep(pos['symbol'], pos, price, snap, self.sb))
+        except Exception as e:
+            self.log(f"Error executing Forex EREP in thread: {e}", "ERROR")
+        finally:
+            loop.close()
+
+    async def check_sl_with_erep(
+        self,
+        symbol:        str,
+        position:      dict,
+        current_price: float,
+        snap:          dict,
+        df_15m:        pd.DataFrame,
+        df_4h:         pd.DataFrame,
+        market_type:   str,
+        supabase,
+    ) -> bool:
+        """
+        Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP.
+
+        Se llama en el ciclo de 15m SOLO cuando el precio está cerca o en el SL.
+        """
+        from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action
+        
+        sl_price = self._safe_float(position.get('stop_loss_price') or position.get('sl_price'))
+        side     = str(position.get('side', 'long'))
+        is_long  = side in ('long', 'buy')
+
+        if sl_price <= 0:
+            return False
+
+        # ¿Tocó el SL?
+        sl_touched = (
+            (is_long  and current_price <= sl_price) or
+            (not is_long and current_price >= sl_price)
+        )
+
+        erep_active = bool(position.get('erep_active'))
+
+        if not sl_touched and not erep_active:
+            return False  # Normal, sin acción
+
+        async def open_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
+            res = supabase.table("forex_positions").select("*").eq("id", position["id"]).execute()
+            if res.data:
+                pos = res.data[0]
+                q1 = abs(self._safe_float(pos.get("erep_q1") or pos.get("lots") or 0))
+                p1 = self._safe_float(pos.get("erep_p1_price") or pos.get("entry_price") or 0)
+                
+                combined_size = q1 + size
+                combined_price = (p1 * q1 + price * size) / combined_size
+                db_lots = -combined_size if str(side).lower() in ('short', 'sell') else combined_size
+                
+                if pos.get('mode') == 'live':
+                    try:
+                        from app.workers.forex_worker_standalone import ACCOUNT_ID, get_divisor
+                        sid = self.state['symbol_ids'].get(symbol)
+                        if sid:
+                            divisor = get_divisor(symbol)
+                            req = ProtoOANewOrderReq()
+                            req.ctidTraderAccountId = ACCOUNT_ID
+                            req.symbolId, req.orderType, req.tradeSide = sid, 1, (1 if str(side).lower() in ('long', 'buy') else 2)
+                            req.volume = int(size * 100000)
+                            self.worker.client.send(req)
+                            self.log(f"[EREP P2 LIVE] Sent order for {symbol} volume {int(size * 100000)}")
+                    except Exception as live_err:
+                        self.log(f"[EREP P2 LIVE ERROR] {live_err}", "ERROR")
+                else:
+                    self.log(f"[EREP P2 PAPER] Simulating P2 entry for {symbol} lots {size}")
+                    
+                supabase.table("forex_positions").update({
+                    "lots": db_lots,
+                    "entry_price": combined_price,
+                }).eq("id", pos["id"]).execute()
+
+        async def close_position(*args, **kwargs):
+            # Support both positional: close_position(symbol, price, reason, supabase)
+            # and keyword: close_position(symbol, side, size, price, reason, supabase)
+            price = current_price
+            reason = 'erep_close'
+            if len(args) >= 3:
+                reason = args[2]
+            if len(args) >= 2:
+                price = args[1]
+                
+            if 'price' in kwargs:
+                price = kwargs['price']
+            if 'reason' in kwargs:
+                reason = kwargs['reason']
+            elif 'close_reason' in kwargs:
+                reason = kwargs['close_reason']
+                
+            res = supabase.table("forex_positions").select("*").eq("id", position["id"]).execute()
+            if res.data:
+                pos = res.data[0]
+                pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                pips_pnl = (price - float(pos.get('entry_price', 0))) / pip_size if is_long else (float(pos.get('entry_price', 0)) - price) / pip_size
+                self._close_position(pos, price, reason, pips_pnl)
+
+        # ── SI EREP YA ESTÁ ACTIVO ─────────────────
+        if erep_active:
+            action = evaluate_erep_phase(
+                position, current_price,
+                snap, df_15m, df_4h, market_type
+            )
+            result = await execute_erep_action(
+                action        = action,
+                position      = position,
+                current_price = current_price,
+                symbol        = symbol,
+                market_type   = market_type,
+                supabase      = supabase,
+                open_func     = open_position,
+                close_func    = close_position,
+            )
+            return result.get('executed') == 'closed'
+
+        # ── SL RECIÉN TOCADO ───────────────────────
+        if sl_touched:
+            entry = self._safe_float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+            q1 = abs(self._safe_float(position.get('lots'), 0.01))
+            
+            await supabase.table('forex_positions').update({
+                'erep_phase':   1,
+                'erep_p1_price': entry,
+                'erep_q1':      q1,
+                'erep_market_type': market_type,
+            }).eq('id', position['id']).execute()
+
+            position['erep_phase']   = 1
+            position['erep_p1_price'] = entry
+            position['erep_q1']      = q1
+            position['erep_market_type'] = market_type
+
+            action = evaluate_erep_phase(
+                position, current_price,
+                snap, df_15m, df_4h, market_type
+            )
+
+            if action['action'] == 'close_sl':
+                await close_position(symbol, current_price, 'sl_normal', supabase)
+                return True
+
+            await execute_erep_action(
+                action, position, current_price,
+                symbol, market_type, supabase,
+                open_position, close_position
+            )
+            return False
+
+        return False
+
+    async def check_forex_erep(
+        self,
+        symbol:        str,
+        position:      dict,
+        current_price: float,
+        snap:          dict,
+        supabase,
+    ) -> bool:
+        """
+        EREP para Forex.
+        """
+        import pandas as pd
+        def _get_df(tf):
+            bars = self.state['candles'].get(f'{symbol}_{tf}', [])
+            if not bars: return None
+            df = pd.DataFrame(bars)
+            df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'ts': 'open_time'})
+            df['open_time'] = pd.to_datetime(df['open_time'], unit='s')
+            df = df.set_index('open_time')
+            df = df.dropna(subset=['open', 'high', 'low', 'close'])
+            for col in ['open','high','low','close']: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            return df
+            
+        df_15m = _get_df('15m')
+        df_4h  = _get_df('4h')
+        
+        return await self.check_sl_with_erep(
+            symbol=symbol,
+            position=position,
+            current_price=current_price,
+            snap=snap,
+            df_15m=df_15m,
+            df_4h=df_4h,
+            market_type='forex_futures',
+            supabase=supabase
+        )
+
     def _manage_position_fast(self, pos, price, snap=None):
         """
         Chequeo rapido en memoria de SL, TP y Hard Cap.
@@ -1177,6 +1347,9 @@ class ForexExecutionService:
         sl     = self._safe_float(pos.get('sl_price'))
         tp     = self._safe_float(pos.get('tp_price'))
         
+        if pos.get('erep_active') or pos.get('erep_phase', 0) > 0:
+            return False
+            
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
         pip_val  = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
         lots_abs = abs(self._safe_float(pos.get('lots'), 0.01))
@@ -1186,18 +1359,32 @@ class ForexExecutionService:
 
         #   1. HARD CAP: Perdida maxima absoluta ($15 USD)
         max_loss_pips = HARD_CAP_LOSS_PIPS.get(symbol, 25)
-        if pips_pnl < -max_loss_pips or pnl_usd < -HARD_CAP_LOSS_USD:
-            self.log(f"[HARD CAP] {symbol}: PnL ${pnl_usd:.2f} ({pips_pnl:.1f} pips). CIERRE INMEDIATO.")
-            self._close_position(pos, price, 'hard_cap_loss', pips_pnl)
-            return True
+        hit_hard_cap = pips_pnl < -max_loss_pips or pnl_usd < -HARD_CAP_LOSS_USD
 
         #   2. SL / TP Estandar
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
         hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
         
-        if hit_sl or hit_tp:
-            reason = 'sl' if hit_sl else 'tp'
-            self._close_position(pos, price, reason, pips_pnl)
+        if hit_hard_cap or hit_sl:
+            self.log(f"[EREP ROUTE] Stop Loss hit for {symbol}. Routing to EREP Phase 1...")
+            self.sb.table('forex_positions').update({
+                'erep_phase': 1,
+                'erep_p1_price': entry,
+                'erep_q1': lots_abs,
+                'erep_market_type': 'forex_futures',
+            }).eq('id', pos['id']).execute()
+            
+            pos['erep_phase'] = 1
+            pos['erep_p1_price'] = entry
+            pos['erep_q1'] = lots_abs
+            pos['erep_market_type'] = 'forex_futures'
+            
+            from twisted.internet import threads
+            threads.deferToThread(self.run_forex_erep_sync, pos, price, snap or {})
+            return True # Retornamos True para saltar el resto de la gestión estándar en este ciclo
+
+        if hit_tp:
+            self._close_position(pos, price, 'tp', pips_pnl)
             return True
 
         #   3. TP Band (Si tenemos snap)

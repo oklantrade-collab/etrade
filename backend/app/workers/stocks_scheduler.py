@@ -60,6 +60,11 @@ from app.stocks.apex_scheduler import (
     run_apex_cycle,
     run_apex_backtesting,
 )
+from app.strategy.erep_manager import (
+    evaluate_erep_phase,
+    execute_erep_action,
+    check_erep_activation_conditions,
+)
 
 sm = SymbolStateMachine.get_instance()
 
@@ -1073,6 +1078,232 @@ async def _get_daily_df_for_tp(ticker: str) -> pd.DataFrame:
         return None
 
 
+async def open_stock_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
+    """Abre o actualiza una posición de Stock para EREP P2."""
+    from app.stocks.stocks_order_executor import _open_or_update_position
+    _open_or_update_position(symbol, price, size, "EREP")
+    now = datetime.now(timezone.utc).isoformat()
+    order_data = {
+        "ticker": symbol,
+        "group_name": "EREP",
+        "rule_code": "EREP_P2",
+        "order_type": "market",
+        "direction": side,
+        "shares": size,
+        "market_price": price,
+        "status": "filled",
+        "filled_price": price,
+        "filled_at": now,
+        "created_at": now,
+    }
+    try:
+        supabase.table("stocks_orders").insert(order_data).execute()
+    except Exception as e:
+        log_error("stocks_scheduler", f"Error inserting EREP order: {e}")
+
+async def close_stock_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
+    """Cierra una posición de Stock completamente para EREP."""
+    from app.stocks.stocks_order_executor import _close_all_positions
+    _close_all_positions(symbol, price)
+    
+    res = supabase.table("stocks_positions").select("*").eq("ticker", symbol).eq("status", "open").execute()
+    if not res.data:
+        res = supabase.table("stocks_positions").select("*").eq("ticker", symbol).order("updated_at", desc=True).limit(1).execute()
+        
+    if res.data:
+        pos = res.data[0]
+        entry_price = float(pos.get("avg_price") or pos.get("entry_price") or price)
+        shares = float(pos.get("shares_remaining") or pos.get("shares") or size)
+        
+        now = datetime.now(timezone.utc).isoformat()
+        pnl_usd = round((price - entry_price) * shares, 2)
+        pnl_pct = round(((price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0.0
+        
+        journal_entry = {
+            "ticker": symbol,
+            "shares": int(shares),
+            "entry_price": entry_price,
+            "exit_price": price,
+            "entry_date": pos.get("first_buy_at") or pos.get("entry_time") or now,
+            "exit_date": now,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "result": "win" if pnl_usd > 0 else "loss",
+            "exit_reason": reason,
+            "trade_type": "EREP"
+        }
+        try:
+            supabase.table("trades_journal").insert(journal_entry).execute()
+            try:
+                from app.core.capital_manager import register_realized_pnl
+                register_realized_pnl('stocks', pnl_usd)
+            except Exception as cap_e:
+                log_error("stocks_scheduler", f"Error registering capital P&L: {cap_e}")
+        except Exception as e:
+            log_error("stocks_scheduler", f"Error inserting EREP journal: {e}")
+
+async def get_df(ticker: str, timeframe: str, supabase) -> pd.DataFrame:
+    """Helper to get yfinance data for a given ticker and timeframe."""
+    from app.data.yfinance_provider import YFinanceProvider
+    provider = YFinanceProvider()
+    period = "120d" if timeframe == "4h" else "60d"
+    return await provider.get_ohlcv(ticker, interval=timeframe, period=period)
+
+async def check_sl_with_erep(
+    symbol:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    df_15m:        pd.DataFrame,
+    df_4h:         pd.DataFrame,
+    market_type:   str,
+    supabase,
+) -> bool:
+    """
+    Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP para Stocks.
+
+    Se llama en el ciclo de monitoreo de Stocks SOLO cuando el precio está cerca o en el SL.
+    """
+    from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action
+    
+    sl_price = float(position.get('stop_loss_price') or
+                     position.get('sl_dynamic_price') or
+                     position.get('stop_loss') or 0)
+    side     = str(position.get('side', 'long'))
+    is_long  = side in ('long', 'buy')
+
+    # Stocks only support LONG spot in EREP
+    if not is_long:
+        return False
+
+    if sl_price <= 0:
+        return False
+
+    # ¿Tocó el SL?
+    sl_touched = current_price <= sl_price
+
+    erep_active = bool(position.get('erep_active'))
+
+    if not sl_touched and not erep_active:
+        return False  # Normal, sin acción
+
+    async def open_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
+        await open_stock_position(symbol, side, size, price, reason, supabase)
+
+    async def close_position(*args, **kwargs):
+        # Support both positional: close_position(symbol, price, reason, supabase)
+        # and keyword: close_position(symbol, side, size, price, reason, supabase)
+        price = current_price
+        reason = 'erep_close'
+        if len(args) >= 3:
+            reason = args[2]
+        if len(args) >= 2:
+            price = args[1]
+            
+        if 'price' in kwargs:
+            price = kwargs['price']
+        if 'reason' in kwargs:
+            reason = kwargs['reason']
+        elif 'close_reason' in kwargs:
+            reason = kwargs['close_reason']
+            
+        await close_stock_position(symbol, side, size, price, reason, supabase)
+
+    # ── SI EREP YA ESTÁ ACTIVO ─────────────────
+    if erep_active:
+        action = evaluate_erep_phase(
+            position, current_price,
+            snap, df_15m, df_4h, market_type
+        )
+        result = await execute_erep_action(
+            action        = action,
+            position      = position,
+            current_price = current_price,
+            symbol        = symbol,
+            market_type   = market_type,
+            supabase      = supabase,
+            open_func     = open_position,
+            close_func    = close_position,
+        )
+        return result.get('executed') == 'closed'
+
+    # ── SL RECIÉN TOCADO ───────────────────────
+    if sl_touched:
+        entry = float(position.get('avg_price') or position.get('entry_price') or current_price)
+        q1 = float(position.get('shares_remaining', position.get('shares', 0)))
+        
+        await supabase.table('stocks_positions').update({
+            'erep_phase':   1,
+            'erep_p1_price': entry,
+            'erep_q1':      q1,
+            'erep_market_type': market_type,
+        }).eq('id', position['id']).execute()
+
+        position['erep_phase']   = 1
+        position['erep_p1_price'] = entry
+        position['erep_q1']      = q1
+        position['erep_market_type'] = market_type
+
+        action = evaluate_erep_phase(
+            position, current_price,
+            snap, df_15m, df_4h, market_type
+        )
+
+        if action['action'] == 'close_sl':
+            # Cierre normal de Stocks por SL
+            from app.stocks.stocks_tp_manager import execute_partial_sell
+            shares_to_sell = int(position.get('shares_remaining', position.get('shares', 0)))
+            await execute_partial_sell(
+                ticker=symbol,
+                position=position,
+                block='tp_total',
+                shares=shares_to_sell,
+                price=current_price,
+                action='close_sl',
+                new_sl=0,
+                new_trail_high=current_price,
+                b3_trail_sl=current_price,
+                supabase=supabase
+            )
+            return True
+
+        await execute_erep_action(
+            action, position, current_price,
+            symbol, market_type, supabase,
+            open_position, close_position
+        )
+        return False
+
+    return False
+
+
+async def check_stocks_erep(
+    ticker:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    df_15m:        pd.DataFrame,
+    supabase,
+) -> bool:
+    """
+    EREP para Stocks. Solo aplica a posiciones
+    LONG (compras directas sin apalancamiento).
+    """
+    market_type = 'stocks_spot'
+    df_4h = await get_df(ticker, '4h', supabase)
+
+    return await check_sl_with_erep(
+        symbol=ticker,
+        position=position,
+        current_price=current_price,
+        snap=snap,
+        df_15m=df_15m,
+        df_4h=df_4h,
+        market_type=market_type,
+        supabase=supabase
+    )
+
+
 async def run_stocks_tp_v2_cycle():
     """
     Ciclo principal de TP v2 para Stocks.
@@ -1098,6 +1329,19 @@ async def run_stocks_tp_v2_cycle():
                 continue
 
             df_15m = await _get_timeframe_df_for_tp(ticker, '15m', '60d')
+            
+            # ── Integración EREP para Stocks ──
+            try:
+                if await check_stocks_erep(ticker, pos, price, snap, df_15m, sb):
+                    continue
+                
+                # Recargar posición local para verificar si EREP ya está activo
+                fresh_pos = sb.table('stocks_positions').select('erep_active').eq('id', pos['id']).execute()
+                if fresh_pos.data and fresh_pos.data[0].get('erep_active'):
+                    # Si EREP ya está activo, saltear el resto del ciclo TP v2 normal (EREP gestiona sus propias salidas)
+                    continue
+            except Exception as erep_err:
+                log_warning('EREP_SCHEDULER', f"Error checking EREP for {ticker}: {erep_err}")
             df_5m  = await _get_timeframe_df_for_tp(ticker, '5m', '5d')
             df_4h  = await _get_timeframe_df_for_tp(ticker, '4h', '120d')
             rvol   = float(snap.get('rvol', 1.0))
