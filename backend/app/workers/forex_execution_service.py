@@ -106,16 +106,16 @@ class ForexExecutionService:
             
             # Verificación de Día y Hora para Protecciones en Forex (Viernes 3 PM GMT-5 es 20:00 UTC)
             now = datetime.now(timezone.utc)
-            weekday = now.weekday()  # 4 = Viernes, 6 = Domingo
+            weekday = now.weekday()  # 4 = Viernes, 5 = Sábado, 6 = Domingo
             hour = now.hour
 
-            # A. Bloqueo de Nuevas Entradas el Viernes a partir de las 3:00 PM local (20:00 UTC)
-            if weekday == 4 and hour >= 20:
-                self.log("⚠️ [PROTECCIÓN VIERNES] Bloqueo de nuevas señales activo después de las 3:00 PM local.")
+            # A. Bloqueo de Nuevas Entradas el Viernes a partir de las 3:00 PM local (20:00 UTC), todo el Sábado, y Domingo hasta 21:00 UTC
+            if (weekday == 4 and hour >= 20) or (weekday == 5) or (weekday == 6 and hour < 21):
+                self.log("⚠️ [PROTECCIÓN FIN DE SEMANA] Bloqueo de nuevas señales activo (Mercado Cerrado).")
                 return
 
-            # B. Filtro de Estabilización de Reapertura Dominical (22:00 a 23:59 UTC)
-            if weekday == 6 and hour >= 22:
+            # B. Filtro de Estabilización de Reapertura Dominical (21:00 a 23:59 UTC)
+            if weekday == 6 and hour >= 21:
                 self.log("⏳ [ESTABILIZACIÓN DOMINGO] Esperando normalización de spreads dominicales. Nuevas señales omitidas.")
                 return
 
@@ -933,11 +933,12 @@ class ForexExecutionService:
     def run_position_management(self):
         """Gestiona SL, TP, HardCap y Protecciones. Optimizada para MEMORIA."""
         # A. Viernes Fin de Semana Auto-Close:
-        # A partir del Viernes a las 20:55 UTC (15:55 local GMT-5 / 3:55 PM local), liquidamos posiciones abiertas
+        # A partir del Viernes a las 20:50 UTC (15:50 local GMT-5 / 3:50 PM local), liquidamos posiciones abiertas
         # para protegernos del riesgo de Gap del fin de semana.
         now = datetime.now(timezone.utc)
-        if now.weekday() == 4 and now.hour == 20 and now.minute >= 55:
-            self.log(f"🚨 [WEEKEND CLOSE] Liquidando posiciones por cierre de sesión del Viernes (20:55 UTC).")
+        is_weekend_close_window = (now.weekday() == 4 and now.hour == 20 and now.minute >= 50) or (now.weekday() == 5)
+        if is_weekend_close_window:
+            self.log(f"🚨 [WEEKEND CLOSE] Liquidando posiciones por cierre de sesión de Fin de Semana.")
             for p in list(self._open_positions_list):
                 try:
                     symbol = p['symbol']
