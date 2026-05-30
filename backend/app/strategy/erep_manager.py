@@ -174,7 +174,7 @@ def detect_p2_entry_signal(
                 from ta.volatility import BollingerBands
                 col_close = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
                 if col_close:
-                    closes = pd.to_numeric(df_15m[col_close], errors='coerce').fillna(method='ffill')
+                    closes = pd.to_numeric(df_15m[col_close], errors='coerce').ffill()
                     bb = BollingerBands(close=closes, window=20, window_dev=2)
                     df_15m['bb_lower'] = bb.bollinger_lband()
                     df_15m['bb_upper'] = bb.bollinger_hband()
@@ -467,6 +467,8 @@ def evaluate_erep_phase(
     is_long    = side in ('long', 'buy')
     cfg        = EREP_CONFIG.get(market_type, {})
     timeout_m  = int(cfg.get('timeout_cycles', 4))
+    if market_type == 'crypto_futures':
+        timeout_m = timeout_m * 3  # Scale by 3 since Crypto monitor runs every 5m instead of 15m
     cycles     = int(position.get('erep_cycles_elapsed', 0))
     p3_avg     = float(position.get('erep_p3_avg') or 0)
 

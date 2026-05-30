@@ -316,7 +316,7 @@ export default function PositionsPage() {
                           <span className={`badge ${p.close_reason === 'TP_HIT' ? 'badge-green' : p.close_reason === 'SL_HIT' ? 'badge-red' : 'badge-gray'}`}>
                             {p.close_reason === 'sar_phase_change' ? 'SAR PHASE CHANGE' : 
                              p.close_reason === 'tp_dynamic_band' ? 'BAND EXIT' : 
-                             p.close_reason || 'MANUAL'}
+                             p.close_reason || 'SIN ESPECIFICAR'}
                           </span>
                         </td>
                         <td style={{ textAlign: 'end' }}>

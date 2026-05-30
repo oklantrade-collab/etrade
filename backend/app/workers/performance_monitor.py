@@ -1,6 +1,7 @@
 from app.core.supabase_client import get_supabase
 from app.workers.alerts_service import send_telegram_message
 from datetime import datetime, timezone, timedelta
+import pandas as pd
 from app.core.logger import log_info, log_error
 
 # In-memory storage for alert throttling: {key: last_alert_time}
@@ -78,7 +79,24 @@ Considerar desactivar en Rule Engine."""
                 ultimos_3 = curr_trades[:3]
                 todos_perdedores = all(float(t.get('total_pnl_usd') or 0) <= 0 for t in ultimos_3)
                 
-                if todos_perdedores:
+                # Evitar alertas duplicadas al reiniciar el servicio:
+                # El trade perdedor más reciente debe haber cerrado en los últimos 30 minutos.
+                most_recent_trade = ultimos_3[0]
+                closed_at_str = most_recent_trade.get('closed_at') or most_recent_trade.get('created_at')
+                is_recent = False
+                if closed_at_str:
+                    try:
+                        closed_at_dt = pd.to_datetime(closed_at_str)
+                        if closed_at_dt.tzinfo is None:
+                            closed_at_dt = closed_at_dt.replace(tzinfo=timezone.utc)
+                        if (now - closed_at_dt) <= timedelta(minutes=30):
+                            is_recent = True
+                    except Exception:
+                        is_recent = True  # Fallback seguro
+                else:
+                    is_recent = True
+                
+                if todos_perdedores and is_recent:
                     alert_key = f"sl3_{rule_code}"
                     last_alert = BOT_STATE_PERF.get(alert_key)
                     if not last_alert or (now - last_alert >= timedelta(hours=4)):
