@@ -31,7 +31,7 @@ export default function SettingsPage() {
   }, [])
 
   const loadConfig = async () => {
-    const { data: tc } = await supabase.from('trading_config').select('*').single()
+    const { data: tc } = await supabase.from('trading_config').select('*').eq('id', 1).single()
     const { data: rc } = await supabase.from('risk_config').select('*').single()
     const { data: us_res } = await supabase.from('universe_settings').select('*').eq('id', 1).limit(1)
     const us = us_res && us_res.length > 0 ? us_res[0] : null
@@ -507,7 +507,12 @@ const ForexSettings = ({ config, onSave }: any) => {
 }
 
 const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
-  const [form, setForm] = useState({ telegram_enabled: config.telegram_enabled ?? true, ai_enabled: config.ai_enabled ?? true, paper_trading: config.paper_trading ?? true })
+  const [form, setForm] = useState({ 
+    telegram_enabled: config.telegram_enabled ?? true, 
+    ai_enabled: config.ai_enabled ?? true, 
+    paper_trading: config.paper_trading ?? true,
+    erep_max_purchases: config.regime_params?.erep_max_purchases ?? 5
+  })
   const [timezone, setTimezone] = useState<string>('America/Lima')
   const [theme, setTheme] = useState<any>({
     bgColor: '#0a0e17',
@@ -560,6 +565,18 @@ const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
       <SettingsSection title="📱 Alertas">
         <SettingToggle label="Telegram Activado" value={form.telegram_enabled} onChange={(v: any) => setForm({ ...form, telegram_enabled: v })} />
+      </SettingsSection>
+      
+      <SettingsSection title="🔄 Configuración EREP">
+        <SettingRow 
+            label="Cantidad compras EREP (Multiplicador Máx. P2)" 
+            value={form.erep_max_purchases} 
+            type="number" 
+            onChange={(v: any) => setForm({ ...form, erep_max_purchases: v })} 
+        />
+        <div style={{ padding: '0 20px 10px 20px', color: 'var(--text-muted)', fontSize: '11px', fontStyle: 'italic' }}>
+            Tamaño de la compra de recuperación (P2) calculado por Fibonacci, limitado a un máximo de N veces la posición original.
+        </div>
       </SettingsSection>
       
       <SettingsSection title="🕒 Zona Horaria (Sistema)">
@@ -627,7 +644,16 @@ const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
         </div>
       </SettingsSection>
 
-      <SaveButton onSave={() => onSave(form)} />
+      <SaveButton onSave={() => {
+          const newRegimeParams = { 
+              ...config.regime_params, 
+              erep_max_purchases: Number(form.erep_max_purchases) 
+          };
+          onSave({
+              ...form,
+              regime_params: newRegimeParams
+          });
+      }} />
     </div>
   )
 }
