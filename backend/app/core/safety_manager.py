@@ -13,6 +13,38 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from app.core.logger import log_info, log_error
 
+def safe_float(val, default=0.0) -> float:
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+def safe_int(val, default=0) -> int:
+    if val is None:
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+def get_rule_expected_direction(rule_code: str) -> str:
+    if not rule_code:
+        return None
+    rc = rule_code.strip().lower()
+    if rc.startswith('dd11'):
+        return 'long'
+    if rc.startswith('dd12'):
+        return 'short'
+    if rc.startswith('aa'):
+        if 'short' in rc:
+            return 'short'
+        return 'long'
+    if rc.startswith('bb'):
+        return 'short'
+    return None
+
 # ── Configuración ─────────────────────────────
 SAFETY_CONFIG = {
     'signal_max_age_minutes':   30,
@@ -36,7 +68,10 @@ PRICE_RANGES = {
 }
 
 # ── Estado interno ────────────────────────────
-_worker_heartbeats:      dict = {}
+_worker_heartbeats:      dict = {
+    'position_monitor': datetime.now(timezone.utc),
+    'crypto_scheduler': datetime.now(timezone.utc),
+}
 _consecutive_sl:         dict = {}
 _circuit_breaker_active: bool = False
 _circuit_breaker_since         = None
@@ -129,6 +164,8 @@ def validate_signal(
     price:       float,
     timestamp=None,
     market_type: str = 'crypto_futures',
+    direction:   str = None,
+    rule_code:   str = None,
 ) -> dict:
     """
     Valida señal antes de ejecutarla.
@@ -192,6 +229,15 @@ def validate_signal(
         errors.append('Bloqueo de Seguridad FOREX activo por fallo en subprocesos críticos')
     elif market_type == 'crypto_futures' and (_safety_block_crypto or check_db_safety_block('crypto_futures')):
         errors.append('Bloqueo de Seguridad CRYPTO activo por fallo en subprocesos críticos')
+
+    # CHECK 6: Coherencia de Regla vs Dirección
+    if direction and rule_code:
+        expected = get_rule_expected_direction(rule_code)
+        if expected and expected != direction.strip().lower():
+            errors.append(
+                f"Dirección incoherente para la regla: "
+                f"regla {rule_code} ({expected}) != dirección {direction}"
+            )
 
     if errors:
         log_info('SAFETY',
@@ -421,6 +467,7 @@ async def check_subprocesses_safety(supabase) -> dict:
     
     forex_checks = {}
     crypto_checks = {}
+    pos_monitor_mem_alive = check_worker_alive('position_monitor')
     
     # ────────────────────────────────────────────────────────────────
     # FOREX SAFETY CHECKLIST
@@ -472,6 +519,7 @@ async def check_subprocesses_safety(supabase) -> dict:
         forex_checks['feed_freshness'] = not stale_forex
         forex_checks['stop_loss_integrity'] = not pos_missing_sl_forex
         forex_checks['adaptive_indicators'] = not indicators_crashed_forex
+        forex_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive
         
         # Check 2.4: Integridad del SLVM (Modo Recuperación)
         forex_checks['slvm_integrity'] = True
@@ -500,24 +548,28 @@ async def check_subprocesses_safety(supabase) -> dict:
         
         stale_crypto = False
         indicators_crashed_crypto = False
+        stale_count_crypto = 0
         for sym in crypto_symbols:
             s_data = snaps_crypto.get(sym)
             if not s_data:
-                stale_crypto = True
+                stale_count_crypto += 1
                 continue
             
             ts_str = s_data.get('updated_at')
             if ts_str:
                 ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
-                if (now - ts).total_seconds() > 900: # 15 minutos
-                    stale_crypto = True
+                if (now - ts).total_seconds() > 1800: # V6: 30 minutos (antes: 15 min) - tolerancia para ciclos crypto
+                    stale_count_crypto += 1
             else:
-                stale_crypto = True
+                stale_count_crypto += 1
                 
             # Check 1.4: Indicadores Adaptativos (basis)
             basis_val = float(s_data.get('basis') or 0)
             if basis_val <= 0:
                 indicators_crashed_crypto = True
+        
+        # V6: Solo marcar stale si la MAYORÍA de símbolos están desactualizados (2+ de 3)
+        stale_crypto = stale_count_crypto >= 2
                 
         # Check 1.3: Integridad de Stop Loss en posiciones abiertas de Crypto
         pos_res_crypto = supabase.table('positions').select('id, symbol, sl_price, tp_full_price').eq('status', 'open').execute()
@@ -535,6 +587,7 @@ async def check_subprocesses_safety(supabase) -> dict:
         crypto_checks['feed_freshness'] = not stale_crypto
         crypto_checks['stop_loss_integrity'] = not pos_missing_sl_crypto
         crypto_checks['adaptive_indicators'] = not indicators_crashed_crypto
+        crypto_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive
         
     except Exception as e:
         log_error('SAFETY', f"Error ejecutando checklist de CRYPTO: {e}")
@@ -571,19 +624,23 @@ async def check_subprocesses_safety(supabase) -> dict:
         
     # Alerta Crypto
     if crypto_failed:
-        report_msg = (
-            "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO CRYPTO**\n"
-            "El control automático de seguridad de 15 min detectó fallos:\n"
-        )
-        for name, ok in crypto_checks.items():
-            icon = "✅ OK" if ok else "❌ FALLÓ"
-            report_msg += f"- [{name}]: {icon}\n"
-        report_msg += (
-            "\n⚠️ **ACCIÓN DE EMERGENCIA**: Se ha activado el bloqueo de seguridad para CRYPTO. "
-            "El sistema tiene prohibido comprar/vender cualquier activo de Crypto hasta solucionar los problemas."
-        )
-        await _send_telegram(report_msg)
-        log_error('SAFETY', f"Bloqueo de Seguridad CRYPTO activado. Diagnóstico: {crypto_checks}")
+        from app.execution.data_provider import BinanceCryptoProvider
+        if BinanceCryptoProvider.is_banned() and crypto_checks.get('stop_loss_integrity') and crypto_checks.get('adaptive_indicators'):
+            log_info('SAFETY', f"Bloqueo de Seguridad CRYPTO mantenido por BAN de Binance. Diagnóstico: {crypto_checks}. Omitiendo alerta de Telegram.")
+        else:
+            report_msg = (
+                "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO CRYPTO**\n"
+                "El control automático de seguridad de 15 min detectó fallos:\n"
+            )
+            for name, ok in crypto_checks.items():
+                icon = "✅ OK" if ok else "❌ FALLÓ"
+                report_msg += f"- [{name}]: {icon}\n"
+            report_msg += (
+                "\n⚠️ **ACCIÓN DE EMERGENCIA**: Se ha activado el bloqueo de seguridad para CRYPTO. "
+                "El sistema tiene prohibido comprar/vender cualquier activo de Crypto hasta solucionar los problemas."
+            )
+            await _send_telegram(report_msg)
+            log_error('SAFETY', f"Bloqueo de Seguridad CRYPTO activado. Diagnóstico: {crypto_checks}")
     else:
         # Si estaba bloqueado anteriormente, alertamos que se solucionó
         if check_db_safety_block('crypto_futures'):
@@ -608,7 +665,8 @@ async def check_all_heartbeats() -> list:
     workers_map = {
         'crypto_scheduler': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
         'forex_worker':     ['EURUSD', 'GBPUSD', 'XAUUSD'],
-        'stocks_scheduler': ['NVDA', 'AAPL', 'TSLA', 'AMD']
+        'position_monitor': [],
+        'stocks_scheduler': []
     }
     
     dead = []
@@ -616,26 +674,44 @@ async def check_all_heartbeats() -> list:
     max_age = SAFETY_CONFIG['worker_heartbeat_minutes']
     
     for w_name, symbols in workers_map.items():
-        # 1. Si es el worker actual, chequear memoria
-        if w_name == _current_worker:
+        # 1. Si es el worker actual o un worker de memoria crítica, chequear memoria
+        if w_name == _current_worker or w_name in ['position_monitor', 'crypto_scheduler']:
             if not check_worker_alive(w_name):
                 dead.append(w_name)
             continue
             
         # 2. Si no, chequear DB (market_snapshot) como proxy
         try:
-            # Especial para stocks: si el mercado está cerrado, no reportar caída
+            # Especial para stocks: si el mercado está cerrado, no reportar caída.
+            # Además, añadimos un periodo de gracia de 15 minutos desde la apertura (09:30 ET)
+            # para dar tiempo a que el scheduler corra su primer ciclo y actualice los snapshots.
             if w_name == 'stocks_scheduler':
-                from app.core.market_hours import is_market_open
+                from app.core.market_hours import is_market_open, get_nyc_now
+                from datetime import time
                 is_open, _ = is_market_open()
                 if not is_open:
                     continue
+                
+                nyc_now = get_nyc_now().replace(tzinfo=None)
+                market_open_dt = datetime.combine(nyc_now.date(), time(9, 30))
+                minutes_since_open = (nyc_now - market_open_dt).total_seconds() / 60.0
+                if 0 <= minutes_since_open < 15:
+                    continue
 
-            res = sb.table('market_snapshot').select('updated_at').in_('symbol', symbols).execute()
+            if w_name == 'stocks_scheduler':
+                # Dinámico: en lugar de buscar tickers estáticos, buscamos el registro más reciente
+                # de CUALQUIER acción (excluyendo cripto y forex representativos) en market_snapshot.
+                exclude_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'EURUSD', 'GBPUSD', 'XAUUSD']
+                res = sb.table('market_snapshot')\
+                        .select('updated_at')\
+                        .not_.in_('symbol', exclude_symbols)\
+                        .order('updated_at', desc=True)\
+                        .limit(1)\
+                        .execute()
+            else:
+                res = sb.table('market_snapshot').select('updated_at').in_('symbol', symbols).execute()
+                
             if not res.data:
-                # Si no hay datos de esos símbolos, podría ser que el worker no los está procesando.
-                # Intentamos ver si ALGÚN símbolo se actualizó para ese tipo de worker si tuviéramos exchange, 
-                # pero como no lo tenemos, confiamos en los representativos.
                 dead.append(w_name)
                 continue
             

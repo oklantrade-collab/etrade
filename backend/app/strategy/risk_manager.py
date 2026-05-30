@@ -78,9 +78,20 @@ def validate_signal(
     supabase_client
 ) -> dict:
     # CHECK 0 — Bloqueos de Seguridad por Subprocesos
-    from app.core.safety_manager import is_crypto_safety_blocked, check_db_safety_block
+    from app.core.safety_manager import is_crypto_safety_blocked, check_db_safety_block, get_rule_expected_direction
     if is_crypto_safety_blocked() or check_db_safety_block('crypto_futures'):
         return { 'approved': False, 'reason': 'SAFETY_BLOCK_CRYPTO_ACTIVE' }
+
+    # CHECK 0.1 — Coherencia de Regla vs Dirección
+    rule_code = signal.get('rule_code')
+    direction = signal.get('direction') or signal.get('signal_type')
+    if not direction and oco_params:
+        direction = 'long' if 'BUY' in str(oco_params.get('side', '')).upper() else 'short'
+    
+    if direction and rule_code:
+        expected = get_rule_expected_direction(rule_code)
+        if expected and expected != direction.strip().lower():
+            return { 'approved': False, 'reason': f'INCOHERENT_RULE_DIRECTION ({rule_code} expected {expected}, got {direction})' }
 
     # CHECK 1 — Bot activo:
     if not risk_config.get('bot_active', True):

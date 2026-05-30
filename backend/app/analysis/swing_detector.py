@@ -33,7 +33,7 @@ def calculate_fall_maturity(
     b) Bandas perforadas >= min_bands
     c) Momentum decreciente (Aceleración frena)
     """
-    if len(df) < lookback + 1:
+    if df is None or len(df) < lookback + 1:
         return {
             'is_mature': False,
             'reason': 'insufficient_data'
@@ -112,7 +112,7 @@ def detect_basis_horizontal(
       basis_now:  float → valor actual
       basis_prev: float → valor hace N velas
     """
-    if len(df) < lookback + 1:
+    if df is None or len(df) < lookback + 1:
         return {
             'is_flat':   False,
             'slope_pct': 0,
@@ -152,7 +152,7 @@ def find_current_band_zone(df: pd.DataFrame, direction: str, lookback: int = 5) 
     Retorna información de la banda si fue tocada.
     Reduced lookback to 5 to avoid "ghost" triggers from old signals.
     """
-    if len(df) < lookback:
+    if df is None or len(df) < lookback:
         return None
         
     subset = df.iloc[-lookback:]

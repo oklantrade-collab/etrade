@@ -186,6 +186,7 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
         sar_ini_high_15m_window = False
         sar_ini_low_15m_window  = False
         p_signal_15m = None
+        last_15m = None
 
         # Intentar obtener DF de 15m desde memoria
         df_15m_mem = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
@@ -418,8 +419,9 @@ async def upsert_candles_to_db(symbol: str, timeframe: str, df, sb):
         return
     try:
         rows = []
-        # Upsert solo los últimos 300 para eficiencia en cada ciclo (FiboBand necesita 200)
-        sub_df = df.tail(300)
+        # OPTIMIZACIÓN DISK IO: Upsert solo los últimos 5 en lugar de 300.
+        # Las velas históricas ya están en DB, solo necesitamos actualizar la reciente y la anterior.
+        sub_df = df.tail(5)
         
         # Usar símbolo original (BTCUSDT) para consistencia en DB (Standardization)
         
@@ -799,6 +801,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
             
             # Calcular señal PineScript del 15m actual
             from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+            p_signal = ""
             if '15m' in MEMORY_STORE.get(symbol, {}):
                 df_15m   = MEMORY_STORE[symbol]['15m']['df']
                 last_row = df_15m.iloc[-1]
@@ -926,6 +929,51 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                 market_type   = 'crypto_futures'
             )
             
+            # 2.5 DCA Proactivo / EREP Fase 0
+            from app.strategy.dca_manager import evaluate_proactive_dca
+            dca_res = evaluate_proactive_dca(position, current_price, snap, symbol, 'crypto_futures')
+            if dca_res.get('should_dca'):
+                # Promediar el costo
+                dca_size = dca_res['dca_size']
+                old_size = float(position.get('size', 0.01))
+                old_entry = float(position.get('avg_entry_price', position.get('entry_price', current_price)))
+                leverage = float(position.get('leverage', 1))
+                
+                new_size = old_size + dca_size
+                new_entry = ((old_entry * old_size) + (current_price * dca_size)) / new_size
+                new_margin = (new_size * new_entry) / leverage if leverage > 0 else 0
+                
+                # Actualizar base de datos
+                update_payload = {
+                    'size': round(new_size, 4),
+                    'shares': round(new_size, 4),
+                    'shares_remaining': round(new_size, 4),
+                    'avg_entry_price': round(new_entry, 6),
+                    'margin': round(new_margin, 4),
+                    'dca_executed': True
+                }
+                try:
+                    sb.table('positions').update(update_payload).eq('id', position['id']).execute()
+                except Exception as e:
+                    log_warning('DCA', f"Error updating with dca_executed (column might not exist): {e}. Retrying without it.")
+                    update_payload.pop('dca_executed', None)
+                    sb.table('positions').update(update_payload).eq('id', position['id']).execute()
+                
+                log_info('DCA_PROACTIVO', f"DCA ejecutado para {symbol}: {dca_res['reason']}. New Entry: {new_entry:.4f}")
+                await send_telegram_message(
+                    f"🛒 DCA PROACTIVO [{symbol}] {position.get('side', 'long').upper()}\n"
+                    f"Razón: {dca_res['reason']}\n"
+                    f"Nuevo Precio Promedio: ${new_entry:.4f}\n"
+                    f"Tamaño actual: {new_size:.4f}"
+                )
+                
+                # Actualizar posición en memoria
+                position['size'] = new_size
+                position['shares'] = new_size
+                position['shares_remaining'] = new_size
+                position['avg_entry_price'] = new_entry
+                position['dca_executed'] = True
+
             # 3. Fallback Proactivo Aa51 (Legacy)
             closed = await check_proactive_exit_crypto(symbol, current_price, snap, sb)
             if closed:
@@ -973,7 +1021,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
 
         # 7. STRATEGY ENGINE v1.0 EVALUATION (5m)
         use_v2_global = bool(BOT_STATE.config_cache.get('use_strategy_engine_v2', False))
-        pilot_v2_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
+        pilot_v2_symbols = BOT_STATE.config_cache.get("symbols_active") or ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
         use_v2 = use_v2_global and symbol in pilot_v2_symbols
 
         if use_v2 and symbol not in BOT_STATE.positions:
@@ -1335,6 +1383,154 @@ def load_config_to_memory():
         log_error(MODULE, f"Error loading config file: {e}. Failing safe to PAPER.")
         BOT_STATE.config_cache = {"paper_trading": True, "observe_only": True}
 
+from app.strategy.profit_capture import evaluate_profit_capture
+from app.strategy.profit_ladder import (
+    evaluate_profit_ladder,
+    check_basis_crossed,
+    update_profit_floor,
+)
+
+async def process_profit_management_15m(
+    symbol:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    df_15m:        pd.DataFrame,
+    df_4h:         pd.DataFrame,
+    sb,
+    market_type:   str = 'crypto_futures',
+) -> bool:
+    """
+    Gestión de ganancias en ciclo 15m.
+    Corre MÓDULO A y MÓDULO B en secuencia.
+    Retorna True si la posición fue cerrada.
+    """
+    side   = str(position.get('side', 'long'))
+    pos_id = position.get('id')
+    table  = (
+        'positions'
+        if market_type == 'crypto_futures'
+        else 'forex_positions'
+        if market_type == 'forex_futures'
+        else 'stocks_positions'
+    )
+    from app.workers.performance_monitor import send_telegram_message
+
+    # ── MÓDULO A: Profit Capture ───────────────
+    # (sobreextensión extrema → cierre inmediato)
+    result_a = evaluate_profit_capture(
+        symbol, side, position, current_price,
+        snap, df_15m, market_type
+    )
+
+    if result_a['action'] in ('close', 'flip'):
+        log_info('PROFIT',
+            f'💰 PROFIT CAPTURE [{symbol}]: '
+            f'{result_a["reason"]}'
+        )
+
+        # Cerrar la posición actual
+        await _execute_paper_close(
+            position, current_price,
+            f'profit_capture_'
+            f'{"_".join(result_a["triggered_by"])}',
+            sb
+        )
+
+        # Si es FLIP → abrir posición inversa
+        if result_a['action'] == 'flip' and \
+           result_a.get('flip_direction'):
+            flip_dir = result_a['flip_direction']
+            log_info('PROFIT',
+                f'🔄 FLIP [{symbol}]: '
+                f'{side} → {flip_dir.upper()}'
+            )
+            # Wrapper para open
+            cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+            qty = (cap_op * 0.1) / current_price
+            await _execute_paper_open(
+                symbol=symbol, side=flip_dir,
+                price=current_price, size=qty,
+                rule_code='profit_flip', regime=snap,
+                levels=snap, vel_config={'sizing_pct': 1.0}, supabase=sb
+            )
+
+        await send_telegram_message(
+            f'{"🔄 FLIP" if result_a["action"]=="flip" else "💰 PROFIT CAPTURE"}'
+            f' [{symbol}]\n'
+            f'{result_a["conditions_met"]}/3 condiciones\n'
+            f'Señales: '
+            f'{", ".join(result_a["triggered_by"])}\n'
+            f'PnL: +{result_a["pnl_pct"]:.2f}%'
+        )
+        return True
+
+    # ── Actualizar cruce de BASIS ─────────────
+    basis_check = check_basis_crossed(
+        position, current_price, snap, df_15m
+    )
+    if basis_check['crossed'] and not \
+       position.get('basis_crossed'):
+        sb.table(table).update({
+            'basis_crossed':    True,
+            'basis_crossed_at': datetime.now(
+                timezone.utc
+            ).isoformat(),
+        }).eq('id', pos_id).execute()
+        position['basis_crossed'] = True
+        log_info('PROFIT',
+            f'📊 BASIS CRUZADO [{symbol}]: '
+            f'{basis_check["reason"]}'
+        )
+
+    # ── MÓDULO B: Profit Ladder ────────────────
+    result_b = evaluate_profit_ladder(
+        symbol, side, position, current_price,
+        snap, df_15m, market_type
+    )
+
+    if result_b['action'] == 'close':
+        log_info('PROFIT',
+            f'📉 PROFIT LADDER CLOSE [{symbol}]: '
+            f'{result_b["reason"]}'
+        )
+        await _execute_paper_close(
+            position, current_price,
+            f'profit_ladder_'
+            f'{result_b.get("triggered_by","ema")}',
+            sb
+        )
+        await send_telegram_message(
+            f'📉 PROFIT LADDER [{symbol}]\n'
+            f'{result_b["reason"]}\n'
+            f'Banda: {result_b.get("current_band")}'
+        )
+        return True
+
+    elif result_b['action'] == 'update_floor':
+        # Actualizar el profit floor en BD
+        sb.table(table).update({
+            'profit_floor_band':  result_b[
+                'new_floor_band'
+            ],
+            'profit_floor_price': result_b[
+                'new_floor_price'
+            ],
+            'highest_band_reached': result_b[
+                'current_band'
+            ],
+        }).eq('id', pos_id).execute()
+        log_info('PROFIT',
+            f'⬆️ FLOOR ACTUALIZADO [{symbol}]: '
+            f'{result_b["reason"]}'
+        )
+        position['profit_floor_band'] = result_b['new_floor_band']
+        position['profit_floor_price'] = result_b['new_floor_price']
+        position['highest_band_reached'] = result_b['current_band']
+
+    return False
+
+
 async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
     """Procesamiento asíncrono para UN símbolo en el ciclo 15m (Parallel)."""
     # ── 1. Heartbeat & Safety Manager ─────────
@@ -1393,7 +1589,15 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             fetch_tasks[tf] = provider.get_ohlcv(symbol, tf, limit=limit)
         
         if fetch_tasks:
-            download_results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+            download_results = []
+            for tf, task in fetch_tasks.items():
+                try:
+                    res = await task
+                    download_results.append(res)
+                    await asyncio.sleep(0.5)  # Evitar rate limits de Binance
+                except Exception as e:
+                    download_results.append(e)
+            
             for tf, res in zip(fetch_tasks.keys(), download_results):
                 if isinstance(res, Exception):
                     log_error(MODULE, f"Error descargando {tf} para {symbol}: {repr(res)}")
@@ -1471,6 +1675,25 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             mtf_result.get('score', 0.0),
             sb
         )
+        
+        # ── INTEGRACIÓN MÓDULO A Y B (Gestión de Ganancias) ──
+        positions = BOT_STATE.get_positions_by_symbol(symbol)
+        from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+        snap_for_profit = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+        for position in list(positions):
+            closed = await process_profit_management_15m(
+                symbol=symbol,
+                position=position,
+                current_price=float(last_row['close']),
+                snap=snap_for_profit,
+                df_15m=df,
+                df_4h=get_memory_df(symbol, "4h"),
+                sb=sb,
+                market_type=BOT_STATE.config_cache.get('market_type', 'crypto_futures')
+            )
+            if closed:
+                # Actualizar el snapshot y continuar
+                pass
         
         # PHASE 4: Rule Engine
         fib_levels = extract_fib_levels(df)
@@ -1657,7 +1880,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             # --- MODO DUAL (Fase 3) ---
             use_v2_global = bool(BOT_STATE.config_cache.get('use_strategy_engine_v2', False))
             # Gradual rollout: ETH y SOL primero
-            pilot_v2_symbols = ['ETHUSDT', 'SOLUSDT']
+            pilot_v2_symbols = BOT_STATE.config_cache.get("symbols_active") or ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
             use_v2 = use_v2_global and symbol in pilot_v2_symbols
             direction_checked = allowed_direction or 'none'
             
@@ -1713,7 +1936,14 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
             else:
                 # ── 3. Validar Señal (Zombie Check) ──────
-                v_signal = validate_signal(symbol, float(last_row['close']), last_row.name if hasattr(last_row, 'name') else None)
+                v_signal = validate_signal(
+                    symbol=symbol,
+                    price=float(last_row['close']),
+                    timestamp=last_row.name if hasattr(last_row, 'name') else None,
+                    market_type='crypto_futures',
+                    direction=rule_match.get('direction') if rule_match else None,
+                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None
+                )
                 if not v_signal['valid']:
                     blocked_by = f"safety_block ({v_signal['reason']})"
                     rule_match = None
@@ -1746,7 +1976,14 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
             else:
                 # ── 3. Validar Señal (Zombie Check) ──────
-                v_signal = validate_signal(symbol, float(last_row['close']), last_row.name if hasattr(last_row, 'name') else None)
+                v_signal = validate_signal(
+                    symbol=symbol,
+                    price=float(last_row['close']),
+                    timestamp=last_row.name if hasattr(last_row, 'name') else None,
+                    market_type='crypto_futures',
+                    direction=rule_match.get('direction') if rule_match else None,
+                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None
+                )
                 if not v_signal['valid']:
                     blocked_by = f"safety_block ({v_signal['reason']})"
                     rule_match = None
@@ -1861,7 +2098,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 blocked_by = 'ai_veto'
                 
                 # Registrar veto en signals_log
-                await sb.table('signals_log').insert({
+                sb.table('signals_log').insert({
                     'symbol':       symbol,
                     'direction':    rule_match['direction'],
                     'rule_code':    rule_eval,

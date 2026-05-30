@@ -17,6 +17,47 @@ import time
 from datetime import datetime, timezone
 from app.core.logger import log_info, log_warning, log_error
 
+def safe_db_update(sb, table: str, record_id: int, update_data: dict):
+    """
+    Defensively updates a table row. If PostgREST schema cache throws PGRST204 
+    because a column is missing from the database schema, it dynamically 
+    removes the missing column from the payload and retries the update.
+    """
+    current_data = update_data.copy()
+    max_attempts = len(update_data) + 1
+    
+    for attempt in range(max_attempts):
+        try:
+            res = sb.table(table).update(current_data).eq('id', record_id).execute()
+            return res
+        except Exception as e:
+            err_str = str(e)
+            is_schema_cache_error = False
+            
+            # Extract from dict or string exception
+            if isinstance(e, dict):
+                err_code = e.get('code')
+                err_msg = e.get('message', '')
+                is_schema_cache_error = (err_code == 'PGRST204' or 'column' in err_msg.lower() or 'schema cache' in err_msg.lower())
+                err_str = err_msg + " " + str(e)
+            else:
+                is_schema_cache_error = ('PGRST204' in err_str or 'column' in err_str.lower() or 'schema cache' in err_str.lower())
+                
+            if is_schema_cache_error:
+                removed = False
+                for key in list(current_data.keys()):
+                    # Match key inside single/double quotes or directly in the error string
+                    if f"'{key}'" in err_str or f'"{key}"' in err_str or f"column {key}" in err_str or key in err_str:
+                        current_data.pop(key)
+                        log_warning('SLVM_SAFE_DB', f"Dynamically removed missing column '{key}' from update payload on table '{table}' and retrying.")
+                        removed = True
+                        break
+                if not removed:
+                    # If we couldn't match a column, raise original error
+                    raise e
+            else:
+                raise e
+    raise Exception(f"Failed to update table {table} after removing missing columns.")
 
 def safe_float(v, default=0.0):
     try:
@@ -95,7 +136,7 @@ def calculate_pips(entry: float, current: float, side: str, symbol: str) -> floa
 def calculate_hard_stop_pips(symbol: str, market_type: str, snap: dict) -> float:
     """Calcula el Hard Stop basado en volatilidad (ATR)."""
     if symbol in ('XAUUSD', 'XAU/USD'):
-        rules = {'pips_base': 800, 'atr_factor': 1.5}
+        rules = {'pips_base': 600, 'atr_factor': 1.0}
     elif symbol in ('USDJPY', 'USD/JPY'):
         rules = {'pips_base': 60, 'atr_factor': 1.2}
     elif symbol in ('GBPUSD', 'GBP/USD'):
@@ -212,6 +253,23 @@ def evaluate_recovery_mode_v2(
             'reason': hs_urgent['reason'],
             'hs_pips': hs_urgent['hs_pips']
         }
+
+    # 1.5 Verificar Cruce de EMAs en contra (Corte urgente en Modo Recuperacion)
+    ema3 = safe_float(snap.get('ema_3', 0))
+    ema9 = safe_float(snap.get('ema_9', 0))
+    if ema3 > 0 and ema9 > 0:
+        if side.lower() in ('long', 'buy') and ema3 < ema9:
+            return {
+                'should_close': True,
+                'exit_type': 'recovery_ema_contrary_cross',
+                'reason': f'EMA3 ({ema3:.5f}) < EMA9 ({ema9:.5f}) en recuperacion'
+            }
+        elif side.lower() in ('short', 'sell') and ema3 > ema9:
+            return {
+                'should_close': True,
+                'exit_type': 'recovery_ema_contrary_cross',
+                'reason': f'EMA3 ({ema3:.5f}) > EMA9 ({ema9:.5f}) en recuperacion'
+            }
         
     # 2. Verificar Lógica de Velas Case A/B
     hs_pips = calculate_hard_stop_pips(symbol, market_type, snap)
@@ -306,7 +364,7 @@ async def process_symbol_5m_with_slvm_v2(
                 'slv_timeframe_trigger': '5m'
             }
             
-            sb.table('positions').update(update_data).eq('id', position['id']).execute()
+            safe_db_update(sb, 'positions', position['id'], update_data)
             
             # Alerta Telegram
             from app.workers.alerts_service import send_telegram_message
@@ -319,9 +377,9 @@ async def process_symbol_5m_with_slvm_v2(
         else:
             # Actualizar ciclos si está en recuperación
             if position.get('recovery_mode'):
-                sb.table('positions').update({
+                safe_db_update(sb, 'positions', position['id'], {
                     'recovery_cycles': mr_result['recovery_cycles']
-                }).eq('id', position['id']).execute()
+                })
                 
     except Exception as e:
         log_error('SLVM_WORKER', f"Error processing {symbol} with SLVM v2: {e}")
@@ -344,11 +402,11 @@ def activate_recovery_mode_sync(position: dict, current_price: float, symbol: st
     """Activa el flag de recovery_mode en la DB."""
     log_info('SLVM', f"ACTIVATING RECOVERY MODE for {symbol} at {current_price} on table {table}")
     try:
-        sb.table(table).update({
+        safe_db_update(sb, table, position['id'], {
             'recovery_mode': True,
             'recovery_cycles': 0,
             'recovery_activated_at': datetime.now(timezone.utc).isoformat()
-        }).eq('id', position['id']).execute()
+        })
     except Exception as e:
         log_error('SLVM', f"Error activating recovery mode on table {table}: {e}")
 
@@ -360,13 +418,13 @@ def evaluate_recovery_mode(position: dict, current_price: float, snap: dict, sym
 def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, symbol: str, sb, table='positions'):
     """Registra el cierre por recuperacion de forma sincrona."""
     try:
-        sb.table(table).update({
+        safe_db_update(sb, table, position['id'], {
             'status': 'closed',
             'close_reason': f"recovery_{mr_result['exit_type']}",
             'closed_at': datetime.now(timezone.utc).isoformat(),
             'current_price': price,
             'realized_pnl': calculate_pips(safe_float(position.get('avg_entry_price', 0)), price, position.get('side', 'long'), symbol)
-        }).eq('id', position['id']).execute()
+        })
         log_info('SLVM', f"Finalized recovery exit for {symbol} ({mr_result['exit_type']})")
     except Exception as e:
         log_error('SLVM', f"Error finalizing recovery exit: {e}")
@@ -374,9 +432,9 @@ def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, s
 def update_recovery_cycle_sync(position: dict, mr_result: dict, sb, table='positions'):
     """Actualiza el contador de ciclos de recuperacion en la DB."""
     try:
-        sb.table(table).update({
+        safe_db_update(sb, table, position['id'], {
             'recovery_cycles': mr_result.get('recovery_cycles', 0)
-        }).eq('id', position['id']).execute()
+        })
     except Exception as e:
         log_error('SLVM', f"Error updating recovery cycles: {e}")
 

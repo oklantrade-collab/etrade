@@ -632,94 +632,99 @@ class StandaloneForexWorker:
             if current_price <= 0: return
 
             for pos in positions:
-                side = pos['side'].lower()
-                is_short = side in ('short', 'sell')
-                
-                # El trailing dinámico reactivo es mandatorio para SHORT en 5m
-                # Para LONG mantenemos 15m (según requerimiento)
-                
-                # Crear objeto de estado temporal para evaluación, recuperando marcas históricas de memoria
-                h_p = STATE['highest_prices_cache'].get(pos['id']) or float(pos.get('highest_price') or pos.get('entry_price') or 0)
-                l_p = STATE['lowest_prices_cache'].get(pos['id']) or float(pos.get('lowest_price') or pos.get('entry_price') or 0)
-                
-                state = ProtectionState(
-                    position_id = str(pos['id']),
-                    symbol      = symbol,
-                    side        = side,
-                    entry_price = float(pos.get('entry_price') or 0),
-                    current_sl  = float(pos.get('sl_price') or 0),
-                    original_sl = float(pos.get('original_sl') or pos.get('sl_price') or 0),
-                    market_type = 'forex_futures',
-                    highest_price = h_p,
-                    lowest_price  = l_p
-                )
-
-                # Precio base para el trailing (mejor precio alcanzado)
-                if is_short:
-                    best_p = state.lowest_price if state.lowest_price > 0 else state.entry_price
-                else:
-                    best_p = state.highest_price if state.highest_price > 0 else state.entry_price
-
-                # Evaluar Trailing Dinámico v2
-                res_trail = evaluate_volatile_trailing_v2(
-                    symbol        = symbol,
-                    side          = side,
-                    entry_price   = state.entry_price,
-                    current_price = current_price,
-                    best_price    = best_p,
-                    current_sl    = state.current_sl,
-                    df_15m        = df_15m,
-                    df_5m         = df_5m,
-                    atr_snap      = float(snap.get('atr') or 0)
-                )
-
-                if res_trail['action'] == 'update_sl':
-                    new_sl = res_trail['sl_price']
-                    self.log(f"[TRAILING-5M] {symbol} {side.upper()} -> Nuevo SL: {new_sl:.5f} ({res_trail['reason']})")
+                try:
+                    side = pos['side'].lower()
+                    is_short = side in ('short', 'sell')
                     
-                    # 1. Actualizar en cTrader
-                    c_id = pos.get('ctrader_pos_id')
-                    if c_id:
-                        self.amend_position(c_id, sl_price=new_sl, symbol=symbol)
+                    # El trailing dinámico reactivo es mandatorio para SHORT en 5m
+                    # Para LONG mantenemos 15m (según requerimiento)
                     
-                    # 2. Actualizar en Supabase
-                    upd_data = {'sl_price': new_sl}
+                    # Crear objeto de estado temporal para evaluación, recuperando marcas históricas de memoria
+                    h_p = STATE['highest_prices_cache'].get(pos['id']) or float(pos.get('highest_price') or pos.get('entry_price') or 0)
+                    l_p = STATE['lowest_prices_cache'].get(pos['id']) or float(pos.get('lowest_price') or pos.get('entry_price') or 0)
+                    
+                    state = ProtectionState(
+                        position_id = str(pos['id']),
+                        symbol      = symbol,
+                        side        = side,
+                        entry_price = float(pos.get('entry_price') or 0),
+                        current_sl  = float(pos.get('sl_price') or 0),
+                        original_sl = float(pos.get('original_sl') or pos.get('sl_price') or 0),
+                        market_type = 'forex_futures',
+                        highest_price = h_p,
+                        lowest_price  = l_p
+                    )
+
+                    # Precio base para el trailing (mejor precio alcanzado)
                     if is_short:
-                        STATE['lowest_prices_cache'][pos['id']] = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+                        best_p = state.lowest_price if state.lowest_price > 0 else state.entry_price
                     else:
-                        STATE['highest_prices_cache'][pos['id']] = max(state.highest_price, current_price)
+                        best_p = state.highest_price if state.highest_price > 0 else state.entry_price
+
+                    # Evaluar Trailing Dinámico v2
+                    res_trail = evaluate_volatile_trailing_v2(
+                        symbol        = symbol,
+                        side          = side,
+                        entry_price   = state.entry_price,
+                        current_price = current_price,
+                        best_price    = best_p,
+                        current_sl    = state.current_sl,
+                        df_15m        = df_15m,
+                        df_5m         = df_5m,
+                        atr_snap      = float(snap.get('atr') or 0)
+                    )
+
+                    if res_trail['action'] == 'update_sl':
+                        new_sl = res_trail['sl_price']
+                        self.log(f"[TRAILING-5M] {symbol} {side.upper()} -> Nuevo SL: {new_sl:.5f} ({res_trail['reason']})")
                         
-                    self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
-                
-                # --- NUEVO: CIERRE PROACTIVO (AaEXT/AaEXH) ---
-                proactive_res = evaluate_proactive_exit(
-                    position      = pos,
-                    current_price = current_price,
-                    snap          = snap,
-                    df_4h         = df_4h,
-                    market_type   = 'forex_futures'
-                )
-                
-                if proactive_res['should_close']:
-                    self.log(f"[PROACTIVE-EXIT] {symbol} {side.upper()} @ {current_price} | Regla: {proactive_res['rule_code']} | Razón: {proactive_res['reason']}", "WARNING")
-                    # Cerrar en cTrader
-                    c_id = pos.get('ctrader_pos_id')
-                    if c_id:
-                        self.close_position(c_id, symbol=symbol)
-                    # Cerrar en DB
-                    self.safe_db_execute(sb.table('forex_positions').update({'status': 'closed', 'closed_at': datetime.now(timezone.utc).isoformat(), 'exit_reason': proactive_res['rule_code']}).eq('id', pos['id']))
-                    continue
+                        # 1. Actualizar en cTrader
+                        c_id = pos.get('ctrader_pos_id')
+                        if c_id:
+                            self.amend_position(c_id, sl_price=new_sl, symbol=symbol)
+                        
+                        # 2. Actualizar en Supabase
+                        upd_data = {'sl_price': new_sl}
+                        if is_short:
+                            STATE['lowest_prices_cache'][pos['id']] = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+                        else:
+                            STATE['highest_prices_cache'][pos['id']] = max(state.highest_price, current_price)
+                            
+                        self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
+                    
+                    # --- NUEVO: CIERRE PROACTIVO (AaEXT/AaEXH) ---
+                    proactive_res = evaluate_proactive_exit(
+                        position      = pos,
+                        current_price = current_price,
+                        snap          = snap,
+                        df_4h         = df_4h,
+                        market_type   = 'forex_futures'
+                    )
+                    
+                    if proactive_res['should_close']:
+                        self.log(f"[PROACTIVE-EXIT] {symbol} {side.upper()} @ {current_price} | Regla: {proactive_res['rule_code']} | Razón: {proactive_res['reason']}", "WARNING")
+                        # Cerrar en cTrader
+                        c_id = pos.get('ctrader_pos_id')
+                        if c_id:
+                            self.close_position(c_id, symbol=symbol)
+                        # Cerrar en DB
+                        self.safe_db_execute(sb.table('forex_positions').update({'status': 'closed', 'closed_at': datetime.now(timezone.utc).isoformat(), 'exit_reason': proactive_res['rule_code']}).eq('id', pos['id']))
+                        continue
 
-                else:
-                    # Si no hay update de SL, al menos actualizamos en memoria local el mejor precio si mejoró
-                    if is_short:
-                        low = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
-                        if low < (state.lowest_price if state.lowest_price > 0 else 999999):
-                            STATE['lowest_prices_cache'][pos['id']] = low
                     else:
-                        high = max(state.highest_price, current_price)
-                        if high > state.highest_price:
-                            STATE['highest_prices_cache'][pos['id']] = high
+                        # Si no hay update de SL, al menos actualizamos en memoria local el mejor precio si mejoró
+                        if is_short:
+                            low = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
+                            if low < (state.lowest_price if state.lowest_price > 0 else 999999):
+                                STATE['lowest_prices_cache'][pos['id']] = low
+                        else:
+                            high = max(state.highest_price, current_price)
+                            if high > state.highest_price:
+                                STATE['highest_prices_cache'][pos['id']] = high
+                except Exception as pos_err:
+                    import traceback
+                    self.log(f"Error managing position ID {pos.get('id')} ({symbol}): {pos_err}\n{traceback.format_exc()}", "ERROR")
+                    continue
 
         except Exception as e:
             self.log(f"Error en _manage_position_5m para {symbol}: {e}", "ERROR")

@@ -184,17 +184,17 @@ def calculate_b1_momentum(
         ema20 = float(snap.get('ema20') or snap.get('ema_20') or 0)
         if ema20 > 0:
             dist_ema20 = (price - ema20) / ema20 * 100
-            if dist_ema20 > 5.0: # Precio está más de 5% arriba de la EMA20 (muy extendido para scalping)
-                score *= 0.5
+            if dist_ema20 > 10.0: # Precio está más de 10% arriba de la EMA20 (muy extendido)
+                score *= 0.60
                 components['overextension_penalty'] = {
                      'dist_ema20': round(dist_ema20, 2),
-                     'multiplier': 0.5
+                     'multiplier': 0.60
                 }
-            elif dist_ema20 > 3.0:
-                score *= 0.75
+            elif dist_ema20 > 5.0:
+                score *= 0.85
                 components['overextension_penalty'] = {
                      'dist_ema20': round(dist_ema20, 2),
-                     'multiplier': 0.75
+                     'multiplier': 0.85
                 }
 
     return {
@@ -313,10 +313,15 @@ def calculate_b2_technical(
         'score': sar_score, 'weight': 0.20,
     }
 
+    # ── Bollinger Bands Expansion ────────────────
+    bb_expanding = bool(snap.get('bb_expanding', False))
+    bb_score = 90 if bb_expanding else 50
+    components['bb_expansion'] = {'expanding': bb_expanding, 'score': bb_score, 'weight': 0.15}
+
     # ── Score final B2 ────────────────────────
     score = (
-        rsi_score * 0.20 + macd_score * 0.20 +
-        ema_score * 0.20 + fib_score * 0.20 + sar_score * 0.20
+        rsi_score * 0.15 + macd_score * 0.15 +
+        ema_score * 0.20 + fib_score * 0.20 + sar_score * 0.15 + bb_score * 0.15
     )
 
     return {
@@ -441,10 +446,28 @@ def calculate_b4_regime(
     mtf = float(snap.get('mtf_score') or 0)
     sector_score = (mtf + 1) / 2 * 100
     components['sector'] = {
-        'mtf': mtf, 'score': round(sector_score, 1), 'weight': 0.20,
+        'mtf': mtf, 'score': round(sector_score, 1), 'weight': 0.15,
     }
 
-    score = regime_score * 0.40 + macro_score * 0.40 + sector_score * 0.20
+    # ── Estructura Diaria (Higher Lows) ───────
+    daily_structure_score = 50
+    if df_daily is not None and len(df_daily) >= 2:
+        try:
+            curr_low = float(df_daily.iloc[-1].get('low', df_daily.iloc[-1].get('Low', 0)))
+            prev_low = float(df_daily.iloc[-2].get('low', df_daily.iloc[-2].get('Low', 0)))
+            if curr_low > 0 and prev_low > 0:
+                if curr_low > prev_low:
+                    daily_structure_score = 80  # Higher low (fuerza alcista)
+                elif curr_low < prev_low:
+                    daily_structure_score = 45  # Lower low (debilidad leve)
+        except Exception:
+            pass
+            
+    components['daily_structure'] = {
+        'score': daily_structure_score, 'weight': 0.15,
+    }
+
+    score = regime_score * 0.35 + macro_score * 0.35 + sector_score * 0.15 + daily_structure_score * 0.15
 
     return {
         'score': round(score, 2),
@@ -576,10 +599,35 @@ def calculate_apex_score(
         'b5_sentiment':   b5['score'],
     }
 
+    # ── MOMENTUM OVERRIDE ──
+    # Si RVOL es alto y Momentum (B1) es muy fuerte, los pesos cambian dinámicamente
+    # para no ser castigados severamente por B3 (Fundamental)
+    rvol_val = float(snap.get('rvol') or 1.0)
+    is_momentum = rvol_val >= 1.5 or b1['score'] >= 75
+    
+    if is_momentum:
+        w_4h = {
+            'b1_momentum':    0.45,
+            'b2_technical':   0.35,
+            'b3_fundamental': 0.05,
+            'b4_regime':      0.10,
+            'b5_sentiment':   0.05,
+        }
+        w_1d = {
+            'b1_momentum':    0.35,
+            'b2_technical':   0.35,
+            'b3_fundamental': 0.10,
+            'b4_regime':      0.10,
+            'b5_sentiment':   0.10,
+        }
+    else:
+        w_4h = APEX_WEIGHTS_4H
+        w_1d = APEX_WEIGHTS_1D
+
     # ── APEX Score 4H (flujo domina) ──────────
-    apex_4h = sum(blocks[k] * APEX_WEIGHTS_4H[k] for k in blocks)
+    apex_4h = sum(blocks[k] * w_4h[k] for k in blocks)
     # ── APEX Score 1D (fundamental importa) ───
-    apex_1d = sum(blocks[k] * APEX_WEIGHTS_1D[k] for k in blocks)
+    apex_1d = sum(blocks[k] * w_1d[k] for k in blocks)
 
     apex_4h = round(max(5, min(95, apex_4h)), 1)
     apex_1d = round(max(5, min(95, apex_1d)), 1)

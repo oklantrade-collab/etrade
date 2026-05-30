@@ -91,21 +91,20 @@ DEFAULT_RULES = [
     {
         "id": 1007,
         "rule_code": "Aa21",
-        "name": "EMA50 angle+basis (bajo riesgo)",
-        "description": "EMA20 angle >= 0, ADX < 20, zona -2 a +2, close <= basis × 1.005.",
+        "name": "EMA50 angle+Bollinger upper (bajo riesgo)",
+        "description": "EMA20 angle >= 0, zona -2 a +2, close < banda superior.",
         "direction": "long",
-        "market_type": ["crypto_spot", "crypto_futures"],
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
         "ema50_vs_ema200": "above",
         "enabled": True,
-        "regime_allowed": ["bajo_riesgo"],
+        "regime_allowed": ["bajo_riesgo", "riesgo_medio", "alto_riesgo"],
         "priority": 4,
         "confidence": "medium_low",
         "entry_trades": [1],
         "conditions": [
             {"indicator": "ema20_angle", "operator": ">=", "value": 0},
-            {"indicator": "adx", "operator": "<", "value": 20},
             {"indicator": "fib_zone_abs", "operator": "<=", "value": 2},
-            {"indicator": "close_near_basis", "operator": "==", "value": True},
+            {"indicator": "close_below_upper", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Solo régimen bajo_riesgo. Sizing: solo T1. (v2 forced)",
@@ -170,6 +169,26 @@ DEFAULT_RULES = [
         ],
         "logic": "AND",
         "notes": "T1, habilitar T2/T3 con condición de precio decreciente. (v2 forced)",
+    },
+    {
+        "id": 1011,
+        "rule_code": "Aa25",
+        "name": "Cruce EMA3 > EMA9 en Tendencia",
+        "description": "Primer cruce al alza de EMA3 sobre EMA9 con filtro de tendencia (EMA9 > EMA20 o EMA3 > EMA20).",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "above",
+        "enabled": True,
+        "regime_allowed": ["riesgo_medio", "bajo_riesgo"],
+        "priority": 1,
+        "confidence": "high",
+        "entry_trades": [1, 2, 3],
+        "conditions": [
+            {"indicator": "ema3_cross_ema9_up", "operator": "==", "value": True},
+            {"indicator": "ema3_ema9_trend_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Nueva regla experimental de continuación.",
     },
     # ═══ SHORT RULES — RAMA B1 (EMA50 < EMA200, macro bajista) ═══
     {
@@ -240,21 +259,21 @@ DEFAULT_RULES = [
     {
         "id": 1013,
         "rule_code": "Bb21",
-        "name": "SHORT ADX fuerte alcista",
-        "description": "ADX > 40, nivel_2_short, -DI > +DI + 10, solo bajo_riesgo.",
+        "name": "SHORT Bollinger lower (bajo riesgo)",
+        "description": "ema20_angle <= 0, nivel_2_short, -DI > +DI + 10, close > banda inferior.",
         "direction": "short",
-        "market_type": ["crypto_spot", "crypto_futures"],
-        "ema50_vs_ema200": "above",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "below",
         "enabled": True,
-        "regime_allowed": ["bajo_riesgo"],
+        "regime_allowed": ["bajo_riesgo", "riesgo_medio", "alto_riesgo"],
         "priority": 3,
         "confidence": "medium",
         "entry_trades": [1],
         "conditions": [
             {"indicator": "ema20_angle", "operator": "<=", "value": 0},
-            {"indicator": "adx", "operator": ">", "value": 40},
             {"indicator": "ema20_phase", "operator": "==", "value": "nivel_2_short"},
             {"indicator": "di_margin", "operator": ">", "value": 10},
+            {"indicator": "close_above_lower", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Solo bajo_riesgo. RR mínimo 3.0. Sizing: T1. (v2 forced)",
@@ -304,12 +323,34 @@ DEFAULT_RULES = [
     },
     # ═══ HOT MOMENTUM RULES (15m) — RAMA HOT ═══
     {
+        "id": 1018,
+        "rule_code": "AaReb_5m",
+        "name": "Cazador de Extremos LONG",
+        "description": "Rebote fuerte en banda inferior, ignorando SAR y MTF",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 9,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "fib_zone", "operator": "<=", "value": -4},
+            {"indicator": "sipv_buy", "operator": "==", "value": True},
+            {"indicator": "ema3_slope_positive", "operator": "==", "value": True},
+            {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
+        ],
+        "logic": "AND",
+        "notes": "Estrategia cazadora de pisos.",
+    },
+    {
         "id": 1016,
-        "rule_code": "Aa_HOT",
+        "rule_code": "AaHot",
         "name": "HOT Momentum LONG",
         "description": "Entrada quirúrgica agresiva LONG con EMA ultra-cerca y ADX>22",
         "direction": "long",
-        "market_type": ["crypto_spot", "crypto_futures"],
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
         "ema50_vs_ema200": "any",
         "enabled": True,
         "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
@@ -318,12 +359,11 @@ DEFAULT_RULES = [
         "entry_trades": [1],
         "conditions": [
             {"indicator": "fresh_cross_long", "operator": "==", "value": True},
-            {"indicator": "mtf_score", "operator": ">", "value": 0},
-            {"indicator": "mtf_score", "operator": ">=", "value": -0.6},
-            {"indicator": "bb_expanding_or_mtf_long", "operator": "==", "value": True},
+            {"indicator": "hot_mtf_ok_long", "operator": "==", "value": True},
+            {"indicator": "bb_expanding_or_mtf_long_or_bottom", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -6},
             {"indicator": "fib_zone", "operator": "<=", "value": 2},
-            {"indicator": "sar_15m_ok_long", "operator": "==", "value": True},
+            {"indicator": "sar_or_signal_long", "operator": "==", "value": True},
             {"indicator": "adx_floor_ok", "operator": "==", "value": True},
             {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
             {"indicator": "rsi_ok_long", "operator": "==", "value": True},
@@ -335,11 +375,11 @@ DEFAULT_RULES = [
     },
     {
         "id": 1017,
-        "rule_code": "Bb_HOT",
+        "rule_code": "BbHot",
         "name": "HOT Momentum SHORT",
         "description": "Entrada quirúrgica agresiva SHORT con EMA ultra-cerca y ADX>22",
         "direction": "short",
-        "market_type": ["crypto_spot", "crypto_futures"],
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
         "ema50_vs_ema200": "any",
         "enabled": True,
         "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
@@ -348,12 +388,11 @@ DEFAULT_RULES = [
         "entry_trades": [1],
         "conditions": [
             {"indicator": "fresh_cross_short", "operator": "==", "value": True},
-            {"indicator": "mtf_score", "operator": "<", "value": 0},
-            {"indicator": "mtf_score", "operator": "<=", "value": 0.6},
-            {"indicator": "bb_expanding_or_mtf_short", "operator": "==", "value": True},
+            {"indicator": "hot_mtf_ok_short", "operator": "==", "value": True},
+            {"indicator": "bb_expanding_or_mtf_short_or_top", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -2},
             {"indicator": "fib_zone", "operator": "<=", "value": 6},
-            {"indicator": "sar_15m_ok_short", "operator": "==", "value": True},
+            {"indicator": "sar_or_signal_short", "operator": "==", "value": True},
             {"indicator": "adx_floor_ok", "operator": "==", "value": True},
             {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
             {"indicator": "rsi_ok_short", "operator": "==", "value": True},
@@ -362,6 +401,50 @@ DEFAULT_RULES = [
         ],
         "logic": "AND",
         "notes": "Estrategia quirúrgica adaptada de Forex. Ultra rápida.",
+    },
+    {
+        "id": 1019,
+        "rule_code": "AaPullback",
+        "name": "Pullback a EMA3 LONG",
+        "description": "Entrada directa en retroceso a EMA3 con bandas abriéndose",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 9,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "pullback_long", "operator": "==", "value": True},
+            {"indicator": "fib_zone", "operator": ">=", "value": -6},
+            {"indicator": "fib_zone", "operator": "<=", "value": 3},
+            {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
+        ],
+        "logic": "AND",
+        "notes": "Estrategia de continuación de momentum.",
+    },
+    {
+        "id": 1020,
+        "rule_code": "BbPullback",
+        "name": "Pullback a EMA3 SHORT",
+        "description": "Entrada directa en retroceso a EMA3 con bandas abriéndose",
+        "direction": "short",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 9,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "pullback_short", "operator": "==", "value": True},
+            {"indicator": "fib_zone", "operator": ">=", "value": -3},
+            {"indicator": "fib_zone", "operator": "<=", "value": 6},
+            {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
+        ],
+        "logic": "AND",
+        "notes": "Estrategia de continuación de momentum.",
     },
     # ═══ SWING RULES (4h) — RAMA D ═══
     {
@@ -504,6 +587,9 @@ def build_market_data_dict(
     last = df.iloc[-1]
     adx_min = regime.get("active_params", {}).get("adx_min", 20)
 
+    adx_val = float(last.get("adx", 0)) if pd.notna(last.get("adx")) else 0.0
+    adx_floor_ok = adx_val >= 15
+
     data = {
         # EMA angles
         "ema9_angle": float(last.get("ema9_angle", 0)) if pd.notna(last.get("ema9_angle")) else 0.0,
@@ -558,7 +644,7 @@ def build_market_data_dict(
         "spike_detected": bool(last.get("spike_detected", False)),
         "spike_ratio": float(last.get("spike_ratio", 0.0)),
         # Variables para Aa_HOT / Bb_HOT
-        "adx_floor_ok": float(last.get("adx", 0)) > 22 if pd.notna(last.get("adx")) else False,
+        "adx_floor_ok": adx_floor_ok,
         "sar_15m_ok_long": int(last.get("sar_trend", 0)) > 0 if pd.notna(last.get("sar_trend")) else False,
         "sar_15m_ok_short": int(last.get("sar_trend", 0)) < 0 if pd.notna(last.get("sar_trend")) else False,
         "bb_expanding": bool(last.get("bb_expanding", False)),
@@ -615,6 +701,23 @@ def build_market_data_dict(
     fresh_cross_short_by_age = (ema3_cross_age <= 3) and (ema3 < ema9)
     slope_entry_short = (ema3_slope < 0) and (ema3_slope < ema3_slope_prev) and (ema3 < ema9)
 
+    ema20 = float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema3")) or pd.notna(last.get("ema_20")) else 0.0
+    ema3_ema9_trend_ok = (ema9 > ema20) or (ema3 > ema20)
+    
+    ema3_cruce_up = False
+    if ema_col1 in df.columns and ema_col2 in df.columns and len(df) >= 5:
+        ema3_s = pd.to_numeric(df[ema_col1], errors="coerce")
+        ema9_s = pd.to_numeric(df[ema_col2], errors="coerce")
+        # 3-candle lookback crossover check
+        for i in range(1, 4):
+            idx = -i
+            if pd.notna(ema3_s.iloc[idx]) and pd.notna(ema9_s.iloc[idx]) and pd.notna(ema3_s.iloc[idx-1]) and pd.notna(ema9_s.iloc[idx-1]):
+                curr_above = ema3_s.iloc[idx] > ema9_s.iloc[idx]
+                prev_above = ema3_s.iloc[idx-1] > ema9_s.iloc[idx-1]
+                if curr_above and not prev_above:
+                    ema3_cruce_up = True
+                    break
+
     data.update({
         "ema_cross_short": (ema3 < ema9) or ema_close_enough,
         "ema_cross_long": (ema3 > ema9) or ema_close_enough,
@@ -622,16 +725,54 @@ def build_market_data_dict(
         "ema_cross_long_hot": (ema3 > ema9) or ema_close_enough_03,
         "fresh_cross_long": fresh_cross_long_by_age or slope_entry_long,
         "fresh_cross_short": fresh_cross_short_by_age or slope_entry_short,
+        "ema3_slope_positive": ema3_slope >= 0,
+        
+        "sipv_buy": bool(
+            last.get("is_dragonfly", False)
+            or last.get("low_higher_than_prev", False)
+            or last.get("is_hammer", False)
+            or last.get("is_bullish_engulfing", False)
+            or last.get("is_doji", False)
+        ),
+        "sipv_sell": bool(
+            last.get("is_gravestone", False)
+            or last.get("high_lower_than_prev", False)
+            or last.get("is_bearish_engulfing", False)
+            or last.get("is_doji", False)
+        ),
+
         "bb_expanding_or_mtf_long": bb_exp or mtf_score >= 0.5,
         "bb_expanding_or_mtf_short": bb_exp or mtf_score <= -0.5,
+        "bb_expanding_or_mtf_long_or_bottom": bb_exp or mtf_score >= 0.5 or (fib_levels.get("zone", 0) <= -4),
+        "bb_expanding_or_mtf_short_or_top": bb_exp or mtf_score <= -0.5 or (fib_levels.get("zone", 0) >= 4),
         "mtf_score": mtf_score,
+        "hot_mtf_ok_long": (mtf_score > -0.4) if (fib_levels.get("zone", 0) <= -4) else (mtf_score > 0),
+        "hot_mtf_ok_short": (mtf_score < 0.4) if (fib_levels.get("zone", 0) >= 4) else (mtf_score < 0),
+        "hot_sar_ok_long": True if (fib_levels.get("zone", 0) <= -4) else (int(last.get("sar_trend", 0)) > 0 if pd.notna(last.get("sar_trend")) else False),
+        "hot_sar_ok_short": True if (fib_levels.get("zone", 0) >= 4) else (int(last.get("sar_trend", 0)) < 0 if pd.notna(last.get("sar_trend")) else False),
         "strong_contratrend_long": float(last.get("adx", 0)) > 35 and mtf_score <= -0.5,
         "strong_contratrend_short": float(last.get("adx", 0)) > 35 and mtf_score >= 0.5,
-        "rsi_ok_long": rsi_14_val < 60,
-        "rsi_ok_short": rsi_14_val > 40,
-        "not_in_ceiling": high_price <= upper_2 if upper_2 > 0 else True,
-        "not_in_floor": low_price >= lower_2 if lower_2 > 0 else True,
+        "rsi_ok_long": rsi_14_val <= 65,
+        "rsi_ok_short": rsi_14_val >= 35,
+        "not_in_ceiling": float(last.get("close", 0)) <= upper_2 if upper_2 > 0 else True,
+        "not_in_floor": float(last.get("close", 0)) >= lower_2 if lower_2 > 0 else True,
+        "close_below_upper": float(last["close"]) < upper_2 if upper_2 > 0 else True,
+        "close_above_lower": float(last["close"]) > lower_2 if lower_2 > 0 else True,
         "ema_exhaustion": ema_exhaustion,
+        "ema3_cross_ema9_up": ema3_cruce_up,
+        "ema3_ema9_trend_ok": ema3_ema9_trend_ok,
+        "pullback_long": bool(
+            bb_exp 
+            and (ema3 > ema9) 
+            and (low_price <= ema3 * 1.002) 
+            and (float(last["close"]) >= ema3 * 0.998)
+        ),
+        "pullback_short": bool(
+            bb_exp 
+            and (ema3 < ema9) 
+            and (high_price >= ema3 * 0.998) 
+            and (float(last["close"]) <= ema3 * 1.002)
+        ),
     })
 
     return data
@@ -739,7 +880,22 @@ def evaluate_all_rules(
             direction_filter = "short"
             pinescript_signal = "Sell"
         else:
+            direction_filter = None
+
+    # Check Pullback direct activation if no direction was resolved yet
+    if direction_filter is None:
+        if bool(market_data.get("pullback_long", False)):
+            direction_filter = "long"
+            pinescript_signal = "Buy" # Fake signal to pass filters
+        elif bool(market_data.get("pullback_short", False)):
+            direction_filter = "short"
+            pinescript_signal = "Sell" # Fake signal to pass filters
+        else:
             return None
+
+    # Inject dynamic SAR or Signal logic for AaHot / BbHot
+    market_data["sar_or_signal_long"] = bool((int(last.get("sar_trend", 0)) > 0 if pd.notna(last.get("sar_trend")) else False) or (pinescript_signal == "Buy"))
+    market_data["sar_or_signal_short"] = bool((int(last.get("sar_trend", 0)) < 0 if pd.notna(last.get("sar_trend")) else False) or (pinescript_signal == "Sell"))
 
     # Filter rules
     filtered = [
@@ -754,21 +910,22 @@ def evaluate_all_rules(
     # Sort by priority (lower = higher priority)
     filtered.sort(key=lambda r: r.get("priority", 99))
 
-    # --- BLOQUEO DE FASE EMA20 ---
+    # --- BLOQUEO DE FASE Y SOBRE-EXTENSIÓN (FIBONACCI) ---
     ema20_phase = market_data.get("ema20_phase", "flat")
+    fib_zone = market_data.get("fib_zone", 0)
     
     # 1. Bloqueo para LONG
     if direction_filter == "long":
         if "short" in ema20_phase:
             return None
-        if ema20_phase == "nivel_3_long":
+        if fib_zone >= 4:
             return None 
 
     # 2. Bloqueo para SHORT
     if direction_filter == "short":
         if "long" in ema20_phase:
             return None
-        if ema20_phase == "nivel_3_short":
+        if fib_zone <= -4:
             return None 
 
     # Evaluate each rule

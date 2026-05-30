@@ -318,13 +318,13 @@ def detect_sipv_exit_signal(
     c1_pine = pine == pine_exit
 
     # C2: SAR negativo/positivo
-    sar_4h  = int(snap.get('sar_trend_4h', 0))
-    sar_15m = int(snap.get('sar_trend_15m', 0))
+    sar_4h  = int(snap.get('sar_trend_4h') or 0)
+    sar_15m = int(snap.get('sar_trend_15m') or 0)
     c2_sar  = (sar_4h == sar_exit) or \
               (sar_15m == sar_exit)
 
     # C3: Zona Fibonacci alta/baja
-    fib_zone = int(snap.get('fibonacci_zone', 0))
+    fib_zone = int(snap.get('fibonacci_zone') or 0)
     c3_fib   = fib_zone_exit(fib_zone)
 
     # C4: Vela 4H confirma (del módulo proactive_exit)
@@ -469,7 +469,7 @@ def evaluate_sl_action(
 
     # ── NUEVO: Bloqueo de Ganancia en Zonas Extremas (UPPER_5/6) ──
     # Si estamos en zona 5 o 6 y la vela es alcista, movemos SL a la banda
-    fib_zone = int(snap.get('fibonacci_zone', 0))
+    fib_zone = int(snap.get('fibonacci_zone') or 0)
     if side in ('long', 'buy') and fib_zone >= 5:
         upper_5 = float(snap.get('upper_5') or 0)
         upper_6 = float(snap.get('upper_6') or 0)
@@ -478,7 +478,7 @@ def evaluate_sl_action(
         if fib_zone >= 6 and current_price > upper_6 and upper_6 > trailing_sl:
             # Necesitamos verificar si la vela es alcista (usando snap o df_15m)
             # Como proxy, si el precio actual es mayor al basis (EMA20), es señal de fuerza
-            is_bullish = current_price > float(snap.get('basis', 0))
+            is_bullish = current_price > float(snap.get('basis') or 0)
             if is_bullish:
                 return {
                     'action': 'update_trailing',
@@ -488,7 +488,7 @@ def evaluate_sl_action(
         
         # Si cerramos por encima de UPPER_5 y es alcista, SL a UPPER_5
         if fib_zone >= 5 and current_price > upper_5 and upper_5 > trailing_sl:
-            is_bullish = current_price > float(snap.get('basis', 0))
+            is_bullish = current_price > float(snap.get('basis') or 0)
             if is_bullish:
                 return {
                     'action': 'update_trailing',

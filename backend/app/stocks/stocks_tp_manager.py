@@ -477,6 +477,44 @@ async def execute_partial_sell(
 
     # Si se vendieron todas las shares → cerrar
     if new_shares_rem <= 0:
+        # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS STOCKS 🛡️
+        # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp)
+        if pnl_total < 0 and 'tp' not in str(action).lower() and 'tp' not in str(block).lower():
+            log_warning(MODULE, f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre Stocks para {ticker} ({action}/{block}) con P&L negativo: ${pnl_total:.4f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
+            
+            # Suspendemos el Stop Loss físico y enrutamos de forma segura a EREP Phase 2
+            try:
+                supabase.table('stocks_positions').update({
+                    'sl_type': 'suspended_negative_protection',
+                    'stop_loss': 0,
+                    'sl_dynamic_price': 0,
+                    'sl_price': 0,
+                    'erep_active': True,
+                    'erep_phase': 2,
+                    'erep_p1_price': entry_price,
+                    'erep_q1': shares_rem,
+                    'erep_market_type': 'stocks_spot',
+                    'erep_cycles_elapsed': 0
+                }).eq('id', pos_id).execute()
+            except Exception as upd_e:
+                log_warning(MODULE, f"Error actualizando estado anti-loss stocks para {ticker}: {upd_e}")
+                
+            # Hook into state machine
+            try:
+                from app.core.symbol_state import SymbolStateMachine
+                sm = SymbolStateMachine.get_instance()
+                sm.on_position_opened(ticker, "long", {"symbol": ticker, "side": "long", "status": "open"})
+            except Exception:
+                pass
+                
+            return {
+                'success': False,
+                'reason': 'anti_loss_blocked',
+                'pnl_usd': pnl_total,
+                'pnl_pct': pnl_pct,
+                'shares_remaining': shares_rem
+            }
+
         update_data['status'] = 'closed'
         update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
         update_data['sl_close_reason'] = f'tp_b{block}_full'

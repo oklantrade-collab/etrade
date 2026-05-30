@@ -329,7 +329,7 @@ async def upsert_forex_candles(symbol: str, timeframe: str, df: pd.DataFrame, sb
         return
     try:
         rows = []
-        sub_df = df.tail(300)
+        sub_df = df.tail(5)
 
         for idx, r in sub_df.iterrows():
             open_time = idx
@@ -741,6 +741,107 @@ async def forex_cycle_5m():
 #  CYCLE 15m — Full Analysis (Forex)
 # ══════════════════════════════════════════════════
 
+from app.strategy.profit_capture import evaluate_profit_capture
+from app.strategy.profit_ladder import evaluate_profit_ladder, check_basis_crossed
+from app.core.position_monitor import _execute_paper_close
+
+async def process_forex_profit_management_15m(
+    symbol: str,
+    position: dict,
+    current_price: float,
+    snap: dict,
+    df_15m: pd.DataFrame,
+    sb,
+    provider
+) -> bool:
+    """
+    Gestión de ganancias en ciclo 15m para Forex.
+    Corre MÓDULO A (Profit Capture) y MÓDULO B (Profit Ladder).
+    """
+    side = str(position.get('side', 'long'))
+    pos_id = position.get('id')
+    market_type = 'forex_futures'
+
+    # ── MÓDULO A: Profit Capture ───────────────
+    result_a = evaluate_profit_capture(
+        symbol, side, position, current_price,
+        snap, df_15m, market_type
+    )
+
+    if result_a['action'] in ('close', 'flip'):
+        log_info('PROFIT_FX', f'💰 PROFIT CAPTURE [{symbol}]: {result_a["reason"]}')
+        
+        await _execute_paper_close(
+            position, current_price,
+            f'profit_capture_fx_{"_".join(result_a["triggered_by"])}',
+            sb
+        )
+
+        if result_a['action'] == 'flip' and result_a.get('flip_direction'):
+            flip_dir = result_a['flip_direction']
+            log_info('PROFIT_FX', f'🔄 FLIP [{symbol}]: {side} → {flip_dir.upper()}')
+            
+            signal_flip = {
+                'direction': flip_dir,
+                'rule_code': 'profit_flip_fx',
+                'score': 1.0
+            }
+            await open_forex_position(
+                symbol=symbol, signal=signal_flip,
+                price=current_price, provider=provider, sb=sb
+            )
+
+        await send_telegram_message(
+            f'{"🔄 FLIP" if result_a["action"]=="flip" else "💰 PROFIT CAPTURE"} [{symbol}]\n'
+            f'{result_a["conditions_met"]}/3 condiciones\n'
+            f'Señales: {", ".join(result_a["triggered_by"])}\n'
+            f'PnL: +{result_a["pnl_pct"]:.2f}%'
+        )
+        return True
+
+    # ── Actualizar cruce de BASIS ─────────────
+    basis_check = check_basis_crossed(position, current_price, snap, df_15m)
+    if basis_check['crossed'] and not position.get('basis_crossed'):
+        sb.table('positions').update({
+            'basis_crossed': True,
+            'basis_crossed_at': datetime.now(timezone.utc).isoformat(),
+        }).eq('id', pos_id).execute()
+        position['basis_crossed'] = True
+        log_info('PROFIT_FX', f'📊 BASIS CRUZADO [{symbol}]: {basis_check["reason"]}')
+
+    # ── MÓDULO B: Profit Ladder ────────────────
+    result_b = evaluate_profit_ladder(
+        symbol, side, position, current_price,
+        snap, df_15m, market_type
+    )
+
+    if result_b['action'] == 'close':
+        log_info('PROFIT_FX', f'📉 PROFIT LADDER CLOSE [{symbol}]: {result_b["reason"]}')
+        await _execute_paper_close(
+            position, current_price,
+            f'profit_ladder_fx_{result_b.get("triggered_by", "ema")}',
+            sb
+        )
+        await send_telegram_message(
+            f'📉 PROFIT LADDER [{symbol}]\n'
+            f'{result_b["reason"]}\n'
+            f'Banda: {result_b.get("current_band")}'
+        )
+        return True
+
+    elif result_b['action'] == 'update_floor':
+        sb.table('positions').update({
+            'profit_floor_band': result_b['new_floor_band'],
+            'profit_floor_price': result_b['new_floor_price'],
+            'highest_band_reached': result_b['current_band'],
+        }).eq('id', pos_id).execute()
+        log_info('PROFIT_FX', f'⬆️ FLOOR ACTUALIZADO [{symbol}]: {result_b["reason"]}')
+        position['profit_floor_band'] = result_b['new_floor_band']
+        position['profit_floor_price'] = result_b['new_floor_price']
+        position['highest_band_reached'] = result_b['current_band']
+
+    return False
+
 async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvider, sb):
     """Procesamiento completo 15m para un simbolo Forex."""
     global _forex_cycle_count
@@ -834,6 +935,22 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
 
         # PHASE 4: Snapshot
         await write_forex_snapshot(symbol, df, regime, spike_result, cur_mtf_score, sb)
+
+        # ── INTEGRACIÓN MÓDULO A Y B (Gestión de Ganancias) ──
+        positions = BOT_STATE.get_positions_by_symbol(symbol)
+        snap_for_profit = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+        for position in list(positions):
+            closed = await process_forex_profit_management_15m(
+                symbol=symbol,
+                position=position,
+                current_price=current_price,
+                snap=snap_for_profit,
+                df_15m=df,
+                sb=sb,
+                provider=provider
+            )
+            if closed:
+                pass # Already closed
 
         # PHASE 5: Strategy Engine Evaluation
         engine = StrategyEngine.get_instance()

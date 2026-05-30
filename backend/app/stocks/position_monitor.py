@@ -111,58 +111,10 @@ class PositionMonitor:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", trade["id"]).execute()
 
-            # ── SLVM: Modo Recuperación ──
-            try:
-                from app.strategy.virtual_sl_recovery import (
-                    check_slv_trigger, evaluate_recovery_mode,
-                    activate_recovery_mode_sync, update_recovery_cycle_sync,
-                    finalize_recovery_exit_sync, update_slv_from_bands_sync,
-                )
-
-                # Map trade to position format for SLVM
-                pos_slvm = dict(trade)
-                pos_slvm['side'] = 'long'
-                pos_slvm['avg_entry_price'] = entry_price
-                pos_slvm['sl_max_loss_hard'] = stocks_config.get('sl_max_loss_hard', 10.0)
-
-                snap_res_slvm = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
-                snap_slvm = snap_res_slvm.data[0] if snap_res_slvm.data else {}
-
-                if trade.get('recovery_mode'):
-                    # Ya en Modo Recuperación — evaluar salida V2
-                    from app.strategy.virtual_sl_recovery import evaluate_recovery_mode_v2
-                    mr_result = evaluate_recovery_mode_v2(
-                        position      = pos_slvm,
-                        current_price = current_price,
-                        snap          = snap_slvm,
-                        symbol        = ticker,
-                        market_type   = 'stocks_spot',
-                    )
-                    
-                    if mr_result['should_close']:
-                        # Logging y cierre
-                        from app.strategy.virtual_sl_recovery import finalize_recovery_exit_sync
-                        finalize_recovery_exit_sync(pos_slvm, mr_result, current_price, ticker, sb, 'stocks_positions')
-                        await self._close_position(trade, current_price, f'recovery_{mr_result["exit_type"]}')
-                        return
-                    else:
-                        # Actualizar ciclos
-                        sb.table('stocks_positions').update({
-                            'recovery_cycles': mr_result.get('recovery_cycles', trade.get('recovery_cycles', 0))
-                        }).eq('id', trade['id']).execute()
-                        return
-
-                # Verificar si precio tocó el SLV
-                if trade.get('slv_price') and check_slv_trigger(pos_slvm, current_price):
-                    activate_recovery_mode_sync(pos_slvm, current_price, ticker, 'stocks_spot', sb, 'stocks_positions')
-                    return
-
-                # Actualizar SLV desde bandas (solo mejora)
-                if trade.get('slv_price'):
-                    update_slv_from_bands_sync(pos_slvm, snap_slvm, ticker, 'stocks_spot', sb, 'stocks_positions')
-
-            except Exception as slvm_e:
-                log_warning(MODULE, f'SLVM error for {ticker}: {slvm_e}')
+            # ── EREP Integration ──
+            if trade.get('erep_active') or trade.get('erep_phase', 0) > 0:
+                log_info(MODULE, f"Bypassing normal exits for {ticker} because EREP is active (phase: {trade.get('erep_phase')})")
+                return
 
             # ── Cálculo de Antigüedad de la Posición ──
             entry_time_str = trade.get("first_buy_at") or trade.get("entry_time")
@@ -217,13 +169,23 @@ class PositionMonitor:
             sl_action = sl_res['action']
 
             if sl_action == 'close_backstop':
-                log_warning(MODULE, f"🔴 BACKSTOP HIT: {ticker} @ ${current_price:.2f}")
-                await self._close_position(trade, current_price, "backstop_sl")
+                log_warning(MODULE, f"🔴 BACKSTOP HIT: {ticker} @ ${current_price:.2f}. Routing to EREP Phase 1...")
+                sb.table("stocks_positions").update({
+                    "erep_phase": 1,
+                    "erep_p1_price": entry_price,
+                    "erep_q1": safe_float(trade.get("shares_remaining")) or safe_float(trade.get("shares")) or shares,
+                    "erep_market_type": "stocks_spot",
+                }).eq("id", trade["id"]).execute()
                 return
 
             if sl_action == 'trigger_dynamic_sl':
-                log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {ticker} @ ${current_price:.2f} (SIPV)")
-                await self._close_position(trade, current_price, "dynamic_sl")
+                log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {ticker} @ ${current_price:.2f} (SIPV). Routing to EREP Phase 1...")
+                sb.table("stocks_positions").update({
+                    "erep_phase": 1,
+                    "erep_p1_price": entry_price,
+                    "erep_q1": safe_float(trade.get("shares_remaining")) or safe_float(trade.get("shares")) or shares,
+                    "erep_market_type": "stocks_spot",
+                }).eq("id", trade["id"]).execute()
                 return
 
             if sl_action == 'activate_dynamic_sl':

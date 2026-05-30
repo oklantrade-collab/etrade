@@ -2,15 +2,19 @@ import subprocess
 import os
 
 # Configuración DigitalOcean
-SERVER_IP = "207.154.224.71"
+SERVER_IP = "165.22.87.171"
 SSH_KEY = "C:/Users/jyups/.ssh/etrade_cloud_key"
 REMOTE_PATH = "/home/etrade/etrade/backend"
 
 # Archivos críticos para sincronizar
 files_to_sync = [
+    "app/strategy/dca_manager.py",
+    "app/strategy/profit_capture.py",
+    "app/strategy/profit_ladder.py",
     "app/strategy/erep_manager.py",
     "app/workers/scheduler.py",
     "app/analysis/indicators_v2.py",
+    "app/analysis/swing_detector.py",
     "app/strategy/strategy_engine.py",
     "app/workers/forex_worker_standalone.py",
     "app/workers/forex_scheduler.py",
@@ -54,7 +58,37 @@ files_to_sync = [
     "app/core/startup.py"
 ]
 
+def check_syntax():
+    import py_compile
+    print("=" * 60)
+    print("Ejecutando analisis sintactico preventivo pre-despliegue...")
+    print("=" * 60)
+    all_ok = True
+    for f in files_to_sync:
+        local_file = os.path.join("c:/Fuentes/eTrade/backend", f)
+        try:
+            py_compile.compile(local_file, doraise=True)
+        except py_compile.PyCompileError as e:
+            print(f"[FAIL] ERROR SINTACTICO DETECTADO EN: {f}")
+            print(str(e))
+            all_ok = False
+        except FileNotFoundError:
+            print(f"[WARN] Archivo no encontrado: {f}")
+            
+    if not all_ok:
+        print("\n[CRITICAL] ERROR: El analisis estatico de codigo ha fallado.")
+        print("El despliegue ha sido CANCELADO por medidas de seguridad preventiva.")
+        print("=" * 60)
+        return False
+    
+    print("\n[SUCCESS] Todos los archivos pasaron la validacion sintactica.")
+    print("=" * 60)
+    return True
+
 def deploy():
+    if not check_syntax():
+        return
+        
     for f in files_to_sync:
         local_file = os.path.join("c:/Fuentes/eTrade/backend", f)
         remote_file = f"root@{SERVER_IP}:{REMOTE_PATH}/{f}"

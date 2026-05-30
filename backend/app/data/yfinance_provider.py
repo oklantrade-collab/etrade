@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import asyncio
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
@@ -86,8 +87,15 @@ class YFinanceProvider:
             if period is None:
                 period = self.MAX_PERIOD.get(interval, "60d")
 
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period=period, interval=yf_interval)
+            def fetch_history():
+                stock = yf.Ticker(ticker)
+                return stock.history(period=period, interval=yf_interval)
+
+            loop = asyncio.get_event_loop()
+            hist = await asyncio.wait_for(
+                loop.run_in_executor(None, fetch_history),
+                timeout=15.0
+            )
 
             if hist is None or hist.empty:
                 log_warning(MODULE, f"No data returned for {ticker} {interval}")
@@ -151,8 +159,15 @@ class YFinanceProvider:
         pe_ratio, forward_pe, dividend_yield, etc.
         """
         try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
+            def fetch_info():
+                stock = yf.Ticker(ticker)
+                return stock.info
+
+            loop = asyncio.get_event_loop()
+            info = await asyncio.wait_for(
+                loop.run_in_executor(None, fetch_info),
+                timeout=15.0
+            )
 
             return {
                 "ticker":          ticker,
@@ -201,9 +216,19 @@ class YFinanceProvider:
             {regime: 'bull'|'bear'|'sideways', vix: float, spy_price: float}
         """
         try:
-            # Get SPY data
-            spy = yf.Ticker("SPY")
-            spy_hist = spy.history(period="1y", interval="1d")
+            def fetch_spy():
+                spy = yf.Ticker("SPY")
+                spy_hist = spy.history(period="1y", interval="1d")
+                vix_ticker = yf.Ticker("^VIX")
+                vix_hist = vix_ticker.history(period="5d", interval="1d")
+                return spy_hist, vix_hist
+
+            loop = asyncio.get_event_loop()
+            spy_hist, vix_hist = await asyncio.wait_for(
+                loop.run_in_executor(None, fetch_spy),
+                timeout=15.0
+            )
+            
             if spy_hist.empty:
                 return {"regime": "sideways", "vix": 20.0, "spy_price": 0}
 
@@ -215,8 +240,6 @@ class YFinanceProvider:
             ma200 = float(np.mean(spy_close[-200:])) if len(spy_close) >= 200 else spy_price
 
             # Get VIX
-            vix_ticker = yf.Ticker("^VIX")
-            vix_hist = vix_ticker.history(period="5d", interval="1d")
             vix = float(vix_hist["Close"].iloc[-1]) if not vix_hist.empty else 20.0
 
             # Determine regime

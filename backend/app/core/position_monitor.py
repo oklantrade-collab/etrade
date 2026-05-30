@@ -4,6 +4,7 @@ Detecta liquidaciones, SL/TP ejecutados por Binance,
 y cualquier discrepancia entre el bot y el exchange.
 """
 import asyncio
+import pandas as pd
 from datetime import datetime, timezone
 from app.core.memory_store import BOT_STATE
 from app.core.logger import log_info, log_warning, log_error
@@ -46,9 +47,9 @@ async def check_signal_reversal(
     if not position:
         return {'should_exit': False}
 
-    # Propuesta 1: Excluir explícitamente estrategias Swing (Dd11/Dd21) de salidas por reversión
+    # Propuesta 1: Excluir explícitamente estrategias Swing (Dd11/Dd12) de salidas por reversión
     rule_code = (position.get('rule_code') or '').lower()
-    if 'dd11' in rule_code or 'dd21' in rule_code:
+    if 'dd11' in rule_code or 'dd12' in rule_code:
         return {'should_exit': False}
 
     side      = (position.get('side') or '').lower()
@@ -83,17 +84,6 @@ async def check_signal_reversal(
     # 2. Evaluación de P&L para decidir la agresividad
     # Si tenemos ganancia (aunque sea mínima), salimos YA para asegurar.
     if pnl_pct >= 0.05:
-        return {
-            'should_exit': True,
-            'reason': 'early_profit_protection',
-            'pnl_pct': round(pnl_pct, 4),
-            'detail': f'Reversión detectada con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
-        }
-    
-    # 3. Si estamos en pérdida, pero la reversión es FUERTE (MTF > 0.5 en contra),
-    # salimos para evitar el SL completo.
-    is_strong_reversal = abs(current_mtf) > 0.5
-    if pnl_pct < 0 and is_strong_reversal:
         # Validación extra: Esperar si la tendencia corta (EMA3 vs EMA9) sigue a nuestro favor
         if snap:
             ema3 = float(snap.get('ema_3') or 0)
@@ -106,11 +96,14 @@ async def check_signal_reversal(
 
         return {
             'should_exit': True,
-            'reason': 'sl_prevention',
+            'reason': 'early_profit_protection',
             'pnl_pct': round(pnl_pct, 4),
-            'detail': f'Reversión fuerte detectada ({current_mtf:.2f}). Cortando pérdida antes del SL.'
+            'detail': f'Reversión detectada con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
         }
-
+    
+    # 3. Si estamos en pérdida, pero la reversión es FUERTE (MTF > 0.5 en contra),
+    # Bloqueado: No cerramos si el PNL es negativo. Esperamos recuperación por EREP o SLV.
+    # (anteriormente hacía exit para evitar SL completo)
     return {'should_exit': False}
 
 async def check_sl_proximity_alert(
@@ -320,7 +313,7 @@ async def check_sl_with_erep(
         from app.core.crypto_symbols import resolve_crypto_position_quantity
         q1 = resolve_crypto_position_quantity(supabase, position)
         
-        await supabase.table('positions').update({
+        supabase.table('positions').update({
             'erep_phase':   1,
             'erep_p1_price': entry,
             'erep_q1':      q1,
@@ -524,6 +517,10 @@ async def check_open_positions_5m(
     """
     events = []
     
+    # Register heartbeat in safety_manager
+    from app.core.safety_manager import register_heartbeat
+    register_heartbeat('position_monitor')
+    
     # --- PHASE 1: Real Exchange Sync ---
     open_positions_mem = BOT_STATE.positions
     if open_positions_mem:
@@ -563,214 +560,223 @@ async def check_open_positions_5m(
             return events
 
         for pos in pos_res.data:
-            symbol = pos['symbol']
-            norm_symbol = normalize_crypto_symbol(symbol)
-            
-            # 0. DETECCIÓN DE PRECIO (ROBUSTA)
-            # Prioridad 1: Binance Ticker (Live). Prioridad 2: Market Snapshot (DB).
-            price = None
+            symbol = pos.get('symbol', 'UNKNOWN')
+            norm_symbol = normalize_crypto_symbol(symbol) if symbol != 'UNKNOWN' else 'UNKNOWN'
             try:
-                ticker = await provider.get_ticker(norm_symbol)
-                price = float(ticker['price'])
-            except:
-                # Fallback to snapshot price
-                snap_row = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), None)
-                if snap_row:
-                    price = float(snap_row.get('price') or 0)
-            
-            if not price or price <= 0:
-                log_warning(MODULE, f"Skipping monitor for {norm_symbol}: Price not available")
-                continue
-            
-            # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (4 Pasos)
-            # Inyectamos el monitor de protecciones dinámicas (BE, Trailing, Backstop)
-            current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
-
-            # ── EREP Integration ──
-            try:
-                if await check_crypto_erep(norm_symbol, pos, price, current_snap_obj, supabase):
-                    events.append({'symbol': norm_symbol, 'event': 'erep_close'})
-                    continue
-                
-                # Recargar posición local para verificar si EREP ya está activo
-                fresh_pos = supabase.table('positions').select('erep_active', 'erep_phase').eq('id', pos['id']).execute()
-                if fresh_pos.data and (fresh_pos.data[0].get('erep_active') or fresh_pos.data[0].get('erep_phase', 0) > 0):
-                    # Si EREP está activo, salteamos el resto de las evaluaciones normales
-                    continue
-            except Exception as erep_err:
-                log_warning(MODULE, f"Error checking EREP for {norm_symbol}: {erep_err}")
-
-            closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
-            if closed:
-                # Register SL cooldown when closed by protection (SL hit)
-                side = (pos.get('side') or 'long').lower()
-                register_sl_event(norm_symbol, side)
-                events.append({'symbol': norm_symbol, 'event': 'protection_close'})
-                continue
-
-            # 0.1.1 TIME-BASED SL (Corrección #1)
-            # Cierra posiciones zombi que llevan demasiado tiempo sin ganancia
-            time_sl = check_time_based_sl(pos, snap=current_snap_obj)
-            if time_sl.get('should_close'):
-                await _execute_paper_close(pos, price, time_sl['reason'], supabase)
-                register_sl_event(norm_symbol, (pos.get('side') or 'long').lower())
-                events.append({'symbol': norm_symbol, 'event': 'time_based_sl'})
-
-                from app.workers.alerts_service import send_telegram_message
-                await send_telegram_message(
-                    f"🕐 TIME-BASED SL [{norm_symbol}]\n"
-                    f"Tiempo: {time_sl['hours_open']:.1f}h "
-                    f"(máx={time_sl['max_hours']}h)\n"
-                    f"Peak PnL: {time_sl['peak_pnl']:.3f}%\n"
-                    f"Velocidad: {time_sl['velocity']}\n"
-                    f"→ Cerrado para limitar exposición"
-                )
-                log_info(MODULE, time_sl['detail'])
-                continue
-
-            # 0.2 ACTUALIZACIÓN DE P&L PARA DASHBOARD
-            entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
-            side = (pos.get('side') or 'long').lower()
-            sl = float(pos.get('sl_price') or pos.get('stop_loss') or 0)
-            tp_p = float(pos.get('tp_partial_price') or 0)
-            tp_f = float(pos.get('tp_full_price') or pos.get('take_profit') or 0)
-            mtf_score = mtf_scores.get(norm_symbol) or 0
-            
-            is_long = side in ['long', 'buy']
-            
-            from app.core.crypto_symbols import resolve_crypto_position_quantity
-            current_qty = resolve_crypto_position_quantity(supabase, pos)
-            
-            upnl = (price - entry_p) * current_qty if is_long else (entry_p - price) * current_qty
-            
-            try:
-                supabase.table('positions').update({
-                    'current_price': price,
-                    'unrealized_pnl': round(upnl, 4)
-                }).eq('id', pos['id']).execute()
-            except Exception as upd_e:
-                log_warning(MODULE, f"Silent update fail for {symbol}: {upd_e}")
-
-            # 1. STOP LOSS (Full Close) via Dynamic SL Manager
-            from app.strategy.dynamic_sl_manager import evaluate_sl_action
-            from app.core.memory_store import get_memory_df
-            df_4h = get_memory_df(norm_symbol, "4h")
-            df_1d = get_memory_df(norm_symbol, "1d")
-
-            # We use snapshot info mapped to what evaluate_sl_action expects
-            snap_for_sl = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
-
-            sl_action = evaluate_sl_action(
-                position      = pos,
-                current_price = price,
-                snap          = snap_for_sl,
-                df_4h         = df_4h,
-                df_1d         = df_1d,
-                market_type   = 'crypto_futures',
-            )
-
-            if action == 'close_backstop':
-                log_warning(MODULE, f"🔴 BACKSTOP HIT: {norm_symbol} @ {price:.6f}. Routing to EREP Phase 1...")
-                supabase.table('positions').update({
-                    'erep_phase': 1,
-                    'erep_p1_price': entry_p,
-                    'erep_q1': current_qty,
-                    'erep_market_type': 'crypto_futures',
-                }).eq('id', pos['id']).execute()
-                events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
-                continue
-
-            if action == 'trigger_dynamic_sl':
-                log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {norm_symbol} @ {price:.6f}. Routing to EREP Phase 1...")
-                supabase.table('positions').update({
-                    'erep_phase': 1,
-                    'erep_p1_price': entry_p,
-                    'erep_q1': current_qty,
-                    'erep_market_type': 'crypto_futures',
-                }).eq('id', pos['id']).execute()
-                events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
-                continue
-
-            if action == 'activate_dynamic_sl':
-                sl_dynamic_price = sl_action['sl_price']
-                sipv             = sl_action['sipv']
-                
-                log_info(MODULE, f'⚡ ACTIVANDO DYNAMIC SL {norm_symbol}: {sl_dynamic_price:.6f} ({sl_action["reason"]})')
-                
+                # 0. DETECCIÓN DE PRECIO (ROBUSTA)
+                # Prioridad 1: Binance Ticker (Live). Prioridad 2: Market Snapshot (DB).
+                price = None
                 try:
-                    supabase.table('positions').update({
-                        'sl_dynamic_price':    sl_dynamic_price,
-                        'sl_type':             'dynamic',
-                        'sl_activated_at':     datetime.now(timezone.utc).isoformat(),
-                        'sl_activation_reason': sipv.get('pattern', 'sipv'),
-                        'stop_loss':     sl_dynamic_price,
-                    }).eq('id', pos['id']).execute()
+                    ticker = await provider.get_ticker(norm_symbol)
+                    price = float(ticker['price'])
+                except:
+                    # Fallback to snapshot price
+                    snap_row = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), None)
+                    if snap_row:
+                        price = float(snap_row.get('price') or 0)
+                
+                if not price or price <= 0:
+                    log_warning(MODULE, f"Skipping monitor for {norm_symbol}: Price not available")
+                    continue
+                
+                # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (4 Pasos)
+                # Inyectamos el monitor de protecciones dinámicas (BE, Trailing, Backstop)
+                current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
+
+                # ── EREP Integration ──
+                try:
+                    if await check_crypto_erep(norm_symbol, pos, price, current_snap_obj, supabase):
+                        events.append({'symbol': norm_symbol, 'event': 'erep_close'})
+                        continue
                     
-                    from app.strategy.dynamic_sl_manager import send_sl_to_exchange
-                    await send_sl_to_exchange(
-                        symbol      = norm_symbol,
-                        side        = side,
-                        sl_price    = sl_dynamic_price,
-                        quantity    = pos.get('size'),
-                        position_id = pos['id'],
-                        supabase    = supabase,
-                        market_type = 'crypto_futures'
-                    )
-                except Exception as upd_e:
-                    log_warning(MODULE, f"Silent dynamic SL update fail for {symbol}: {upd_e}")
+                    # Recargar posición local para verificar si EREP ya está activo
+                    fresh_pos = supabase.table('positions').select('erep_active', 'erep_phase').eq('id', pos['id']).execute()
+                    if fresh_pos.data and (fresh_pos.data[0].get('erep_active') or fresh_pos.data[0].get('erep_phase', 0) > 0):
+                        # Si EREP está activo, salteamos el resto de las evaluaciones normales
+                        continue
+                except Exception as erep_err:
+                    log_warning(MODULE, f"Error checking EREP for {norm_symbol}: {erep_err}")
 
-            if action == 'update_trailing':
+                closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
+                if closed:
+                    # Register SL cooldown when closed by protection (SL hit)
+                    side = (pos.get('side') or 'long').lower()
+                    register_sl_event(norm_symbol, side)
+                    events.append({'symbol': norm_symbol, 'event': 'protection_close'})
+                    continue
+
+                # 0.1.1 TIME-BASED SL (Corrección #1)
+                # Cierra posiciones zombi que llevan demasiado tiempo sin ganancia.
+                # 🛡️ Solo se evalúa si el P&L es positivo para evitar consolidar pérdidas en posiciones zombie.
+                entry_p_z = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+                is_long_z = (pos.get('side') or 'long').lower() in ['long', 'buy']
+                qty_z = float(pos.get('size') or 0)
+                upnl_z = (price - entry_p_z) * qty_z if is_long_z else (entry_p_z - price) * qty_z
+
+                if upnl_z >= 0:
+                    time_sl = check_time_based_sl(pos, snap=current_snap_obj)
+                    if time_sl.get('should_close'):
+                        await _execute_paper_close(pos, price, time_sl['reason'], supabase)
+                        register_sl_event(norm_symbol, (pos.get('side') or 'long').lower())
+                        events.append({'symbol': norm_symbol, 'event': 'time_based_sl'})
+
+                        from app.workers.alerts_service import send_telegram_message
+                        await send_telegram_message(
+                            f"🕐 TIME-BASED SL [{norm_symbol}]\n"
+                            f"Tiempo: {time_sl['hours_open']:.1f}h "
+                            f"(máx={time_sl['max_hours']}h)\n"
+                            f"Peak PnL: {time_sl['peak_pnl']:.3f}%\n"
+                            f"Velocidad: {time_sl['velocity']}\n"
+                            f"→ Cerrado para limitar exposición"
+                        )
+                        log_info(MODULE, time_sl['detail'])
+                        continue
+
+                # 0.2 ACTUALIZACIÓN DE P&L PARA DASHBOARD
+                entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+                side = (pos.get('side') or 'long').lower()
+                sl = float(pos.get('sl_price') or pos.get('stop_loss') or 0)
+                tp_p = float(pos.get('tp_partial_price') or 0)
+                tp_f = float(pos.get('tp_full_price') or pos.get('take_profit') or 0)
+                mtf_score = mtf_scores.get(norm_symbol) or 0
+                
+                is_long = side in ['long', 'buy']
+                
+                from app.core.crypto_symbols import resolve_crypto_position_quantity
+                current_qty = resolve_crypto_position_quantity(supabase, pos)
+                
+                upnl = (price - entry_p) * current_qty if is_long else (entry_p - price) * current_qty
+                
                 try:
                     supabase.table('positions').update({
-                        'trailing_sl_price': sl_action['sl_price'],
-                        'highest_price_reached': sl_action.get('new_max'),
-                        'lowest_price_reached': sl_action.get('new_min'),
+                        'current_price': price,
+                        'unrealized_pnl': round(upnl, 4)
                     }).eq('id', pos['id']).execute()
                 except Exception as upd_e:
-                    log_warning(MODULE, f"Silent trailing SL update fail for {symbol}: {upd_e}")
+                    log_warning(MODULE, f"Silent update fail for {symbol}: {upd_e}")
 
-            # 2. TAKE PROFIT PARTIAL (50% Close)
-            is_tp_p = (side == 'long' and price >= tp_p) or (side == 'short' and price <= tp_p) if (tp_p > 0 and not pos.get('partial_closed')) else False
-            if is_tp_p:
-                await _execute_paper_partial_close(pos, price, supabase)
-                events.append({'symbol': symbol, 'event': 'tp_partial_hit'})
-                continue
+                # 1. STOP LOSS (Full Close) via Dynamic SL Manager
+                from app.strategy.dynamic_sl_manager import evaluate_sl_action
+                from app.core.memory_store import get_memory_df
+                df_4h = get_memory_df(norm_symbol, "4h")
+                df_1d = get_memory_df(norm_symbol, "1d")
 
-            # 3. TAKE PROFIT FULL (Full Close)
-            is_tp_f = (side == 'long' and price >= tp_f) or (side == 'short' and price <= tp_f) if tp_f > 0 else False
-            if is_tp_f:
-                await _execute_paper_close(pos, price, 'tp_full', supabase)
-                events.append({'symbol': symbol, 'event': 'tp_full_hit'})
-                continue
+                # We use snapshot info mapped to what evaluate_sl_action expects
+                snap_for_sl = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
 
-            # 4. DYNAMIC HOLDING MAX (Based on market velocity / ADX)
-            try:
-                from app.core.parameter_guard import get_velocity_config
-                # Get ADX from snapshot
-                snap_adx = {r['symbol'].replace("/", ""): float(r.get('adx') or 25)
-                            for r in snap_res.data} if snap_res.data else {}
-                current_adx = snap_adx.get(norm_symbol, 25)
-                vel_config = get_velocity_config(current_adx)
-                holding_max = vel_config['holding_max']
+                sl_action = evaluate_sl_action(
+                    position      = pos,
+                    current_price = price,
+                    snap          = snap_for_sl,
+                    df_4h         = df_4h,
+                    df_1d         = df_1d,
+                    market_type   = 'crypto_futures',
+                )
                 
-                # Bypassear holding max para estrategias swing/4h/1d
-                rule_code = str(pos.get('rule_code') or pos.get('rule_entry') or '').lower()
-                is_swing = any(x in rule_code for x in ['_4h', '_1d', '31a', '31b', '41'])
-                
-                if is_swing:
-                    # Las estrategias Swing no se cierran por tiempo en velas de 5m
-                    pass
-                else:
-                    # Calculate bars held
-                    opened_at = pos.get('opened_at')
-                    if opened_at:
-                        from datetime import datetime, timezone
-                        opened_dt = datetime.fromisoformat(opened_at.replace('Z', '+00:00'))
-                        now_dt = datetime.now(timezone.utc)
-                        elapsed_min = (now_dt - opened_dt).total_seconds() / 60
-                        bars_held = int(elapsed_min / 5)  # 5m bars
+                action = sl_action.get('action')
+
+                if action == 'close_backstop':
+                    log_warning(MODULE, f"🔴 BACKSTOP HIT: {norm_symbol} @ {price:.6f}. Routing to EREP Phase 1...")
+                    supabase.table('positions').update({
+                        'erep_phase': 1,
+                        'erep_p1_price': entry_p,
+                        'erep_q1': current_qty,
+                        'erep_market_type': 'crypto_futures',
+                    }).eq('id', pos['id']).execute()
+                    events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
+                    continue
+
+                if action == 'trigger_dynamic_sl':
+                    log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {norm_symbol} @ {price:.6f}. Routing to EREP Phase 1...")
+                    supabase.table('positions').update({
+                        'erep_phase': 1,
+                        'erep_p1_price': entry_p,
+                        'erep_q1': current_qty,
+                        'erep_market_type': 'crypto_futures',
+                    }).eq('id', pos['id']).execute()
+                    events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
+                    continue
+
+                if action == 'activate_dynamic_sl':
+                    sl_dynamic_price = sl_action['sl_price']
+                    sipv             = sl_action['sipv']
+                    
+                    log_info(MODULE, f'⚡ ACTIVANDO DYNAMIC SL {norm_symbol}: {sl_dynamic_price:.6f} ({sl_action["reason"]})')
+                    
+                    try:
+                        supabase.table('positions').update({
+                            'sl_dynamic_price':    sl_dynamic_price,
+                            'sl_type':             'dynamic',
+                            'sl_activated_at':     datetime.now(timezone.utc).isoformat(),
+                            'sl_activation_reason': sipv.get('pattern', 'sipv'),
+                            'stop_loss':     sl_dynamic_price,
+                        }).eq('id', pos['id']).execute()
                         
-                        if bars_held >= holding_max:
+                        from app.strategy.dynamic_sl_manager import send_sl_to_exchange
+                        await send_sl_to_exchange(
+                            symbol      = norm_symbol,
+                            side        = side,
+                            sl_price    = sl_dynamic_price,
+                            quantity    = pos.get('size'),
+                            position_id = pos['id'],
+                            supabase    = supabase,
+                            market_type = 'crypto_futures'
+                        )
+                    except Exception as upd_e:
+                        log_warning(MODULE, f"Silent dynamic SL update fail for {symbol}: {upd_e}")
+
+                if action == 'update_trailing':
+                    try:
+                        supabase.table('positions').update({
+                            'trailing_sl_price': sl_action['sl_price'],
+                            'highest_price_reached': sl_action.get('new_max'),
+                            'lowest_price_reached': sl_action.get('new_min'),
+                        }).eq('id', pos['id']).execute()
+                    except Exception as upd_e:
+                        log_warning(MODULE, f"Silent trailing SL update fail for {symbol}: {upd_e}")
+
+                # 2. TAKE PROFIT PARTIAL (50% Close)
+                is_tp_p = (side == 'long' and price >= tp_p) or (side == 'short' and price <= tp_p) if (tp_p > 0 and not pos.get('partial_closed')) else False
+                if is_tp_p:
+                    await _execute_paper_partial_close(pos, price, supabase)
+                    events.append({'symbol': symbol, 'event': 'tp_partial_hit'})
+                    continue
+
+                # 3. TAKE PROFIT FULL (Full Close)
+                is_tp_f = (side == 'long' and price >= tp_f) or (side == 'short' and price <= tp_f) if tp_f > 0 else False
+                if is_tp_f:
+                    await _execute_paper_close(pos, price, 'tp_full', supabase)
+                    events.append({'symbol': symbol, 'event': 'tp_full_hit'})
+                    continue
+
+                # 4. DYNAMIC HOLDING MAX (Based on market velocity / ADX)
+                try:
+                    from app.core.parameter_guard import get_velocity_config
+                    # Get ADX from snapshot
+                    snap_adx = {r['symbol'].replace("/", ""): float(r.get('adx') or 25)
+                                for r in snap_res.data} if snap_res.data else {}
+                    current_adx = snap_adx.get(norm_symbol, 25)
+                    vel_config = get_velocity_config(current_adx)
+                    holding_max = vel_config['holding_max']
+                    
+                    # Bypassear holding max para estrategias swing/4h/1d
+                    rule_code = str(pos.get('rule_code') or pos.get('rule_entry') or '').lower()
+                    is_swing = any(x in rule_code for x in ['_4h', '_1d', '31a', '31b', '41'])
+                    
+                    if is_swing:
+                        # Las estrategias Swing no se cierran por tiempo en velas de 5m
+                        pass
+                    else:
+                        # Calculate bars held
+                        opened_at = pos.get('opened_at')
+                        if opened_at:
+                            from datetime import datetime, timezone
+                            opened_dt = datetime.fromisoformat(opened_at.replace('Z', '+00:00'))
+                            now_dt = datetime.now(timezone.utc)
+                            elapsed_min = (now_dt - opened_dt).total_seconds() / 60
+                            bars_held = int(elapsed_min / 5)  # 5m bars
+                            
+                            # Calcular PNL para evitar cierres por tiempo en pérdida
                             entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
                             if entry_p > 0:
                                 if side == 'long':
@@ -779,51 +785,55 @@ async def check_open_positions_5m(
                                     hold_pnl = (entry_p - price) / entry_p * 100
                             else:
                                 hold_pnl = 0
-                            
-                            close_reason = f'hold_{vel_config["velocity"][:10]}'
-                            await _execute_paper_close(pos, price, close_reason, supabase)
-                            events.append({'symbol': symbol, 'event': 'max_holding_close'})
-                            
-                            from app.workers.alerts_service import send_telegram_message
-                            await send_telegram_message(
-                                f"⏱️ CIERRE POR TIEMPO [{norm_symbol}]\n"
-                                f"Velocidad: {vel_config['velocity'].upper()}\n"
-                                f"Holding: {bars_held} velas "
-                                f"(máx: {holding_max})\n"
-                                f"P&L: {hold_pnl:.2f}%"
-                            )
-                            log_info(MODULE, f"Max holding close for {norm_symbol}: {bars_held}/{holding_max} bars ({vel_config['velocity']})")
-                            continue
-            except Exception as vel_e:
-                log_warning(MODULE, f"Velocity holding check error for {norm_symbol}: {vel_e}")
 
-            # 5. SL PROXIMITY ALERT (Inteligente)
-            await check_sl_proximity_alert(
-                symbol               = norm_symbol,
-                current_price        = price,
-                sl_price             = sl,
-                danger_threshold_pct = 3.0,
-                escalation_drop_pct  = 1.0,
-                pos_id               = str(pos.get('id', ''))
-            )
+                            if bars_held >= holding_max and hold_pnl >= 0:
+                                close_reason = f'hold_{vel_config["velocity"][:10]}'
+                                await _execute_paper_close(pos, price, close_reason, supabase)
+                                events.append({'symbol': symbol, 'event': 'max_holding_close'})
+                                
+                                from app.workers.alerts_service import send_telegram_message
+                                await send_telegram_message(
+                                    f"⏱️ CIERRE POR TIEMPO [{norm_symbol}]\n"
+                                    f"Velocidad: {vel_config['velocity'].upper()}\n"
+                                    f"Holding: {bars_held} velas "
+                                    f"(máx: {holding_max})\n"
+                                    f"P&L: {hold_pnl:.2f}%"
+                                )
+                                log_info(MODULE, f"Max holding close for {norm_symbol}: {bars_held}/{holding_max} bars ({vel_config['velocity']})")
+                                continue
+                except Exception as vel_e:
+                    log_warning(MODULE, f"Velocity holding check error for {norm_symbol}: {vel_e}")
 
-            # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
-            # Evalúa si la tendencia giró para salir antes del SL o asegurar TP.
-            rev_res = await check_signal_reversal(pos, mtf_score, price, config, snap=current_snap_obj)
-            if rev_res.get('should_exit'):
-                reason = rev_res.get('reason', 'signal_reversal')
-                await _execute_paper_close(pos, price, reason, supabase)
-                events.append({'symbol': symbol, 'event': 'signal_reversal_exit'})
-                
-                from app.workers.alerts_service import send_telegram_message
-                await send_telegram_message(
-                    f"⚠️ SALIDA ANTICIPADA [{norm_symbol}]\n"
-                    f"Razón: {reason.replace('_', ' ').upper()}\n"
-                    f"P&L: {upnl / (entry_p * float(pos.get('size') or 1)) * 100:.2f}%\n"
-                    f"Detalle: {rev_res.get('detail')}"
+                # 5. SL PROXIMITY ALERT (Inteligente)
+                await check_sl_proximity_alert(
+                    symbol               = norm_symbol,
+                    current_price        = price,
+                    sl_price             = sl,
+                    danger_threshold_pct = 3.0,
+                    escalation_drop_pct  = 1.0,
+                    pos_id               = str(pos.get('id', ''))
                 )
+
+                # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
+                # Evalúa si la tendencia giró para salir antes del SL o asegurar TP.
+                rev_res = await check_signal_reversal(pos, mtf_score, price, config, snap=current_snap_obj)
+                if rev_res.get('should_exit'):
+                    reason = rev_res.get('reason', 'signal_reversal')
+                    await _execute_paper_close(pos, price, reason, supabase)
+                    events.append({'symbol': symbol, 'event': 'signal_reversal_exit'})
+                    
+                    from app.workers.alerts_service import send_telegram_message
+                    await send_telegram_message(
+                        f"⚠️ SALIDA ANTICIPADA [{norm_symbol}]\n"
+                        f"Razón: {reason.replace('_', ' ').upper()}\n"
+                        f"P&L: {upnl / (entry_p * float(pos.get('size') or 1)) * 100:.2f}%\n"
+                        f"Detalle: {rev_res.get('detail')}"
+                    )
+                    continue
+            except Exception as pos_err:
+                import traceback
+                log_error(MODULE, f"Error monitoring position ID {pos.get('id')} ({symbol}): {pos_err}\n{traceback.format_exc()}")
                 continue
-                
     except Exception as e:
         log_error(MODULE, f"Error in paper monitoring: {e}")
 
@@ -1278,6 +1288,44 @@ async def _execute_paper_close(pos, price, reason, supabase):
     # Si hubo cierre parcial previo, sumar sus USD
     total_pnl = pnl_usd + float(pos.get('partial_pnl_usd', 0))
 
+    # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS 🛡️
+    # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp)
+    if total_pnl < 0 and 'tp' not in str(reason).lower():
+        log_warning(MODULE, f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre para {symbol} ({reason}) con P&L negativo: ${total_pnl:.4f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
+        
+        # Suspendemos el Stop Loss físico y enrutamos de forma segura a EREP Phase 2
+        try:
+            supabase.table('positions').update({
+                'sl_type': 'suspended_negative_protection',
+                'sl_price': 0,
+                'stop_loss': 0,
+                'sl_dynamic_price': 0,
+                'erep_active': True,
+                'erep_phase': 2,
+                'erep_p1_price': entry,
+                'erep_q1': qty,
+                'erep_market_type': 'crypto_futures',
+                'erep_cycles_elapsed': 0
+            }).eq('id', pos['id']).execute()
+            
+            # ActualizarBOT_STATE local para que no siga evaluando SL normales
+            from app.core.memory_store import BOT_STATE
+            if pos['id'] in BOT_STATE.positions:
+                BOT_STATE.positions[pos['id']].update({
+                    'sl_type': 'suspended_negative_protection',
+                    'sl_price': 0,
+                    'stop_loss': 0,
+                    'sl_dynamic_price': 0,
+                    'erep_active': True,
+                    'erep_phase': 2,
+                    'erep_p1_price': entry,
+                    'erep_q1': qty,
+                    'erep_cycles_elapsed': 0
+                })
+        except Exception as upd_e:
+            log_warning(MODULE, f"Error actualizando estado anti-loss para {symbol}: {upd_e}")
+        return False
+
     supabase.table('positions').update({
         'status': 'closed',
         'close_reason': reason[:20],  # Truncate to 20 chars to avoid Postgres varchar(20) 22001 error
@@ -1414,10 +1462,10 @@ async def _handle_unexpected_close(
     }
 
     if pos_id:
-        await supabase.table('positions').update(update_fields).eq('id', pos_id).execute()
+        supabase.table('positions').update(update_fields).eq('id', pos_id).execute()
         BOT_STATE.positions.pop(pos_id, None)
     else:
-        await supabase.table('positions').update(update_fields).eq('symbol', symbol).eq('status', 'open').execute()
+        supabase.table('positions').update(update_fields).eq('symbol', symbol).eq('status', 'open').execute()
         BOT_STATE.positions.pop(symbol, None)
 
     # ── REGISTRAR PN EN CAPITAL ACUMULADO ──

@@ -114,6 +114,22 @@ def detect_ema_crosses(df: pd.DataFrame) -> pd.DataFrame:
     if 'ema4' in df.columns and 'basis' in df.columns:
         df['ema4_cross_above_basis'] = (df['ema4'] > df['basis']) & (df['ema4'].shift(1) <= df['basis'].shift(1))
         df['ema4_cross_below_basis'] = (df['ema4'] < df['basis']) & (df['ema4'].shift(1) >= df['basis'].shift(1))
+        
+    if 'ema1' in df.columns and 'ema2' in df.columns:
+        # ema1=3, ema2=9
+        df['ema3_cross_ema9_up'] = (df['ema1'] > df['ema2']) & (df['ema1'].shift(1) <= df['ema2'].shift(1))
+        
+        # Calculate age of the cross (bars since last cross up)
+        ages = []
+        cur_age = 999
+        for cross in df['ema3_cross_ema9_up']:
+            if cross:
+                cur_age = 0
+            else:
+                cur_age += 1 if cur_age < 999 else 0
+            ages.append(cur_age)
+        df['ema3_cross_ema9_age'] = ages
+        
     return df
 
 def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame:

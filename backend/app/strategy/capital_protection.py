@@ -19,8 +19,8 @@ from app.core.logger import log_info, log_error
 # ── Configuración por mercado ─────────────────
 PROTECTION_CONFIG = {
     'crypto_futures': {
-        'be_trigger_pct':    0.003,  # +0.3%
-        'be_buffer_pct':     0.0005, # +0.05%
+        'be_trigger_pct':    0.006,  # +0.6%
+        'be_buffer_pct':     0.001, # +0.1%
         'trailing_levels': [
             # (trigger_pct, new_sl_pct)
             (0.003,  0.0005),  # +0.3% → SL a +0.05%
@@ -987,6 +987,7 @@ def evaluate_trailing_stop(
 def evaluate_break_even(
     state:         ProtectionState,
     current_price: float,
+    df_15m:        pd.DataFrame = None,
 ) -> dict:
     """
     REGLA 1: Break-Even Automático.
@@ -994,11 +995,38 @@ def evaluate_break_even(
     """
     if state.be_activated:
         return {'action': 'none'}
+        
+    is_long = state.side.lower() in ('long', 'buy')
+    
+    # --- LÓGICA DE SUSPENSIÓN POR MOMENTUM EXPLOSIVO ---
+    if df_15m is not None and len(df_15m) > 0:
+        c0 = df_15m.iloc[-1]
+        c0_high = float(c0.get('high', 0))
+        c0_low = float(c0.get('low', 0))
+        ema3 = float(c0.get('ema3', 0))
+        ema9 = float(c0.get('ema9', 0))
+        bb_upper = float(c0.get('upper_2', 0))
+        bb_lower = float(c0.get('lower_2', 0))
+        bb_expanding = bool(c0.get('bb_expanding', False))
+        pine_signal = str(c0.get('pinescript_signal', ''))
+        
+        if is_long:
+            momentum_fuerte = (ema3 > ema9) if (ema3 > 0 and ema9 > 0) else False
+            condicion_explosiva = (c0_high >= bb_upper) or bb_expanding or (pine_signal == 'Sell') if bb_upper > 0 else False
+            
+            if momentum_fuerte and condicion_explosiva:
+                return {'action': 'none'} # Suspendido por explosión alcista
+        else:
+            momentum_fuerte = (ema3 < ema9) if (ema3 > 0 and ema9 > 0) else False
+            condicion_explosiva = (c0_low <= bb_lower) or bb_expanding or (pine_signal == 'Buy') if bb_lower > 0 else False
+            
+            if momentum_fuerte and condicion_explosiva:
+                return {'action': 'none'} # Suspendido por explosión bajista
+    # ---------------------------------------------------
 
     cfg  = PROTECTION_CONFIG.get(state.market_type, {})
     entry = state.entry_price
     side  = state.side.lower()
-    is_long = side in ('long', 'buy')
 
     pnl = calculate_pnl(entry, current_price, side, state.symbol, state.market_type)
 
@@ -1194,7 +1222,7 @@ def evaluate_all_protections(
     actions = []
 
     # 1. Break-Even
-    be = evaluate_break_even(state, current_price)
+    be = evaluate_break_even(state, current_price, df_15m=df_15m)
     if be['action'] == 'activate_be':
         actions.append({'priority': 1, 'type': 'break_even', **be})
 

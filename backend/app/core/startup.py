@@ -77,17 +77,40 @@ async def warm_up(symbols: list[str], timeframes: list[str], provider: BinanceCr
     # Ensure current config is loaded for indicator calculations
     # ... logic for config load ...
 
+    sem = asyncio.Semaphore(1)  # Límite estricto secuencial para evitar baneos en testnet
+
+    async def _bounded_warmup(sym: str, timeframe: str):
+        async with sem:
+            await _warm_up_symbol_tf(sym, timeframe, provider)
+            await asyncio.sleep(1.0)  # Delay agresivo de 1 segundo entre cada petición
+
     for symbol in symbols:
         for tf in timeframes:
-            tasks.append(_warm_up_symbol_tf(symbol, tf, provider))
+            tasks.append(_bounded_warmup(symbol, tf))
     
-    await asyncio.gather(*tasks)
+    # gather_with_concurrency
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Verificar si hubo excepciones importantes
+    banned = False
+    for res in results:
+        if isinstance(res, Exception):
+            if "banned" in str(res).lower() or "IP_BANNED" in str(res):
+                banned = True
+            else:
+                log_error(MODULE, f"Error en warmup (excepción capturada): {res}")
+                
+    if banned:
+        log_error(MODULE, f"Startup warmup abortado: La IP está baneada en Binance hasta {BinanceCryptoProvider._ban_until_ts}.")
     
     elapsed = (datetime.now() - start_time).total_seconds()
     log_info(MODULE, f"Phase 2 Complete: HOT indicators reconstructed in {elapsed:.2f}s.")
 
 async def _warm_up_symbol_tf(symbol: str, tf: str, provider: BinanceCryptoProvider):
     try:
+        if BinanceCryptoProvider.is_banned():
+            raise Exception("IP_BANNED")
+            
         # Fetch data for calculation
         df = await provider.get_ohlcv(symbol, tf, limit=300)
         # Use the definitive v4 pipeline
@@ -95,6 +118,8 @@ async def _warm_up_symbol_tf(symbol: str, tf: str, provider: BinanceCryptoProvid
         df = calculate_all_indicators(df, BOT_STATE.config_cache)
         update_memory_df(symbol, tf, df)
     except Exception as e:
+        if "banned" in str(e).lower() or "ip_banned" in str(e).lower():
+            raise e
         log_error(MODULE, f"Error warming up {symbol} {tf}: {e}")
 
 if __name__ == "__main__":

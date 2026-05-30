@@ -166,13 +166,28 @@ def detect_p2_entry_signal(
 
     is_long = side in ('long', 'buy')
 
-    # ── SEÑAL A: SIPV (vela del 15m) ──────────
+    # ── SEÑAL A: SIPV (vela del 15m) & Bollinger / Fibonacci extremas ──────────
     if df_15m is not None and len(df_15m) >= 2:
+        # Asegurar cálculo de bandas de Bollinger si no están en el DataFrame
+        if 'bb_lower' not in df_15m.columns or 'bb_upper' not in df_15m.columns:
+            try:
+                from ta.volatility import BollingerBands
+                col_close = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
+                if col_close:
+                    closes = pd.to_numeric(df_15m[col_close], errors='coerce').fillna(method='ffill')
+                    bb = BollingerBands(close=closes, window=20, window_dev=2)
+                    df_15m['bb_lower'] = bb.bollinger_lband()
+                    df_15m['bb_upper'] = bb.bollinger_hband()
+            except Exception as e:
+                log_error('EREP_BOLLINGER', f"Error calculando Bollinger Bands locales: {e}")
+
         last_closed = df_15m.iloc[-2]
         o = float(last_closed.get('open',  last_closed.get('o', 0)))
         c = float(last_closed.get('close', last_closed.get('c', 0)))
         h = float(last_closed.get('high',  last_closed.get('h', 0)))
         l = float(last_closed.get('low',   last_closed.get('l', 0)))
+        bb_lower = float(last_closed.get('bb_lower', 0))
+        bb_upper = float(last_closed.get('bb_upper', 0))
 
         if h > l and o > 0:
             body     = c - o
@@ -193,7 +208,42 @@ def detect_p2_entry_signal(
                         'reason':   f'Vela SELL 15m: cuerpo {body_pct*100:.1f}%',
                     })
 
-    # ── SEÑAL B: Fibonacci extremo ─────────────
+        # LONG: Cierre por debajo o igual a Soporte 5 (Fibonacci)
+        if is_long:
+            lower_5 = float(snap.get('lower_5', 0))
+            if lower_5 > 0 and c <= lower_5:
+                signals_found.append({
+                    'type':     'fib_extreme_low_5',
+                    'strength': 0.85,
+                    'reason':   f'Cierre de vela 15m (${c:.4f}) ≤ lower_5 (${lower_5:.4f})',
+                })
+            
+            # LONG: (open < bb_lower) AND (close < bb_lower) (Rompimiento Extremo Bollinger)
+            if bb_lower > 0 and o < bb_lower and c < bb_lower:
+                signals_found.append({
+                    'type':     'bollinger_breakout_low',
+                    'strength': 0.95,
+                    'reason':   f'Vela 15m completamente bajo Bollinger: open (${o:.4f}) < BB_L (${bb_lower:.4f}) y close (${c:.4f}) < BB_L',
+                })
+        # SHORT: Cierre por encima o igual a Resistencia 5 (Fibonacci)
+        else:
+            upper_5 = float(snap.get('upper_5', 0))
+            if upper_5 > 0 and c >= upper_5:
+                signals_found.append({
+                    'type':     'fib_extreme_high_5',
+                    'strength': 0.85,
+                    'reason':   f'Cierre de vela 15m (${c:.4f}) ≥ upper_5 (${upper_5:.4f})',
+                })
+            
+            # SHORT: (open > bb_upper) AND (close > bb_upper) (Rompimiento Extremo Bollinger)
+            if bb_upper > 0 and o > bb_upper and c > bb_upper:
+                signals_found.append({
+                    'type':     'bollinger_breakout_high',
+                    'strength': 0.95,
+                    'reason':   f'Vela 15m completamente sobre Bollinger: open (${o:.4f}) > BB_U (${bb_upper:.4f}) y close (${c:.4f}) > BB_U',
+                })
+
+    # ── SEÑAL B: Fibonacci extremo (Existente lower_6 / upper_6) ─────────────
     price = float(snap.get('price', 0))
     if is_long:
         lower_6 = float(snap.get('lower_6', 0))
@@ -201,7 +251,7 @@ def detect_p2_entry_signal(
             signals_found.append({
                 'type':     'fib_extreme_low',
                 'strength': 0.9,
-                'reason':   f'Precio ${price:.4f} ≤ lower_6 ${lower_6:.4f} (zona soporte extremo)',
+                'reason':   f'Precio ${price:.4f} ≤ lower_6 ${lower_6:.4f} (soporte extremo)',
             })
     else:
         upper_6 = float(snap.get('upper_6', 0))
@@ -209,7 +259,7 @@ def detect_p2_entry_signal(
             signals_found.append({
                 'type':     'fib_extreme_high',
                 'strength': 0.9,
-                'reason':   f'Precio ${price:.4f} ≥ upper_6 ${upper_6:.4f} (zona resistencia extrema)',
+                'reason':   f'Precio ${price:.4f} ≥ upper_6 ${upper_6:.4f} (resistencia extrema)',
             })
 
     # ── SEÑAL C: RSI extremo ───────────────────
@@ -218,13 +268,13 @@ def detect_p2_entry_signal(
         signals_found.append({
             'type':     'rsi_oversold',
             'strength': 1.0,
-            'reason':   f'RSI={rsi:.1f} ≤ {rsi_oversold} (sobreventa extrema)',
+            'reason':   f'RSI={rsi:.1f} ≤ {rsi_oversold} (sobreventa)',
         })
     elif not is_long and rsi >= (100 - rsi_oversold):
         signals_found.append({
             'type':     'rsi_overbought',
             'strength': 1.0,
-            'reason':   f'RSI={rsi:.1f} ≥ {100-rsi_oversold} (sobrecompra extrema)',
+            'reason':   f'RSI={rsi:.1f} ≥ {100-rsi_oversold} (sobrecompra)',
         })
 
     has_signal = len(signals_found) > 0
@@ -418,7 +468,7 @@ def evaluate_erep_phase(
     cfg        = EREP_CONFIG.get(market_type, {})
     timeout_m  = int(cfg.get('timeout_cycles', 4))
     cycles     = int(position.get('erep_cycles_elapsed', 0))
-    p3_avg     = float(position.get('erep_p3_avg', 0))
+    p3_avg     = float(position.get('erep_p3_avg') or 0)
 
     fast_p = int(cfg.get('ema_period_fast', 3))
     slow_p = int(cfg.get('ema_period_slow', 9))
@@ -436,7 +486,7 @@ def evaluate_erep_phase(
         )
 
         if check.get('wait_natural'):
-            p1 = float(position.get('erep_p1_price', 0))
+            p1 = float(position.get('erep_p1_price') or 0)
             if p1 > 0:
                 recovered = (is_long and current_price >= p1) or (not is_long and current_price <= p1)
                 if recovered:
@@ -453,6 +503,13 @@ def evaluate_erep_phase(
             }
 
         if not check['can_activate']:
+            if check.get('loss_pct', 0) > 0:
+                # 🛡️ Si el P&L es negativo, NO cerramos. Forzamos activación de EREP Fase 2 para promedio inteligente P2.
+                return {
+                    'action':  'activate_phase2',
+                    'reason': f'🔄 EREP FORZADO POR PNL NEGATIVO ({check["loss_pct"]:.2f}%): Evitando cierre en pérdida. Entrando a fase 2 para buscar rebote.',
+                    'conditions': check['conditions'],
+                }
             return {
                 'action':   'close_sl',
                 'reason': f'EREP no puede activarse: {check["reason"]}. Cerrar por SL normal.',
@@ -467,15 +524,9 @@ def evaluate_erep_phase(
 
     # ── FASE 2: Esperando señal para P2 ───────
     elif phase == 2:
-        if cycles >= timeout_m:
-            return {
-                'action':  'close_all',
-                'reason': f'TIMEOUT fase 2: {cycles}/{timeout_m} ciclos sin señal P2. Cerrar todo.',
-                'close_type': 'timeout_phase2',
-            }
-
-        p1 = float(position.get('erep_p1_price', 0))
+        p1 = float(position.get('erep_p1_price') or 0)
         max_loss = float(cfg.get('max_loss_pct_to_activate', 6.0)) * 1.5
+        current_loss = 0.0
 
         if p1 > 0:
             if is_long:
@@ -483,12 +534,29 @@ def evaluate_erep_phase(
             else:
                 current_loss = (current_price - p1) / p1 * 100
 
-            if current_loss > max_loss:
+        if cycles >= timeout_m:
+            if current_loss > 0:
+                # 🛡️ Evitar el cierre en pérdida. Aumentamos los ciclos de espera.
                 return {
-                    'action':  'close_all',
-                    'reason': f'PÉRDIDA MÁXIMA EREP: {current_loss:.2f}% > {max_loss:.1f}%. Cerrar todo.',
-                    'close_type': 'max_loss_exceeded',
+                    'action': 'wait_p2_signal',
+                    'cycles': cycles,
+                    'max':    timeout_m + 4,
+                    'reason': f'🛡️ TIMEOUT EVITADO POR PNL NEGATIVO: Esperando señal P2 (ciclo {cycles}/{timeout_m + 4}).',
                 }
+            return {
+                'action':  'close_all',
+                'reason': f'TIMEOUT fase 2: {cycles}/{timeout_m} ciclos sin señal P2. Cerrar todo.',
+                'close_type': 'timeout_phase2',
+            }
+
+        if p1 > 0 and current_loss > max_loss:
+            # 🛡️ Si es pérdida extrema, preferimos mantenerla abierta en Modo Recuperación Virtual en vez de consolidar pérdida
+            return {
+                'action': 'wait_p2_signal',
+                'cycles': cycles,
+                'max':    timeout_m,
+                'reason': f'🛡️ PÉRDIDA MÁXIMA DETECTADA ({current_loss:.2f}%): Bloqueando cierre en pérdida extrema. Esperando señal P2.',
+            }
 
         signal = detect_p2_entry_signal(
             df_15m, snap, side, '', market_type
@@ -517,7 +585,23 @@ def evaluate_erep_phase(
                 'close_type': 'error',
             }
 
+        # Calcular pérdida actual para evitar cierre
+        p1 = float(position.get('erep_p1_price') or position.get('entry_price') or 0)
+        current_loss = 0.0
+        if p1 > 0:
+            current_loss = (p1 - current_price) / p1 * 100 if is_long else (current_price - p1) / p1 * 100
+
         if cycles >= timeout_m * 2:
+            if current_loss > 0:
+                # 🛡️ Evitar cierre por timeout
+                return {
+                    'action':   'wait_p3',
+                    'p3_avg':   p3_avg,
+                    'distance': round(abs(current_price - p3_avg), 6),
+                    'cycles':   cycles,
+                    'ema_ok':   True,
+                    'reason':   f'🛡️ TIMEOUT FASE 3 EVITADO POR PNL NEGATIVO: Esperando P3 (ciclo {cycles}).',
+                }
             return {
                 'action':  'close_all',
                 'reason': f'TIMEOUT fase 3: {cycles} ciclos. Cerrar todo.',
@@ -553,6 +637,16 @@ def evaluate_erep_phase(
         ema_unfavorable = (is_long and not is_ema_fast_above) or (not is_long and is_ema_fast_above)
 
         if ema_unfavorable:
+            if current_loss > 0:
+                # 🛡️ Evitar cierre por EMA desfavorable
+                return {
+                    'action':   'wait_p3',
+                    'p3_avg':   p3_avg,
+                    'distance': round(abs(current_price - p3_avg), 6),
+                    'cycles':   cycles,
+                    'ema_ok':   False,
+                    'reason':   f'🛡️ EMA DESFAVORABLE EN FASE 3: Bloqueando cierre en pérdida. Esperando P3 (ciclo {cycles}).',
+                }
             return {
                 'action':  'close_all',
                 'reason': f'EMA desfavorable en fase 3: precio {current_price:.4f} no llegó a P3 {p3_avg:.4f}. Cerrar con pérdida controlada.',
@@ -679,15 +773,20 @@ def calculate_q2_smart(
     p2_max_f = float(cfg.get('p2_max_factor', 3.0))
 
     try:
-        from app.core.supabase_client import get_risk_config
-        risk_cfg = get_risk_config()
-        max_positions_val = float(risk_cfg.get('max_positions_per_symbol', 4.0))
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        cfg_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        if cfg_res.data and 'regime_params' in cfg_res.data:
+            params = cfg_res.data['regime_params'] or {}
+            max_positions_val = float(params.get('erep_max_purchases', 5.0))
+        else:
+            max_positions_val = 5.0
     except Exception:
-        max_positions_val = 4.0
+        max_positions_val = 5.0
 
     if market_type == 'stocks_spot':
         p2_min_f = 2.0
-        p2_max_f = 3.0
+        p2_max_f = max_positions_val
     elif market_type in ('crypto_futures', 'forex_futures'):
         p2_max_f = max_positions_val
 
@@ -801,14 +900,15 @@ async def execute_erep_action(
             'erep_q1':              p1_size,
             'erep_activated_at':    datetime.now(timezone.utc).isoformat(),
             'erep_cycles_elapsed':  0,
-            'sl_type':              'erep_suspended',
         }
+        if table != 'forex_positions':
+            update_fields['sl_type'] = 'erep_suspended'
         if 'stop_loss_price' in position:
             update_fields['stop_loss_price'] = 0
         if 'stop_loss' in position:
             update_fields['stop_loss'] = 0
 
-        await supabase.table(table).update(update_fields).eq('id', pos_id).execute()
+        supabase.table(table).update(update_fields).eq('id', pos_id).execute()
 
         log_info('EREP', f'🟢 EREP ACTIVADO [{symbol}] ({side.upper()}): Fase 1→2. P1={p1_price:.4f} size={p1_size}. Esperando señal para P2...')
 
@@ -822,8 +922,8 @@ async def execute_erep_action(
 
     # ── COMPRAR P2 ────────────────────────────
     elif act == 'buy_p2':
-        p1_price = float(position.get('erep_p1_price', 0))
-        p1_size  = float(position.get('erep_p1_size', position.get('erep_q1', 0.01)))
+        p1_price = float(position.get('erep_p1_price') or 0)
+        p1_size  = float(position.get('erep_p1_size') or position.get('erep_q1') or 0.01)
         
         # Intentar cálculo inteligente de Q2 con Fibonacci
         q2_data = calculate_q2_smart(
@@ -868,7 +968,7 @@ async def execute_erep_action(
             return {'executed': 'error_p2'}
 
         # Actualizar la posición original
-        await supabase.table(table).update({
+        supabase.table(table).update({
             'erep_phase':             3,
             'erep_p2_price':          current_price,
             'erep_p2_size':           p2_size,
@@ -924,7 +1024,7 @@ async def execute_erep_action(
             log_error('EREP', f'Error P1 close: {e}')
 
         # Limpiar campos EREP en base de datos
-        await supabase.table(table).update({
+        supabase.table(table).update({
             'erep_active':       False,
             'erep_phase':        0,
             'erep_close_reason': close_type,
@@ -957,7 +1057,7 @@ async def execute_erep_action(
     # ── INCREMENTAR CICLOS ────────────────────
     elif act in ('wait_p2_signal', 'wait_p3', 'wait_natural', 'increment_cycle'):
         cycles = int(position.get('erep_cycles_elapsed', 0)) + 1
-        await supabase.table(table).update({
+        supabase.table(table).update({
             'erep_cycles_elapsed': cycles
         }).eq('id', pos_id).execute()
 

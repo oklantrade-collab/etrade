@@ -212,19 +212,23 @@ def evaluate_proactive_exit(
         # Cerrar todo lo HOT/Scalping en los últimos 5 min para evitar GAPs nocturnos
         # Solo para Stocks. Forex (24/5) y Crypto (24/7) prefieren evitar cierres forzados por horario.
         if market_type == 'stocks_spot' and time(15, 55) <= current_time <= time(16, 5):
-            return {
-                'should_close': True,
-                'rule_code':    'AaEOD' if is_long else 'BbEOD',
-                'reason':       'Protección EOD: Cierre preventivo antes del fin de jornada para evitar GAPs.',
-                'pnl':          calculate_position_pnl(position, current_price, market_type),
-                'urgency':      'urgent'
-            }
+            pnl_data = calculate_position_pnl(position, current_price, market_type)
+            if pnl_data['pnl_usd'] >= 0:
+                return {
+                    'should_close': True,
+                    'rule_code':    'AaEOD' if is_long else 'BbEOD',
+                    'reason':       'Protección EOD: Cierre preventivo con ganancia antes del fin de jornada.',
+                    'pnl':          pnl_data,
+                    'urgency':      'urgent'
+                }
+            else:
+                log_info(MODULE, f"EOD ignorado para {position.get('symbol')} porque PNL es negativo. Se mantendrá para EREP.")
     except Exception as e:
         log_error(MODULE, f"Error en protección EOD: {e}")
 
-    # ── NUEVO: Cierre Preventivo Bb61 (Aa61 / Aa61_short) ──
-    rule_code_pos = str(position.get('rule_code', ''))
-    if '61' in rule_code_pos:
+    # ── NUEVO: Cierre Preventivo Bb61 / Swing (Dd11/Dd12) ──
+    rule_code_pos = str(position.get('rule_code', '')).lower()
+    if '61' in rule_code_pos or 'dd1' in rule_code_pos or 'dd2' in rule_code_pos:
         try:
             triggered_exit_61 = False
             exit_reason = ""

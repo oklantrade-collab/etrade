@@ -68,6 +68,19 @@ class BinanceCryptoProvider(DataProvider):
     Sprint 1 — only active provider.
     """
 
+    _ban_until_ts = None
+
+    @classmethod
+    def is_banned(cls) -> bool:
+        if cls._ban_until_ts is None:
+            return False
+        import time
+        now_ms = int(time.time() * 1000)
+        if now_ms < cls._ban_until_ts:
+            return True
+        cls._ban_until_ts = None
+        return False
+
     def __init__(
         self,
         api_key: str,
@@ -103,6 +116,9 @@ class BinanceCryptoProvider(DataProvider):
         self, symbol: str, timeframe: str, limit: int = 200
     ) -> pd.DataFrame:
         """Fetch OHLCV data from Binance REST API (ASYNCHRONOUS) with retries."""
+        if BinanceCryptoProvider.is_banned():
+            raise Exception(f"Binance API request blocked: IP is banned until timestamp {BinanceCryptoProvider._ban_until_ts}")
+
         client = await self._get_async_client()
         symbol_clean = symbol.replace("/", "")
 
@@ -117,30 +133,27 @@ class BinanceCryptoProvider(DataProvider):
         }
         interval = interval_map.get(timeframe, timeframe)
 
-        minutes_per_bar = {
-            "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080
-        }
-        m = minutes_per_bar.get(timeframe, 15)
-        # Añadimos un pequeño buffer del 10%
-        lookback_mins = int(limit * m * 1.1)
-        start_str = f"{lookback_mins} minutes ago UTC"
-
         max_retries = 3
         klines = []
         for attempt in range(max_retries):
             try:
                 if self.market == "futures":
-                    klines = await client.futures_historical_klines(
-                        symbol=symbol_clean, interval=interval, start_str=start_str
+                    klines = await client.futures_klines(
+                        symbol=symbol_clean, interval=interval, limit=limit
                     )
-                    klines = klines[-limit:] if len(klines) > limit else klines
                 else:
-                    klines = await client.get_historical_klines(
-                        symbol=symbol_clean, interval=interval, start_str=start_str
+                    klines = await client.get_klines(
+                        symbol=symbol_clean, interval=interval, limit=limit
                     )
-                    klines = klines[-limit:] if len(klines) > limit else klines
                 break # Success!
             except Exception as e:
+                err_str = repr(e)
+                if "IP banned" in err_str or "Way too many requests" in err_str or "418" in err_str:
+                    import re
+                    match = re.search(r"banned until (?:timestamp )?(\d+)", err_str)
+                    if match:
+                        BinanceCryptoProvider._ban_until_ts = int(match.group(1))
+
                 import asyncio
                 if attempt == max_retries - 1:
                     raise e
@@ -173,6 +186,9 @@ class BinanceCryptoProvider(DataProvider):
         return df
 
     async def get_current_price(self, symbol: str) -> float:
+        if BinanceCryptoProvider.is_banned():
+            raise Exception(f"Binance API request blocked: IP is banned until timestamp {BinanceCryptoProvider._ban_until_ts}")
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -184,6 +200,13 @@ class BinanceCryptoProvider(DataProvider):
                     ticker = await client.get_symbol_ticker(symbol=symbol_clean)
                 return float(ticker["price"])
             except Exception as e:
+                err_str = repr(e)
+                if "IP banned" in err_str or "Way too many requests" in err_str or "418" in err_str:
+                    import re
+                    match = re.search(r"banned until (?:timestamp )?(\d+)", err_str)
+                    if match:
+                        BinanceCryptoProvider._ban_until_ts = int(match.group(1))
+
                 import asyncio
                 if attempt == max_retries - 1:
                     raise e
@@ -192,6 +215,9 @@ class BinanceCryptoProvider(DataProvider):
 
     async def get_ticker(self, symbol: str) -> dict:
         """Fetch current price and ticker data."""
+        if BinanceCryptoProvider.is_banned():
+            raise Exception(f"Binance API request blocked: IP is banned until timestamp {BinanceCryptoProvider._ban_until_ts}")
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -201,13 +227,20 @@ class BinanceCryptoProvider(DataProvider):
                     ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
                 else:
                     ticker = await client.get_symbol_ticker(symbol=symbol_clean)
-                
+
                 return {
                     "symbol": symbol_clean,
                     "price": float(ticker["price"]),
                     "time": ticker.get("time") # Some endpoints don't return time
                 }
             except Exception as e:
+                err_str = repr(e)
+                if "IP banned" in err_str or "Way too many requests" in err_str or "418" in err_str:
+                    import re
+                    match = re.search(r"banned until (?:timestamp )?(\d+)", err_str)
+                    if match:
+                        BinanceCryptoProvider._ban_until_ts = int(match.group(1))
+
                 import asyncio
                 if attempt == max_retries - 1:
                     raise Exception(f"get_ticker failed for {symbol}: {e}")

@@ -6,8 +6,17 @@ import logging
 import json
 import time
 import asyncio
+import sys
 from datetime import datetime, timezone
 
+# Reconfigure system streams to use UTF-8 on Windows
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
 
 # Standard Python logger
 logging.basicConfig(
@@ -17,6 +26,21 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("eTrader")
+
+def _safe_log_call(log_func, text: str):
+    """Safely calls a logger function, encoding/decoding if a UnicodeEncodeError occurs."""
+    try:
+        log_func(text)
+    except UnicodeEncodeError:
+        try:
+            # Fallback to ascii representation of the string
+            clean_text = text.encode('ascii', errors='replace').decode('ascii')
+            log_func(clean_text)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 
 
 def log_to_db(
@@ -30,6 +54,10 @@ def log_to_db(
     Insert a log entry into system_logs in Supabase.
     Fails silently to never block the pipeline.
     """
+    # OPTIMIZACIÓN DISK IO: Solo guardar en DB los ERRORES graves.
+    if level.upper() not in ['ERROR', 'CRITICAL']:
+        return
+
     try:
         from app.core.supabase_client import get_supabase
 
@@ -45,15 +73,15 @@ def log_to_db(
             row["cycle_id"] = cycle_id
         sb.table("system_logs").insert(row).execute()
     except Exception as e:
-        logger.warning(f"Failed to write log to DB: {e}")
+        _safe_log_call(logger.warning, f"Failed to write log to DB: {e}")
 
 
 def log_info(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):
-    logger.info(f"[{module}] {message}")
+    _safe_log_call(logger.info, f"[{module}] {message}")
 
 
 def log_warning(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):
-    logger.warning(f"[{module}] {message}")
+    _safe_log_call(logger.warning, f"[{module}] {message}")
     log_to_db(module, "WARNING", message, context, cycle_id)
 
 
@@ -67,8 +95,13 @@ def _should_notify(module: str, message: str) -> bool:
         return False
     
     now = time.time()
-    # Fingerprint: módulo + primeros 30 caracteres del mensaje
-    fingerprint = (module, message[:40])
+    
+    # Generic fingerprint for Binance ban or rate-limiting errors to prevent Telegram spam
+    if "BinanceAPIException" in message or "APIError(code=-1003)" in message or "IP banned" in message or "IP is banned" in message or "418 I'm a teapot" in message or "baneada" in message.lower():
+        return False
+    else:
+        # Fingerprint: módulo + primeros 40 caracteres del mensaje
+        fingerprint = (module, message[:40])
     
     if now - ERROR_THROTTLE.get(fingerprint, 0) > THROTTLE_SECONDS:
         ERROR_THROTTLE[fingerprint] = now
@@ -97,17 +130,18 @@ def _trigger_notification(module: str, level: str, message: str):
             pass
 
 def log_error(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):
-    logger.error(f"[{module}] {message}")
+    _safe_log_call(logger.error, f"[{module}] {message}")
     log_to_db(module, "ERROR", message, context, cycle_id)
     _trigger_notification(module, "ERROR", message)
 
 
 def log_critical(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):
-    logger.critical(f"[{module}] {message}")
+    _safe_log_call(logger.critical, f"[{module}] {message}")
     log_to_db(module, "CRITICAL", message, context, cycle_id)
     _trigger_notification(module, "CRITICAL", message)
 
 
 def log_debug(module: str, message: str, context: dict | None = None, cycle_id: str | None = None):
-    logger.debug(f"[{module}] {message}")
+    _safe_log_call(logger.debug, f"[{module}] {message}")
     # Debug logs not persisted to DB to save space
+

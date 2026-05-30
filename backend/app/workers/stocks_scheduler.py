@@ -966,20 +966,17 @@ async def run_stocks_cycle(force=False):
         except Exception as e:
             log_warning(MODULE, f"Monitor step skipped: {e}")
 
-        # Log cycle to system_logs
-        sb = get_supabase()
-        sb.table("system_logs").insert({
-            "module": MODULE,
-            "level": "INFO",
-            "message": f"Stocks cycle completed: {len(results)} tickers processed",
-            "context": str({
-                "tickers_processed": len(results),
-                "high_score_count": high_score_count,
-                "spike_count": spike_count,
-                "duration_s": duration_s,
-            }),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        # Log cycle to system_logs (desactivado)
+        #     "level": "INFO",
+        #     "message": f"Stocks cycle completed: {len(results)} tickers processed",
+        #     "context": str({
+        #         "tickers_processed": len(results),
+        #         "high_score_count": high_score_count,
+        #         "spike_count": spike_count,
+        #         "duration_s": duration_s,
+        #     }),
+        #     "created_at": datetime.now(timezone.utc).isoformat(),
+        # }).execute()
 
     except Exception as e:
         log_error(MODULE, f"Stocks cycle failed: {e}")
@@ -1041,15 +1038,15 @@ async def run_pro_cycle():
             except Exception as e:
                 log_warning(MODULE, f"AI analysis step skipped: {e}")
 
-        # Log to system_logs
-        sb = get_supabase()
-        sb.table("system_logs").insert({
-            "module": MODULE,
-            "level": "INFO",
-            "message": f"PRO cycle completed: {len(results)} tickers processed at market close",
-            "context": str({"tickers_processed": len(results), "duration_s": duration_s}),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        # Log to system_logs (Desactivado para reducir Disk IO)
+        # sb = get_supabase()
+        # sb.table("system_logs").insert({
+        #     "module": MODULE,
+        #     "level": "INFO",
+        #     "message": f"PRO cycle completed: {len(results)} tickers processed at market close",
+        #     "context": str({"tickers_processed": len(results), "duration_s": duration_s}),
+        #     "created_at": datetime.now(timezone.utc).isoformat(),
+        # }).execute()
 
     except Exception as e:
         log_error(MODULE, f"PRO scoring cycle failed: {e}")
@@ -1103,13 +1100,43 @@ async def open_stock_position(symbol: str, side: str, size: float, price: float,
 
 async def close_stock_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
     """Cierra una posición de Stock completamente para EREP."""
-    from app.stocks.stocks_order_executor import _close_all_positions
-    _close_all_positions(symbol, price)
-    
     res = supabase.table("stocks_positions").select("*").eq("ticker", symbol).eq("status", "open").execute()
     if not res.data:
         res = supabase.table("stocks_positions").select("*").eq("ticker", symbol).order("updated_at", desc=True).limit(1).execute()
         
+    if res.data:
+        pos = res.data[0]
+        entry_price = float(pos.get("avg_price") or pos.get("entry_price") or price)
+        shares = float(pos.get("shares_remaining") or pos.get("shares") or size)
+        
+        pnl_usd = round((price - entry_price) * shares, 2)
+        pnl_pct = round(((price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0.0
+        
+        # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS EN CIERRE EREP 🛡️
+        if pnl_usd < 0 and 'tp' not in str(reason).lower():
+            log_warning("stocks_scheduler", f"🛡️ [ANTI-LOSS EREP] Bloqueando intento de cierre EREP para {symbol} ({reason}) con P&L negativo: ${pnl_usd:.2f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
+            
+            # Suspendemos el Stop Loss físico y forzamos/mantenemos EREP en Fase 2 para seguir esperando
+            try:
+                supabase.table('stocks_positions').update({
+                    'sl_type': 'suspended_negative_protection',
+                    'stop_loss': 0,
+                    'sl_dynamic_price': 0,
+                    'sl_price': 0,
+                    'erep_active': True,
+                    'erep_phase': 2,
+                    'erep_p1_price': entry_price,
+                    'erep_q1': shares,
+                    'erep_market_type': 'stocks_spot',
+                    'erep_cycles_elapsed': 0
+                }).eq('id', pos['id']).execute()
+            except Exception as upd_e:
+                log_error("stocks_scheduler", f"Error actualizando estado anti-loss EREP para {symbol}: {upd_e}")
+            return
+
+    from app.stocks.stocks_order_executor import _close_all_positions
+    _close_all_positions(symbol, price)
+    
     if res.data:
         pos = res.data[0]
         entry_price = float(pos.get("avg_price") or pos.get("entry_price") or price)
@@ -1250,22 +1277,12 @@ async def check_sl_with_erep(
         )
 
         if action['action'] == 'close_sl':
-            # Cierre normal de Stocks por SL
-            from app.stocks.stocks_tp_manager import execute_partial_sell
-            shares_to_sell = int(position.get('shares_remaining', position.get('shares', 0)))
-            await execute_partial_sell(
-                ticker=symbol,
-                position=position,
-                block='tp_total',
-                shares=shares_to_sell,
-                price=current_price,
-                action='close_sl',
-                new_sl=0,
-                new_trail_high=current_price,
-                b3_trail_sl=current_price,
-                supabase=supabase
-            )
-            return True
+            # 🛡️ FORZAR EREP FASE 2 POR PROTECCIÓN ANTI-PÉRDIDAS 🛡️
+            log_warning("stocks_scheduler", f"🛡️ [ANTI-LOSS SL] {symbol} tocó SL y EREP falló (cierre sugerido). Forzando Activación de EREP Fase 2 para buscar recuperación.")
+            action = {
+                'action': 'activate_phase2',
+                'reason': 'Forced EREP Phase 2 by Anti-Loss Guard'
+            }
 
         await execute_erep_action(
             action, position, current_price,

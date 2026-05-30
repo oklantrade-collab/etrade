@@ -46,6 +46,7 @@ async def load_orchestrator_config(supabase) -> dict:
             'apex_composite_w_conf':    0.10,
             'apex_proportional_sizing': True,
             'apex_max_positions':       5,
+            'allow_after_hours':        False,
         }
 
         for row in (res.data or []):
