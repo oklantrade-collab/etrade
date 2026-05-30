@@ -497,7 +497,7 @@ def evaluate_volatile_trailing_v2(
 ) -> dict:
     """
     Trailing Stop Dinámico v2. Compatible con LONG y SHORT.
-    Usa 5m para SHORT y 15m para LONG.
+    Usa exclusivamente velas de 15m para evitar ruido y retrocesos rápidos de 5m.
     """
     cfg_sym = VOLATILE_TRAILING_CONFIG.get(symbol)
     if not cfg_sym:
@@ -510,7 +510,7 @@ def evaluate_volatile_trailing_v2(
     dir_cfg = cfg_sym.get('long' if is_long else 'short', {})
     pip          = cfg_sym['pip_size']
     min_pips     = cfg_sym['min_pips_to_activate']
-    candle_tf    = dir_cfg.get('candle_timeframe', '15m')
+    candle_tf    = '15m' # Forzado a 15m
 
     # ── P&L actual en pips ────────────────────
     if is_long:
@@ -526,11 +526,8 @@ def evaluate_volatile_trailing_v2(
             'reason': f'Ganancia {pnl_pips:.1f} pips < mínimo {min_pips} pips',
         }
 
-    # ── ATR según temporaridad ─────────────────
-    if is_short and df_5m is not None:
-        atr_data = get_atr_5m(df_5m)
-    else:
-        atr_data = get_atr_current(df_15m)
+    # ── ATR según temporaridad (siempre 15m) ──
+    atr_data = get_atr_current(df_15m)
 
     atr    = atr_data['atr'] if atr_data['atr'] > 0 else atr_snap
     if atr <= 0:
@@ -563,18 +560,14 @@ def evaluate_volatile_trailing_v2(
 
     phases = {'phase1': round(sl_phase1, 6)}
 
-    # ── FASE 2: Velas (5m para SHORT) ────────
+    # ── FASE 2: Velas (siempre 15m) ───────────
     sl_phase2         = None
     candle_pips_thr   = dir_cfg.get('candle_switch_pips', 8)
     candle_lookback   = dir_cfg.get('candle_lookback', 2)
 
     if pnl_pips >= candle_pips_thr:
-        if is_short and df_5m is not None:
-            # SHORT: usar velas de 5m
-            candle_data = get_candle_sl_short_5m(df_5m, side, candle_lookback)
-        else:
-            # LONG: usar velas de 15m
-            candle_data = get_candle_sl_short_5m(df_15m, side, candle_lookback)
+        # Usar siempre velas estables de 15m
+        candle_data = get_candle_sl_short_5m(df_15m, side, candle_lookback)
 
         if candle_data['valid']:
             sl_phase2 = candle_data['sl_price']

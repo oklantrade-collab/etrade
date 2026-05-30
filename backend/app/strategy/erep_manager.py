@@ -171,13 +171,14 @@ def detect_p2_entry_signal(
         # Asegurar cálculo de bandas de Bollinger si no están en el DataFrame
         if 'bb_lower' not in df_15m.columns or 'bb_upper' not in df_15m.columns:
             try:
-                from ta.volatility import BollingerBands
                 col_close = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
                 if col_close:
                     closes = pd.to_numeric(df_15m[col_close], errors='coerce').ffill()
-                    bb = BollingerBands(close=closes, window=20, window_dev=2)
-                    df_15m['bb_lower'] = bb.bollinger_lband()
-                    df_15m['bb_upper'] = bb.bollinger_hband()
+                    # Cálculo nativo robusto con Pandas (evita el bug de fillna con method de la librería ta)
+                    rolling_mean = closes.rolling(window=20).mean()
+                    rolling_std = closes.rolling(window=20).std()
+                    df_15m['bb_lower'] = rolling_mean - (2 * rolling_std)
+                    df_15m['bb_upper'] = rolling_mean + (2 * rolling_std)
             except Exception as e:
                 log_error('EREP_BOLLINGER', f"Error calculando Bollinger Bands locales: {e}")
 
