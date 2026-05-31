@@ -1026,12 +1026,14 @@ async def execute_erep_action(
         except Exception as e:
             log_error('EREP', f'Error P1 close: {e}')
 
-        # Limpiar campos EREP en base de datos
+        # Limpiar campos EREP en base de datos e incorporar campos de cierre principales
         supabase.table(table).update({
             'erep_active':       False,
             'erep_phase':        0,
             'erep_close_reason': close_type,
             'status':            'closed',
+            'closed_at':         datetime.now(timezone.utc).isoformat(),
+            'close_reason':      f'EREP_{close_type.upper()}'[:50]
         }).eq('id', pos_id).execute()
 
         # Calcular P&L del EREP completo

@@ -1818,8 +1818,8 @@ class ForexExecutionService:
             pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
             
             # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS FOREX 🛡️
-            # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp)
-            if pips_pnl < 0 and 'tp' not in str(reason).lower() and 'weekend_close' not in str(reason).lower():
+            # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual
+            if pips_pnl < 0 and 'tp' not in str(reason).lower() and 'weekend_close' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower():
                 self.log(f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre Forex para {symbol} ({reason}) con P&L negativo: ${pnl_usd:.2f} ({pips_pnl:.1f} pips). La posición permanece ABIERTA.")
                 
                 # Suspendemos el Stop Loss físico en Supabase y derivamos a EREP Phase 2

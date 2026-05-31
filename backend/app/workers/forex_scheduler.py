@@ -608,6 +608,13 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
         MARKET_SNAPSHOT_CACHE[symbol] = MARKET_SNAPSHOT_CACHE.get(symbol, {})
         MARKET_SNAPSHOT_CACHE[symbol]['price'] = current_price
 
+        # --- VERIFICAR EJECUCIÓN LIMIT ORDERS (SWING) ---
+        try:
+            from app.strategy.swing_orders import check_limit_order_execution
+            await check_limit_order_execution(symbol=symbol, current_price=current_price, provider=provider, sb=sb)
+        except Exception as limit_err:
+            log_error(MODULE, f"Error verificando ejecución de orden límite swing para {symbol}: {limit_err}")
+
         # 4. Smart Exit: SAR Phase Change
         snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
         sar_data = MEMORY_STORE.get(symbol, {}).get('sar', {})
@@ -1027,6 +1034,18 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                 for r in all_results:
                     if r['score'] >= 0.40:
                         await engine.log_evaluation(symbol, r, context)
+
+        # --- ESTRATEGIA CUSTOM APEX_EMA (SwingEma) para Forex ---
+        try:
+            from app.strategy.swing_orders import process_swing_ema_strategy
+            await process_swing_ema_strategy(
+                symbol=symbol,
+                df_15m=df,
+                snap=snap,
+                sb=sb
+            )
+        except Exception as swing_ema_err:
+            log_error(MODULE, f"{symbol}/15m swing ema error: {swing_ema_err}")
 
         # PHASE 6: Swing Orders (4h cycle = cada 16 ciclos)
         if _forex_cycle_count % 16 == 0:

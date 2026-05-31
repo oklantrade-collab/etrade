@@ -394,7 +394,8 @@ async def check_protections(
             entry_price  = float(position.get('avg_entry_price') or position.get('entry_price') or 0),
             current_sl   = float(position.get('sl_price') or position.get('stop_loss') or 0),
             original_sl  = float(position.get('sl_backstop_price') or position.get('sl_price') or 0),
-            market_type  = 'crypto_futures'
+            market_type  = 'crypto_futures',
+            rule_code    = position.get('rule_code') or position.get('rule_entry') or ''
         )
         # Campos adicionales no presentes en el constructor base pero necesarios para el flujo
         state = _protection_cache[pos_id]
@@ -856,7 +857,8 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
             entry_price=float(pos.get('avg_entry_price') or pos.get('entry_price') or 0),
             current_sl=float(pos.get('sl_price') or pos.get('stop_loss') or 0),
             original_sl=float(pos.get('sl_backstop_price') or pos.get('sl_price') or pos.get('stop_loss') or 0),
-            market_type='crypto_futures'
+            market_type='crypto_futures',
+            rule_code=pos.get('rule_code')
         )
     
     state = BOT_STATE.protection_cache[pos_id]
@@ -908,7 +910,6 @@ async def _execute_paper_open(
     Simula la apertura de una posición paper y persiste en Supabase.
     Aplica SL y TP dinámicos basados en la velocidad (ADX).
     """
-    from app.core.memory_store import BOT_STATE
     from app.core.logger import log_info
 
     symbol = normalize_crypto_symbol(symbol)
@@ -1051,7 +1052,6 @@ async def _execute_paper_open_unlocked(
         tp_partial = price * (1.04 if side == 'long' else 0.96)
 
     # Calculamos SL con el multiplicador dinámico de velocidad y buffer extra
-    from app.core.memory_store import BOT_STATE
     buffer_pct = float(BOT_STATE.config_cache.get('sl_extra_buffer_pct', 0.5))
     
     sl_dict = calculate_sl_tp(
@@ -1214,7 +1214,6 @@ async def _execute_paper_open_unlocked(
     res = supabase.table('positions').insert(data).execute()
     new_pos = res.data[0] if res.data else None
     if new_pos:
-        from app.core.memory_store import BOT_STATE
         # Key by pos_id to support multiple positions per symbol
         BOT_STATE.positions[new_pos.get('id', symbol)] = new_pos
         sm.on_position_opened(symbol, side, new_pos)
@@ -1289,8 +1288,8 @@ async def _execute_paper_close(pos, price, reason, supabase):
     total_pnl = pnl_usd + float(pos.get('partial_pnl_usd', 0))
 
     # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS 🛡️
-    # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp)
-    if total_pnl < 0 and 'tp' not in str(reason).lower():
+    # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual
+    if total_pnl < 0 and 'tp' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower():
         log_warning(MODULE, f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre para {symbol} ({reason}) con P&L negativo: ${total_pnl:.4f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
         
         # Suspendemos el Stop Loss físico y enrutamos de forma segura a EREP Phase 2
@@ -1309,7 +1308,6 @@ async def _execute_paper_close(pos, price, reason, supabase):
             }).eq('id', pos['id']).execute()
             
             # ActualizarBOT_STATE local para que no siga evaluando SL normales
-            from app.core.memory_store import BOT_STATE
             if pos['id'] in BOT_STATE.positions:
                 BOT_STATE.positions[pos['id']].update({
                     'sl_type': 'suspended_negative_protection',

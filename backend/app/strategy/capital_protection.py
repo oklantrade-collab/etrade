@@ -725,6 +725,7 @@ class ProtectionState:
     current_sl:        float
     original_sl:       float
     market_type:       str
+    rule_code:         str = ''
 
     # Trailing
     # Trailing
@@ -799,6 +800,43 @@ def evaluate_trailing_stop(
     Evalúa si el SL debe subir al siguiente nivel. El SL NUNCA retrocede.
     """
     symbol = state.symbol
+
+    # ── CUSTOM TRAILING FOR STRATEGY ApexEma (SwingEma) ──
+    rule_code = getattr(state, 'rule_code', '')
+    if rule_code in ('AaApexEma', 'BbApexEma', 'AaHot', 'BbHot'):
+        if df_15m is not None and len(df_15m) >= 20:
+            df = df_15m.copy()
+            df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()
+            
+            # Vela cerrada más reciente
+            last_row = df.iloc[-1]
+            close_price = float(last_row['close'])
+            open_price = float(last_row['open'])
+            ema3 = float(last_row['ema3'])
+            
+            is_long = state.side.lower() in ('long', 'buy')
+            
+            if is_long:
+                # LONG: vela verde (close > open) y close > ema3
+                if close_price > open_price and close_price > ema3:
+                    if state.current_sl == 0 or close_price > state.current_sl:
+                        return {
+                            'action': 'update_sl',
+                            'new_sl': close_price,
+                            'reason': 'swing_ema_green_candle_trail',
+                            'new_level': 1
+                        }
+            else:
+                # SHORT: vela roja (close < open) y close < ema3
+                if close_price < open_price and close_price < ema3:
+                    if state.current_sl == 0 or close_price < state.current_sl:
+                        return {
+                            'action': 'update_sl',
+                            'new_sl': close_price,
+                            'reason': 'swing_ema_red_candle_trail',
+                            'new_level': 1
+                        }
+        return {'action': 'none'}
 
     # ── Símbolos con trailing dinámico ────────
     if symbol in VOLATILE_TRAILING_CONFIG and state.market_type == 'forex_futures':

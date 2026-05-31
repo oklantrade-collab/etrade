@@ -15,8 +15,231 @@ from app.analysis.smart_limit import (
 )
 from app.core.crypto_symbols import crypto_symbol_match_variants
 
+async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: dict, sb) -> None:
+    """
+    Estrategia SwingEma (ApexEma): LONG/SHORT basada en EMA3/9/20/50/200, 
+    Sizing 40/60, Distancia Mínima 0.4%, Pendiente EMA200, y traspaso a EREP.
+    """
+    if df_15m is None or len(df_15m) < 200:
+        return
+        
+    # 1. Calcular EMAs
+    df = df_15m.copy()
+    df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()
+    df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+    
+    # Obtener valores actuales (vela cerrada más reciente)
+    last_row = df.iloc[-1]
+    ema3 = float(last_row['ema3'])
+    ema9 = float(last_row['ema9'])
+    ema20 = float(last_row['ema20'])
+    ema50 = float(last_row['ema50'])
+    ema200 = float(last_row['ema200'])
+    
+    # Obtener valores de hace 3 velas para pendiente de EMA200
+    ema200_3 = float(df.iloc[-4]['ema200']) if len(df) >= 4 else ema200
+    
+    current_price = float(last_row['close'])
+    
+    # 2. Verificar posiciones abiertas de esta estrategia
+    variants = crypto_symbol_match_variants(symbol)
+    try:
+        open_res = sb.table('positions').select('*').in_('symbol', variants).eq('status', 'open').in_('rule_code', ['AaApexEma', 'BbApexEma']).execute()
+        open_positions = open_res.data or []
+    except Exception as e:
+        log_error('APEX_EMA', f"Error consultando posiciones abiertas para {symbol}: {e}")
+        open_positions = []
+        
+    # 3. Transición Proactiva a EREP en caso de Reversión
+    if open_positions:
+        for pos in open_positions:
+            side = (pos.get('side') or '').upper()
+            rule = pos.get('rule_code')
+            
+            reversal = False
+            if side == 'LONG' and ema3 < ema9:
+                reversal = True
+            elif side == 'SHORT' and ema3 > ema9:
+                reversal = True
+                
+            if reversal:
+                # Traspasar a EREP Fase 2
+                log_info('APEX_EMA', f"⚠️ [REVERSAL] Traspasando posición {pos['id']} ({symbol} {side}) a EREP Fase 2 de forma proactiva.")
+                try:
+                    sb.table('positions').update({
+                        'sl_type': 'suspended_negative_protection',
+                        'sl_price': 0,
+                        'stop_loss': 0,
+                        'sl_dynamic_price': 0,
+                        'erep_active': True,
+                        'erep_phase': 2,
+                        'erep_p1_price': float(pos.get('avg_entry_price') or pos.get('entry_price') or current_price),
+                        'erep_q1': float(pos.get('size') or 0),
+                        'erep_market_type': 'crypto_futures',
+                        'erep_cycles_elapsed': 0
+                    }).eq('id', pos['id']).execute()
+                    
+                    # Actualizar memoria
+                    if pos['id'] in BOT_STATE.positions:
+                        BOT_STATE.positions[pos['id']].update({
+                            'sl_type': 'suspended_negative_protection',
+                            'sl_price': 0,
+                            'stop_loss': 0,
+                            'sl_dynamic_price': 0,
+                            'erep_active': True,
+                            'erep_phase': 2,
+                            'erep_cycles_elapsed': 0
+                        })
+                except Exception as erep_e:
+                    log_error('APEX_EMA', f"Error traspasando posición {pos['id']} a EREP: {erep_e}")
+        return  # Si ya hay posiciones abiertas o en proceso de EREP, no colocamos nuevas órdenes límite
+
+    # 4. Verificar órdenes pendientes existentes
+    try:
+        pend_res = sb.table('pending_orders').select('*').in_('symbol', variants).eq('status', 'pending').in_('rule_code', ['AaApexEma', 'BbApexEma']).execute()
+        pending_orders = pend_res.data or []
+    except Exception as e:
+        log_error('APEX_EMA', f"Error consultando órdenes pendientes para {symbol}: {e}")
+        pending_orders = []
+
+    # 5. Condición de Cancelación de Pendientes (Reversión de tendencia antes de ejecutar)
+    if pending_orders:
+        cancel_long = (ema3 < ema9)
+        cancel_short = (ema3 > ema9)
+        
+        has_cancelled = False
+        for po in pending_orders:
+            rule = po.get('rule_code')
+            if (rule == 'AaApexEma' and cancel_long) or (rule == 'BbApexEma' and cancel_short):
+                log_info('APEX_EMA', f"🧹 [CANCEL PENDING] Cancelando orden pendiente {po['id']} de {symbol} ({rule}) por reversión rápida.")
+                try:
+                    sb.table('pending_orders').update({
+                        'status': 'cancelled',
+                        'cancelled_at': datetime.now(timezone.utc).isoformat(),
+                        'updated_at': datetime.now(timezone.utc).isoformat(),
+                        'rejection_reason': 'ema_reversal'
+                    }).eq('id', po['id']).execute()
+                    has_cancelled = True
+                except Exception as cancel_e:
+                    log_error('APEX_EMA', f"Error cancelando orden pendiente {po['id']}: {cancel_e}")
+        if has_cancelled:
+            return
+
+    # Si ya hay órdenes pendientes colocadas que no se cancelaron, no hacemos nada más
+    if pending_orders:
+        return
+
+    # 6. Evaluar Gatillo de Entrada
+    trigger_long = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200) and (ema200 > ema200_3)
+    trigger_short = (ema3 < ema9) and (ema9 < ema20) and (ema50 < ema200) and (ema200 < ema200_3)
+    
+    if not trigger_long and not trigger_short:
+        return
+
+    direction = 'long' if trigger_long else 'short'
+    rule_code = 'AaApexEma' if trigger_long else 'BbApexEma'
+    
+    # 7. Calcular cantidad de la posición total
+    try:
+        from app.core.position_sizing import calculate_position_size
+        # Sizing aproximado basado en el precio actual
+        sizing = calculate_position_size(
+            symbol=symbol, entry_price=current_price, sl_price=current_price * (0.985 if trigger_long else 1.015),
+            market_type=BOT_STATE.config_cache.get('market_type', 'crypto_futures'),
+            trade_number=1, regime='swing', supabase=sb
+        )
+        total_qty = float(sizing['quantity'] if sizing else 0)
+    except Exception as sz_e:
+        log_error('APEX_EMA', f"Error calculando sizing para {symbol}: {sz_e}")
+        total_qty = 0
+        
+    if total_qty <= 0:
+        return
+
+    # 8. Filtro de Distancia Mínima de Soporte (0.4%)
+    dist_pct = abs(ema9 - ema20) / ema20
+    
+    orders_to_place = []
+    if dist_pct >= 0.004:
+        # Colocar 2 órdenes limitadas (Sizing 40/60)
+        orders_to_place.append({
+            'limit_price': ema9,
+            'qty': total_qty * 0.40,
+            'name': 'Order 1 (EMA9)'
+        })
+        orders_to_place.append({
+            'limit_price': ema20,
+            'qty': total_qty * 0.60,
+            'name': 'Order 2 (EMA20)'
+        })
+    else:
+        # Colocar 1 sola orden limitada consolidada en EMA9 (Sizing 100%)
+        orders_to_place.append({
+            'limit_price': ema9,
+            'qty': total_qty,
+            'name': 'Order 1 Consolidada (EMA9)'
+        })
+
+    # 9. Insertar Órdenes Límite en la base de datos
+    is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+    mode_val = 'paper' if is_paper else 'real'
+    ttl_hours = 4  # 4 horas de expiración estándar para Swing
+    
+    for op in orders_to_place:
+        limit_px = round(op['limit_price'], 4)
+        size_val = round(op['qty'], 4)
+        
+        if size_val <= 0:
+            continue
+            
+        new_order = {
+            'symbol': symbol,
+            'direction': direction,
+            'order_type': 'limit',
+            'trade_type': 'swing_ema',
+            'rule_code': rule_code,
+            'limit_price': limit_px,
+            'sl_price': 0,  # Se deja vacío inicialmente, delegación virtual
+            'tp1_price': 0,
+            'tp2_price': 0,
+            'band_name': op['name'],
+            'status': 'pending',
+            'mode': mode_val,
+            'expires_at': (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat(),
+            'sizing_pct': 100 if len(orders_to_place) == 1 else (40 if 'Order 1' in op['name'] else 60),
+            'timeframe': '15m',
+            'movement_type': 'trend_ema',
+            'signal_quality': 'high',
+            'fib_zone_entry': 0
+        }
+        
+        try:
+            sb.table('pending_orders').insert(new_order).execute()
+            log_info('APEX_EMA', f"🎯 [PLACED LIMIT] {symbol} {rule_code}: {op['name']} colocada a ${limit_px:.4f} | Cantidad: {size_val}")
+            
+            # Alerta Telegram
+            await send_telegram_message(
+                f"🎯 APEX_EMA LIMIT [{symbol}]\n"
+                f"Dirección: {direction.upper()}\n"
+                f"Nivel: {op['name']}\n"
+                f"Precio LIMIT: ${limit_px:.4f}\n"
+                f"Cantidad: {size_val:.4f}\n"
+                f"Modo: {mode_val.upper()}"
+            )
+        except Exception as ins_e:
+            log_error('APEX_EMA', f"Error insertando orden límite {op['name']} en DB: {ins_e}")
+
 async def process_swing_orders_15m(symbol: str, df_15m: pd.DataFrame, df_4h: pd.DataFrame, snap: dict, provider, sb) -> None:
     """Ciclo de gestión de órdenes Swing cada 15m"""
+    
+    # --- ESTRATEGIA CUSTOM APEX_EMA (SwingEma) ---
+    try:
+        await process_swing_ema_strategy(symbol, df_15m, snap, sb)
+    except Exception as ema_err:
+        log_error('APEX_EMA', f"Error en estrategia ApexEma para {symbol}: {ema_err}")
     
     # --- VALIDACIÓN DE LÍMITE DE POSICIONES POR SÍMBOLO ---
     max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 4))
@@ -291,11 +514,14 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
 
         # 4. Apertura
         try:
+            is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+            resolved_market_type = 'forex_futures' if is_forex else 'crypto_futures'
+
             from app.core.position_sizing import calculate_position_size
             sizing = calculate_position_size(
                 symbol=symbol, entry_price=execution_price, 
                 sl_price=float(order.get('sl_price') or 0),
-                market_type=BOT_STATE.config_cache.get('market_type', 'crypto_futures'),
+                market_type=resolved_market_type,
                 trade_number=1, regime='swing', supabase=sb
             )
             qty = sizing['quantity'] if sizing else 0
@@ -320,7 +546,8 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                 'avg_entry_price': execution_price, 'stop_loss': float(order.get('sl_price') or 0),
                 'take_profit': float(order.get('tp2_price') or 0), 'status': 'open', 'size': qty,
                 'current_price': execution_price, 'opened_at': datetime.now(timezone.utc).isoformat(),
-                'mode': 'paper', 'rule_code': order.get('rule_code', 'SWING')
+                'mode': 'paper', 'rule_code': order.get('rule_code', 'SWING'),
+                'market_type': resolved_market_type
             }
             res = sb.table('positions').insert(pos_data).execute()
             if res.data:
