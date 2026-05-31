@@ -17,6 +17,7 @@ export default function StocksDashboard() {
   const [opportunities, setOpportunities] = useState<any[]>([])
   const [showChart, setShowChart] = useState(false)
   const [selectedTicker, setSelectedTicker] = useState('')
+  const [searchTicker, setSearchTicker] = useState('')
 
   useEffect(() => {
     fetchData()
@@ -85,13 +86,63 @@ export default function StocksDashboard() {
         </div>
 
         <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-           <div style={{ textAlign:'right', marginRight:'10px' }}>
-                <div style={{ fontSize:'10px', color:'#666', fontWeight:900, textTransform:'uppercase', letterSpacing:'1px' }}>Market Sentiment</div>
-                <div style={{ fontSize:'18px', fontWeight:950, color:regimeColor }}>{regime.sm_avg?.toFixed(1) || '4.2'} SM <span style={{fontSize:'12px', color:'#444', marginLeft:'5px'}}>{regime.regime?.toUpperCase()}</span></div>
-           </div>
-           <button 
-              onClick={triggerPipeline}
-              disabled={triggering}
+          {/* Buscador de Ticker Flotante */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '14px', padding: '4px 8px', marginRight: '10px' }}>
+            <input 
+              type="text" 
+              placeholder="TICKER (Ej: TSLA, BTCUSDT)..." 
+              value={searchTicker} 
+              onChange={(e) => setSearchTicker(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && searchTicker.trim()) {
+                  setSelectedTicker(searchTicker.trim());
+                  setShowChart(true);
+                }
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                outline: 'none',
+                color: '#FFF',
+                fontSize: '11px',
+                fontWeight: 800,
+                width: '185px',
+                padding: '6px 10px'
+              }}
+            />
+            <button 
+              onClick={() => {
+                if (searchTicker.trim()) {
+                  setSelectedTicker(searchTicker.trim());
+                  setShowChart(true);
+                }
+              }}
+              style={{
+                background: '#38BDF8',
+                color: '#000',
+                border: 'none',
+                borderRadius: '10px',
+                padding: '6px 14px',
+                fontSize: '10px',
+                fontWeight: 950,
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                boxShadow: '0 2px 10px rgba(56,189,248,0.2)'
+              }}
+              onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
+              onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
+            >
+              VER 📊
+            </button>
+          </div>
+
+          <div style={{ textAlign:'right', marginRight:'10px' }}>
+               <div style={{ fontSize:'10px', color:'#666', fontWeight:900, textTransform:'uppercase', letterSpacing:'1px' }}>Market Sentiment</div>
+               <div style={{ fontSize:'18px', fontWeight:950, color:regimeColor }}>{regime.sm_avg?.toFixed(1) || '4.2'} SM <span style={{fontSize:'12px', color:'#444', marginLeft:'5px'}}>{regime.regime?.toUpperCase()}</span></div>
+          </div>
+          <button 
+             onClick={triggerPipeline}
+             disabled={triggering}
               style={{
                 background: triggering ? '#1A1D26' : '#22C55E',
                 border: 'none', borderRadius: '14px', padding: '14px 28px', color: triggering ? '#444' : '#000', fontSize: '12px', fontWeight: 950, cursor: triggering ? 'wait' : 'pointer', transition: 'all 0.3s', boxShadow: triggering ? 'none' : '0 4px 20px rgba(34,197,94,0.3)'
