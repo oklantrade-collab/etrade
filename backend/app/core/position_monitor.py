@@ -309,6 +309,10 @@ async def check_sl_with_erep(
 
     # ── SL RECIÉN TOCADO ───────────────────────
     if sl_touched:
+        if reason == 'sl_trailing':
+            await close_position(symbol, current_price, 'sl_trailing', supabase)
+            return True
+            
         entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
         from app.core.crypto_symbols import resolve_crypto_position_quantity
         q1 = resolve_crypto_position_quantity(supabase, position)
@@ -1285,7 +1289,8 @@ async def _execute_paper_close(pos, price, reason, supabase):
     pnl_pct = ((price - entry) / entry * 100) if side == 'long' else ((entry - price) / entry * 100)
 
     # Si hubo cierre parcial previo, sumar sus USD
-    total_pnl = pnl_usd + float(pos.get('partial_pnl_usd', 0))
+    partial_pnl = pos.get('partial_pnl_usd')
+    total_pnl = pnl_usd + (float(partial_pnl) if partial_pnl is not None else 0.0)
 
     # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS 🛡️
     # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual
