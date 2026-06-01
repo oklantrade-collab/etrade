@@ -229,9 +229,11 @@ class StandaloneForexWorker:
     def send_heartbeat(self):
         """Mantener viva la conexion (Requerido cada 25s)"""
         try:
-            req = ProtoOAHeartbeatEvent()
+            from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
+            req = ProtoHeartbeatEvent()
             self.safe_send(req)
-        except: pass
+        except Exception as e:
+            self.log(f"Error enviando heartbeat: {e}", "ERROR")
 
     def _load_dynamic_symbols(self):
         """Carga la lista de simbolos desde trading_config -> regime_params."""

@@ -332,8 +332,8 @@ class CTraderProtobufProvider(BaseMarketProvider):
         while True:
             try:
                 if self._connected and self._authenticated:
-                    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAHeartbeatEvent
-                    req = ProtoOAHeartbeatEvent()
+                    from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoHeartbeatEvent
+                    req = ProtoHeartbeatEvent()
                     await self._send_request(req)
                     log_info('CTRADER', 'Heartbeat enviado')
             except Exception as e:
