@@ -826,13 +826,15 @@ def evaluate_trailing_stop(
         ema200 = float(last_row['ema200'])
         bb_upper = float(last_row['bb_upper'])
         bb_lower = float(last_row['bb_lower'])
+        upper_6 = float(last_row.get('upper_6', 0))
+        lower_6 = float(last_row.get('lower_6', 0))
         
         is_long = state.side.lower() in ('long', 'buy')
         
         if is_long:
-            confluence_active = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200)
+            confluence_active = (ema3 > ema9) and (ema9 >= ema20) and (ema50 > ema200)
         else:
-            confluence_active = (ema3 < ema9) and (ema9 < ema20) and (ema50 < ema200)
+            confluence_active = (ema3 < ema9) and (ema9 <= ema20) and (ema50 < ema200)
             
         if confluence_active:
             bb_touched = getattr(state, 'bb_touched', False)
@@ -851,15 +853,17 @@ def evaluate_trailing_stop(
             action_dict = {'action': 'none'}
             
             if is_long:
-                # 1) Move SL on green candles
+                # 1) Move SL on green candles to EMA3, and TP to UPPER_6
                 if close_price > open_price:
-                    if state.current_sl == 0 or close_price > state.current_sl:
+                    if state.current_sl == 0 or ema3 > state.current_sl:
                         action_dict = {
                             'action': 'update_sl',
-                            'new_sl': close_price,
+                            'new_sl': ema3,
                             'reason': 'ApexConfluence_green_candle_trail',
                             'new_level': 1
                         }
+                        if upper_6 > 0:
+                            action_dict['new_tp'] = upper_6
                 # 2) Close position if red candle closes below EMA3
                 elif close_price < open_price:
                     if close_price < ema3:
@@ -869,15 +873,17 @@ def evaluate_trailing_stop(
                             'bb_touched': bb_touched
                         }
             else:
-                # 1) Move SL on red candles
+                # 1) Move SL on red candles to EMA3, and TP to LOWER_6
                 if close_price < open_price:
-                    if state.current_sl == 0 or close_price < state.current_sl:
+                    if state.current_sl == 0 or ema3 < state.current_sl:
                         action_dict = {
                             'action': 'update_sl',
-                            'new_sl': close_price,
+                            'new_sl': ema3,
                             'reason': 'ApexConfluence_red_candle_trail',
                             'new_level': 1
                         }
+                        if lower_6 > 0:
+                            action_dict['new_tp'] = lower_6
                 # 2) Close position if green candle closes above EMA3
                 elif close_price > open_price:
                     if close_price > ema3:

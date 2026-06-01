@@ -1744,17 +1744,26 @@ class ForexExecutionService:
             
             if action in ('activate_be', 'update_sl'):
                 new_sl = primary.get('be_price') if action == 'activate_be' else primary.get('new_sl')
+                new_tp = primary.get('new_tp')
                 self.log(f"[PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
+                if new_tp:
+                    self.log(f"[PROTECTION] {symbol}: Actualizando TP a {new_tp}")
                 
                 # Sincronizar con cTrader si es cuenta real
                 if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
-                    self.worker.amend_position(pos['ctrader_pos_id'], sl_price=new_sl, symbol=symbol)
+                    self.worker.amend_position(pos['ctrader_pos_id'], sl_price=new_sl, tp_price=new_tp, symbol=symbol)
  
                 # Actualizar en DB
-                self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos_id).execute()
+                update_fields = {'sl_price': new_sl}
+                if new_tp:
+                    update_fields['tp_price'] = new_tp
+                self.sb.table('forex_positions').update(update_fields).eq('id', pos_id).execute()
+                
                 # Actualizar en memoria
                 pos['sl_price'] = new_sl
-                # Actualizar estado interno de protecci n
+                if new_tp:
+                    pos['tp_price'] = new_tp
+                # Actualizar estado interno de protección
                 state.current_sl = new_sl
                 if action == 'activate_be': state.be_activated = True
                 if action == 'update_sl': state.trailing_level = primary.get('new_level', state.trailing_level)

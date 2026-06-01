@@ -993,17 +993,28 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
         
         if action in ('activate_be', 'update_sl'):
             new_sl = primary.get('be_price') if action == 'activate_be' else primary.get('new_sl')
+            new_tp = primary.get('new_tp')
             log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Moviendo SL a {new_sl} ({primary.get('reason')})")
+            if new_tp:
+                log_info(MODULE, f"🛡️ [PROTECTION] {symbol}: Actualizando TP a {new_tp}")
             # Persistencia en DB
             try:
-                supabase.table('positions').update({
+                update_fields = {
                     'sl_price': new_sl,
                     'stop_loss': new_sl,
                     'sl_update_reason': primary.get('reason')
-                }).eq('id', pos_id).execute()
+                }
+                if new_tp:
+                    update_fields['take_profit'] = new_tp
+                    update_fields['take_profit_price'] = new_tp
+
+                supabase.table('positions').update(update_fields).eq('id', pos_id).execute()
                 # Actualizar objeto local para el resto del ciclo
                 pos['sl_price'] = new_sl
                 pos['stop_loss'] = new_sl
+                if new_tp:
+                    pos['take_profit'] = new_tp
+                    pos['take_profit_price'] = new_tp
                 # Actualizar estado interno
                 state.current_sl = new_sl
                 if action == 'activate_be': state.be_activated = True

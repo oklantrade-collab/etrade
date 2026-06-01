@@ -770,15 +770,21 @@ class StandaloneForexWorker:
 
                     if res_trail['action'] == 'update_sl':
                         new_sl = res_trail['sl_price']
+                        new_tp = res_trail.get('new_tp')
                         self.log(f"[TRAILING-5M] {symbol} {side.upper()} -> Nuevo SL: {new_sl:.5f} ({res_trail['reason']})")
+                        if new_tp:
+                            self.log(f"[TRAILING-5M] {symbol} {side.upper()} -> Nuevo TP: {new_tp:.5f}")
                         
                         # 1. Actualizar en cTrader
                         c_id = pos.get('ctrader_pos_id')
                         if c_id:
-                            self.amend_position(c_id, sl_price=new_sl, symbol=symbol)
+                            self.amend_position(c_id, sl_price=new_sl, tp_price=new_tp, symbol=symbol)
                         
                         # 2. Actualizar en Supabase
                         upd_data = {'sl_price': new_sl}
+                        if new_tp:
+                            upd_data['tp_price'] = new_tp
+                            pos['tp_price'] = new_tp
                         if is_short:
                             STATE['lowest_prices_cache'][pos['id']] = min(state.lowest_price if state.lowest_price > 0 else current_price, current_price)
                         else:
