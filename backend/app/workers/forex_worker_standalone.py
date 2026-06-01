@@ -994,7 +994,6 @@ class StandaloneForexWorker:
                 'ema_9': ema9,
                 'ema_20': ema20,
                 'bb_expanding': bb_expanding,
-                'ema_exhaustion': ema_exhaustion,
                 'adx': adx,
                 'pinescript_signal': 'Buy' if last.get('macd_buy') else ('Sell' if last.get('macd_sell') else None)
             }

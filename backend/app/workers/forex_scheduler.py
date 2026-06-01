@@ -305,7 +305,6 @@ async def write_forex_snapshot(
             'reverse_signal_4h':     struct_4h['reverse_signal'],
             'structure_reason_4h':   struct_4h['reason'],
             'bb_expanding':          bool(last.get('bb_expanding', False)),
-            'ema_exhaustion':        bool(last.get('ema_exhaustion', False)),
             'updated_at':            datetime.now(timezone.utc).isoformat(),
         }
 
