@@ -180,7 +180,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         orders_to_place.append({
             'limit_price': ema9,
             'qty': total_qty,
-            'name': 'Order 1 Consolidada (EMA9)'
+            'name': 'Order 1 Cons (EMA9)'
         })
 
     # 9. Insertar Órdenes Límite en la base de datos
