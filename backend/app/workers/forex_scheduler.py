@@ -729,7 +729,8 @@ async def forex_cycle_5m():
 
     provider = _forex_provider
     if not provider or not provider._connected:
-        log_warning(MODULE, "Provider Forex desconectado. Omitiendo ciclo 5m.")
+        log_warning(MODULE, "Provider Forex desconectado. Intentando reconectar en segundo plano y omitiendo ciclo 5m.")
+        asyncio.create_task(get_forex_provider())
         return
 
     try:
@@ -1114,7 +1115,8 @@ async def forex_cycle_15m():
 
     provider = _forex_provider
     if not provider or not provider._connected:
-        log_warning(MODULE, "Provider Forex desconectado. Omitiendo ciclo 15m.")
+        log_warning(MODULE, "Provider Forex desconectado. Intentando reconectar en segundo plano y omitiendo ciclo 15m.")
+        asyncio.create_task(get_forex_provider())
         return
 
     try:

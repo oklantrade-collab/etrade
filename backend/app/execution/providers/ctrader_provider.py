@@ -58,7 +58,7 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 )
 
 from .base_provider import BaseMarketProvider
-from app.core.logger import log_info, log_error
+from app.core.logger import log_info, log_error, log_warning
 
 
 import threading
@@ -150,6 +150,9 @@ class CTraderProtobufProvider(BaseMarketProvider):
         self._client:       Optional[Client] = None
         self._connected     = False
         self._authenticated = False
+        self.loop           = None
+        self._heartbeat_task = None
+        self._was_authenticated = False
 
         # Precios en tiempo real (cache)
         self._live_prices:  dict = {}
@@ -180,7 +183,8 @@ class CTraderProtobufProvider(BaseMarketProvider):
           2. Account Auth (Access Token)
         """
         try:
-            loop = asyncio.get_event_loop()
+            self.loop = asyncio.get_event_loop()
+            loop = self.loop
 
             # Crear cliente TCP
             self._client = Client(
@@ -246,6 +250,11 @@ class CTraderProtobufProvider(BaseMarketProvider):
                 )
                 # Cargar mapa de símbolos
                 await self._load_symbols()
+                
+                # Iniciar loop de heartbeat si no existe o terminó
+                if not getattr(self, '_heartbeat_task', None) or self._heartbeat_task.done():
+                    self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                
                 return True
 
             return False
@@ -296,6 +305,10 @@ class CTraderProtobufProvider(BaseMarketProvider):
     def _on_connected(self, client):
         log_info('CTRADER', 'TCP conectado')
         self._connected = True
+        if hasattr(self, 'loop') and self.loop and getattr(self, '_was_authenticated', False):
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._reauthenticate())
+            )
 
     def _on_disconnected(self, client, reason):
         log_error('CTRADER',
@@ -303,6 +316,29 @@ class CTraderProtobufProvider(BaseMarketProvider):
         )
         self._connected     = False
         self._authenticated = False
+
+    async def _reauthenticate(self):
+        log_info('CTRADER', 'Re-autenticando en reconexión TCP...')
+        try:
+            self._authenticated = False
+            await self._app_auth()
+            await asyncio.sleep(1.0)
+            await self._account_auth()
+        except Exception as e:
+            log_error('CTRADER', f'Error en re-autenticación: {e}')
+
+    async def _heartbeat_loop(self):
+        """Envía un heartbeat cada 25 segundos para mantener la conexión cTrader viva."""
+        while True:
+            try:
+                if self._connected and self._authenticated:
+                    from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAHeartbeatEvent
+                    req = ProtoOAHeartbeatEvent()
+                    await self._send_request(req)
+                    log_info('CTRADER', 'Heartbeat enviado')
+            except Exception as e:
+                log_error('CTRADER', f'Error enviando heartbeat: {e}')
+            await asyncio.sleep(25)
 
     def _on_message(self, client, message):
         """
@@ -319,9 +355,10 @@ class CTraderProtobufProvider(BaseMarketProvider):
 
         # Account Auth Response
         elif msg_type == \
-             ProtoOAAccountAuthRes().payloadType:
+              ProtoOAAccountAuthRes().payloadType:
             log_info('CTRADER', 'Account Auth OK')
             self._authenticated = True
+            self._was_authenticated = True
 
         # Error
         elif msg_type == 50: # ProtoOAErrorRes
@@ -765,6 +802,9 @@ class CTraderProtobufProvider(BaseMarketProvider):
 
     async def disconnect(self):
         """Cierra la conexión TCP."""
+        if getattr(self, '_heartbeat_task', None):
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
         if self._client:
             self._client.stopService()
         self._connected     = False
