@@ -737,6 +737,8 @@ class ProtectionState:
     # SHORT: precio más bajo alcanzado ← NUEVO
     lowest_price:       float = 0.0
 
+    bb_touched:         bool  = False
+
     be_activated:       bool  = False
     be_price:           float = 0.0
 
@@ -800,6 +802,101 @@ def evaluate_trailing_stop(
     Evalúa si el SL debe subir al siguiente nivel. El SL NUNCA retrocede.
     """
     symbol = state.symbol
+
+    # ── CUSTOM DYNAMIC TRAILING: ApexConfluence ──
+    if df_15m is not None and len(df_15m) >= 20:
+        df = df_15m.copy()
+        df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()
+        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean() if len(df) >= 200 else df['ema20']
+        
+        std20 = df['close'].rolling(20).std()
+        df['bb_upper'] = df['ema20'] + (std20 * 2)
+        df['bb_lower'] = df['ema20'] - (std20 * 2)
+        
+        last_row = df.iloc[-1]
+        close_price = float(last_row['close'])
+        open_price = float(last_row['open'])
+        ema3 = float(last_row['ema3'])
+        ema9 = float(last_row['ema9'])
+        ema20 = float(last_row['ema20'])
+        ema50 = float(last_row['ema50'])
+        ema200 = float(last_row['ema200'])
+        bb_upper = float(last_row['bb_upper'])
+        bb_lower = float(last_row['bb_lower'])
+        
+        is_long = state.side.lower() in ('long', 'buy')
+        
+        if is_long:
+            confluence_active = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200)
+        else:
+            confluence_active = (ema3 < ema9) and (ema9 < ema20) and (ema50 < ema200)
+            
+        if confluence_active:
+            bb_touched = getattr(state, 'bb_touched', False)
+            touched_now = False
+            if is_long:
+                if close_price >= bb_upper and not bb_touched:
+                    state.bb_touched = True
+                    bb_touched = True
+                    touched_now = True
+            else:
+                if close_price <= bb_lower and not bb_touched:
+                    state.bb_touched = True
+                    bb_touched = True
+                    touched_now = True
+                    
+            action_dict = {'action': 'none'}
+            
+            if is_long:
+                # 1) Move SL on green candles
+                if close_price > open_price:
+                    if state.current_sl == 0 or close_price > state.current_sl:
+                        action_dict = {
+                            'action': 'update_sl',
+                            'new_sl': close_price,
+                            'reason': 'ApexConfluence_green_candle_trail',
+                            'new_level': 1
+                        }
+                # 2) Close position if red candle closes below EMA3
+                elif close_price < open_price:
+                    if close_price < ema3:
+                        action_dict = {
+                            'action': 'close_market',
+                            'reason': 'ApexConfluence_ema3_close',
+                            'bb_touched': bb_touched
+                        }
+            else:
+                # 1) Move SL on red candles
+                if close_price < open_price:
+                    if state.current_sl == 0 or close_price < state.current_sl:
+                        action_dict = {
+                            'action': 'update_sl',
+                            'new_sl': close_price,
+                            'reason': 'ApexConfluence_red_candle_trail',
+                            'new_level': 1
+                        }
+                # 2) Close position if green candle closes above EMA3
+                elif close_price > open_price:
+                    if close_price > ema3:
+                        action_dict = {
+                            'action': 'close_market',
+                            'reason': 'ApexConfluence_ema3_close',
+                            'bb_touched': bb_touched
+                        }
+                        
+            if touched_now:
+                if action_dict['action'] == 'none':
+                    action_dict = {
+                        'action': 'update_bb_touched',
+                        'bb_touched': True
+                    }
+                else:
+                    action_dict['update_bb_touched'] = True
+                    
+            return action_dict
 
     # ── CUSTOM TRAILING FOR STRATEGY ApexEma (SwingEma) ──
     rule_code = getattr(state, 'rule_code', '')
@@ -1251,6 +1348,7 @@ def evaluate_all_protections(
     Función principal de evaluación por prioridades.
     """
     actions = []
+    bb_touch_triggered = False
 
     # 1. Break-Even
     be = evaluate_break_even(state, current_price, df_15m=df_15m)
@@ -1259,8 +1357,13 @@ def evaluate_all_protections(
 
     # 2. Trailing Stop
     trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
+    if trail.get('update_bb_touched') or trail['action'] == 'update_bb_touched':
+        bb_touch_triggered = True
+
     if trail['action'] == 'update_sl':
         actions.append({'priority': 2, 'type': 'trailing', **trail})
+    elif trail['action'] == 'close_market':
+        actions.append({'priority': 2, 'type': 'trailing_close', **trail})
 
     # 3. Partial Close
     partial = evaluate_partial_close(state, current_price)
@@ -1273,14 +1376,17 @@ def evaluate_all_protections(
         if inv['action'] in ('close_market', 'wait_confirmation'):
             actions.append({'priority': 4, 'type': 'inverse_signal', **inv})
 
-    if actions:
-        primary = min(actions, key=lambda x: x['priority'])
-        return {
-            'has_action': True, 'primary': primary, 'all_actions': actions,
-            'pnl': calculate_pnl(state.entry_price, current_price, state.side, state.symbol, state.market_type),
-        }
-
-    return {
+    ret = {
         'has_action': False, 'primary': None, 'all_actions': [],
         'pnl': calculate_pnl(state.entry_price, current_price, state.side, state.symbol, state.market_type),
+        'bb_touch_triggered': bb_touch_triggered,
+        'bb_touched_val': getattr(state, 'bb_touched', False)
     }
+
+    if actions:
+        primary = min(actions, key=lambda x: x['priority'])
+        ret.update({
+            'has_action': True, 'primary': primary, 'all_actions': actions
+        })
+
+    return ret

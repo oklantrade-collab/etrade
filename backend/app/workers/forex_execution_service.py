@@ -1683,6 +1683,9 @@ class ForexExecutionService:
         # Obtener o crear estado
         pos_id = pos['id']
         if pos_id not in self.protection_states:
+            highest_band = pos.get('highest_band_reached') or ''
+            bb_touched_val = 'bb_touched' in str(highest_band)
+            
             self.protection_states[pos_id] = ProtectionState(
                 position_id=pos_id,
                 symbol=symbol,
@@ -1690,7 +1693,9 @@ class ForexExecutionService:
                 entry_price=self._safe_float(pos['entry_price']),
                 current_sl=self._safe_float(pos.get('sl_price')),
                 original_sl=self._safe_float(pos.get('sl_price')),
-                market_type='forex_futures'
+                market_type='forex_futures',
+                rule_code=pos.get('rule_code') or '',
+                bb_touched=bb_touched_val
             )
 
         state = self.protection_states[pos_id]
@@ -1703,9 +1708,6 @@ class ForexExecutionService:
         else:
             state.lowest_price = min(state.lowest_price, price) if state.lowest_price > 0 else min(state.entry_price, price)
             
-        # Extraer dataframes si están disponibles
-        import pandas as pd
-        
         def _get_df(tf):
             bars = self.state['candles'].get(f'{symbol}_{tf}', [])
             if not bars: return None
@@ -1722,6 +1724,20 @@ class ForexExecutionService:
 
         result = evaluate_all_protections(state, price, snap, df_15m=df_15m, df_5m=df_5m)
         
+        # Handle bb_touch update
+        if result.get('bb_touch_triggered'):
+            try:
+                curr_band = pos.get('highest_band_reached') or ''
+                new_band = f"{curr_band};bb_touched" if curr_band else "bb_touched"
+                self.sb.table('forex_positions').update({
+                    'highest_band_reached': new_band
+                }).eq('id', pos_id).execute()
+                pos['highest_band_reached'] = new_band
+                state.bb_touched = True
+                self.log(f"[PROTECTION] {symbol}: bb_touched detectado. Actualizado DB.")
+            except Exception as e:
+                self.log(f"Error actualizando bb_touched para {symbol}: {e}", "WARNING")
+        
         if result.get('has_action') and 'primary' in result:
             primary = result['primary']
             action = primary.get('action')
@@ -1733,7 +1749,7 @@ class ForexExecutionService:
                 # Sincronizar con cTrader si es cuenta real
                 if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
                     self.worker.amend_position(pos['ctrader_pos_id'], sl_price=new_sl, symbol=symbol)
-
+ 
                 # Actualizar en DB
                 self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos_id).execute()
                 # Actualizar en memoria
@@ -1745,9 +1761,90 @@ class ForexExecutionService:
                 
             elif action == 'partial_close':
                 self.log(f"   [PROTECTION] {symbol}: Cierre parcial sugerido (No implementado en esta version)")
-            elif action == 'close_market':
-                self.log(f"   [PROTECTION] {symbol}: Cierre por senal inversa confirmada")
-                self._close_position(pos, price, 'inverse_signal', 0)
+            elif action == 'close_market' or primary.get('type') == 'trailing_close':
+                reason = primary.get('reason', 'inverse_signal')
+                self.log(f"   [PROTECTION] {symbol}: Cierre de posición por {reason}")
+                
+                pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                side = pos['side'].lower()
+                pips = (price - state.entry_price)/pip_size if side in ('long', 'buy') else (state.entry_price - price)/pip_size
+                
+                self._close_position(pos, price, reason, pips)
+                
+                # Si es un cierre por trailing_close y no tocó BB, re-entramos con órdenes límite!
+                if primary.get('type') == 'trailing_close' and not primary.get('bb_touched', False):
+                    qty = abs(self._safe_float(pos.get('lots')))
+                    from twisted.internet import threads
+                    threads.deferToThread(self.trigger_forex_reentry_sync, symbol, side, qty, df_15m)
+                    
+    def trigger_forex_reentry_sync(self, symbol, side, lots, df_15m):
+        try:
+            if df_15m is None or len(df_15m) < 20:
+                return
+                
+            df = df_15m.copy()
+            df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            
+            last_row = df.iloc[-1]
+            ema9 = float(last_row['ema9'])
+            ema20 = float(last_row['ema20'])
+            
+            mode_val = 'paper'
+            
+            orders = [
+                {'limit_price': ema9, 'pct': 40, 'name': 'Order 1 (EMA9)'},
+                {'limit_price': ema20, 'pct': 60, 'name': 'Order 2 (EMA20)'}
+            ]
+            
+            from datetime import datetime, timezone, timedelta
+            for op in orders:
+                limit_px = round(op['limit_price'], 5)
+                qty_val = round(lots * (op['pct'] / 100.0), 2)
+                
+                if qty_val <= 0:
+                    continue
+                    
+                new_order = {
+                    'symbol': symbol,
+                    'direction': side.lower(),
+                    'order_type': 'limit',
+                    'trade_type': 'swing_ema',
+                    'rule_code': 'AaApexEma' if side.lower() in ('long', 'buy') else 'BbApexEma',
+                    'limit_price': limit_px,
+                    'sl_price': 0,
+                    'tp1_price': 0,
+                    'tp2_price': 0,
+                    'band_name': op['name'],
+                    'status': 'pending',
+                    'mode': mode_val,
+                    'expires_at': (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+                    'sizing_pct': op['pct'],
+                    'timeframe': '15m',
+                    'movement_type': 'trend_ema',
+                    'signal_quality': 'high',
+                    'fib_zone_entry': 0
+                }
+                
+                self.sb.table('pending_orders').insert(new_order).execute()
+                self.log(f"🎯 [FOREX TS RE-ENTRY LIMIT] {symbol} {side.upper()}: {op['name']} colocada a {limit_px} | Lots: {qty_val}")
+                
+                # Telegram notification
+                try:
+                    from app.workers.alerts_service import send_telegram_message
+                    import asyncio
+                    asyncio.run(send_telegram_message(
+                        f"🎯 RE-ENTRADA TRAILING STOP FOREX [{symbol}]\n"
+                        f"Dirección: {side.upper()}\n"
+                        f"Nivel: {op['name']}\n"
+                        f"Precio LIMIT: {limit_px:.5f}\n"
+                        f"Lots: {qty_val}\n"
+                        f"Modo: {mode_val.upper()}"
+                    ))
+                except Exception as tg_e:
+                    self.log(f"Telegram alert error: {tg_e}")
+        except Exception as e:
+            self.log(f"Error placing forex reentry: {e}", "ERROR")
 
     def _manage_position(self, pos, snap=None):
         symbol = pos['symbol']
@@ -1818,8 +1915,8 @@ class ForexExecutionService:
             pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
             
             # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS FOREX 🛡️
-            # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual
-            if pips_pnl < 0 and 'tp' not in str(reason).lower() and 'weekend_close' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower():
+            # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual/Trailing
+            if pips_pnl < 0 and 'tp' not in str(reason).lower() and 'weekend_close' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower() and 'trailing' not in str(reason).lower() and 'ts_close' not in str(reason).lower() and 'apexconfluence' not in str(reason).lower():
                 self.log(f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre Forex para {symbol} ({reason}) con P&L negativo: ${pnl_usd:.2f} ({pips_pnl:.1f} pips). La posición permanece ABIERTA.")
                 
                 # Suspendemos el Stop Loss físico en Supabase y derivamos a EREP Phase 2

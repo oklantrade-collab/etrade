@@ -373,6 +373,81 @@ async def check_crypto_erep(
         supabase=supabase
     )
 
+async def trigger_trailing_stop_reentry(symbol, side, size, df_15m, supabase):
+    """
+    Plaza las órdenes LIMIT de re-entrada (Q1 a EMA9 y Q2 a EMA20)
+    cuando el Trailing Stop cierra sin tocar la banda de Bollinger.
+    """
+    try:
+        if df_15m is None or len(df_15m) < 20:
+            return
+            
+        df = df_15m.copy()
+        df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+        
+        last_row = df.iloc[-1]
+        ema9 = float(last_row['ema9'])
+        ema20 = float(last_row['ema20'])
+        
+        is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+        trade_type_val = 'swing_ema'
+        mode_val = 'paper' # standard paper mode
+        
+        # Sizing 40/60
+        orders = [
+            {'limit_price': ema9, 'pct': 40, 'name': 'Order 1 (EMA9)'},
+            {'limit_price': ema20, 'pct': 60, 'name': 'Order 2 (EMA20)'}
+        ]
+        
+        from datetime import datetime, timezone, timedelta
+        for op in orders:
+            limit_px = round(op['limit_price'], 4 if is_forex else 8)
+            qty_val = round(size * (op['pct'] / 100.0), 4 if is_forex else 8)
+            
+            if qty_val <= 0:
+                continue
+                
+            new_order = {
+                'symbol': symbol,
+                'direction': side.lower(),
+                'order_type': 'limit',
+                'trade_type': trade_type_val,
+                'rule_code': 'AaApexEma' if side.lower() in ('long', 'buy') else 'BbApexEma',
+                'limit_price': limit_px,
+                'sl_price': 0,
+                'tp1_price': 0,
+                'tp2_price': 0,
+                'band_name': op['name'],
+                'status': 'pending',
+                'mode': mode_val,
+                'expires_at': (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+                'sizing_pct': op['pct'],
+                'timeframe': '15m',
+                'movement_type': 'trend_ema',
+                'signal_quality': 'high',
+                'fib_zone_entry': 0
+            }
+            
+            supabase.table('pending_orders').insert(new_order).execute()
+            log_info('TS_REENTRY', f"🎯 [TS RE-ENTRY LIMIT] {symbol} {side.upper()}: {op['name']} colocada a {limit_px} | Cantidad: {qty_val}")
+            
+            # Telegram notification
+            try:
+                from app.workers.alerts_service import send_telegram_message
+                await send_telegram_message(
+                    f"🎯 RE-ENTRADA TRAILING STOP [{symbol}]\n"
+                    f"Dirección: {side.upper()}\n"
+                    f"Nivel: {op['name']}\n"
+                    f"Precio LIMIT: {limit_px}\n"
+                    f"Cantidad: {qty_val}\n"
+                    f"Modo: {mode_val.upper()}"
+                )
+            except Exception as tg_e:
+                log_error('TS_REENTRY', f"Error enviando Telegram: {tg_e}")
+    except Exception as e:
+        log_error('TS_REENTRY', f"Error colocando órdenes de re-entrada para {symbol}: {e}")
+
 async def check_protections(
     symbol:        str,
     position:      dict,
@@ -390,6 +465,8 @@ async def check_protections(
     if pos_id not in _protection_cache:
         # Resolver side
         side_raw = str(position.get('side') or 'long').lower()
+        highest_band_reached = position.get('highest_band_reached') or ''
+        bb_touched_val = 'bb_touched' in str(highest_band_reached)
         
         _protection_cache[pos_id] = ProtectionState(
             position_id  = pos_id,
@@ -399,7 +476,8 @@ async def check_protections(
             current_sl   = float(position.get('sl_price') or position.get('stop_loss') or 0),
             original_sl  = float(position.get('sl_backstop_price') or position.get('sl_price') or 0),
             market_type  = 'crypto_futures',
-            rule_code    = position.get('rule_code') or position.get('rule_entry') or ''
+            rule_code    = position.get('rule_code') or position.get('rule_entry') or '',
+            bb_touched   = bb_touched_val
         )
         # Campos adicionales no presentes en el constructor base pero necesarios para el flujo
         state = _protection_cache[pos_id]
@@ -461,6 +539,21 @@ async def check_protections(
     df_5m = get_memory_df(symbol, "5m")
     
     trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
+    
+    # Handle bb_touched update
+    if trail.get('update_bb_touched') or trail['action'] == 'update_bb_touched':
+        try:
+            curr_band = position.get('highest_band_reached') or ''
+            new_band = f"{curr_band};bb_touched" if curr_band else "bb_touched"
+            supabase.table('positions').update({
+                'highest_band_reached': new_band
+            }).eq('id', pos_id).execute()
+            position['highest_band_reached'] = new_band
+            state.bb_touched = True
+            log_info('PROTECTION', f'🎯 BB TOUCHED [{symbol}]: Actualizado highest_band_reached en DB.')
+        except Exception as e:
+            log_error(MODULE, f"Error actualizando bb_touched para {symbol}: {e}")
+            
     if trail['action'] == 'update_sl':
         new_sl = trail['new_sl']
         try:
@@ -479,6 +572,21 @@ async def check_protections(
             log_info('PROTECTION', f'📈 TRAIL L{trail["new_level"]} [{symbol}]: {trail["reason"]}')
         except Exception as e:
             log_error(MODULE, f"Error actualizando Trail para {symbol}: {e}")
+            
+    elif trail['action'] == 'close_market':
+        log_info('PROTECTION', f'🔴 TS CLOSE TRIGGERED [{symbol}]: precio={current_price:.6f}. Reason={trail["reason"]}')
+        closed = await _execute_paper_close(position, current_price, 'ts_close', supabase)
+        if closed:
+            # Register SL cooldown
+            side = (position.get('side') or 'long').lower()
+            register_sl_event(symbol, side)
+            
+            # Si no tocó BB, re-entramos con órdenes límite!
+            if not trail.get('bb_touched', False):
+                qty = float(position.get('size') or 0)
+                await trigger_trailing_stop_reentry(symbol, side, qty, df_15m, supabase)
+                
+            return True
 
     # ── CHECK 3: SL backstop hit ──────────────
     sl = state.current_sl
@@ -1293,8 +1401,8 @@ async def _execute_paper_close(pos, price, reason, supabase):
     total_pnl = pnl_usd + (float(partial_pnl) if partial_pnl is not None else 0.0)
 
     # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS 🛡️
-    # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual
-    if total_pnl < 0 and 'tp' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower():
+    # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual/Trailing
+    if total_pnl < 0 and 'tp' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower() and 'trailing' not in str(reason).lower() and 'ts_close' not in str(reason).lower() and 'apexconfluence' not in str(reason).lower():
         log_warning(MODULE, f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre para {symbol} ({reason}) con P&L negativo: ${total_pnl:.4f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
         
         # Suspendemos el Stop Loss físico y enrutamos de forma segura a EREP Phase 2

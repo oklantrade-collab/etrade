@@ -367,6 +367,75 @@ class StandaloneForexWorker:
             self.log(f"Error enviando cierre a cTrader: {e}", "ERROR")
             return False
 
+    def trigger_forex_reentry_standalone(self, symbol, side, lots, df_15m):
+        try:
+            if df_15m is None or len(df_15m) < 20:
+                return
+                
+            df = df_15m.copy()
+            df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
+            df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+            
+            last_row = df.iloc[-1]
+            ema9 = float(last_row['ema9'])
+            ema20 = float(last_row['ema20'])
+            
+            mode_val = 'paper'
+            
+            orders = [
+                {'limit_price': ema9, 'pct': 40, 'name': 'Order 1 (EMA9)'},
+                {'limit_price': ema20, 'pct': 60, 'name': 'Order 2 (EMA20)'}
+            ]
+            
+            from datetime import datetime, timezone, timedelta
+            for op in orders:
+                limit_px = round(op['limit_price'], 5)
+                qty_val = round(lots * (op['pct'] / 100.0), 2)
+                
+                if qty_val <= 0:
+                    continue
+                    
+                new_order = {
+                    'symbol': symbol,
+                    'direction': side.lower(),
+                    'order_type': 'limit',
+                    'trade_type': 'swing_ema',
+                    'rule_code': 'AaApexEma' if side.lower() in ('long', 'buy') else 'BbApexEma',
+                    'limit_price': limit_px,
+                    'sl_price': 0,
+                    'tp1_price': 0,
+                    'tp2_price': 0,
+                    'band_name': op['name'],
+                    'status': 'pending',
+                    'mode': mode_val,
+                    'expires_at': (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+                    'sizing_pct': op['pct'],
+                    'timeframe': '15m',
+                    'movement_type': 'trend_ema',
+                    'signal_quality': 'high',
+                    'fib_zone_entry': 0
+                }
+                
+                sb.table('pending_orders').insert(new_order).execute()
+                self.log(f"🎯 [FOREX TS STANDALONE RE-ENTRY LIMIT] {symbol} {side.upper()}: {op['name']} colocada a {limit_px} | Lots: {qty_val}")
+                
+                # Telegram notification
+                try:
+                    from app.workers.alerts_service import send_telegram_message
+                    from twisted.internet import reactor
+                    reactor.callInThread(lambda: asyncio.run(send_telegram_message(
+                        f"🎯 RE-ENTRADA TRAILING STOP STANDALONE FOREX [{symbol}]\n"
+                        f"Dirección: {side.upper()}\n"
+                        f"Nivel: {op['name']}\n"
+                        f"Precio LIMIT: {limit_px:.5f}\n"
+                        f"Lots: {qty_val}\n"
+                        f"Modo: {mode_val.upper()}"
+                    )))
+                except Exception as tg_e:
+                    self.log(f"Telegram alert error: {tg_e}")
+        except Exception as e:
+            self.log(f"Error placing forex reentry: {e}", "ERROR")
+
     def amend_position(self, pos_id, sl_price=None, tp_price=None, symbol=None):
         """Modifica SL/TP en cTrader."""
         try:
@@ -642,6 +711,9 @@ class StandaloneForexWorker:
                     # Crear objeto de estado temporal para evaluación, recuperando marcas históricas de memoria
                     h_p = STATE['highest_prices_cache'].get(pos['id']) or float(pos.get('highest_price') or pos.get('entry_price') or 0)
                     l_p = STATE['lowest_prices_cache'].get(pos['id']) or float(pos.get('lowest_price') or pos.get('entry_price') or 0)
+                    highest_band = pos.get('highest_band_reached') or ''
+                    bb_touched_val = 'bb_touched' in str(highest_band)
+                    rule_val = pos.get('rule_code') or ''
                     
                     state = ProtectionState(
                         position_id = str(pos['id']),
@@ -652,7 +724,9 @@ class StandaloneForexWorker:
                         original_sl = float(pos.get('original_sl') or pos.get('sl_price') or 0),
                         market_type = 'forex_futures',
                         highest_price = h_p,
-                        lowest_price  = l_p
+                        lowest_price  = l_p,
+                        rule_code   = rule_val,
+                        bb_touched   = bb_touched_val
                     )
 
                     # Precio base para el trailing (mejor precio alcanzado)
@@ -661,18 +735,36 @@ class StandaloneForexWorker:
                     else:
                         best_p = state.highest_price if state.highest_price > 0 else state.entry_price
 
-                    # Evaluar Trailing Dinámico v2
-                    res_trail = evaluate_volatile_trailing_v2(
-                        symbol        = symbol,
-                        side          = side,
-                        entry_price   = state.entry_price,
-                        current_price = current_price,
-                        best_price    = best_p,
-                        current_sl    = state.current_sl,
-                        df_15m        = df_15m,
-                        df_5m         = df_5m,
-                        atr_snap      = float(snap.get('atr') or 0)
-                    )
+                    # Evaluar Trailing Stop (ApexConfluence)
+                    res_trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
+                    
+                    if res_trail['action'] == 'none' and not res_trail.get('update_bb_touched'):
+                        # Fallback to Volatile Trailing v2
+                        res_trail = evaluate_volatile_trailing_v2(
+                            symbol        = symbol,
+                            side          = side,
+                            entry_price   = state.entry_price,
+                            current_price = current_price,
+                            best_price    = best_p,
+                            current_sl    = state.current_sl,
+                            df_15m        = df_15m,
+                            df_5m         = df_5m,
+                            atr_snap      = float(snap.get('atr') or 0)
+                        )
+                        
+                    # Handle bb_touched update
+                    if res_trail.get('update_bb_touched') or res_trail['action'] == 'update_bb_touched':
+                        try:
+                            curr_band = pos.get('highest_band_reached') or ''
+                            new_band = f"{curr_band};bb_touched" if curr_band else "bb_touched"
+                            self.safe_db_execute(sb.table('forex_positions').update({
+                                'highest_band_reached': new_band
+                            }).eq('id', pos['id']))
+                            pos['highest_band_reached'] = new_band
+                            state.bb_touched = True
+                            self.log(f"[PROTECTION] {symbol}: bb_touched detectado. Actualizado DB.")
+                        except Exception as e:
+                            self.log(f"Error actualizando bb_touched para {symbol}: {e}", "WARNING")
 
                     if res_trail['action'] == 'update_sl':
                         new_sl = res_trail['sl_price']
@@ -691,6 +783,21 @@ class StandaloneForexWorker:
                             STATE['highest_prices_cache'][pos['id']] = max(state.highest_price, current_price)
                             
                         self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
+                        
+                    elif res_trail['action'] == 'close_market':
+                        self.log(f"[TRAILING-5M CLOSE] {symbol} {side.upper()} @ {current_price} | Razón: {res_trail['reason']}", "WARNING")
+                        # 1. Cerrar en cTrader
+                        c_id = pos.get('ctrader_pos_id')
+                        if c_id:
+                            self.close_position(c_id, symbol=symbol)
+                        # 2. Cerrar en DB
+                        self.safe_db_execute(sb.table('forex_positions').update({'status': 'closed', 'closed_at': datetime.now(timezone.utc).isoformat(), 'close_reason': res_trail['reason']}).eq('id', pos['id']))
+                        
+                        # 3. Si no tocó BB, re-entrar con órdenes límite!
+                        if not res_trail.get('bb_touched', False):
+                            qty = abs(float(pos.get('lots') or 0))
+                            self.trigger_forex_reentry_standalone(symbol, side, qty, df_15m)
+                        continue
                     
                     # --- NUEVO: CIERRE PROACTIVO (AaEXT/AaEXH) ---
                     proactive_res = evaluate_proactive_exit(
