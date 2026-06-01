@@ -1209,7 +1209,7 @@ async def init_forex_worker(supabase) -> Optional[CTraderProtobufProvider]:
         MEMORY_STORE[symbol] = \
             MEMORY_STORE.get(symbol, {})
 
-        for tf in ['5m','15m','1h','4h','1d']:
+        for tf in ['5m','15m','30m','1h','4h','1d']:
             try:
                 df = await provider.get_ohlcv(
                     symbol, tf, limit=300

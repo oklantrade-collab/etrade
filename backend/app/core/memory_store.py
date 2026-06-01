@@ -54,6 +54,10 @@ def get_memory_df(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     return MEMORY_STORE.get(symbol, {}).get(timeframe, {}).get('df')
 
 def update_memory_df(symbol: str, timeframe: str, df: pd.DataFrame):
+    if symbol not in MEMORY_STORE:
+        MEMORY_STORE[symbol] = {}
+    if timeframe not in MEMORY_STORE[symbol]:
+        MEMORY_STORE[symbol][timeframe] = {}
     MEMORY_STORE[symbol][timeframe]['df'] = df
     MEMORY_STORE[symbol][timeframe]['last_updated'] = datetime.utcnow()
 
