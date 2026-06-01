@@ -2241,6 +2241,20 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                  log_info('SWING', f'{symbol}/15m: evaluación swing completada')
              except Exception as swing_e:
                  log_error('SWING', f'{symbol}/15m: error en evaluación swing: {swing_e}')
+
+             # --- ESTRATEGIA CUSTOM APEX_EMA (SwingEma) para Crypto ---
+             try:
+                 log_info('SWING', f'{symbol}/15m: iniciando evaluación swing ema strategy')
+                 from app.strategy.swing_orders import process_swing_ema_strategy
+                 await process_swing_ema_strategy(
+                     symbol=symbol,
+                     df_15m=df,
+                     snap=snap_ref,
+                     sb=sb
+                 )
+                 log_info('SWING', f'{symbol}/15m: evaluación swing ema strategy completada')
+             except Exception as swing_ema_e:
+                 log_error('SWING', f'{symbol}/15m: error en swing ema strategy: {swing_ema_e}')
              
              # Swing 4h -> cada 16 ciclos (cada 4h)
              if BOT_STATE.cycle_count_15m % 16 == 0:
