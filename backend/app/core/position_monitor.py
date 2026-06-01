@@ -422,7 +422,7 @@ async def trigger_trailing_stop_reentry(symbol, side, size, df_15m, supabase):
                 'status': 'pending',
                 'mode': mode_val,
                 'expires_at': (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
-                'sizing_pct': op['pct'],
+                'sizing_pct': op['pct'] / 100.0,
                 'timeframe': '15m',
                 'movement_type': 'trend_ema',
                 'signal_quality': 'high',

@@ -209,7 +209,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
             'status': 'pending',
             'mode': mode_val,
             'expires_at': (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat(),
-            'sizing_pct': 100 if len(orders_to_place) == 1 else (40 if 'Order 1' in op['name'] else 60),
+            'sizing_pct': 1.00 if len(orders_to_place) == 1 else (0.40 if 'Order 1' in op['name'] else 0.60),
             'timeframe': '15m',
             'movement_type': 'trend_ema',
             'signal_quality': 'high',
