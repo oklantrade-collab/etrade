@@ -1375,7 +1375,7 @@ class ForexExecutionService:
         
         sl_price = self._safe_float(position.get('stop_loss_price') or position.get('sl_price'))
         side     = str(position.get('side', 'long'))
-        is_long  = side in ('long', 'buy')
+        is_long  = side.lower() in ('long', 'buy')
 
         if sl_price <= 0:
             return False

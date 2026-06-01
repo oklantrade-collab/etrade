@@ -218,7 +218,7 @@ async def check_sl_with_erep(
                      position.get('sl_price') or
                      position.get('stop_loss') or 0)
     side     = str(position.get('side', 'long'))
-    is_long  = side in ('long', 'buy')
+    is_long  = side.lower() in ('long', 'buy')
 
     if sl_price <= 0:
         return False

@@ -164,7 +164,7 @@ def detect_p2_entry_signal(
     rsi_oversold = int(cfg.get('rsi_oversold', 10))
     signals_found = []
 
-    is_long = side in ('long', 'buy')
+    is_long = side.lower() in ('long', 'buy')
 
     # ── SEÑAL A: SIPV (vela del 15m) & Bollinger / Fibonacci extremas ──────────
     if df_15m is not None and len(df_15m) >= 2:
@@ -310,7 +310,7 @@ def check_erep_activation_conditions(
     """
     cfg    = EREP_CONFIG.get(market_type, {})
     side   = str(position.get('side', 'long'))
-    is_long = side in ('long', 'buy')
+    is_long = side.lower() in ('long', 'buy')
 
     entry_price = float(position.get(
         'avg_entry_price',
@@ -465,7 +465,7 @@ def evaluate_erep_phase(
     """
     phase      = int(position.get('erep_phase', 0))
     side       = str(position.get('side', 'long'))
-    is_long    = side in ('long', 'buy')
+    is_long    = side.lower() in ('long', 'buy')
     cfg        = EREP_CONFIG.get(market_type, {})
     timeout_m  = int(cfg.get('timeout_cycles', 4))
     if market_type == 'crypto_futures':
@@ -686,7 +686,7 @@ def find_target_fibonacci_band(
     """
     Encuentra la banda Fibonacci inmediata en la dirección del recovery.
     """
-    is_long = side in ('long', 'buy')
+    is_long = side.lower() in ('long', 'buy')
 
     if is_long:
         bands = []
@@ -809,7 +809,7 @@ def calculate_q2_smart(
 
     band_price = band_data['band_price']
     band_name  = band_data['band_name']
-    is_long    = side in ('long', 'buy')
+    is_long    = side.lower() in ('long', 'buy')
 
     if is_long:
         target_95 = p2_price + (band_price - p2_price) * band_pct
@@ -871,7 +871,7 @@ async def execute_erep_action(
     act      = action['action']
     pos_id   = position.get('id')
     side     = str(position.get('side', 'long'))
-    is_long  = side in ('long', 'buy')
+    is_long  = side.lower() in ('long', 'buy')
     cfg      = EREP_CONFIG.get(market_type, {})
 
     table = (

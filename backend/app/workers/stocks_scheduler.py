@@ -1197,7 +1197,7 @@ async def check_sl_with_erep(
                      position.get('sl_dynamic_price') or
                      position.get('stop_loss') or 0)
     side     = str(position.get('side', 'long'))
-    is_long  = side in ('long', 'buy')
+    is_long  = side.lower() in ('long', 'buy')
 
     # Stocks only support LONG spot in EREP
     if not is_long:
