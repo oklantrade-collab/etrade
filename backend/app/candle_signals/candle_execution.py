@@ -85,7 +85,7 @@ def _ensure_crypto_sl_tp(
     
     if side in ('long', 'buy', 'BUY'):
         if snap:
-            lower_6 = float(snap.get('lower_6', 0))
+            lower_6 = float(snap.get('lower_6') if snap.get('lower_6') is not None else 0)
             if lower_6 > 0 and lower_6 < price * 0.95:
                 sl = lower_6 * 0.9995  # 0.05% debajo de lower_6
             else:
@@ -94,16 +94,16 @@ def _ensure_crypto_sl_tp(
             sl = price * 0.92
 
         # TP1 en upper_3 o +3%
-        upper_3 = float(snap.get('upper_3', 0)) if snap else 0
+        upper_3 = float(snap.get('upper_3') if (snap and snap.get('upper_3') is not None) else 0)
         tp1 = upper_3 if upper_3 > price * 1.01 else price * 1.03
         
         # TP2 en upper_6 o +6%
-        upper_6 = float(snap.get('upper_6', 0)) if snap else 0
+        upper_6 = float(snap.get('upper_6') if (snap and snap.get('upper_6') is not None) else 0)
         tp2 = upper_6 if upper_6 > tp1 * 1.01 else tp1 * 1.05
 
     else:  # short
         if snap:
-            upper_6 = float(snap.get('upper_6', 0))
+            upper_6 = float(snap.get('upper_6') if snap.get('upper_6') is not None else 0)
             if upper_6 > 0 and upper_6 > price * 1.05:
                 sl = upper_6 * 1.0005
             else:
@@ -112,11 +112,11 @@ def _ensure_crypto_sl_tp(
             sl = price * 1.08
 
         # TP1 en lower_3 o -3%
-        lower_3 = float(snap.get('lower_3', 0)) if snap else 0
+        lower_3 = float(snap.get('lower_3') if (snap and snap.get('lower_3') is not None) else 0)
         tp1 = lower_3 if lower_3 < price * 0.99 else price * 0.97
         
         # TP2 en lower_6 o -6%
-        lower_6 = float(snap.get('lower_6', 0)) if snap else 0
+        lower_6 = float(snap.get('lower_6') if (snap and snap.get('lower_6') is not None) else 0)
         tp2 = lower_6 if lower_6 < tp1 * 0.99 else tp1 * 0.95
 
     return round(sl, 8), round(tp1, 8), round(tp2, 8)
@@ -1461,6 +1461,42 @@ def execute_candle_signal(
             "reason": f"Fibonacci zone {fib_zone:+d} not valid for {pattern.action}",
             "fib_zone": fib_zone,
         }
+
+    # ── STRUCTURAL TREND FILTER (Aa41/Bb41) ──
+    # Prevents buying in a strong downtrend, or selling in a strong uptrend
+    from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+    from app.core.crypto_symbols import normalize_crypto_symbol
+    sym = normalize_crypto_symbol(pair_or_ticker) if market in ('crypto', 'forex') else pair_or_ticker
+    snap = MARKET_SNAPSHOT_CACHE.get(sym, {})
+    
+    if snap:
+        ema_50 = float(snap.get("ema_50", 0))
+        ema_200 = float(snap.get("ema_200", 0))
+        mtf_score = float(snap.get("mtf_score", 0))
+        
+        trend_blocked = False
+        trend_reason = ""
+        
+        if pattern.action == "BUY":
+            # Si EMA50 está debajo de EMA200 Y MTF es muy bajista
+            if ema_50 > 0 and ema_200 > 0 and ema_50 < ema_200 and mtf_score < -0.5:
+                trend_blocked = True
+                trend_reason = f"Downtrend Guard: EMA50({ema_50:.4f}) < EMA200({ema_200:.4f}) and MTF({mtf_score:.2f}) < -0.5"
+        elif pattern.action == "SELL":
+            # Si EMA50 está sobre EMA200 Y MTF es muy alcista
+            if ema_50 > 0 and ema_200 > 0 and ema_50 > ema_200 and mtf_score > 0.5:
+                trend_blocked = True
+                trend_reason = f"Uptrend Guard: EMA50({ema_50:.4f}) > EMA200({ema_200:.4f}) and MTF({mtf_score:.2f}) > 0.5"
+                
+        if trend_blocked:
+            strategy_code = _get_strategy_code(market, pattern.action, pool_type)
+            log_info(MODULE, f"🚫 TREND FILTER BLOCKED: {pattern.action} {pair_or_ticker} | Strategy: {strategy_code} | {trend_reason}")
+            _save_candle_signal(market, pair_or_ticker, pattern, timeframe, candle_data, pool_type, fib_zone=fib_zone, blocked=True)
+            return {
+                "success": False,
+                "reason": trend_reason,
+                "fib_zone": fib_zone,
+            }
 
     # Save signal to candle_signals table for audit (passed filter)
     _save_candle_signal(market, pair_or_ticker, pattern, timeframe, candle_data, pool_type,
