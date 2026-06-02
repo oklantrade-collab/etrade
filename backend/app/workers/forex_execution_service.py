@@ -173,6 +173,22 @@ class ForexExecutionService:
     def _evaluate_symbol(self, snap: dict):
         try:
             context = self._build_context(snap)
+            
+            # DEBUG DIAGNOSTICO: Log detallado para entender por qué no se generan señales
+            sym = snap.get('symbol', '?')
+            if sym == 'XAUUSD':
+                self.log(
+                    f'[DIAG] {sym} ctx: price={context.get("price",0):.2f} '
+                    f'ema3={context.get("ema_3",0):.4f} ema9={context.get("ema_9",0):.4f} ema20={context.get("ema_20",0):.4f} '
+                    f'adx={context.get("adx",0):.1f} mtf={context.get("mtf_score",0):.2f} '
+                    f'sar15m={context.get("sar_trend_15m",0)} sar4h={context.get("sar_trend_4h",0)} '
+                    f'fib={context.get("fibonacci_zone",0)} pine={context.get("pinescript_signal","")} '
+                    f'5m_long={context.get("ema_5m_aligned_long",False)} 5m_short={context.get("ema_5m_aligned_short",False)} '
+                    f'slope5m={context.get("ema3_slope_5m",0):.6f} cross_age={context.get("ema3_cross_age",999)} '
+                    f'ema50={context.get("ema_50",0):.2f} ema200={context.get("ema_200",0):.2f} '
+                    f'bb_exp={context.get("bb_expanding",False)} rsi={context.get("rsi_14",50):.1f}'
+                )
+            
             for direction in ['long', 'short']:
                 signal = self._check_rules(context, direction)
                 if signal and signal['triggered']:
@@ -474,107 +490,85 @@ class ForexExecutionService:
             'score': 0.7
         })
 
-        # NUEVA REGLA: HOT_MOMENTUM (Especifica y Quirurgica) — REFINAMIENTO V6
+        # NUEVA REGLA: HOT_MOMENTUM (Homologada con Crypto V2)
         ema3, ema9, ema20 = context.get('ema_3'), context.get('ema_9'), context.get('ema_20')
         bb_exp = context.get('bb_expanding', False)
         
-        # Mejorada lógica de entrada para AaHot (Long/Short)
-        # V6: Filtros reforzados para XAUUSD tras pérdida de -$10.38
         hot_triggered = False
         if ema3 and ema9 and ema20:
             # Calcular distancia porcentual entre EMA3 y EMA9
             ema_dist_pct = abs(ema3 - ema9) / ema9 * 100 if ema9 > 0 else 100
-            ema_close_enough = ema_dist_pct <= 0.03  # V6: Reducido de 0.05% a 0.03% para cruce más inminente
             
             # Detector de Agotamiento de EMA
-            # Si están muy separadas pero el impulso es débil, asumimos agotamiento (a menos que haya bb_exp)
             ema_exhaustion = (ema_dist_pct > 0.15) and not bb_exp
 
-            # V6: Exigir ADX mínimo de 22 para confirmar tendencia real
-            adx_floor_ok = adx > 22
+            # ADX mínimo relajado a 15 (homologado con Crypto)
+            adx_floor_ok = adx >= 15
             
-            # Filtros anti‑momentum y contratendencia fuerte (CORREGIDO: adx_val → adx)
+            # Filtros anti-momentum y contratendencia fuerte
             strong_contratrend_hot = (
                 (direction == 'long' and adx > 35 and mtf <= -0.5) or
                 (direction == 'short' and adx > 35 and mtf >= 0.5)
             )
             
-            # V6: Para XAUUSD y símbolos estrictos, exigir SAR 4H alineado
-            hot_strict_symbols = ['XAUUSD', 'GBPUSD']
-            require_sar4h = symbol in hot_strict_symbols
-            sar4h_gate = sar_4h_ok if require_sar4h else True
-            
             rsi = context.get('rsi_14', 50)
-            high_price = context.get('high', 0)
-            low_price = context.get('low', 0)
             bb_upper = context.get('bb_upper', 99999)
             bb_lower = context.get('bb_lower', 0)
             
+            cross_age = context.get('ema3_cross_age', 999)
+            slope = context.get('ema3_slope', 0)
+            slope_prev = context.get('ema3_slope_prev', 0)
+            
             if direction == 'long':
-                # V9: Cruce fresco (≤3 velas) O pendiente acelerando, + confirmación 5m
-                cross_age = context.get('ema3_cross_age', 999)
-                slope = context.get('ema3_slope', 0)
-                slope_prev = context.get('ema3_slope_prev', 0)
-                ema_5m_ok = context.get('ema_5m_aligned_long', False)
-                slope_5m = context.get('ema3_slope_5m', 0)
+                fresh_cross_long_by_age = (cross_age <= 3) and (ema3 > ema9)
+                slope_entry_long = (slope > 0) and (slope > slope_prev) and (ema3 > ema9)
+                fresh_cross = fresh_cross_long_by_age or slope_entry_long
                 
-                # REFINAMIENTO PROPUESTA 3: Slope en 5m
-                slope_entry = slope_5m > 0
-                fresh_cross = (cross_age <= 3) and (ema3 > ema9)
-                ema_condition = (fresh_cross or slope_entry) and ema_5m_ok
-                
-                mtf_not_extreme = mtf >= -0.6
-                
-                # Nuevas reglas de protección para LONG (V8)
-                rsi_ok = rsi < 60
+                rsi_ok = rsi <= 65
                 not_in_ceiling = price <= bb_upper if bb_upper > 0 else True
                 
-                # REFINAMIENTO PROPUESTA 2: Relajar MTF y SAR si viene de fondo
-                from_bottom = (fib_zone <= -4) and sipv_buy
+                from_bottom = (fib_zone <= -4)
                 relaxed_mtf_ok = (mtf > -0.4) if from_bottom else (mtf > 0)
                 relaxed_sar_ok = True if from_bottom else sar_15m_ok
+                bb_expanding_or_mtf_long_or_bottom = bb_exp or (mtf >= 0.5) or from_bottom
                 
                 hot_triggered = (
-                    ema_condition and ema20 and (bb_exp or mtf >= 0.5 or from_bottom) and (-6 <= fib_zone <= 2)
-                    and relaxed_sar_ok and sar4h_gate and relaxed_mtf_ok and adx_floor_ok
-                    and mtf_not_extreme and not strong_contratrend_hot
-                    and struct_ok  # V6: Exigir estructura 4H favorable
-                    and rsi_ok
-                    and not_in_ceiling
-                    and not ema_exhaustion
+                    fresh_cross and
+                    relaxed_mtf_ok and
+                    bb_expanding_or_mtf_long_or_bottom and
+                    (-6 <= fib_zone <= 2) and
+                    relaxed_sar_ok and
+                    adx_floor_ok and
+                    (not strong_contratrend_hot) and
+                    rsi_ok and
+                    not_in_ceiling and
+                    (not ema_exhaustion)
                 )
             else:
                 # Short
-                # V9: Cruce fresco (≤3 velas) O pendiente acelerando, + confirmación 5m
-                cross_age = context.get('ema3_cross_age', 999)
-                slope = context.get('ema3_slope', 0)
-                slope_prev = context.get('ema3_slope_prev', 0)
-                ema_5m_ok = context.get('ema_5m_aligned_short', False)
-                slope_5m = context.get('ema3_slope_5m', 0)
+                fresh_cross_short_by_age = (cross_age <= 3) and (ema3 < ema9)
+                slope_entry_short = (slope < 0) and (slope < slope_prev) and (ema3 < ema9)
+                fresh_cross = fresh_cross_short_by_age or slope_entry_short
                 
-                # REFINAMIENTO PROPUESTA 3: Slope en 5m
-                slope_entry = slope_5m < 0
-                fresh_cross = (cross_age <= 3) and (ema3 < ema9)
-                ema_condition = (fresh_cross or slope_entry) and ema_5m_ok
-                
-                mtf_not_extreme = mtf <= 0.6
-                
-                rsi_ok = rsi > 40
+                rsi_ok = rsi >= 35
                 not_in_floor = price >= bb_lower if bb_lower > 0 else True
                 
-                # REFINAMIENTO PROPUESTA 2: Relajar MTF y SAR si viene de techo
-                from_top = (fib_zone >= 4) and sipv_sell
+                from_top = (fib_zone >= 4)
                 relaxed_mtf_ok = (mtf < 0.4) if from_top else (mtf < 0)
                 relaxed_sar_ok = True if from_top else sar_15m_ok
+                bb_expanding_or_mtf_short_or_top = bb_exp or (mtf <= -0.5) or from_top
                 
                 hot_triggered = (
-                    ema_condition and ema20 and (bb_exp or mtf <= -0.5 or from_top) and (-2 <= fib_zone <= 6)
-                    and relaxed_sar_ok and sar4h_gate and relaxed_mtf_ok and adx_floor_ok
-                    and mtf_not_extreme and not strong_contratrend_hot
-                    and struct_ok  # V6: Exigir estructura 4H favorable
-                    and rsi_ok
-                    and not_in_floor
-                    and not ema_exhaustion
+                    fresh_cross and
+                    relaxed_mtf_ok and
+                    bb_expanding_or_mtf_short_or_top and
+                    (-2 <= fib_zone <= 6) and
+                    relaxed_sar_ok and
+                    adx_floor_ok and
+                    (not strong_contratrend_hot) and
+                    rsi_ok and
+                    not_in_floor and
+                    (not ema_exhaustion)
                 )
 
         results.append({
@@ -583,25 +577,20 @@ class ForexExecutionService:
             'score': 0.95 # Alta prioridad
         })
 
-        # NUEVA REGLA FOREX: Aa21 / Bb21 (Bollinger Band / EMA50 trend / Regime bajo_riesgo)
+        # REGLA: Aa21 / Bb21 (Homologada con Crypto V2)
         bb21_rule_triggered = False
         if direction == 'long':
             if ema3 and ema9 and ema20:
                 ema20_angle = context.get('ema20_angle', 0.0)
                 ema_50 = context.get('ema_50', 0.0)
                 ema_200 = context.get('ema_200', 0.0)
-                regime = context.get('regime', 'bajo_riesgo')
                 bb_upper = context.get('bb_upper', 99999)
                 
                 bb21_rule_triggered = (
-                    regime == 'bajo_riesgo'
-                    and ema_50 > ema_200
+                    ema_50 > ema_200
                     and ema20_angle >= 0
                     and (-2 <= fib_zone <= 2)
                     and (price < bb_upper if bb_upper > 0 else True)
-                    and struct_ok
-                    and sar_15m_ok
-                    and pine_not_opposite
                 )
         else:
             if ema3 and ema9 and ema20:
@@ -613,19 +602,14 @@ class ForexExecutionService:
                 
                 ema_50 = context.get('ema_50', 0.0)
                 ema_200 = context.get('ema_200', 0.0)
-                regime = context.get('regime', 'bajo_riesgo')
                 bb_lower = context.get('bb_lower', 0.0)
                 
                 bb21_rule_triggered = (
-                    regime == 'bajo_riesgo'
-                    and ema_50 < ema_200
+                    ema_50 < ema_200
                     and ema20_angle <= 0
                     and ema20_phase == 'nivel_2_short'
                     and di_margin > 10
                     and (price > bb_lower if bb_lower > 0 else True)
-                    and struct_ok
-                    and sar_15m_ok
-                    and pine_not_opposite
                 )
 
         results.append({
@@ -810,6 +794,7 @@ class ForexExecutionService:
             market_type='forex_futures',
             direction=direction,
             rule_code=signal.get('rule_code'),
+            snap=snap,
         )
         if not v_res.get('valid'):
             self.log(f"⚠️ ORDEN ABORTADA para {symbol} ({direction.upper()}): Fallo de validación de seguridad: {v_res.get('reason')}", "CRITICAL")
@@ -1389,7 +1374,45 @@ class ForexExecutionService:
         erep_active = bool(position.get('erep_active'))
 
         if not sl_touched and not erep_active:
-            return False  # Normal, sin acción
+            # PROACTIVE / EARLY EREP ACTIVATION TRIGGER
+            try:
+                entry = self._safe_float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+                if entry > 0:
+                    drawdown = (entry - current_price) / entry * 100 if is_long else (current_price - entry) / entry * 100
+                    min_drawdown = 1.2
+                    if drawdown >= min_drawdown:
+                        from app.strategy.erep_manager import detect_p2_entry_signal
+                        sig = detect_p2_entry_signal(df_15m, snap, side, symbol, market_type)
+                        if sig['has_signal']:
+                            self.log(f"🔥 PROACTIVE EREP TRIGGERED for {symbol}: drawdown={drawdown:.2f}% >= {min_drawdown}%. Signal: {sig['reason']}")
+                            
+                            q1 = abs(self._safe_float(position.get('erep_q1') or position.get('lots') or 0))
+                            
+                            supabase.table('forex_positions').update({
+                                'erep_active':      True,
+                                'erep_phase':       2,
+                                'erep_p1_price':    entry,
+                                'erep_q1':          q1,
+                                'erep_market_type': market_type,
+                                'erep_cycles_elapsed': 0
+                            }).eq('id', position['id']).execute()
+                            
+                            position['erep_active'] = True
+                            position['erep_phase'] = 2
+                            position['erep_p1_price'] = entry
+                            position['erep_q1'] = q1
+                            position['erep_market_type'] = market_type
+                            position['erep_cycles_elapsed'] = 0
+                            erep_active = True
+                        else:
+                            return False
+                    else:
+                        return False
+                else:
+                    return False
+            except Exception as proactive_err:
+                self.log(f"Error evaluating proactive EREP: {proactive_err}", "WARNING")
+                return False
 
         async def open_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
             res = supabase.table("forex_positions").select("*").eq("id", position["id"]).execute()
