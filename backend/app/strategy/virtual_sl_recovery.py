@@ -423,15 +423,34 @@ def check_slv_trigger(position: dict, current_price: float) -> bool:
     else:
         return current_price >= slv_price
 
+def get_db_key_and_record_id(position: dict, table: str) -> tuple:
+    import uuid
+    is_uuid = False
+    pos_id = position.get('id')
+    if pos_id:
+        try:
+            uuid.UUID(str(pos_id))
+            is_uuid = True
+        except ValueError:
+            is_uuid = False
+
+    db_key_name = 'id'
+    db_record_id = pos_id
+    if table == 'forex_positions' and not is_uuid:
+        db_key_name = 'ctrader_order_id'
+        db_record_id = position.get('ctrader_order_id') or pos_id
+    return db_key_name, db_record_id
+
 def activate_recovery_mode_sync(position: dict, current_price: float, symbol: str, market_type: str, sb, table='positions'):
     """Activa el flag de recovery_mode en la DB."""
     log_info('SLVM', f"ACTIVATING RECOVERY MODE for {symbol} at {current_price} on table {table}")
+    db_key, db_rec = get_db_key_and_record_id(position, table)
     try:
-        safe_db_update(sb, table, position['id'], {
+        safe_db_update(sb, table, db_rec, {
             'recovery_mode': True,
             'recovery_cycles': 0,
             'recovery_activated_at': datetime.now(timezone.utc).isoformat()
-        })
+        }, key_name=db_key)
     except Exception as e:
         log_error('SLVM', f"Error activating recovery mode on table {table}: {e}")
 
@@ -442,24 +461,26 @@ def evaluate_recovery_mode(position: dict, current_price: float, snap: dict, sym
 
 def finalize_recovery_exit_sync(position: dict, mr_result: dict, price: float, symbol: str, sb, table='positions'):
     """Registra el cierre por recuperacion de forma sincrona."""
+    db_key, db_rec = get_db_key_and_record_id(position, table)
     try:
-        safe_db_update(sb, table, position['id'], {
+        safe_db_update(sb, table, db_rec, {
             'status': 'closed',
             'close_reason': f"recovery_{mr_result['exit_type']}",
             'closed_at': datetime.now(timezone.utc).isoformat(),
             'current_price': price,
             'realized_pnl': calculate_pips(safe_float(position.get('avg_entry_price', 0)), price, position.get('side', 'long'), symbol)
-        })
+        }, key_name=db_key)
         log_info('SLVM', f"Finalized recovery exit for {symbol} ({mr_result['exit_type']})")
     except Exception as e:
         log_error('SLVM', f"Error finalizing recovery exit: {e}")
 
 def update_recovery_cycle_sync(position: dict, mr_result: dict, sb, table='positions'):
     """Actualiza el contador de ciclos de recuperacion en la DB."""
+    db_key, db_rec = get_db_key_and_record_id(position, table)
     try:
-        safe_db_update(sb, table, position['id'], {
+        safe_db_update(sb, table, db_rec, {
             'recovery_cycles': mr_result.get('recovery_cycles', 0)
-        })
+        }, key_name=db_key)
     except Exception as e:
         log_error('SLVM', f"Error updating recovery cycles: {e}")
 
