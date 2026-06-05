@@ -1006,7 +1006,7 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
                 }
                 if new_tp:
                     update_fields['take_profit'] = new_tp
-                    update_fields['take_profit_price'] = new_tp
+                    update_fields['tp_full_price'] = new_tp
 
                 supabase.table('positions').update(update_fields).eq('id', pos_id).execute()
                 # Actualizar objeto local para el resto del ciclo
@@ -1014,7 +1014,7 @@ async def _run_protection_crypto(pos: dict, price: float, supabase):
                 pos['stop_loss'] = new_sl
                 if new_tp:
                     pos['take_profit'] = new_tp
-                    pos['take_profit_price'] = new_tp
+                    pos['tp_full_price'] = new_tp
                 # Actualizar estado interno
                 state.current_sl = new_sl
                 if action == 'activate_be': state.be_activated = True
@@ -1418,7 +1418,7 @@ async def _execute_paper_partial_close(pos, price, supabase):
     except Exception as cap_e:
         log_warning(MODULE, f"Error actualizando capital acumulado en partial close: {cap_e}")
 
-async def _execute_paper_close(pos, price, reason, supabase):
+async def _execute_paper_close(pos, price, reason, supabase, snap=None):
     """Cierra la posición completamente en Paper Trading."""
     symbol = pos['symbol']
     entry = float(pos.get('entry_price') or 0)
@@ -1427,6 +1427,7 @@ async def _execute_paper_close(pos, price, reason, supabase):
     
     is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')) or pos.get('market_type') == 'forex_futures'
     table_name = 'forex_positions' if is_forex else 'positions'
+    market_type = 'forex_futures' if is_forex else 'crypto_futures'
     
     # Check UUID formatting to avoid database validation crashes
     import uuid
@@ -1455,9 +1456,53 @@ async def _execute_paper_close(pos, price, reason, supabase):
     partial_pnl = pos.get('partial_pnl_usd')
     total_pnl = pnl_usd + (float(partial_pnl) if partial_pnl is not None else 0.0)
 
+    # ── SMART ANTI-LOSS GUARD v2.0 ──
+    # Evalúa la tendencia macro (EMA20 vs EMA50) antes de permitir un cierre en pérdida.
+    # Solo bloquea el cierre si la tendencia sigue favorable (pullback temporal).
+    # Si la tendencia se rompió (EMA20 < EMA50 para LONGs), permite el cierre.
+    from app.strategy.smart_loss_guard import should_block_close
+    guard_result = should_block_close(
+        snap=snap,
+        side=side,
+        reason=reason,
+        total_pnl=total_pnl,
+        market_type=market_type,
+        symbol=symbol,
+    )
+
+    if guard_result['block']:
+        # Tendencia sana: bloquear cierre y activar EREP con columnas seguras por tabla
+        log_warning(MODULE,
+            f"SMART GUARD: Protegiendo {symbol} ({reason}) PnL=${total_pnl:.4f}. "
+            f"{guard_result['reason']}"
+        )
+        try:
+            # Columnas comunes (existen en ambas tablas)
+            guard_update = {
+                'erep_active': True,
+                'erep_phase': 2,
+                'erep_p1_price': entry,
+                'erep_q1': qty,
+                'erep_market_type': market_type,
+                'erep_cycles_elapsed': 0,
+                'sl_price': 0,
+            }
+            # Columnas exclusivas de crypto (NO existen en forex_positions)
+            if not is_forex:
+                guard_update['sl_type'] = 'smart_guard_protect'
+                guard_update['stop_loss'] = 0
+                guard_update['sl_dynamic_price'] = 0
+
+            supabase.table(table_name).update(guard_update).eq(db_key_name, db_record_id).execute()
+
+            # Actualizar BOT_STATE local
+            if pos_id in BOT_STATE.positions:
+                BOT_STATE.positions[pos_id].update(guard_update)
+        except Exception as upd_e:
+            log_warning(MODULE, f"Error actualizando Smart Guard para {symbol}: {upd_e}")
+        return False
+
     # ── Cerrar posición en la tabla correcta con columnas válidas ──
-    # NOTA: Anti-Loss Guard fue removido (atrapaba posiciones indefinidamente
-    # y escribía columnas inexistentes en forex_positions causando crashes).
     if is_forex:
         close_update = {
             'status': 'closed',

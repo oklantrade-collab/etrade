@@ -904,12 +904,15 @@ async def execute_erep_action(
             'erep_activated_at':    datetime.now(timezone.utc).isoformat(),
             'erep_cycles_elapsed':  0,
         }
-        if table != 'forex_positions':
+        if table == 'positions':
             update_fields['sl_type'] = 'erep_suspended'
-        if 'stop_loss_price' in position:
-            update_fields['stop_loss_price'] = 0
-        if 'stop_loss' in position:
             update_fields['stop_loss'] = 0
+            update_fields['sl_price'] = 0
+        elif table == 'forex_positions':
+            update_fields['sl_price'] = 0
+        else:
+            update_fields['stop_loss'] = 0
+            update_fields['sl_price'] = 0
 
         supabase.table(table).update(update_fields).eq('id', pos_id).execute()
 

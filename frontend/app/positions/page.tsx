@@ -16,6 +16,7 @@ export default function PositionsPage() {
   const [closedPage, setClosedPage] = useState(0)
   const [tz, setTz] = useState('America/Lima')
   const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   useEffect(() => {
     const handleTzUpdate = () => {
@@ -39,12 +40,17 @@ export default function PositionsPage() {
   }, [])
 
   async function loadPositions() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('positions')
       .select('*')
       .eq('status', 'open')
       .order('opened_at', { ascending: false })
-    if (data) setPositions(data)
+    if (error) {
+      console.error('Error loading open positions:', error)
+      setErrorMsg(`Error loading open positions: ${error.message}`)
+    } else {
+      if (data) setPositions(data)
+    }
   }
 
   async function loadClosedPositions() {
@@ -56,16 +62,22 @@ export default function PositionsPage() {
       .limit(100)
     if (error) {
       console.error('Error loading closed positions:', error)
+      setErrorMsg(`Error loading closed positions: ${error.message}`)
+    } else {
+      if (data) setClosedPositions(data)
     }
-    if (data) setClosedPositions(data)
   }
   async function loadMaxPositions() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('risk_config')
       .select('max_open_trades')
       .limit(1)
       .maybe_single()
-    if (data?.max_open_trades) setMaxPositions(data.max_open_trades)
+    if (error) {
+      console.error('Error loading risk config:', error)
+    } else if (data?.max_open_trades) {
+      setMaxPositions(data.max_open_trades)
+    }
   }
 
   async function handleClose(id: string) {
@@ -99,6 +111,13 @@ export default function PositionsPage() {
         <h1>Positions</h1>
         <p>Live trading positions with Binance OCO brackets</p>
       </div>
+
+      {errorMsg && (
+        <div style={{ padding: '12px 16px', background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.2)', color: '#F43F5E', borderRadius: '8px', marginBottom: 24, fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span><strong>Database Error:</strong> {errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} style={{ background: 'none', border: 'none', color: '#F43F5E', cursor: 'pointer', fontSize: '1.2rem', fontWeight: 'bold' }}>&times;</button>
+        </div>
+      )}
 
       <div className="stats-grid" style={{ marginBottom: 32 }}>
         <div className="card">
