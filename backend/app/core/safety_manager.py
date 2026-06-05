@@ -166,6 +166,7 @@ def validate_signal(
     market_type: str = 'crypto_futures',
     direction:   str = None,
     rule_code:   str = None,
+    snap:        dict = None,
 ) -> dict:
     """
     Valida señal antes de ejecutarla.
@@ -238,6 +239,50 @@ def validate_signal(
                 f"Dirección incoherente para la regla: "
                 f"regla {rule_code} ({expected}) != dirección {direction}"
             )
+
+    # CHECK 7: Sanidad de Indicadores Técnicos en el Snapshot
+    if snap:
+        critical_keys = ['price']
+        if market_type == 'forex_futures':
+            critical_keys.extend(['ema_3', 'ema_9', 'ema_20', 'atr', 'adx'])
+        elif market_type == 'crypto_futures':
+            critical_keys.extend(['ema_3', 'ema_9'])
+            
+        had_check7_error = False
+        check7_errors = []
+        for key in critical_keys:
+            val = snap.get(key)
+            if val is None:
+                err_msg = f"Indicador crítico ausente/nulo: '{key}'"
+                errors.append(err_msg)
+                check7_errors.append(err_msg)
+                had_check7_error = True
+            elif isinstance(val, (int, float)) and val <= 0 and key != 'sar_trend_4h' and key != 'sar_trend_15m':
+                err_msg = f"Indicador crítico con valor inválido: '{key}' = {val}"
+                errors.append(err_msg)
+                check7_errors.append(err_msg)
+                had_check7_error = True
+
+        if had_check7_error:
+            # Activar bloqueo de seguridad preventivo a nivel de sistema (in-memory y base de datos)
+            if market_type == 'forex_futures':
+                set_forex_safety_block(True)
+                update_db_safety_block('forex_futures', True)
+                market_name = "FOREX"
+            else:
+                set_crypto_safety_block(True)
+                update_db_safety_block('crypto_futures', True)
+                market_name = "CRYPTO"
+            
+            alert_msg = (
+                f"🚨 **BLOQUEO PREVENTIVO DE SEGURIDAD ACTIVADO ({market_name})**\n\n"
+                f"El motor de seguridad detectó datos corruptos, nulos o desfasados en indicadores técnicos antes de operar en **{symbol}**.\n\n"
+                f"**Detalles del fallo:**\n"
+                + "\n".join(f"• {e}" for e in check7_errors) + "\n\n"
+                f"🛑 **Acción Preventiva:** Se suspende inmediatamente todo el ingreso de nuevas compras u operaciones en {market_name} "
+                f"de manera preventiva hasta que se corrija el problema técnico en los servidores."
+            )
+            send_telegram_sync(alert_msg)
 
     if errors:
         log_info('SAFETY',
@@ -503,12 +548,16 @@ async def check_subprocesses_safety(supabase) -> dict:
             if basis_val <= 0:
                 indicators_crashed_forex = True
         
-        # Check 2.3: Integridad de Stop Loss en posiciones abiertas
-        pos_res = supabase.table('forex_positions').select('id, symbol, sl_price, tp_price').eq('status', 'open').execute()
+        # Check 2.3: Integridad de Stop Loss en posiciones abiertas (exceptuando si EREP está activo o son de ApexEma)
+        pos_res = supabase.table('forex_positions').select('id, symbol, sl_price, tp_price, erep_active, erep_phase, rule_code').eq('status', 'open').execute()
         open_pos_list = pos_res.data or []
         
         pos_missing_sl_forex = False
         for pos in open_pos_list:
+            if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
+                continue
+            if pos.get('rule_code') in ('AaApexEma', 'BbApexEma'):
+                continue
             sl = float(pos.get('sl_price') or 0)
             tp = float(pos.get('tp_price') or 0)
             if sl <= 0 or tp <= 0:
@@ -530,6 +579,19 @@ async def check_subprocesses_safety(supabase) -> dict:
         
     # Calcular resultado Forex
     forex_failed = any(v is False for v in forex_checks.values())
+    
+    # ── EMERGENCY GUARDS HOOK (FOREX) ──
+    from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
+    was_forex_blocked = check_db_safety_block('forex_futures')
+    if forex_failed and not was_forex_blocked:
+        # Acaba de entrar en emergencia
+        import asyncio
+        asyncio.create_task(trigger_emergency_protection('forex_futures'))
+    elif not forex_failed and was_forex_blocked:
+        # Acaba de salir de emergencia
+        import asyncio
+        asyncio.create_task(restore_emergency_protection('forex_futures'))
+
     set_forex_safety_block(forex_failed)
     update_db_safety_block('forex_futures', forex_failed)
     
@@ -571,12 +633,16 @@ async def check_subprocesses_safety(supabase) -> dict:
         # V6: Solo marcar stale si la MAYORÍA de símbolos están desactualizados (2+ de 3)
         stale_crypto = stale_count_crypto >= 2
                 
-        # Check 1.3: Integridad de Stop Loss en posiciones abiertas de Crypto
-        pos_res_crypto = supabase.table('positions').select('id, symbol, sl_price, tp_full_price').eq('status', 'open').execute()
+        # Check 1.3: Integridad de Stop Loss en posiciones abiertas de Crypto (exceptuando si EREP está activo o son de ApexEma)
+        pos_res_crypto = supabase.table('positions').select('id, symbol, sl_price, tp_full_price, erep_active, erep_phase, rule_code').eq('status', 'open').execute()
         open_pos_list_crypto = pos_res_crypto.data or []
         
         pos_missing_sl_crypto = False
         for pos in open_pos_list_crypto:
+            if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
+                continue
+            if pos.get('rule_code') in ('AaApexEma', 'BbApexEma'):
+                continue
             sl = float(pos.get('sl_price') or 0)
             tp = float(pos.get('tp_full_price') or 0)
             if sl <= 0 or tp <= 0:
@@ -595,6 +661,19 @@ async def check_subprocesses_safety(supabase) -> dict:
         
     # Calcular resultado Crypto
     crypto_failed = any(v is False for v in crypto_checks.values())
+    
+    # ── EMERGENCY GUARDS HOOK (CRYPTO) ──
+    from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
+    was_crypto_blocked = check_db_safety_block('crypto_futures')
+    if crypto_failed and not was_crypto_blocked:
+        # Acaba de entrar en emergencia
+        import asyncio
+        asyncio.create_task(trigger_emergency_protection('crypto_futures'))
+    elif not crypto_failed and was_crypto_blocked:
+        # Acaba de salir de emergencia
+        import asyncio
+        asyncio.create_task(restore_emergency_protection('crypto_futures'))
+
     set_crypto_safety_block(crypto_failed)
     update_db_safety_block('crypto_futures', crypto_failed)
     
@@ -748,13 +827,33 @@ async def check_all_heartbeats() -> list:
     return dead
 
 
-# ════════════════════════════════════════
-# HELPER — Telegram
-# ════════════════════════════════════════
-
 async def _send_telegram(message: str):
     try:
         from app.workers.alerts_service import send_telegram_message
         await send_telegram_message(message)
     except Exception:
         pass
+
+def send_telegram_sync(message: str):
+    """Envía un mensaje de Telegram desde un contexto síncrono de forma segura."""
+    try:
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        
+        if loop and loop.is_running():
+            from app.workers.alerts_service import send_telegram_message
+            loop.create_task(send_telegram_message(message))
+        else:
+            import threading
+            from app.workers.alerts_service import send_telegram_message
+            def run_sync():
+                try:
+                    asyncio.run(send_telegram_message(message))
+                except Exception:
+                    pass
+            threading.Thread(target=run_sync, daemon=True).start()
+    except Exception as e:
+        log_error('SAFETY', f"Error enviando Telegram síncrono: {e}")

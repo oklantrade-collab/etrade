@@ -50,6 +50,7 @@ def calculate_b1_momentum(
     snap:    dict,
     df_5m:   pd.DataFrame = None,
     df_15m:  pd.DataFrame = None,
+    snap_5m: dict = None,
 ) -> dict:
     """
     Mide la fuerza del flujo comprador.
@@ -144,7 +145,7 @@ def calculate_b1_momentum(
     # ── EMA3 / EMA9 FRESH CROSS BONUS ─────────
     ema3 = float(snap.get('ema_3') or 0)
     ema9 = float(snap.get('ema_9') or 0)
-    ema_cross_age = int(snap.get('ema3_cross_ema9_age', 999))
+    ema_cross_age = int(snap.get('ema3_cross_ema9_age') if snap.get('ema3_cross_ema9_age') is not None else 999)
     ema_cross_score = 0
     if ema3 > ema9:
         if ema_cross_age <= 1:
@@ -161,13 +162,54 @@ def calculate_b1_momentum(
         'score': ema_cross_score, 'weight': 0.25,
     }
 
+    # ── EARLY MOMENTUM 5m BONUS ──────────────────
+    # Si en el gráfico de 5 minutos: EMA3 > EMA9 > EMA20 Y las bandas BB están
+    # abriéndose, esto indica el INICIO de un movimiento explosivo.
+    # Premiamos fuertemente para que APEX seleccione estas acciones.
+    early_momentum_5m = 0
+    if snap_5m:
+        ema3_5m  = float(snap_5m.get('ema_3') or 0)
+        ema9_5m  = float(snap_5m.get('ema_9') or 0)
+        ema20_5m = float(snap_5m.get('ema_20') or 0)
+        bb_exp_5m = bool(snap_5m.get('bb_expanding', False))
+        rsi_5m    = float(snap_5m.get('rsi_14') or 50)
+
+        # Perfect alignment: EMA3 > EMA9 > EMA20 on 5m
+        if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+            if ema3_5m > ema9_5m > ema20_5m:
+                if bb_exp_5m and rsi_5m < 70:
+                    # ¡Setup perfecto! Momentum naciente con bandas abriéndose
+                    early_momentum_5m = 100
+                elif bb_exp_5m:
+                    early_momentum_5m = 80
+                elif rsi_5m < 60:
+                    early_momentum_5m = 65
+                else:
+                    early_momentum_5m = 50
+            elif ema3_5m > ema9_5m:
+                # Parcial alignment
+                early_momentum_5m = 35
+            else:
+                early_momentum_5m = 10
+        
+        components['early_momentum_5m'] = {
+            'ema3_5m': round(ema3_5m, 4) if ema3_5m else 0,
+            'ema9_5m': round(ema9_5m, 4) if ema9_5m else 0,
+            'ema20_5m': round(ema20_5m, 4) if ema20_5m else 0,
+            'bb_expanding_5m': bb_exp_5m,
+            'rsi_5m': round(rsi_5m, 1),
+            'score': early_momentum_5m, 'weight': 0.20,
+        }
+
     # ── Score final B1 ────────────────────────
+    has_early_5m = 'early_momentum_5m' in components
     weights_used = {
-        'rvol': 0.25,
-        'price_accel': 0.15 if 'price_acceleration' in components else 0,
-        'vwap': 0.15 if 'vwap' in components else 0,
-        'vol_consist': 0.20 if 'vol_consistency' in components else 0,
+        'rvol': 0.20,
+        'price_accel': 0.10 if 'price_acceleration' in components else 0,
+        'vwap': 0.10 if 'vwap' in components else 0,
+        'vol_consist': 0.15 if 'vol_consistency' in components else 0,
         'ema_cross': 0.25 if 'ema_cross_momentum' in components else 0,
+        'early_5m': 0.20 if has_early_5m else 0,
     }
     total_w = sum(weights_used.values())
 
@@ -176,7 +218,8 @@ def calculate_b1_momentum(
         price_accel * weights_used['price_accel'] +
         vwap_score * weights_used['vwap'] +
         vol_consistency * weights_used['vol_consist'] +
-        ema_cross_score * weights_used['ema_cross']
+        ema_cross_score * weights_used['ema_cross'] +
+        early_momentum_5m * weights_used['early_5m']
     ) / (total_w if total_w > 0 else 1)
     
     # ── Penalización por Sobreextensión (Evitar techos) ────────
@@ -213,6 +256,7 @@ def calculate_b2_technical(
     snap:   dict,
     df_15m: pd.DataFrame = None,
     df_4h:  pd.DataFrame = None,
+    snap_5m: dict = None,
 ) -> dict:
     """
     Evalúa el contexto técnico actual.
@@ -284,7 +328,8 @@ def calculate_b2_technical(
     }
 
     # ── Banda Fibonacci ───────────────────────
-    fib_zone = int(snap.get('fibonacci_zone', snap.get('fib_zone_15m', 0)))
+    fib_zone_val = snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fib_zone_15m')
+    fib_zone = int(fib_zone_val if fib_zone_val is not None else 0)
     fib_score_map = {
         -6: 95, -5: 88, -4: 80, -3: 72, -2: 62, -1: 55,
         0: 50,
@@ -294,8 +339,8 @@ def calculate_b2_technical(
     components['fibonacci'] = {'zone': fib_zone, 'score': fib_score, 'weight': 0.20}
 
     # ── SAR ───────────────────────────────────
-    sar_15m = int(snap.get('sar_trend_15m', 0))
-    sar_4h  = int(snap.get('sar_trend_4h', 0))
+    sar_15m = int(snap.get('sar_trend_15m') if snap.get('sar_trend_15m') is not None else 0)
+    sar_4h  = int(snap.get('sar_trend_4h') if snap.get('sar_trend_4h') is not None else 0)
 
     if sar_15m > 0 and sar_4h > 0:
         sar_score = 80
@@ -315,8 +360,21 @@ def calculate_b2_technical(
 
     # ── Bollinger Bands Expansion ────────────────
     bb_expanding = bool(snap.get('bb_expanding', False))
-    bb_score = 90 if bb_expanding else 50
-    components['bb_expansion'] = {'expanding': bb_expanding, 'score': bb_score, 'weight': 0.15}
+    bb_expanding_5m = bool(snap_5m.get('bb_expanding', False)) if snap_5m else False
+    # Si la expansión está naciendo en 5m, máxima puntuación
+    if bb_expanding_5m and bb_expanding:
+        bb_score = 100  # Ambas temporalidades expandiéndose
+    elif bb_expanding_5m:
+        bb_score = 95   # Naciendo en 5m (setup temprano ideal)
+    elif bb_expanding:
+        bb_score = 80   # Solo en 15m
+    else:
+        bb_score = 45
+    components['bb_expansion'] = {
+        'expanding_15m': bb_expanding,
+        'expanding_5m': bb_expanding_5m,
+        'score': bb_score, 'weight': 0.15,
+    }
 
     # ── Score final B2 ────────────────────────
     score = (
@@ -415,9 +473,10 @@ def calculate_b4_regime(
     price = float(snap.get('price') or 1)
     atr_pct = (atr / price * 100) if price > 0 else 0
 
-    if adx > 35 and snap.get('sar_trend_4h', 0) > 0:
+    sar_4h_val = snap.get('sar_trend_4h') if snap.get('sar_trend_4h') is not None else 0
+    if adx > 35 and sar_4h_val > 0:
         regime_type, regime_score = 'trending_up', 80
-    elif adx > 35 and snap.get('sar_trend_4h', 0) < 0:
+    elif adx > 35 and sar_4h_val < 0:
         regime_type, regime_score = 'trending_down', 25
     elif adx < 20 and atr_pct < 1.5:
         regime_type, regime_score = 'low_volatility', 55
@@ -584,9 +643,40 @@ def calculate_apex_score(
     price = float(snap.get('price') or 0)
     atr   = float(snap.get('atr') or (price * 0.02))
 
+    # ── Construir snap_5m para indicadores de 5 minutos ──
+    snap_5m = None
+    if df_5m is not None and len(df_5m) >= 20:
+        try:
+            close_5m = pd.to_numeric(df_5m['close' if 'close' in df_5m.columns else 'Close'], errors='coerce').dropna()
+            ema3_5m_val = float(close_5m.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_5m_val = float(close_5m.ewm(span=9, adjust=False).mean().iloc[-1])
+            ema20_5m_val = float(close_5m.ewm(span=20, adjust=False).mean().iloc[-1])
+            rsi_col = 'rsi_14' if 'rsi_14' in df_5m.columns else None
+            rsi_5m_val = float(df_5m[rsi_col].iloc[-1]) if rsi_col else 50.0
+            # Detect BB expansion in 5m
+            bb_upper_col = 'bb_upper' if 'bb_upper' in df_5m.columns else None
+            bb_lower_col = 'bb_lower' if 'bb_lower' in df_5m.columns else None
+            bb_exp_5m = False
+            if bb_upper_col and bb_lower_col and len(df_5m) >= 3:
+                last_row = df_5m.iloc[-1]
+                prev_row = df_5m.iloc[-2]
+                bb_exp_5m = (
+                    float(last_row[bb_upper_col]) > float(prev_row[bb_upper_col]) and
+                    float(last_row[bb_lower_col]) < float(prev_row[bb_lower_col])
+                )
+            snap_5m = {
+                'ema_3': ema3_5m_val,
+                'ema_9': ema9_5m_val,
+                'ema_20': ema20_5m_val,
+                'rsi_14': rsi_5m_val,
+                'bb_expanding': bb_exp_5m,
+            }
+        except Exception:
+            snap_5m = None
+
     # ── Calcular los 5 bloques ────────────────
-    b1 = calculate_b1_momentum(snap, df_5m, df_15m)
-    b2 = calculate_b2_technical(snap, df_15m, df_4h)
+    b1 = calculate_b1_momentum(snap, df_5m, df_15m, snap_5m=snap_5m)
+    b2 = calculate_b2_technical(snap, df_15m, df_4h, snap_5m=snap_5m)
     b3 = calculate_b3_fundamental(fundamental_cache)
     b4 = calculate_b4_regime(macro, snap, df_daily)
     b5 = calculate_b5_sentiment(fundamental_cache, snap, ia_score=ia_score)

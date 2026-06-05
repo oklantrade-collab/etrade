@@ -1,27 +1,17 @@
 import os
 import sys
-from dotenv import load_dotenv
-from supabase import create_client
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Load environment
-load_dotenv('c:/Fuentes/eTrade/backend/.env')
+from app.core.supabase_client import get_supabase
 
-sb = create_client(os.getenv('SUPABASE_URL'), os.getenv('SUPABASE_SERVICE_KEY'))
+def check_config():
+    sb = get_supabase()
+    res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
+    print("=== trading_config regime_params ===")
+    if res.data:
+        print(res.data[0].get('regime_params'))
+    else:
+        print("No config found")
 
-print("=== TRADING CONFIG ===")
-try:
-    res = sb.table('trading_config').select('*').execute()
-    for row in res.data:
-        for k, v in row.items():
-            print(f"  {k}: {v}")
-except Exception as e:
-    print("Error querying trading_config:", e)
-
-print("\n=== RISK CONFIG ===")
-try:
-    res = sb.table('risk_config').select('*').execute()
-    for row in res.data:
-        for k, v in row.items():
-            print(f"  {k}: {v}")
-except Exception as e:
-    print("Error querying risk_config:", e)
+if __name__ == "__main__":
+    check_config()

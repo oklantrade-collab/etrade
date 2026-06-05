@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from app.core.logger import log_info, log_warning, log_error
 
-def safe_db_update(sb, table: str, record_id: int, update_data: dict):
+def safe_db_update(sb, table: str, record_id, update_data: dict, key_name: str = 'id'):
     """
     Defensively updates a table row. If PostgREST schema cache throws PGRST204 
     because a column is missing from the database schema, it dynamically 
@@ -28,7 +28,7 @@ def safe_db_update(sb, table: str, record_id: int, update_data: dict):
     
     for attempt in range(max_attempts):
         try:
-            res = sb.table(table).update(current_data).eq('id', record_id).execute()
+            res = sb.table(table).update(current_data).eq(key_name, record_id).execute()
             return res
         except Exception as e:
             err_str = str(e)
@@ -331,14 +331,22 @@ async def process_symbol_5m_with_slvm_v2(
     Busca la posicion abierta y aplica la logica SLVM v2.
     """
     try:
+        table_name = 'forex_positions' if 'forex' in market_type else 'positions'
+        
         # 1. Buscar posición abierta
-        res = sb.table('positions').select('*').eq('symbol', symbol).eq('status', 'open').maybe_single().execute()
-        if not res.data:
+        res = sb.table(table_name).select('*').eq('symbol', symbol).eq('status', 'open').maybe_single().execute()
+        if not res or not hasattr(res, 'data') or not res.data:
             return
             
         position = res.data
         
-        # 2. Evaluar Modo Recuperación V2
+        # 1.5 Si la posición no está en modo recuperación, sólo verificamos si debe activarse
+        if not position.get('recovery_mode'):
+            if check_slv_trigger(position, current_price):
+                activate_recovery_mode_sync(position, current_price, symbol, market_type, sb, table_name)
+            return
+        
+        # 2. Evaluar Modo Recuperación V2 (sólo si ya está activado)
         mr_result = evaluate_recovery_mode_v2(
             position=position,
             current_price=current_price,
@@ -346,6 +354,23 @@ async def process_symbol_5m_with_slvm_v2(
             symbol=symbol,
             market_type=market_type
         )
+        
+        # Determine unique key columns for dynamic DB updates
+        import uuid
+        is_uuid = False
+        pos_id = position.get('id')
+        if pos_id:
+            try:
+                uuid.UUID(str(pos_id))
+                is_uuid = True
+            except ValueError:
+                is_uuid = False
+
+        db_key_name = 'id'
+        db_record_id = pos_id
+        if 'forex' in market_type and not is_uuid:
+            db_key_name = 'ctrader_order_id'
+            db_record_id = position.get('ctrader_order_id') or pos_id
         
         # 3. Actuar según resultado
         if mr_result['should_close']:
@@ -364,7 +389,7 @@ async def process_symbol_5m_with_slvm_v2(
                 'slv_timeframe_trigger': '5m'
             }
             
-            safe_db_update(sb, 'positions', position['id'], update_data)
+            safe_db_update(sb, table_name, db_record_id, update_data, key_name=db_key_name)
             
             # Alerta Telegram
             from app.workers.alerts_service import send_telegram_message
@@ -377,9 +402,9 @@ async def process_symbol_5m_with_slvm_v2(
         else:
             # Actualizar ciclos si está en recuperación
             if position.get('recovery_mode'):
-                safe_db_update(sb, 'positions', position['id'], {
+                safe_db_update(sb, table_name, db_record_id, {
                     'recovery_cycles': mr_result['recovery_cycles']
-                })
+                }, key_name=db_key_name)
                 
     except Exception as e:
         log_error('SLVM_WORKER', f"Error processing {symbol} with SLVM v2: {e}")

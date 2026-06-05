@@ -29,34 +29,57 @@ class WebSocketManager:
         self._last_processed_price = {}
 
     async def start(self):
-        """Initialize and start the WebSocket connection."""
+        """Initialize and start the WebSocket connection with robust reconnection."""
         self._running = True
-        client = await AsyncClient.create(self.api_key, self.api_secret, testnet=self.testnet)
-        bsm = BinanceSocketManager(client)
         
         # Combine streams for all symbols
-        # For simplicity in Sprint 1, we monitor the 1m candle or ticker
         streams = [f"{s}@ticker" for s in self.symbols]
-        
         log_info(MODULE, f"Starting WebSocket Speed 1 for symbols: {self.symbols}")
         
-        async with bsm.multiplex_socket(streams) as ms:
-            while self._running:
+        while self._running:
+            client = None
+            try:
+                client = await AsyncClient.create(self.api_key, self.api_secret, testnet=self.testnet)
+                bsm = BinanceSocketManager(client)
+                
+                async with bsm.multiplex_socket(streams) as ms:
+                    while self._running:
+                        try:
+                            res = await ms.recv()
+                            if res:
+                                await self._process_message(res)
+                        except Exception as recv_err:
+                            log_error(MODULE, f"WebSocket read error (will reconnect): {recv_err}")
+                            break  # Break inner loop to exit context manager and reconnect
+            except Exception as e:
+                err_str = str(e)
+                if "502" in err_str or "503" in err_str or "504" in err_str or "Gateway" in err_str or "disconnect" in err_str:
+                    log_warning(MODULE, f"Transient WebSocket error (Bad Gateway/Disconnect): {e}. Retrying gracefully.")
+                else:
+                    log_error(MODULE, f"WebSocket connection/manager error: {e}")
+            
+            if client:
                 try:
-                    res = await ms.recv()
-                    if res:
-                        await self._process_message(res)
-                except Exception as e:
-                    log_error(MODULE, f"WebSocket error: {e}")
-                    await asyncio.sleep(5) # Auto-reconnect delay
+                    await client.close_connection()
+                except Exception as close_err:
+                    log_warning(MODULE, f"Error closing connection: {close_err}")
                     
-        await client.close_connection()
+            if self._running:
+                wait_time = min(5 * (self._retry_count if hasattr(self, '_retry_count') else 1), 60)
+                self._retry_count = (self._retry_count + 1) if hasattr(self, '_retry_count') else 2
+                log_info(MODULE, f"Attempting WebSocket reconnection in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+                
+            # If we successfully connected and received data before failing, reset retry count
+            # but since we are just inside the while loop, we can reset it in the inner loop
+
 
     async def _process_message(self, msg: dict):
         """
         Process incoming ticker/price messages.
         Logic: compare real-time price against 15m basis or last ATR.
         """
+        self._retry_count = 1  # Reset retry count
         data = msg.get('data', {})
         symbol_raw = data.get('s')
         if not symbol_raw:

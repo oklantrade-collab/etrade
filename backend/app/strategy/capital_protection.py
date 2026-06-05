@@ -756,6 +756,7 @@ class ProtectionState:
     # (para SHORT: el valor más ALTO del SL mientras el precio bajaba)
     phase_history:      list  = field(default_factory=list)
     # Historial de fases del trailing
+    opened_at:          str   = ''
 
 
 def calculate_pnl(
@@ -804,7 +805,8 @@ def evaluate_trailing_stop(
     symbol = state.symbol
 
     # ── CUSTOM DYNAMIC TRAILING: ApexConfluence ──
-    if df_15m is not None and len(df_15m) >= 20:
+    rule_code = getattr(state, 'rule_code', '')
+    if rule_code == 'ApexConfluence' and df_15m is not None and len(df_15m) >= 20:
         df = df_15m.copy()
         df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()
         df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -817,6 +819,23 @@ def evaluate_trailing_stop(
         df['bb_lower'] = df['ema20'] - (std20 * 2)
         
         last_row = df.iloc[-1]
+        
+        # 🛡️ Cierre de vela candle-close guard (Bypass pre-opening/historical candles)
+        opened_at_str = getattr(state, 'opened_at', '')
+        if opened_at_str and 'open_time' in last_row:
+            try:
+                opened_at = pd.to_datetime(opened_at_str).tz_localize(None)
+                candle_open = pd.to_datetime(last_row['open_time']).tz_localize(None)
+                # La vela se considera cerrada 15 minutos después de su open_time
+                candle_close = candle_open + pd.Timedelta(minutes=15)
+                
+                if candle_close <= opened_at:
+                    # La vela evaluada cerró antes o en el mismo momento de abrir la posición
+                    # Retornamos none para evitar cierres inmediatos por velas pre-apertura
+                    return {'action': 'none', 'reason': 'Esperando primer cierre de vela de 15m.'}
+            except Exception as timestamp_err:
+                log_error('TRAILING_CANDLE_GUARD', f"Error validando tiempo de cierre de vela: {timestamp_err}")
+                
         close_price = float(last_row['close'])
         open_price = float(last_row['open'])
         ema3 = float(last_row['ema3'])
@@ -832,9 +851,9 @@ def evaluate_trailing_stop(
         is_long = state.side.lower() in ('long', 'buy')
         
         if is_long:
-            confluence_active = (ema3 > ema9) and (ema9 >= ema20) and (ema50 > ema200)
+            confluence_active = (ema3 > ema9) and (ema9 >= ema20)
         else:
-            confluence_active = (ema3 < ema9) and (ema9 <= ema20) and (ema50 < ema200)
+            confluence_active = (ema3 < ema9) and (ema9 <= ema20)
             
         if confluence_active:
             bb_touched = getattr(state, 'bb_touched', False)
@@ -905,7 +924,6 @@ def evaluate_trailing_stop(
             return action_dict
 
     # ── CUSTOM TRAILING FOR STRATEGY ApexEma (SwingEma) ──
-    rule_code = getattr(state, 'rule_code', '')
     if rule_code in ('AaApexEma', 'BbApexEma', 'AaHot', 'BbHot'):
         if df_15m is not None and len(df_15m) >= 20:
             df = df_15m.copy()
@@ -922,20 +940,20 @@ def evaluate_trailing_stop(
             if is_long:
                 # LONG: vela verde (close > open) y close > ema3
                 if close_price > open_price and close_price > ema3:
-                    if state.current_sl == 0 or close_price > state.current_sl:
+                    if state.current_sl == 0 or ema3 > state.current_sl:
                         return {
                             'action': 'update_sl',
-                            'new_sl': close_price,
+                            'new_sl': ema3,
                             'reason': 'swing_ema_green_candle_trail',
                             'new_level': 1
                         }
             else:
                 # SHORT: vela roja (close < open) y close < ema3
                 if close_price < open_price and close_price < ema3:
-                    if state.current_sl == 0 or close_price < state.current_sl:
+                    if state.current_sl == 0 or ema3 < state.current_sl:
                         return {
                             'action': 'update_sl',
-                            'new_sl': close_price,
+                            'new_sl': ema3,
                             'reason': 'swing_ema_red_candle_trail',
                             'new_level': 1
                         }
@@ -943,7 +961,7 @@ def evaluate_trailing_stop(
 
     # ── Símbolos con trailing dinámico ────────
     if symbol in VOLATILE_TRAILING_CONFIG and state.market_type == 'forex_futures':
-        atr_snap = float(snap.get('atr', 0)) if snap else 0
+        atr_snap = float(snap.get('atr') if snap.get('atr') is not None else 0) if snap else 0
         
         # best_price: máximo para LONG, mínimo para SHORT
         if state.side in ('long', 'buy'):
@@ -1291,22 +1309,22 @@ def evaluate_counter_trend_sizing(
     size_reduction = cfg.get('counter_trend_size_pct', 0.50)
     flags = []
 
-    sar_4h = int(snap.get('sar_trend_4h', 0))
+    sar_4h = int(snap.get('sar_trend_4h') if snap.get('sar_trend_4h') is not None else 0) if snap else 0
     if signal_direction.lower() in ('long', 'buy') and sar_4h < 0:
         flags.append('SAR 4H bajista vs LONG')
     elif signal_direction.lower() in ('short', 'sell') and sar_4h > 0:
         flags.append('SAR 4H alcista vs SHORT')
 
-    mtf = float(snap.get('mtf_score', 0))
+    mtf = float(snap.get('mtf_score') if snap.get('mtf_score') is not None else 0) if snap else 0
     if signal_direction.lower() in ('long', 'buy') and mtf < 0.20:
         flags.append(f'MTF débil para LONG ({mtf:.2f})')
     elif signal_direction.lower() in ('short', 'sell') and mtf > -0.20:
         flags.append(f'MTF débil para SHORT ({mtf:.2f})')
 
-    adx = float(snap.get('adx', 0))
+    adx = float(snap.get('adx') if snap.get('adx') is not None else 0) if snap else 0
     if adx > 35:
-        plus_di  = float(snap.get('plus_di', 0))
-        minus_di = float(snap.get('minus_di', 0))
+        plus_di  = float(snap.get('plus_di') if snap.get('plus_di') is not None else 0) if snap else 0
+        minus_di = float(snap.get('minus_di') if snap.get('minus_di') is not None else 0) if snap else 0
         if signal_direction.lower() in ('long','buy') and minus_di > plus_di:
             flags.append(f'ADX fuerte bajista ({adx:.1f})')
         elif signal_direction.lower() not in ('long','buy') and plus_di > minus_di:

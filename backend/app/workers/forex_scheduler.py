@@ -503,7 +503,7 @@ async def open_forex_position(
     if is_paper:
         # Paper trading: simular orden
         order = {
-            'order_id': f'PAPER-FX-{int(time.time())}',
+            'order_id': int(time.time()),
             'symbol': symbol,
             'side': direction,
             'quantity': sizing['lotes'],
@@ -540,20 +540,20 @@ async def open_forex_position(
 
     # Registrar en Supabase
     try:
-        sb.table('positions').insert({
+        sb.table('forex_positions').insert({
             'symbol':           symbol,
             'side':             direction,
-            'avg_entry_price':  price,
-            'size':             sizing['lotes'],
+            'entry_price':      price,
+            'lots':             sizing['lotes'],
             'sl_price':         levels['sl_price'],
             'slv_price':        slv_price,
             'slv_hard_stop_pips': slv_hs_pips,
-            'tp_partial_price': levels['tp_price'],
+            'tp_price':         levels['tp_price'],
             'rule_code':        rule_code,
             'status':           'open',
             'mode':             'paper' if is_paper else 'live',
             'market_type':      'forex_futures',
-            'external_id':      order.get('order_id'),
+            'ctrader_order_id': order.get('order_id'),
             'opened_at':        datetime.now(timezone.utc).isoformat(),
         }).execute()
     except Exception as e:
@@ -562,6 +562,7 @@ async def open_forex_position(
     # Registrar en BOT_STATE
     pos_id = order.get('order_id', f'FX-{int(time.time())}')
     BOT_STATE.positions[pos_id] = {
+        'id': pos_id,
         'symbol': symbol,
         'side': direction,
         'avg_entry_price': price,
@@ -569,7 +570,7 @@ async def open_forex_position(
         'sl_price': levels['sl_price'],
         'slv_price': slv_price,
         'slv_hard_stop_pips': slv_hs_pips,
-        'tp_partial_price': levels['tp_price'],
+        'tp_price': levels['tp_price'],
         'rule_code': rule_code,
         'status': 'open',
         'market_type': 'forex_futures',
@@ -578,11 +579,15 @@ async def open_forex_position(
 
     # Telegram
     side_emoji = 'LONG' if direction == 'long' else 'SHORT'
+    pip_size = PIP_SIZES.get(symbol, 0.0001)
+    sl_pips = abs(price - levels['sl_price']) / pip_size
+    tp_pips = abs(levels['tp_price'] - price) / pip_size
+    
     await send_telegram_message(
         f"FOREX {side_emoji} [{symbol}]\n"
         f"Regla: {rule_code} | Score: {signal.get('score', 0):.2f}\n"
         f"Entrada: {price:.5f}\n"
-        f"SL: {levels['sl_price']:.5f} (-{sl_pips} pips)\n"
+        f"SL: {levels['sl_price']:.5f} (-{sl_pips:.0f} pips)\n"
         f"TP: {levels['tp_price']:.5f} (+{tp_pips:.0f} pips)\n"
         f"Lotes: {sizing['lotes']} | Riesgo: ${sizing['risk_usd']:.2f}"
     )
@@ -679,7 +684,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
             # 6. SL/TP check (manual for Forex since paper mode)
             sl = float(position.get('sl_price', 0))
-            tp = float(position.get('tp_partial_price', 0))
+            tp = float(position.get('tp_price', position.get('tp_partial_price', 0)))
             side = (position.get('side') or '').lower()
 
             if sl > 0:
@@ -872,22 +877,21 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
         ]
 
         # Descargas paralelas
-        fetch_tasks = {}
-        for tf in timeframes_to_fetch:
-            limit = 300 if tf in ['5m', '15m', '30m', '1h'] else 500
-            fetch_tasks[tf] = provider.get_ohlcv(symbol, tf, limit=limit)
-
-        if fetch_tasks:
-            results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
-            for tf, res in zip(fetch_tasks.keys(), results):
-                if isinstance(res, Exception):
-                    log_warning(MODULE, f"Error descargando {tf} para {symbol}: {res}")
+        if timeframes_to_fetch:
+            for tf in timeframes_to_fetch:
+                limit = 300 if tf in ['5m', '15m', '30m', '1h'] else 500
+                try:
+                    res = await provider.get_ohlcv(symbol, tf, limit=limit)
+                    if res is not None and not res.empty:
+                        df_tf = calculate_all_indicators(res, BOT_STATE.config_cache)
+                        update_memory_df(symbol, tf, df_tf)
+                        await upsert_forex_candles(symbol, tf, df_tf, sb)
+                except Exception as res_err:
+                    log_warning(MODULE, f"Error descargando {tf} para {symbol}: {res_err}")
                     if tf == '15m':
-                        raise res
-                elif res is not None and not res.empty:
-                    df_tf = calculate_all_indicators(res, BOT_STATE.config_cache)
-                    update_memory_df(symbol, tf, df_tf)
-                    await upsert_forex_candles(symbol, tf, df_tf, sb)
+                        raise res_err
+                # Pequeña pausa para evitar rate limit de cTrader
+                await asyncio.sleep(0.4)
 
         # Recuperar DF 15m
         df = get_memory_df(symbol, '15m')

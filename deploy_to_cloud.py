@@ -48,6 +48,8 @@ files_to_sync = [
     "app/api/market.py",
     "app/api/forex.py",
     "app/api/crypto.py",
+    "app/api/portfolio.py",
+    "app/api/positions.py",
     "app/analysis/fundamental_scorer.py",
     "app/stocks/universe_builder.py",
     "app/workers/performance_monitor.py",
@@ -55,7 +57,9 @@ files_to_sync = [
     "app/execution/data_provider.py",
     "app/data/yfinance_provider.py",
     "app/data/ib_scanner.py",
-    "app/core/startup.py"
+    "app/core/startup.py",
+    "app/candle_signals/candle_execution.py",
+    "app/ws/ws_manager.py"
 ]
 
 def check_syntax():
@@ -108,7 +112,7 @@ def deploy():
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         f"root@{SERVER_IP}",
-        "systemctl restart etrade-crypto etrade-forex etrade-api etrade-stocks"
+        "systemctl restart etrade-crypto etrade-forex etrade-forex-scheduler etrade-api etrade-stocks"
     ]
     subprocess.run(restart_cmd, check=True)
     print("¡Despliegue y reinicio completado!")

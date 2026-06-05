@@ -274,20 +274,28 @@ class SymbolStateMachine:
 
 def detect_market_ambiguity(snap: dict) -> dict:
     flags = []
-    mtf = float(snap.get('mtf_score', 0))
+    if not snap:
+        return {
+            'is_ambiguous': False,
+            'flags': [],
+            'flag_count': 0,
+            'reason': 'No snapshot data available',
+        }
+        
+    mtf = float(snap.get('mtf_score') if snap.get('mtf_score') is not None else 0)
     if -0.20 < mtf < 0.20:
         flags.append(f'MTF neutro ({mtf:.2f})')
 
-    sar_4h  = int(snap.get('sar_trend_4h',  0))
-    sar_15m = int(snap.get('sar_trend_15m', 0))
+    sar_4h  = int(snap.get('sar_trend_4h') if snap.get('sar_trend_4h') is not None else 0)
+    sar_15m = int(snap.get('sar_trend_15m') if snap.get('sar_trend_15m') is not None else 0)
     if sar_4h != 0 and sar_15m != 0 and sar_4h != sar_15m:
         flags.append(f'SAR divergente: 4h={sar_4h} 15m={sar_15m}')
 
-    adx = float(snap.get('adx', 25))
+    adx = float(snap.get('adx') if snap.get('adx') is not None else 25)
     if adx < 15:
         flags.append(f'ADX muy débil ({adx:.1f})')
 
-    fib = int(snap.get('fibonacci_zone', 0))
+    fib = int(snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else 0)
     if fib == 0:
         flags.append('Precio en BASIS (zona 0)')
 

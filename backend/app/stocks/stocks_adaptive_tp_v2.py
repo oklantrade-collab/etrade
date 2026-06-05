@@ -453,6 +453,31 @@ def evaluate_stock_tp_v2(
         / entry_price * 100
     ) if entry_price > 0 else 0
 
+    # ── NUEVO: Control de antigüedad mínima de la posición ──
+    # Para evitar que señales estáticas e históricas (como SIPV de 15m)
+    # cierren el trade inmediatamente tras comprar en fracciones de segundos.
+    entry_time_str = position.get("first_buy_at") or position.get("entry_time")
+    age_mins = 0.0
+    if entry_time_str:
+        try:
+            # Normalizar ISO string
+            entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+            age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+        except Exception:
+            pass
+
+    MIN_HOLDING_MINUTES = 15.0
+    if age_mins < MIN_HOLDING_MINUTES:
+        # Permitimos saltar la restricción únicamente si no hay ganancia (evaluado por seguridad en otros lados)
+        # o si la posición tiene ganancias pero es demasiado joven, la obligamos a madurar.
+        if gain_pct > 0:
+            return {
+                'action': 'hold',
+                'gain_pct': round(gain_pct, 2),
+                'debug_indicators': {},
+                'reason': f'Posición joven ({age_mins:.1f}m < {MIN_HOLDING_MINUTES}m) — bloqueo de salida prematura para buscar ganancias importantes.'
+            }
+
     # Sin ganancia → no evaluar TP
     if gain_pct <= 0:
         return {
@@ -562,21 +587,58 @@ def evaluate_stock_tp_v2(
             ),
         }
 
-    # ── PASO 1.5: PROTECCIÓN TRAILING STOP (EMA3 vs EMA9) ──
-    # Condiciones solicitadas por el usuario:
-    # Vender si EMA3 < EMA9
-    # O si (EMA3 > EMA9 pero diff < 5% y EMA3 curving down)
-    # O si (RSI > 75 y Precio > BB Upper)
+    # ── PASO 1.5: REGLAS DE CIERRE DINÁMICO V5.3 ──
+    # Condiciones de cierre solicitadas por el usuario:
+    # Cerrar si: (EMA3 < EMA9) OR (CLOSE > UPPER_6) OR (RSI >= 75)
+    #         OR (OPEN > BB_Upper AND CLOSE > OPEN)
     rsi_15m = float(snap.get('rsi_14', 50))
     bb_upper = float(snap.get('bb_upper', 999999))
-    
-    rsi_overbought = (rsi_15m > 75) and (current_price > bb_upper)
+    upper_6 = safe_float(snap.get('upper_6', 0))
+
+    # Obtener OPEN y CLOSE de la vela vigente
+    curr_open = 0.0
+    curr_close = current_price
+    if df_15m is not None and len(df_15m) >= 1:
+        last_candle = df_15m.iloc[-1]
+        curr_open = float(last_candle.get('open', last_candle.get('Open', 0)))
+        curr_close = float(last_candle.get('close', last_candle.get('Close', current_price)))
+
+    # Condición 1: EMA3 < EMA9 (Cruce bajista de momentum)
     ema_crossed_down = ema['is_down']
+
+    # Condición 2: CLOSE > UPPER_6 (Sobre-extensión masiva - Fibonacci Band 6)
+    close_above_upper6 = (upper_6 > 0 and curr_close > upper_6)
+
+    # Condición 3: RSI >= 75 (Sobrecompra extrema intradía)
+    rsi_extreme = (rsi_15m >= 75)
+
+    # Condición 4: OPEN > BB_Upper AND CLOSE > OPEN
+    # Vela abriendo por encima de la banda superior de Bollinger y cerrando verde
+    # Esto indica agotamiento inminente (último impulso antes de reversión)
+    candle_above_bb = (curr_open > bb_upper and curr_close > curr_open)
+
+    # Condición extra: EMA3 convergiendo hacia EMA9 (squeeze descendente)
     ema_squeezing_down = ema['is_up'] and (ema['diff_pct'] < 5.0) and ema['ema3_curving_down']
-    
-    if rsi_overbought or ema_crossed_down or ema_squeezing_down:
+
+    if ema_crossed_down or close_above_upper6 or rsi_extreme or candle_above_bb or ema_squeezing_down:
         remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
-        trigger_name = "rsi_overbought" if rsi_overbought else ("ema_crossed_down" if ema_crossed_down else "ema_squeezing_down")
+        # Determinar qué condición activó el cierre
+        if ema_crossed_down:
+            trigger_name = "ema3_lt_ema9"
+            reason_detail = f"EMA3 < EMA9 (Cruce bajista: {ema['ema3']:.2f} < {ema['ema9']:.2f})"
+        elif close_above_upper6:
+            trigger_name = "close_gt_upper6"
+            reason_detail = f"CLOSE ${curr_close:.2f} > UPPER_6 ${upper_6:.2f} (Sobre-extensión máxima)"
+        elif rsi_extreme:
+            trigger_name = "rsi_gte_75"
+            reason_detail = f"RSI = {rsi_15m:.1f} >= 75 (Sobrecompra extrema)"
+        elif candle_above_bb:
+            trigger_name = "open_gt_bb_upper"
+            reason_detail = f"OPEN ${curr_open:.2f} > BB_Upper ${bb_upper:.2f} AND CLOSE > OPEN (Agotamiento)"
+        else:
+            trigger_name = "ema_squeezing_down"
+            reason_detail = f"EMA3 convergiendo hacia EMA9 ({ema['diff_pct']:.1f}% separación, curving down)"
+
         return {
             'action':  'close_total',
             'pct':     100,
@@ -584,16 +646,14 @@ def evaluate_stock_tp_v2(
             'trigger': trigger_name,
             'debug_indicators': debug_indicators,
             'reason': (
-                f'TRAILING STOP TRIGGERED: '
-                f'{"RSI > 75 & Price > BB_Upper" if rsi_overbought else ("EMA3 < EMA9" if ema_crossed_down else "EMA3 converging down to EMA9")}. '
+                f'EXIT RULE V5.3: {reason_detail}. '
                 f'CIERRE TOTAL {remaining} shares. '
                 f'Ganancia: +{gain_pct:.2f}%'
             ),
         }
 
-    # Si EMA3 > EMA9 y no se cumplen las condiciones de salida anteriores, BLOQUEAMOS el cierre prematuro.
-    # El usuario pidió explícitamente: "Asegurate que ningun cierre se genere mientras el EMA3 > EMA9 sino todo lo contrario"
-    if ema['is_up'] and not ema_squeezing_down and not rsi_overbought:
+    # Si EMA3 > EMA9 y no se cumplen las condiciones de salida, BLOQUEAMOS el cierre prematuro.
+    if ema['is_up'] and not ema_squeezing_down:
          return {
              'action': 'hold',
              'trigger': 'ema_trailing_active',

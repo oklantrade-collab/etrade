@@ -45,9 +45,11 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     current_price = float(last_row['close'])
     
     # 2. Verificar posiciones abiertas de esta estrategia
+    is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+    table_name = 'forex_positions' if is_forex else 'positions'
     variants = crypto_symbol_match_variants(symbol)
     try:
-        open_res = sb.table('positions').select('*').in_('symbol', variants).eq('status', 'open').in_('rule_code', ['AaApexEma', 'BbApexEma']).execute()
+        open_res = sb.table(table_name).select('*').in_('symbol', variants).eq('status', 'open').in_('rule_code', ['AaApexEma', 'BbApexEma']).execute()
         open_positions = open_res.data or []
     except Exception as e:
         log_error('APEX_EMA', f"Error consultando posiciones abiertas para {symbol}: {e}")
@@ -69,30 +71,47 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
                 # Traspasar a EREP Fase 2
                 log_info('APEX_EMA', f"⚠️ [REVERSAL] Traspasando posición {pos['id']} ({symbol} {side}) a EREP Fase 2 de forma proactiva.")
                 try:
-                    sb.table('positions').update({
-                        'sl_type': 'suspended_negative_protection',
-                        'sl_price': 0,
-                        'stop_loss': 0,
-                        'sl_dynamic_price': 0,
-                        'erep_active': True,
-                        'erep_phase': 2,
-                        'erep_p1_price': float(pos.get('avg_entry_price') or pos.get('entry_price') or current_price),
-                        'erep_q1': float(pos.get('size') or 0),
-                        'erep_market_type': 'crypto_futures',
-                        'erep_cycles_elapsed': 0
-                    }).eq('id', pos['id']).execute()
+                    if is_forex:
+                        update_data = {
+                            'sl_price': 0,
+                            'erep_active': True,
+                            'erep_phase': 2,
+                            'erep_p1_price': float(pos.get('avg_entry_price') or pos.get('entry_price') or current_price),
+                            'erep_market_type': 'forex_futures',
+                            'erep_cycles_elapsed': 0,
+                            'erep_q1': float(pos.get('lots') or 0)
+                        }
+                    else:
+                        update_data = {
+                            'sl_type': 'suspended_negative_protection',
+                            'sl_price': 0,
+                            'sl_dynamic_price': 0,
+                            'stop_loss': 0,
+                            'erep_active': True,
+                            'erep_phase': 2,
+                            'erep_p1_price': float(pos.get('avg_entry_price') or pos.get('entry_price') or current_price),
+                            'erep_market_type': 'crypto_futures',
+                            'erep_cycles_elapsed': 0,
+                            'erep_q1': float(pos.get('size') or 0)
+                        }
+
+                    sb.table(table_name).update(update_data).eq('id', pos['id']).execute()
                     
                     # Actualizar memoria
                     if pos['id'] in BOT_STATE.positions:
-                        BOT_STATE.positions[pos['id']].update({
-                            'sl_type': 'suspended_negative_protection',
+                        memory_update = {
                             'sl_price': 0,
-                            'stop_loss': 0,
-                            'sl_dynamic_price': 0,
                             'erep_active': True,
                             'erep_phase': 2,
                             'erep_cycles_elapsed': 0
-                        })
+                        }
+                        if not is_forex:
+                            memory_update.update({
+                                'sl_type': 'suspended_negative_protection',
+                                'stop_loss': 0,
+                                'sl_dynamic_price': 0
+                            })
+                        BOT_STATE.positions[pos['id']].update(memory_update)
                 except Exception as erep_e:
                     log_error('APEX_EMA', f"Error traspasando posición {pos['id']} a EREP: {erep_e}")
         return  # Si ya hay posiciones abiertas o en proceso de EREP, no colocamos nuevas órdenes límite
@@ -246,8 +265,10 @@ async def process_swing_orders_15m(symbol: str, df_15m: pd.DataFrame, df_4h: pd.
 
     try:
         # Contar posiciones abiertas en DB para este símbolo (atómico)
+        is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+        table_name = 'forex_positions' if is_forex else 'positions'
         variants = crypto_symbol_match_variants(symbol)
-        open_res = sb.table('positions').select('id', count='exact').in_('symbol', variants).eq('status', 'open').limit(0).execute()
+        open_res = sb.table(table_name).select('id', count='exact').in_('symbol', variants).eq('status', 'open').limit(0).execute()
         num_open = open_res.count if open_res.count is not None else 999
         
         # Contar órdenes pendientes en DB para este símbolo
@@ -287,9 +308,11 @@ async def process_swing_orders(
     # --- PROACTIVE LIMIT CHECK ---
     try:
         max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 4))
+        is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+        table_name = 'forex_positions' if is_forex else 'positions'
         variants = crypto_symbol_match_variants(symbol)
         
-        res_open = sb.table('positions').select('id', count='exact').in_('symbol', variants).eq('status', 'open').limit(0).execute()
+        res_open = sb.table(table_name).select('id', count='exact').in_('symbol', variants).eq('status', 'open').limit(0).execute()
         current_count = res_open.count if res_open.count is not None else 999
         
         if current_count >= max_per_symbol:
@@ -434,13 +457,16 @@ async def check_limit_order_execution(symbol: str, current_price: float, provide
 async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> None:
     symbol = order['symbol']
     direction = order['direction']
+    
+    is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+    table_name = 'forex_positions' if is_forex else 'positions'
 
     async with BOT_STATE.order_lock:
         try:
             # 1. Límite Global (Fail-Closed)
             max_global = int(BOT_STATE.config_cache.get('max_open_trades', 15))
             try:
-                pos_res = sb.table('positions').select('id', count='exact').eq('status', 'open').limit(0).execute()
+                pos_res = sb.table(table_name).select('id', count='exact').eq('status', 'open').limit(0).execute()
                 current_global = pos_res.count if pos_res.count is not None else 0
             except Exception as e:
                 log_error('SWING', f"Error consultando límite global: {e}")
@@ -455,7 +481,7 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
             variants = crypto_symbol_match_variants(symbol)
             try:
                 # Seleccionamos campos necesarios para DCA y Cool-down
-                sym_pos_res = sb.table('positions').select('id, rule_code, opened_at, entry_price, side', count='exact').in_('symbol', variants).eq('status', 'open').execute()
+                sym_pos_res = sb.table(table_name).select('id, rule_code, opened_at, entry_price, side', count='exact').in_('symbol', variants).eq('status', 'open').execute()
                 current_sym = sym_pos_res.count if sym_pos_res.count is not None else 0
                 existing_data = sym_pos_res.data or []
                 current_sym = max(current_sym, len(existing_data))
@@ -475,7 +501,7 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
             # 2.1.1 Spam Protection (Historial reciente cerrado o abierto)
             try:
                 since = (now_utc - timedelta(minutes=15)).isoformat()
-                hist = sb.table('positions').select('opened_at').in_('symbol', variants).eq('rule_code', rule_code).gte('opened_at', since).order('opened_at', desc=True).limit(1).execute()
+                hist = sb.table(table_name).select('opened_at').in_('symbol', variants).eq('rule_code', rule_code).gte('opened_at', since).order('opened_at', desc=True).limit(1).execute()
                 if hist.data:
                     log_warning('SWING', f"SPAM_BLOCK: {symbol} rule {rule_code} ejecutada hace menos de 15 min. Abortando.")
                     return
@@ -503,7 +529,7 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
         # 3. Reversión
         try:
             opposite_side = 'SHORT' if direction.lower() == 'long' else 'LONG'
-            opp_res = sb.table('positions').select('*').in_('symbol', variants).eq('status', 'open').execute()
+            opp_res = sb.table(table_name).select('*').in_('symbol', variants).eq('status', 'open').execute()
             to_close = [p for p in (opp_res.data or []) if (p.get('side') or '').upper() == opposite_side]
             if to_close:
                 from app.execution.order_manager import close_position
@@ -514,7 +540,6 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
 
         # 4. Apertura
         try:
-            is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
             resolved_market_type = 'forex_futures' if is_forex else 'crypto_futures'
 
             from app.core.position_sizing import calculate_position_size
@@ -526,6 +551,19 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
             )
             qty = sizing['quantity'] if sizing else 0
             if qty <= 0: return
+            
+            # Apply sizing percentage (T1/T2 distribution or reentry split)
+            sizing_pct = float(order.get('sizing_pct') or 1.0)
+            qty = qty * sizing_pct
+            
+            # For Forex, convert quantity from raw units to standard lots (1 lot = 100,000 units)
+            if is_forex:
+                qty = qty / 100000.0
+                qty = max(round(qty, 2), 0.01) # Round to 2 decimals, floor at 0.01 lots
+            else:
+                qty = round(qty, 4)
+                
+            if qty <= 0: return
 
             sb.table('pending_orders').update({'status': 'triggered', 'triggered_at': datetime.now(timezone.utc).isoformat()}).eq('id', order['id']).execute()
             
@@ -534,24 +572,39 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
             # Re-query DB right before INSERT to catch any concurrent opens
             # ═══════════════════════════════════════════════════════════
             final_variants = crypto_symbol_match_variants(symbol)
-            final_count_res = sb.table('positions').select('id', count='exact').in_('symbol', final_variants).eq('status', 'open').limit(0).execute()
+            final_count_res = sb.table(table_name).select('id', count='exact').in_('symbol', final_variants).eq('status', 'open').limit(0).execute()
             final_count = final_count_res.count if final_count_res.count is not None else 999
             if final_count >= max_symbol:
                 log_warning('SWING', f"🚫 ATOMIC BLOCK: {symbol} has {final_count} open (max {max_symbol}). Swing INSERT rejected.")
                 return
             # ═══════════════════════════════════════════════════════════
 
-            pos_data = {
-                'symbol': symbol, 'side': direction.upper(), 'entry_price': execution_price,
-                'avg_entry_price': execution_price, 'stop_loss': float(order.get('sl_price') or 0),
-                'take_profit': float(order.get('tp2_price') or 0), 'status': 'open', 'size': qty,
-                'current_price': execution_price, 'opened_at': datetime.now(timezone.utc).isoformat(),
-                'mode': 'paper', 'rule_code': order.get('rule_code', 'SWING'),
-                'market_type': resolved_market_type
-            }
-            res = sb.table('positions').insert(pos_data).execute()
+            if is_forex:
+                pos_data = {
+                    'symbol': symbol, 'side': direction.upper(), 'entry_price': execution_price,
+                    'sl_price': float(order.get('sl_price') or 0),
+                    'tp_price': float(order.get('tp2_price') or 0), 'status': 'open', 'lots': qty,
+                    'current_price': execution_price, 'opened_at': datetime.now(timezone.utc).isoformat(),
+                    'mode': 'paper', 'rule_code': order.get('rule_code', 'SWING'),
+                    'market_type': resolved_market_type,
+                }
+                import hashlib
+                uuid_hash = int(hashlib.md5(str(order.get('id', '')).encode()).hexdigest(), 16) % (2**63 - 1)
+                pos_data['ctrader_order_id'] = uuid_hash
+            else:
+                pos_data = {
+                    'symbol': symbol, 'side': direction.upper(), 'entry_price': execution_price,
+                    'avg_entry_price': execution_price, 'stop_loss': float(order.get('sl_price') or 0),
+                    'take_profit': float(order.get('tp2_price') or 0), 'status': 'open', 'size': qty,
+                    'current_price': execution_price, 'opened_at': datetime.now(timezone.utc).isoformat(),
+                    'mode': 'paper', 'rule_code': order.get('rule_code', 'SWING'),
+                    'market_type': resolved_market_type
+                }
+                
+            res = sb.table(table_name).insert(pos_data).execute()
             if res.data:
                 p = res.data[0]
+                # Key by pos_id to support multiple positions per symbol
                 BOT_STATE.positions[p.get('id', symbol)] = p
                 log_info('SWING', f"🚀 POSICIÓN ABIERTA: {symbol} {direction.upper()} (ID: {p.get('id')})")
         except Exception as e:

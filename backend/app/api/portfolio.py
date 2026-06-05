@@ -108,33 +108,53 @@ async def get_global_portfolio():
             
             # --- REUTILIZACIÓN DE MAPAREO ---
             # Mapeo de Crypto
-            open_crypto_map = {p['symbol']: p for p in (open_crypto_pos_res.data or [])}
+            from collections import defaultdict
+            open_crypto_by_sym = defaultdict(list)
+            for p in (open_crypto_pos_res.data or []):
+                open_crypto_by_sym[p['symbol']].append(p)
+
             symbols_data = []
             for sym in active_crypto_symbols:
                 snap = market_snaps.get(sym, {})
-                pos = open_crypto_map.get(sym)
                 cur_price = float(snap.get('price', 0.0))
-                upnl_usd, upnl_pct, capital = 0.0, 0.0, 0.0
-                if pos:
-                    entry = float(pos.get('avg_entry_price') or pos.get('entry_price') or 0.0)
-                    capital = (float(pos.get('size') or 0) * entry) / lev_crypto
-                    if entry > 0:
-                        side_mult = 1 if str(pos.get('side', '')).lower() == 'long' else -1
-                        upnl_pct = ((cur_price - entry) / entry) * 100 * side_mult
-                        upnl_usd = capital * (upnl_pct / 100)
-                symbols_data.append({
-                    'symbol': sym,
-                    'side': str(pos.get('side', '')).lower() if pos else None,
-                    'avg_entry_price': float(pos.get('avg_entry_price') or pos.get('entry_price') or 0) if pos else 0,
-                    'current_price': cur_price,
-                    'unrealized_pnl_usd': round(upnl_usd, 2),
-                    'unrealized_pnl_pct': round(upnl_pct, 2),
-                    'fibonacci_zone': snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
-                    'rule_code': pos.get('rule_code', 'N/A') if pos else 'N/A',
-                    'total_investment': round(capital, 2),
-                    'quantity': float(pos.get('size') or 0) if pos else 0,
-                    'status': 'active' if pos else 'hold'
-                })
+                positions_list = open_crypto_by_sym.get(sym, [])
+                
+                if positions_list:
+                    for pos in positions_list:
+                        entry = float(pos.get('avg_entry_price') or pos.get('entry_price') or 0.0)
+                        capital = (float(pos.get('size') or 0) * entry) / lev_crypto
+                        upnl_usd, upnl_pct = 0.0, 0.0
+                        if entry > 0:
+                          side_mult = 1 if str(pos.get('side', '')).lower() in ('long', 'buy') else -1
+                          upnl_pct = ((cur_price - entry) / entry) * 100 * side_mult
+                          upnl_usd = capital * (upnl_pct / 100)
+                        symbols_data.append({
+                            'symbol': sym,
+                            'side': str(pos.get('side', '')).lower() if pos else None,
+                            'avg_entry_price': entry,
+                            'current_price': cur_price,
+                            'unrealized_pnl_usd': round(upnl_usd, 2),
+                            'unrealized_pnl_pct': round(upnl_pct, 2),
+                            'fibonacci_zone': snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
+                            'rule_code': pos.get('rule_code', 'N/A'),
+                            'total_investment': round(capital, 2),
+                            'quantity': float(pos.get('size') or 0),
+                            'status': 'active'
+                        })
+                else:
+                    symbols_data.append({
+                        'symbol': sym,
+                        'side': None,
+                        'avg_entry_price': 0.0,
+                        'current_price': cur_price,
+                        'unrealized_pnl_usd': 0.0,
+                        'unrealized_pnl_pct': 0.0,
+                        'fibonacci_zone': snap.get('fibonacci_zone') if snap.get('fibonacci_zone') is not None else snap.get('fibo_zone', 0),
+                        'rule_code': 'N/A',
+                        'total_investment': 0.0,
+                        'quantity': 0.0,
+                        'status': 'hold'
+                    })
 
             # Mapeo de Forex
             open_forex_map = {p['symbol']: p for p in (open_forex_pos_res.data or [])}

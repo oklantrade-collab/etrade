@@ -595,10 +595,8 @@ async def send_sl_to_exchange(
 
     try:
         if market_type == 'crypto_futures':
-            from app.execution.providers.binance_provider import (
-                BinanceCryptoProvider
-            )
-            provider = BinanceCryptoProvider()
+            from app.execution.provider_factory import create_provider
+            provider = create_provider(market_type)
             # Stop Market: cierra al tocar el precio
             order = await provider.place_order(
                 symbol     = symbol,
@@ -694,10 +692,8 @@ async def cancel_all_sl_orders(
                not exchange_id.startswith('ctdr'):
 
                 if market_type == 'crypto_futures':
-                    from app.execution.providers.binance_provider import (
-                        BinanceCryptoProvider
-                    )
-                    provider = BinanceCryptoProvider()
+                    from app.execution.provider_factory import create_provider
+                    provider = create_provider(market_type)
                     # We might need await or proper instantiation depending on provider
                     await provider.cancel_order(
                         symbol   = symbol,

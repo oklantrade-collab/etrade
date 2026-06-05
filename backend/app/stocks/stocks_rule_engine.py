@@ -465,7 +465,7 @@ class StocksRuleEngine:
             if len(failures) == 0:
                 smart_limit_price = current_price # Comprar ya si está barato
 
-        # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5.2) ──
+        # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5.3) ──
         # Normalizar rule_code para capturar variaciones con sufijos (_BUY, _SELL)
         normalized_code = rule_code.replace("_BUY", "").replace("_SELL", "")
         if normalized_code == "HOT_CANDLE":
@@ -480,6 +480,14 @@ class StocksRuleEngine:
             bb_upper = float(context.get("bb_upper") or 99999)
             high_price = float(context.get("high") or 0)
             rsi = float(context.get("rsi_14") or 50.0)
+
+            # ── Indicadores de 5 minutos ──
+            ema3_5m  = float(context.get("ema_3_5m") or 0)
+            ema9_5m  = float(context.get("ema_9_5m") or 0)
+            ema20_5m = float(context.get("ema_20_5m") or 0)
+            bb_exp_5m = bool(context.get("bb_expanding_5m", False))
+            rsi_5m = float(context.get("rsi_5m") or 50.0)
+            gap_exhaustion = bool(context.get("gap_up_exhaustion", False))
             
             # Requisito 1: Volumen Mínimo (Evitar acciones sin tracción)
             if vol_24h < 1_000_000:
@@ -490,7 +498,7 @@ class StocksRuleEngine:
             if rvol < dynamic_rvol_min:
                 failures.append(f"Insufficient RVOL: {rvol:.2f}x < {dynamic_rvol_min}x (No momentum projection)")
 
-            # Requisito 3: Momentum Técnico FRESCO (Cruce EMA3 > EMA9, HIGH <= BB_UPPER, RSI < 60)
+            # Requisito 3: Momentum Técnico FRESCO (15m)
             ema_ok = (ema3 and ema9 and ema3 > ema9 and high_price <= bb_upper)
             if not (ema_ok or bb_exp):
                 failures.append(f"No Fresh Momentum: Need (EMA3 > EMA9 AND High {high_price} <= BB_Upper {bb_upper}) OR (BB Expanding)")
@@ -502,17 +510,42 @@ class StocksRuleEngine:
                 failures.append(f"Price below EMA20: {ema3:.2f} < {ema20:.2f} (Bearish trend)")
 
             # Requisito 5: Filtro Fibonacci (-6 hasta +2)
-            # V5.2: Antes era <= 3. Ahora restringido a <= 2 para no comprar sobre-agotados.
             fib_ok = -6 <= fib_z <= 2
             if not fib_ok:
                 failures.append(f"Fibonacci Zone {fib_z} is OUT of range [-6, 2]")
             
             # Requisito 6: Evitar divergencia de agotamiento evidente
             if context.get("ema_exhaustion"):
-                 if not bb_exp: # Si es explosión, ignoramos agotamiento
+                 if not bb_exp:
                       failures.append("Trend Exhaustion Detected: EMAs are stalling/diverging")
 
-        # ── CHECK 8: Regla Específica BOLLINGER_EXPLOSION ──
+            # ── V5.3: Requisitos de precisión en 5 minutos ──
+            
+            # Requisito 7: Alineación EMA en 5 minutos (EMA3 > EMA9 > EMA20)
+            if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                if not (ema3_5m > ema9_5m > ema20_5m):
+                    failures.append(
+                        f"5m EMA Misaligned: EMA3={ema3_5m:.2f} EMA9={ema9_5m:.2f} EMA20={ema20_5m:.2f} "
+                        f"(Need EMA3 > EMA9 > EMA20 on 5m)"
+                    )
+
+            # Requisito 8: Expansión de Bollinger en 5m (bandas abriéndose)
+            if not bb_exp_5m and not bb_exp:
+                failures.append("5m BB Not Expanding: Bands not opening on 5m chart (Momentum not fresh)")
+
+            # Requisito 9: RSI de 5 minutos no sobrecomprado
+            if rsi_5m > 70:
+                failures.append(f"5m RSI Overbought: {rsi_5m:.1f} > 70 (Intraday exhaustion)")
+
+            # Requisito 10: Bloqueo por Gap Up Exhaustion
+            if gap_exhaustion:
+                gap_pct = float(context.get("gap_pct") or 0)
+                failures.append(
+                    f"Gap Up Exhaustion: Stock gapped {gap_pct:.1f}% and momentum has faded. "
+                    f"Entry too late."
+                )
+
+        # ── CHECK 8: Regla Específica BOLLINGER_EXPLOSION (V5.3) ──
         if normalized_code == "BOLLINGER_EXPLOSION":
             bb_exp = context.get("bb_expanding", False)
             ema_exh = context.get("ema_exhaustion", False)
@@ -522,16 +555,24 @@ class StocksRuleEngine:
             rsi = float(context.get("rsi_14") or 50.0)
             high_price = float(context.get("high") or 0)
             bb_upper = float(context.get("bb_upper") or 99999)
+
+            # ── Indicadores de 5 minutos ──
+            ema3_5m  = float(context.get("ema_3_5m") or 0)
+            ema9_5m  = float(context.get("ema_9_5m") or 0)
+            ema20_5m = float(context.get("ema_20_5m") or 0)
+            bb_exp_5m = bool(context.get("bb_expanding_5m", False))
+            rsi_5m = float(context.get("rsi_5m") or 50.0)
+            gap_exhaustion = bool(context.get("gap_up_exhaustion", False))
             
-            # Requisito 1: Expansión de bandas activa
-            if not bb_exp:
-                failures.append("BB Not Expanding: Bands are not opening explosively")
+            # Requisito 1: Expansión de bandas activa (15m O 5m)
+            if not bb_exp and not bb_exp_5m:
+                failures.append("BB Not Expanding: Bands are not opening on any timeframe")
             
             # Requisito 2: Volumen masivo (RVOL > 2.0)
             if rvol < 2.0:
                 failures.append(f"Low RVOL: {rvol:.2f} < 2.0x (Needed for explosion confirmation)")
             
-            # Requisito 3: Alineación mínima EMA3 > EMA9
+            # Requisito 3: Alineación mínima EMA3 > EMA9 (15m)
             if ema3 and ema9 and ema3 < ema9:
                 failures.append(f"EMA Bearish: EMA3 {ema3:.2f} < EMA9 {ema9:.2f}")
 
@@ -539,13 +580,34 @@ class StocksRuleEngine:
             if ema_exh:
                 failures.append("EMA Exhaustion: EMA3 and EMA9 are too close (Possible reversal)")
 
-            # Requisito 5: RSI Máximo (Protección contra sobrecompra extrema en explosiones)
+            # Requisito 5: RSI Máximo (15m)
             if rsi > 65:
                 failures.append(f"RSI Exhausted (Explosion): {rsi:.1f} > 65 (Overbought)")
 
             # Requisito 6: Evitar perforación de banda superior
             if high_price >= bb_upper:
                 failures.append(f"Price outside band: High {high_price} >= BB_Upper {bb_upper}")
+
+            # ── V5.3: Precisión 5 minutos ──
+
+            # Requisito 7: Alineación EMA perfecta en 5 minutos
+            if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                if not (ema3_5m > ema9_5m > ema20_5m):
+                    failures.append(
+                        f"5m EMA Misaligned: EMA3={ema3_5m:.2f} EMA9={ema9_5m:.2f} EMA20={ema20_5m:.2f} "
+                        f"(Need perfect 5m alignment for explosion entry)"
+                    )
+
+            # Requisito 8: RSI 5m no sobrecomprado
+            if rsi_5m > 70:
+                failures.append(f"5m RSI Overbought: {rsi_5m:.1f} > 70 (Explosion already mature)")
+
+            # Requisito 9: Bloqueo Gap Up Exhaustion
+            if gap_exhaustion:
+                gap_pct = float(context.get("gap_pct") or 0)
+                failures.append(
+                    f"Gap Up Exhaustion: Stock gapped {gap_pct:.1f}% and explosion is stale."
+                )
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

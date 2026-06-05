@@ -1936,13 +1936,26 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
             else:
                 # ── 3. Validar Señal (Zombie Check) ──────
+                from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+                snap_eval = MARKET_SNAPSHOT_CACHE.get(symbol, {}).copy() if MARKET_SNAPSHOT_CACHE.get(symbol) else {}
+                snap_eval.update({
+                    'price': float(last_row['close']),
+                    'ema_3': float(last_row.get('ema1') if last_row.get('ema1') is not None else 0),
+                    'ema_9': float(last_row.get('ema2') if last_row.get('ema2') is not None else 0),
+                    'ema_20': float(last_row.get('ema3') if last_row.get('ema3') is not None else 0),
+                    'atr': float(last_row.get('atr') if last_row.get('atr') is not None else 0),
+                    'adx': float(last_row.get('adx') if last_row.get('adx') is not None else 0),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                
                 v_signal = validate_signal(
                     symbol=symbol,
                     price=float(last_row['close']),
                     timestamp=last_row.name if hasattr(last_row, 'name') else None,
                     market_type='crypto_futures',
                     direction=rule_match.get('direction') if rule_match else None,
-                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None
+                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None,
+                    snap=snap_eval
                 )
                 if not v_signal['valid']:
                     blocked_by = f"safety_block ({v_signal['reason']})"
@@ -1976,13 +1989,26 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
             else:
                 # ── 3. Validar Señal (Zombie Check) ──────
+                from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+                snap_eval = MARKET_SNAPSHOT_CACHE.get(symbol, {}).copy() if MARKET_SNAPSHOT_CACHE.get(symbol) else {}
+                snap_eval.update({
+                    'price': float(last_row['close']),
+                    'ema_3': float(last_row.get('ema1') if last_row.get('ema1') is not None else 0),
+                    'ema_9': float(last_row.get('ema2') if last_row.get('ema2') is not None else 0),
+                    'ema_20': float(last_row.get('ema3') if last_row.get('ema3') is not None else 0),
+                    'atr': float(last_row.get('atr') if last_row.get('atr') is not None else 0),
+                    'adx': float(last_row.get('adx') if last_row.get('adx') is not None else 0),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                
                 v_signal = validate_signal(
                     symbol=symbol,
                     price=float(last_row['close']),
                     timestamp=last_row.name if hasattr(last_row, 'name') else None,
                     market_type='crypto_futures',
                     direction=rule_match.get('direction') if rule_match else None,
-                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None
+                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None,
+                    snap=snap_eval
                 )
                 if not v_signal['valid']:
                     blocked_by = f"safety_block ({v_signal['reason']})"

@@ -176,7 +176,7 @@ def check_basis_crossed(
 
     basis = float(snap.get('basis', 0))
     if basis <= 0:
-        return {'crossed': False, 'confirmed': False}
+        return {'crossed': False, 'confirmed': False, 'reason': 'BASIS <= 0 (no disponible)'}
 
     side    = str(position.get('side', 'long'))
     is_long = side in ('long', 'buy')

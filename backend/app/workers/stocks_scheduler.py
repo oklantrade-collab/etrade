@@ -22,6 +22,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
@@ -671,6 +672,31 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         
 
         re = StocksRuleEngine.get_instance()
+
+        # ── Extraer indicadores de 5m para el Rule Engine ──
+        ema_3_5m  = float(ind_5m.get('ema_3') or 0)
+        ema_9_5m  = float(ind_5m.get('ema_9') or 0)
+        ema_20_5m = float(ind_5m.get('ema_20') or 0)
+        bb_expanding_5m = bool(ind_5m.get('bb_expanding', False))
+        rsi_5m = float(ind_5m.get('rsi_14') or 50.0)
+
+        # ── Gap Up Exhaustion Detection ──
+        # Si la acción abrió con un gap up significativo (>3%) y ya han
+        # pasado varias horas, el momentum está probablemente agotado.
+        gap_up_exhaustion = False
+        try:
+            now_et = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+            hours_since_open = (now_et.hour - 9) + (now_et.minute - 30) / 60.0
+            if gap_pct > 3.0 and hours_since_open > 2.0:
+                # Gap Up + más de 2 horas desde apertura = momentum agotado
+                gap_up_exhaustion = True
+                log_info(MODULE, f"⚠️ Gap Up Exhaustion: {ticker} gap={gap_pct:.1f}% hours={hours_since_open:.1f}h")
+            elif gap_pct > 5.0 and hours_since_open > 1.0:
+                gap_up_exhaustion = True
+                log_info(MODULE, f"⚠️ Gap Up Exhaustion (Fast): {ticker} gap={gap_pct:.1f}% hours={hours_since_open:.1f}h")
+        except Exception:
+            pass
+
         rule_ctx = re.build_context(
             ticker=ticker,
             snap=ind_15m,
@@ -695,6 +721,14 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             ema_exhaustion=ema_exhaustion,
             ema3_cross_age=ind_15m.get("ema3_cross_ema9_age", 999)
         )
+        # ── Inyectar indicadores de 5 minutos al contexto ──
+        rule_ctx['ema_3_5m'] = ema_3_5m
+        rule_ctx['ema_9_5m'] = ema_9_5m
+        rule_ctx['ema_20_5m'] = ema_20_5m
+        rule_ctx['bb_expanding_5m'] = bb_expanding_5m
+        rule_ctx['rsi_5m'] = rsi_5m
+        rule_ctx['gap_up_exhaustion'] = gap_up_exhaustion
+        rule_ctx['gap_pct'] = gap_pct
         rule_ctx["revenue_growth_yoy"] = ind_15m.get("revenue_growth_yoy", 0)
         rule_ctx["sm_score"] = ind_15m.get("sm_score", 1.0)
         rule_ctx["piotroski_score"] = ind_15m.get("piotroski_score", 0)

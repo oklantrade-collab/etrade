@@ -103,7 +103,7 @@ def calculate_position_size(
             leverage = 1
         elif market_type == 'forex_futures':
             capital_base = float(c.get('capital_forex_futures', capital_op_fallback))
-            leverage = int(c.get('leverage_forex', 100))
+            leverage = int(c.get('leverage_forex') or 100)
         else:
             capital_base = capital_op_fallback
             leverage = 1

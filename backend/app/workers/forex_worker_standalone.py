@@ -76,7 +76,7 @@ from supabase import create_client
 from dataclasses import field
 from app.strategy.proactive_exit import evaluate_proactive_exit
 from app.strategy.dynamic_sl_manager import evaluate_sl_action
-from app.strategy.capital_protection import ProtectionState, evaluate_volatile_trailing_v2
+from app.strategy.capital_protection import ProtectionState, evaluate_volatile_trailing_v2, evaluate_trailing_stop
 
 #     PASO 3: Config    
 CLIENT_ID     = os.getenv('CTRADER_CLIENT_ID')
@@ -295,8 +295,9 @@ class StandaloneForexWorker:
             res = Protobuf.extract(message)
             count = 0
             for sym in res.symbol:
-                if sym.symbolName in self.symbols: 
-                    STATE['symbol_ids'][sym.symbolName] = sym.symbolId
+                base_name = sym.symbolName.split('.')[0].upper().strip()
+                if base_name in self.symbols: 
+                    STATE['symbol_ids'][base_name] = sym.symbolId
                     count += 1
             if count > 0:
                 self.log(f"Simbolos vinculados: {count} ({', '.join(STATE['symbol_ids'].keys())})")
@@ -546,7 +547,27 @@ class StandaloneForexWorker:
     def handle_bars(self, res):
         name = next((n for n, sid in STATE['symbol_ids'].items() if sid == res.symbolId), None)
         if not name: return
-        p_rev = {v: k for k, v in TF_MAP.items()}; tf = p_rev.get(res.period, '15m')
+        
+        # Robustly extract period value (handles raw int, enum wrapper, or string)
+        period_val = res.period
+        if hasattr(period_val, 'value'):
+            period_val = period_val.value
+        try:
+            period_int = int(period_val)
+        except (ValueError, TypeError):
+            period_int = period_val
+            
+        p_rev = {}
+        for k, v in TF_MAP.items():
+            val = v
+            if hasattr(val, 'value'):
+                val = val.value
+            try:
+                p_rev[int(val)] = k
+            except (ValueError, TypeError):
+                p_rev[val] = k
+                
+        tf = p_rev.get(period_int, '15m')
         div = get_divisor(name)
         bars = []
         for b in res.trendbar:
@@ -589,8 +610,9 @@ class StandaloneForexWorker:
             df = calculate_all_indicators(df_raw, {})
             
             # NUEVO: Lazy Warmup. Si estamos arrancando, no guardamos el historial pesado en DB
+            # pero SÍ sincronizamos MEMORY_STORE para que las señales funcionen desde el inicio
             if STATE.get('is_warming_up', False) and len(df) > 10:
-                # self.log(f"   [Lazy Skip DB] {sym} {tf} ({len(df)} velas)")
+                self._sync_memory_store(sym, tf, df)
                 return
 
             rows = []
@@ -625,8 +647,112 @@ class StandaloneForexWorker:
                 })
             if rows: 
                 self.safe_db_execute(sb.table('market_candles').upsert(rows, on_conflict='symbol,exchange,timeframe,open_time'))
+            
+            # CRITICAL FIX: Sincronizar MEMORY_STORE para que forex_execution_service pueda leer datos
+            self._sync_memory_store(sym, tf, df)
         except Exception as e: 
             self.log(f"Error procesando {sym} ({tf}):\n{traceback.format_exc()}", "ERROR")
+
+    def _sync_memory_store(self, symbol, tf, df):
+        """
+        Sincroniza el DataFrame procesado con MEMORY_STORE para que
+        forex_execution_service.py pueda acceder a los indicadores necesarios
+        (SIPV patterns, EMAs, ADX, DI+/DI-, ema20_angle/phase).
+        
+        SIN ESTE MÉTODO, MEMORY_STORE está vacío para forex y NUNCA se generan señales.
+        """
+        try:
+            from app.core.memory_store import update_memory_df
+            
+            if df is None or df.empty or len(df) < 20:
+                return
+            
+            df_mem = df.copy()
+            
+            # --- EMAs compatibles con el formato esperado (ema1=3, ema2=9, ema3=20, ema4=50, ema5=200) ---
+            if 'close' in df_mem.columns:
+                close_col = df_mem['close']
+            elif 'c' in df_mem.columns:
+                close_col = df_mem['c']
+            else:
+                return
+            
+            df_mem['ema1'] = close_col.ewm(span=3, adjust=False).mean()   # EMA 3
+            df_mem['ema2'] = close_col.ewm(span=9, adjust=False).mean()   # EMA 9
+            df_mem['ema3'] = close_col.ewm(span=20, adjust=False).mean()  # EMA 20
+            df_mem['ema4'] = close_col.ewm(span=50, adjust=False).mean()  # EMA 50
+            df_mem['ema5'] = close_col.ewm(span=200, adjust=False).mean() # EMA 200
+            
+            # --- ADX, DI+, DI- ---
+            high_col = df_mem.get('high', df_mem.get('h'))
+            low_col = df_mem.get('low', df_mem.get('l'))
+            if high_col is not None and low_col is not None:
+                tr = np.maximum(high_col - low_col, 
+                       np.maximum(abs(high_col - close_col.shift(1)), 
+                                  abs(low_col - close_col.shift(1))))
+                df_mem['atr'] = tr.rolling(window=14).mean()
+                
+                dm_plus = np.where(
+                    (high_col - high_col.shift(1)) > (low_col.shift(1) - low_col),
+                    np.maximum(high_col - high_col.shift(1), 0), 0)
+                dm_minus = np.where(
+                    (low_col.shift(1) - low_col) > (high_col - high_col.shift(1)),
+                    np.maximum(low_col.shift(1) - low_col, 0), 0)
+                
+                tr_14 = tr.rolling(window=14).mean()
+                df_mem['plus_di'] = 100 * (pd.Series(dm_plus, index=df_mem.index).rolling(14).mean() / (tr_14 + 1e-10))
+                df_mem['minus_di'] = 100 * (pd.Series(dm_minus, index=df_mem.index).rolling(14).mean() / (tr_14 + 1e-10))
+                dx = 100 * abs(df_mem['plus_di'] - df_mem['minus_di']) / (df_mem['plus_di'] + df_mem['minus_di'] + 1e-10)
+                df_mem['adx'] = dx.rolling(window=14).mean()
+            
+            # --- EMA20 Angle y Phase ---
+            ema20 = df_mem['ema3']  # ema3 = EMA 20
+            if len(ema20) >= 3:
+                df_mem['ema20_angle'] = ema20.diff()
+                df_mem['ema20_phase'] = np.where(
+                    df_mem['ema20_angle'] > 0, 'rising',
+                    np.where(df_mem['ema20_angle'] < 0, 'falling', 'flat'))
+            
+            # --- SIPV Candlestick Patterns ---
+            o = df_mem.get('open', df_mem.get('o'))
+            h = high_col
+            l = low_col
+            c = close_col
+            
+            if o is not None and h is not None and l is not None:
+                body = abs(c - o)
+                full_range = h - l + 1e-10
+                
+                # Dragonfly Doji (bullish): Larga sombra inferior, sin sombra superior
+                lower_shadow = np.minimum(o, c) - l
+                upper_shadow = h - np.maximum(o, c)
+                df_mem['is_dragonfly'] = (lower_shadow > body * 2) & (upper_shadow < body * 0.5) & (body < full_range * 0.3)
+                
+                # Gravestone Doji (bearish): Larga sombra superior, sin sombra inferior
+                df_mem['is_gravestone'] = (upper_shadow > body * 2) & (lower_shadow < body * 0.5) & (body < full_range * 0.3)
+                
+                # Doji: Body muy pequeño
+                df_mem['is_doji'] = body < full_range * 0.1
+                
+                # Bullish Engulfing
+                prev_o = o.shift(1)
+                prev_c = c.shift(1)
+                df_mem['is_bullish_engulfing'] = (prev_c < prev_o) & (c > o) & (c > prev_o) & (o < prev_c)
+                
+                # Bearish Engulfing
+                df_mem['is_bearish_engulfing'] = (prev_c > prev_o) & (c < o) & (c < prev_o) & (o > prev_c)
+                
+                # Low higher than previous low
+                df_mem['low_higher_than_prev'] = l > l.shift(1)
+                
+                # High lower than previous high
+                df_mem['high_lower_than_prev'] = h < h.shift(1)
+            
+            # Guardar en MEMORY_STORE
+            update_memory_df(symbol, tf, df_mem)
+            
+        except Exception as e:
+            self.log(f"Error sincronizando MEMORY_STORE para {symbol}/{tf}: {e}", "WARNING")
 
     def run_cycle(self):
         #    Heartbeat                              
@@ -728,7 +854,8 @@ class StandaloneForexWorker:
                         highest_price = h_p,
                         lowest_price  = l_p,
                         rule_code   = rule_val,
-                        bb_touched   = bb_touched_val
+                        bb_touched   = bb_touched_val,
+                        opened_at   = str(pos.get('opened_at') or '')
                     )
 
                     # Precio base para el trailing (mejor precio alcanzado)
@@ -798,8 +925,42 @@ class StandaloneForexWorker:
                         c_id = pos.get('ctrader_pos_id')
                         if c_id:
                             self.close_position(c_id, symbol=symbol)
-                        # 2. Cerrar en DB
-                        self.safe_db_execute(sb.table('forex_positions').update({'status': 'closed', 'closed_at': datetime.now(timezone.utc).isoformat(), 'close_reason': res_trail['reason']}).eq('id', pos['id']))
+                        # 2. Cerrar en DB con datos reales financieros
+                        try:
+                            entry_px = float(pos.get('entry_price') or 0)
+                            lots_qty = abs(float(pos.get('lots') or 0))
+                            pip_val_usd = 10.0  # Lote estándar pips value
+                            from app.strategy.capital_protection import PIP_SIZES
+                            pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                            is_short_pos = side.lower() in ('short', 'sell')
+                            pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                            pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
+                            
+                            upd_fields = {
+                                'status': 'closed', 
+                                'current_price': current_price,
+                                'pnl_pips': round(pips_pnl_calc, 1),
+                                'pnl_usd': round(pnl_usd_calc, 2),
+                                'closed_at': datetime.now(timezone.utc).isoformat(), 
+                                'close_reason': res_trail['reason']
+                            }
+                            
+                            # Registrar en capital manager
+                            try:
+                                from app.core.capital_manager import register_realized_pnl
+                                register_realized_pnl('forex', round(pnl_usd_calc, 2))
+                            except Exception:
+                                pass
+                        except Exception as calc_err:
+                            self.log(f"Error calculando PnL de cierre: {calc_err}", "ERROR")
+                            upd_fields = {
+                                'status': 'closed', 
+                                'current_price': current_price,
+                                'closed_at': datetime.now(timezone.utc).isoformat(), 
+                                'close_reason': res_trail['reason']
+                            }
+                            
+                        self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
                         
                         # 3. Si no tocó BB, re-entrar con órdenes límite!
                         if not res_trail.get('bb_touched', False):
@@ -822,8 +983,42 @@ class StandaloneForexWorker:
                         c_id = pos.get('ctrader_pos_id')
                         if c_id:
                             self.close_position(c_id, symbol=symbol)
-                        # Cerrar en DB
-                        self.safe_db_execute(sb.table('forex_positions').update({'status': 'closed', 'closed_at': datetime.now(timezone.utc).isoformat(), 'exit_reason': proactive_res['rule_code']}).eq('id', pos['id']))
+                        # Cerrar en DB con datos reales financieros
+                        try:
+                            entry_px = float(pos.get('entry_price') or 0)
+                            lots_qty = abs(float(pos.get('lots') or 0))
+                            pip_val_usd = 10.0
+                            from app.strategy.capital_protection import PIP_SIZES
+                            pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                            is_short_pos = side.lower() in ('short', 'sell')
+                            pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                            pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
+                            
+                            upd_fields = {
+                                'status': 'closed', 
+                                'current_price': current_price,
+                                'pnl_pips': round(pips_pnl_calc, 1),
+                                'pnl_usd': round(pnl_usd_calc, 2),
+                                'closed_at': datetime.now(timezone.utc).isoformat(), 
+                                'close_reason': proactive_res.get('reason') or proactive_res.get('rule_code'),
+                                'exit_reason': proactive_res['rule_code']
+                            }
+                            
+                            try:
+                                from app.core.capital_manager import register_realized_pnl
+                                register_realized_pnl('forex', round(pnl_usd_calc, 2))
+                            except Exception:
+                                pass
+                        except Exception as calc_err:
+                            self.log(f"Error calculando PnL de cierre proactivo: {calc_err}", "ERROR")
+                            upd_fields = {
+                                'status': 'closed', 
+                                'current_price': current_price,
+                                'closed_at': datetime.now(timezone.utc).isoformat(), 
+                                'exit_reason': proactive_res['rule_code']
+                            }
+                            
+                        self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
                         continue
 
                     else:

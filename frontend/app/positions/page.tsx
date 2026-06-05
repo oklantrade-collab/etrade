@@ -48,12 +48,15 @@ export default function PositionsPage() {
   }
 
   async function loadClosedPositions() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('positions')
       .select('*')
       .eq('status', 'closed')
       .order('closed_at', { ascending: false })
       .limit(100)
+    if (error) {
+      console.error('Error loading closed positions:', error)
+    }
     if (data) setClosedPositions(data)
   }
   async function loadMaxPositions() {

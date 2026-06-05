@@ -163,6 +163,9 @@ class CTraderProtobufProvider(BaseMarketProvider):
         # Callbacks de precio
         self._price_callbacks: list[Callable] = []
 
+        # Futures para solicitudes concurrentes de trendbars
+        self._trendbar_futures: dict = {}
+
     @property
     def market_type(self) -> str:
         return 'forex_futures'
@@ -361,9 +364,13 @@ class CTraderProtobufProvider(BaseMarketProvider):
             self._was_authenticated = True
 
         # Error
-        elif msg_type == 50: # ProtoOAErrorRes
+        elif msg_type == 50: # ProtoErrorRes
             error = Protobuf.extract(message)
             log_error('CTRADER', f'Error del servidor: {error}')
+
+        elif msg_type == 2142: # ProtoOAErrorRes
+            error = Protobuf.extract(message)
+            log_error('CTRADER', f'Error de Open API (ProtoOAErrorRes): errorCode={error.errorCode}, description={error.description}')
 
 
         # Spot Price Update (precio en tiempo real)
@@ -432,6 +439,16 @@ class CTraderProtobufProvider(BaseMarketProvider):
     def _handle_trendbars(self, response):
         """Almacena las velas descargadas."""
         self._last_trendbars = response
+        key = (response.symbolId, response.period)
+        if hasattr(self, '_trendbar_futures') and key in self._trendbar_futures:
+            future = self._trendbar_futures.pop(key)
+            if self.loop:
+                self.loop.call_soon_threadsafe(
+                    lambda: future.set_result(response) if not future.done() else None
+                )
+            else:
+                if not future.done():
+                    future.set_result(response)
 
     def _handle_symbols(self, response):
         """Construye el mapa de símbolos."""
@@ -554,8 +571,12 @@ class CTraderProtobufProvider(BaseMarketProvider):
             minutes * limit * 60 * 1000
         )
 
-        # Limpiar respuesta anterior
-        self._last_trendbars = None
+        # Crear un Future para esta solicitud
+        key = (symbol_id, tf_proto)
+        future = asyncio.get_running_loop().create_future()
+        if not hasattr(self, '_trendbar_futures'):
+            self._trendbar_futures = {}
+        self._trendbar_futures[key] = future
 
         request = ProtoOAGetTrendbarsReq()
         request.ctidTraderAccountId = \
@@ -568,21 +589,19 @@ class CTraderProtobufProvider(BaseMarketProvider):
 
         await self._send_request(request)
 
-        # Esperar respuesta (max 10 seg)
-        for _ in range(100):
-            if self._last_trendbars is not None:
-                break
-            await asyncio.sleep(0.1)
-
-        if self._last_trendbars is None:
+        # Esperar respuesta (max 10 seg) usando el Future específico
+        try:
+            response = await asyncio.wait_for(future, timeout=10.0)
+        except asyncio.TimeoutError:
             log_error('CTRADER',
                 f'Timeout descargando velas '
                 f'{symbol}/{timeframe}'
             )
+            self._trendbar_futures.pop(key, None)
             return pd.DataFrame()
 
         return self._trendbars_to_df(
-            self._last_trendbars,
+            response,
             symbol,
             timeframe
         )

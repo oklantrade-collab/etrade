@@ -1314,11 +1314,6 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
         if not positions:
             return
 
-        log_info(MODULE,
-            f"🔄 Cerrando {len(positions)} posiciones LONG de {ticker} "
-            f"(SELL signal detectada → {strategy_code})"
-        )
-
         now_iso = datetime.now(timezone.utc).isoformat()
         for pos in positions:
             try:
@@ -1333,6 +1328,26 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
                 pnl = (price - avg) * shares
                 pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
 
+                # 🛡️ PROTECCIÓN ANTI-PÉRDIDAS & EREP PARA STOCKS 🛡️
+                # Si el cierre sugerido por vela genera pérdida, no cerramos la posición.
+                # En su lugar, la enviamos a EREP Fase 1 para intentar recuperación.
+                if pnl < 0:
+                    log_warning(MODULE, f"🛡️ [ANTI-LOSS CANDLE EXIT] Intento de cierre de vela para {ticker} con pérdida: ${pnl:.2f} ({pnl_pct:.2f}%). Enrutando a EREP Fase 1.")
+                    sb.table("stocks_positions").update({
+                        "erep_phase": 1,
+                        "erep_p1_price": avg,
+                        "erep_q1": shares,
+                        "erep_market_type": "stocks_spot",
+                        "updated_at": now_iso,
+                    }).eq("id", pos["id"]).execute()
+                    continue
+
+                log_info(MODULE,
+                    f"🔄 Cerrando posición LONG de {ticker} x{shares:.0f} "
+                    f"(SELL signal detectada → {strategy_code})"
+                )
+
+                # Cierre normal (en ganancia o neutro)
                 sb.table("stocks_positions").update({
                     "status": "closed",
                     "current_price": price,
@@ -1355,6 +1370,28 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
                     "filled_at": now_iso,
                     "created_at": now_iso,
                 }).execute()
+
+                # 📝 REGISTRAR EN DIARIO DE OPERACIONES (trades_journal) 📝
+                sb.table("trades_journal").insert({
+                    "ticker": ticker,
+                    "shares": int(shares),
+                    "entry_price": avg,
+                    "exit_price": price,
+                    "entry_date": pos.get("first_buy_at") or pos.get("entry_time") or now_iso,
+                    "exit_date": now_iso,
+                    "pnl_usd": round(pnl, 2),
+                    "pnl_pct": round(pnl_pct, 2),
+                    "result": "win" if pnl > 0 else "loss",
+                    "exit_reason": f"candle_signal_{strategy_code}",
+                    "trade_type": pos.get("strategy") or pos.get("rule_code") or "V5_INDUSTRIAL"
+                }).execute()
+
+                # Registrar profit en capital acumulado
+                try:
+                    from app.core.capital_manager import register_realized_pnl
+                    register_realized_pnl('stocks', pnl)
+                except Exception as cap_e:
+                    log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
 
                 log_info(MODULE,
                     f"  ↳ Cerrada {ticker} x{shares:.0f} "

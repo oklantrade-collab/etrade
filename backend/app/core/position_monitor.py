@@ -1350,9 +1350,14 @@ async def _execute_paper_partial_close(pos, price, supabase):
     entry = float(pos.get('entry_price') or 0)
     side = (pos.get('side') or '').lower()
     
+    is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')) or pos.get('market_type') == 'forex_futures'
+    table_name = 'forex_positions' if is_forex else 'positions'
+    
     # PnL %
     is_long = side in ['long', 'buy']
-    pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
+    pnl_pct = 0.0
+    if entry > 0:
+        pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
     
     # Asumimos que T1 es todo el capital actual (v4 simple distribution)
     # Si queremos ser precisos necesitamos 'capital_per_symbol'
@@ -1360,14 +1365,31 @@ async def _execute_paper_partial_close(pos, price, supabase):
     partial_qty = float(pos['size']) * 0.5
     partial_pnl_usd = (price - entry) * partial_qty if is_long else (entry - price) * partial_qty
     
+    # Check UUID formatting to avoid database validation crashes
+    import uuid
+    is_uuid = False
+    pos_id = pos.get('id')
+    if pos_id:
+        try:
+            uuid.UUID(str(pos_id))
+            is_uuid = True
+        except ValueError:
+            is_uuid = False
+
+    db_key_name = 'id'
+    db_record_id = pos_id
+    if is_forex and not is_uuid:
+        db_key_name = 'ctrader_order_id'
+        db_record_id = pos.get('ctrader_order_id') or pos_id
+    
     # Update Position
-    supabase.table('positions').update({
+    supabase.table(table_name).update({
         'partial_closed': True,
         'partial_close_price': price,
         'current_price': price,
         'partial_close_usd': round(partial_pnl_usd, 4),
         'size': float(pos['size']) - partial_qty
-    }).eq('id', pos['id']).execute()
+    }).eq(db_key_name, db_record_id).execute()
     
     # 2. Persistir en paper_trades (Log de actividad parcial)
     p_rule_code = pos.get('rule_code') or pos.get('rule_entry') or "Cc-Partial"
@@ -1386,7 +1408,7 @@ async def _execute_paper_partial_close(pos, price, supabase):
     }).execute()
     
     log_info(MODULE, f"✅ PARTIAL CLOSE [{symbol}] at ${price:,.2f} | PnL: ${partial_pnl_usd:.2f}")
-
+    
     # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
     try:
         from app.core.capital_manager import register_realized_pnl
@@ -1403,61 +1425,61 @@ async def _execute_paper_close(pos, price, reason, supabase):
     side = (pos.get('side') or '').lower()
     qty = float(pos['size'])
     
+    is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')) or pos.get('market_type') == 'forex_futures'
+    table_name = 'forex_positions' if is_forex else 'positions'
+    
+    # Check UUID formatting to avoid database validation crashes
+    import uuid
+    is_uuid = False
+    pos_id = pos.get('id')
+    if pos_id:
+        try:
+            uuid.UUID(str(pos_id))
+            is_uuid = True
+        except ValueError:
+            is_uuid = False
+
+    db_key_name = 'id'
+    db_record_id = pos_id
+    if is_forex and not is_uuid:
+        db_key_name = 'ctrader_order_id'
+        db_record_id = pos.get('ctrader_order_id') or pos_id
+    
     is_long = side in ['long', 'buy']
     pnl_usd = (price - entry) * qty if is_long else (entry - price) * qty
-    pnl_pct = ((price - entry) / entry * 100) if side == 'long' else ((entry - price) / entry * 100)
+    pnl_pct = 0.0
+    if entry > 0:
+        pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
 
     # Si hubo cierre parcial previo, sumar sus USD
     partial_pnl = pos.get('partial_pnl_usd')
     total_pnl = pnl_usd + (float(partial_pnl) if partial_pnl is not None else 0.0)
 
-    # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS 🛡️
-    # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual/Trailing
-    if total_pnl < 0 and 'tp' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower() and 'trailing' not in str(reason).lower() and 'ts_close' not in str(reason).lower() and 'apexconfluence' not in str(reason).lower():
-        log_warning(MODULE, f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre para {symbol} ({reason}) con P&L negativo: ${total_pnl:.4f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
-        
-        # Suspendemos el Stop Loss físico y enrutamos de forma segura a EREP Phase 2
-        try:
-            supabase.table('positions').update({
-                'sl_type': 'suspended_negative_protection',
-                'sl_price': 0,
-                'stop_loss': 0,
-                'sl_dynamic_price': 0,
-                'erep_active': True,
-                'erep_phase': 2,
-                'erep_p1_price': entry,
-                'erep_q1': qty,
-                'erep_market_type': 'crypto_futures',
-                'erep_cycles_elapsed': 0
-            }).eq('id', pos['id']).execute()
-            
-            # ActualizarBOT_STATE local para que no siga evaluando SL normales
-            if pos['id'] in BOT_STATE.positions:
-                BOT_STATE.positions[pos['id']].update({
-                    'sl_type': 'suspended_negative_protection',
-                    'sl_price': 0,
-                    'stop_loss': 0,
-                    'sl_dynamic_price': 0,
-                    'erep_active': True,
-                    'erep_phase': 2,
-                    'erep_p1_price': entry,
-                    'erep_q1': qty,
-                    'erep_cycles_elapsed': 0
-                })
-        except Exception as upd_e:
-            log_warning(MODULE, f"Error actualizando estado anti-loss para {symbol}: {upd_e}")
-        return False
+    # ── Cerrar posición en la tabla correcta con columnas válidas ──
+    # NOTA: Anti-Loss Guard fue removido (atrapaba posiciones indefinidamente
+    # y escribía columnas inexistentes en forex_positions causando crashes).
+    if is_forex:
+        close_update = {
+            'status': 'closed',
+            'close_reason': reason[:20],
+            'current_price': price,
+            'closed_at': datetime.now(timezone.utc).isoformat(),
+            'pnl_usd': round(total_pnl, 4),
+        }
+    else:
+        close_update = {
+            'status': 'closed',
+            'close_reason': reason[:20],
+            'current_price': price,
+            'closed_at': datetime.now(timezone.utc).isoformat(),
+            'realized_pnl': round(total_pnl, 4),
+        }
 
-    supabase.table('positions').update({
-        'status': 'closed',
-        'close_reason': reason[:20],  # Truncate to 20 chars to avoid Postgres varchar(20) 22001 error
-        'current_price': price,
-        'closed_at': datetime.now(timezone.utc).isoformat(),
-        'realized_pnl': round(total_pnl, 4)
-    }).eq('id', pos['id']).execute()
+    log_info(MODULE, f"Cerrando {symbol} ({reason}) en tabla {table_name}: PnL=${total_pnl:.4f} ({pnl_pct:.2f}%)")
+    supabase.table(table_name).update(close_update).eq(db_key_name, db_record_id).execute()
     
     # Check if there are other open positions for this symbol
-    open_pos = supabase.table('positions').select('id').eq('symbol', symbol).eq('status', 'open').execute()
+    open_pos = supabase.table(table_name).select('id').eq('symbol', symbol).eq('status', 'open').execute()
     all_closed = len(open_pos.data) == 0 if open_pos.data else True
     sm.on_position_closed(symbol, reason, all_closed=all_closed)
     
@@ -1521,7 +1543,6 @@ async def _execute_paper_close(pos, price, reason, supabase):
         log_warning(MODULE, f"Error cancelando órdenes huérfanas de {symbol}: {cancel_e}")
 
     # Remove from BOT_STATE
-    pos_id = pos.get('id')
     if pos_id:
         BOT_STATE.positions.pop(pos_id, None)
     else:
