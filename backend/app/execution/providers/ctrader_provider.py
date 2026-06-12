@@ -363,6 +363,11 @@ class CTraderProtobufProvider(BaseMarketProvider):
             self._authenticated = True
             self._was_authenticated = True
 
+        # Trader Response (Balance)
+        elif msg_type == ProtoOATraderRes().payloadType:
+            res = Protobuf.extract(message)
+            self._last_trader = res.trader
+
         # Error
         elif msg_type == 50: # ProtoErrorRes
             error = Protobuf.extract(message)
