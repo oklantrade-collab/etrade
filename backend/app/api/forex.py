@@ -68,43 +68,35 @@ async def get_forex_status(
         return {'connected': False, 'error': str(e)}
 
 @router.get('/live-balance')
-async def get_live_balance():
-    """Obtiene el balance en vivo directamente de cTrader."""
+async def get_live_balance(
+    sb = Depends(get_supabase)
+):
+    """Obtiene el balance del broker desde Supabase (cacheado por el forex_scheduler)."""
     try:
-        from app.execution.providers.ctrader_provider import CTraderProtobufProvider
+        res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        cfg = res.data or {}
+        params = cfg.get('regime_params') or {}
+        broker_bal = params.get('broker_balance_forex')
         
-        client_id = os.getenv('CTRADER_CLIENT_ID')
-        client_secret = os.getenv('CTRADER_CLIENT_SECRET')
-        account_id = os.getenv('CTRADER_ACCOUNT_ID')
-        access_token = os.getenv('CTRADER_ACCESS_TOKEN')
-        env = os.getenv('CTRADER_ENV', 'demo')
-
-        if not all([client_id, client_secret, account_id, access_token]):
-            return {'error': 'Faltan credenciales de cTrader'}
-
-        provider = CTraderProtobufProvider(
-            client_id=client_id,
-            client_secret=client_secret,
-            account_id=account_id,
-            access_token=access_token,
-            environment=env
-        )
+        if broker_bal is not None:
+            return {
+                'balance': broker_bal,
+                'equity': broker_bal,
+                'margin_free': broker_bal,
+                'source': 'ctrader_cached'
+            }
         
-        connected = await provider.connect()
-        if not connected:
-            return {'error': 'No se pudo conectar a cTrader API'}
-            
-        balance_info = await provider.get_account_balance()
-        
-        # Opcional: desconectar o dejar que el garbage collector lo cierre
-        if provider._client:
-            try:
-                # El cliente Twisted TCP se cerrará eventualmente o podríamos intentar pararlo
-                pass
-            except:
-                pass
-                
-        return balance_info
+        # Fallback: usar capital + profit si el scheduler aún no ha guardado el balance
+        cfg2 = sb.table('trading_config').select('capital_forex_futures, accumulated_profit_forex').eq('id', 1).maybe_single().execute()
+        data = cfg2.data or {}
+        base = float(data.get('capital_forex_futures') or 0)
+        profit = float(data.get('accumulated_profit_forex') or 0)
+        return {
+            'balance': base + profit,
+            'equity': base + profit,
+            'margin_free': base + profit,
+            'source': 'config_fallback'
+        }
     except Exception as e:
         return {'error': str(e)}
 

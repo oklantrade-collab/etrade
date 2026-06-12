@@ -892,6 +892,19 @@ async def forex_cycle_5m():
         for sym in symbols:
             sm.tick_waiting(sym)
             sm.tick_ambiguous(sym)
+
+        # ── SYNC BROKER BALANCE TO SUPABASE ──
+        try:
+            balance_info = await provider.get_account_balance()
+            if balance_info and 'balance' in balance_info:
+                current_params = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+                params = (current_params.data or {}).get('regime_params') or {}
+                params['broker_balance_forex'] = balance_info['balance']
+                sb.table('trading_config').update({'regime_params': params}).eq('id', 1).execute()
+                log_debug(MODULE, f"Broker balance synced: ${balance_info['balance']:.2f}")
+        except Exception as bal_err:
+            log_debug(MODULE, f"Balance sync skip: {bal_err}")
+
     except Exception as e:
         log_error(MODULE, f"Error global forex 5m: {e}")
 
