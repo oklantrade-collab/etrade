@@ -1,8 +1,9 @@
 'use client'
 import { useState, useEffect } from 'react'
+import { supabase } from '@/lib/supabase'
 
 export default function BrokersPage() {
-  const [balance, setBalance] = useState<any>(null)
+  const [balanceAmount, setBalanceAmount] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [positions, setPositions] = useState<any[]>([])
@@ -15,12 +16,29 @@ export default function BrokersPage() {
   const fetchBalance = async () => {
     try {
       setLoading(true)
-      const res = await fetch('/api/v1/forex/live-balance')
-      const data = await res.json()
-      if (data.error) {
-        setError(data.error)
+      setError('')
+      // Read directly from Supabase — no backend API needed
+      const { data, error: sbErr } = await supabase
+        .from('trading_config')
+        .select('capital_forex_futures, accumulated_profit_forex, regime_params')
+        .eq('id', 1)
+        .maybeSingle()
+
+      if (sbErr) {
+        setError(sbErr.message)
+        return
+      }
+
+      const params = data?.regime_params || {}
+      const brokerBal = params.broker_balance_forex
+
+      if (brokerBal != null && brokerBal > 0) {
+        setBalanceAmount(brokerBal)
       } else {
-        setBalance(data)
+        // Fallback: capital + profit
+        const base = parseFloat(data?.capital_forex_futures || '0')
+        const profit = parseFloat(data?.accumulated_profit_forex || '0')
+        setBalanceAmount(base + profit)
       }
     } catch (err: any) {
       setError(err.message)
@@ -64,23 +82,13 @@ export default function BrokersPage() {
           <div style={{ background: 'rgba(0,0,0,0.2)', padding: '16px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)', marginBottom: '16px' }}>
              <div style={{ color: 'var(--text-muted)', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', marginBottom: '4px' }}>Saldo en Vivo (Broker)</div>
              {loading ? (
-                <div style={{ color: '#aaa', fontSize: '24px', fontWeight: 800, animation: 'pulse 1.5s infinite' }}>Cargando...</div>
+                <div style={{ color: '#aaa', fontSize: '24px', fontWeight: 800 }}>Cargando...</div>
              ) : error ? (
                 <div style={{ color: '#EF4444', fontSize: '14px', fontWeight: 700 }}>Error: {error}</div>
              ) : (
-                <>
-                   <div style={{ color: '#FFF', fontSize: '28px', fontWeight: 900 }}>${balance?.balance?.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD</div>
-                   <div style={{ display: 'flex', gap: '16px', marginTop: '8px' }}>
-                      <div>
-                         <div style={{ color: 'var(--text-muted)', fontSize: '10px' }}>Equity</div>
-                         <div style={{ color: '#ccc', fontSize: '12px', fontWeight: 700 }}>${balance?.equity?.toLocaleString('en-US', {minimumFractionDigits: 2})}</div>
-                      </div>
-                      <div>
-                         <div style={{ color: 'var(--text-muted)', fontSize: '10px' }}>Margen Libre</div>
-                         <div style={{ color: '#ccc', fontSize: '12px', fontWeight: 700 }}>${balance?.margin_free?.toLocaleString('en-US', {minimumFractionDigits: 2})}</div>
-                      </div>
-                   </div>
-                </>
+                <div style={{ color: '#FFF', fontSize: '28px', fontWeight: 900 }}>
+                  ${balanceAmount?.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD
+                </div>
              )}
           </div>
           
