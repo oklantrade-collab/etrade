@@ -12,6 +12,7 @@ export default function BrokersPage() {
     fetchBalance()
     fetchPositions()
   }, [])
+  const [balanceSource, setBalanceSource] = useState('')
 
   const fetchBalance = async () => {
     try {
@@ -20,7 +21,7 @@ export default function BrokersPage() {
       // Read directly from Supabase — no backend API needed
       const { data, error: sbErr } = await supabase
         .from('trading_config')
-        .select('capital_forex_futures, accumulated_profit_forex, regime_params')
+        .select('capital_forex_futures, regime_params')
         .eq('id', 1)
         .maybeSingle()
 
@@ -34,11 +35,12 @@ export default function BrokersPage() {
 
       if (brokerBal != null && brokerBal > 0) {
         setBalanceAmount(brokerBal)
+        setBalanceSource('IC Markets (en vivo)')
       } else {
-        // Fallback: capital + profit
+        // Fallback: solo capital base asignado
         const base = parseFloat(data?.capital_forex_futures || '0')
-        const profit = parseFloat(data?.accumulated_profit_forex || '0')
-        setBalanceAmount(base + profit)
+        setBalanceAmount(base)
+        setBalanceSource('Capital asignado (pendiente sync broker)')
       }
     } catch (err: any) {
       setError(err.message)
@@ -89,6 +91,11 @@ export default function BrokersPage() {
                 <div style={{ color: '#FFF', fontSize: '28px', fontWeight: 900 }}>
                   ${balanceAmount?.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD
                 </div>
+                {balanceSource && (
+                  <div style={{ color: 'var(--text-muted)', fontSize: '10px', marginTop: '4px' }}>
+                    📡 {balanceSource}
+                  </div>
+                )}
              )}
           </div>
           
