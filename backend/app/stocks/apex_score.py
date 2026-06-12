@@ -203,14 +203,29 @@ def calculate_b1_momentum(
 
     # ── Score final B1 ────────────────────────
     has_early_5m = 'early_momentum_5m' in components
-    weights_used = {
-        'rvol': 0.20,
-        'price_accel': 0.10 if 'price_acceleration' in components else 0,
-        'vwap': 0.10 if 'vwap' in components else 0,
-        'vol_consist': 0.15 if 'vol_consistency' in components else 0,
-        'ema_cross': 0.25 if 'ema_cross_momentum' in components else 0,
-        'early_5m': 0.20 if has_early_5m else 0,
-    }
+    
+    # ── OVERRIDE PARA BREAKOUTS TEMPRANOS ──
+    # Si tenemos una explosión inminente en 5m, ignoramos los indicadores rezagados
+    # (vol_consistency de 150 mins y price_accel pasados) para que no tiren el puntaje abajo.
+    if has_early_5m and early_momentum_5m >= 80:
+        weights_used = {
+            'rvol': 0.35,        # RVOL toma mucha más importancia
+            'price_accel': 0,    # IGNORAR (lagging indicator)
+            'vwap': 0.15 if 'vwap' in components else 0,
+            'vol_consist': 0,    # IGNORAR (lagging indicator)
+            'ema_cross': 0.20 if 'ema_cross_momentum' in components else 0,
+            'early_5m': 0.30,    # El setup de 5m toma el control principal
+        }
+    else:
+        weights_used = {
+            'rvol': 0.20,
+            'price_accel': 0.10 if 'price_acceleration' in components else 0,
+            'vwap': 0.10 if 'vwap' in components else 0,
+            'vol_consist': 0.15 if 'vol_consistency' in components else 0,
+            'ema_cross': 0.25 if 'ema_cross_momentum' in components else 0,
+            'early_5m': 0.20 if has_early_5m else 0,
+        }
+        
     total_w = sum(weights_used.values())
 
     score = (

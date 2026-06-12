@@ -17,13 +17,11 @@ def find_untouched_band(
     df:           pd.DataFrame,
     direction:    str,  # 'long' o 'short'
     lookback:     int = 50,
+    movement_type: str = 'lateral',
 ) -> dict:
     """
     Identifica la banda Fibonacci más cercana que
     el precio NO ha tocado en las últimas N velas.
-
-    Para LONG: banda inferior inmediata no tocada
-    Para SHORT: banda superior inmediata no tocada
 
     Returns:
       band_name:   str  (ej: 'upper_1', 'lower_3')
@@ -35,34 +33,35 @@ def find_untouched_band(
     recent = df.tail(lookback)
     price  = float(recent['close'].iloc[-1])
 
+    all_bands = [
+        ('upper_6', float(recent['upper_6'].iloc[-1]) if 'upper_6' in recent.columns else 0.0),
+        ('upper_5', float(recent['upper_5'].iloc[-1]) if 'upper_5' in recent.columns else 0.0),
+        ('upper_4', float(recent['upper_4'].iloc[-1]) if 'upper_4' in recent.columns else 0.0),
+        ('upper_3', float(recent['upper_3'].iloc[-1]) if 'upper_3' in recent.columns else 0.0),
+        ('upper_2', float(recent['upper_2'].iloc[-1]) if 'upper_2' in recent.columns else 0.0),
+        ('upper_1', float(recent['upper_1'].iloc[-1]) if 'upper_1' in recent.columns else 0.0),
+        ('basis',   float(recent['basis'].iloc[-1])   if 'basis'   in recent.columns else 0.0),
+        ('lower_1', float(recent['lower_1'].iloc[-1]) if 'lower_1' in recent.columns else 0.0),
+        ('lower_2', float(recent['lower_2'].iloc[-1]) if 'lower_2' in recent.columns else 0.0),
+        ('lower_3', float(recent['lower_3'].iloc[-1]) if 'lower_3' in recent.columns else 0.0),
+        ('lower_4', float(recent['lower_4'].iloc[-1]) if 'lower_4' in recent.columns else 0.0),
+        ('lower_5', float(recent['lower_5'].iloc[-1]) if 'lower_5' in recent.columns else 0.0),
+        ('lower_6', float(recent['lower_6'].iloc[-1]) if 'lower_6' in recent.columns else 0.0),
+    ]
+
     if direction == 'long':
-        bands = [
-            ('lower_1', float(recent['lower_1'].iloc[-1])),
-            ('lower_2', float(recent['lower_2'].iloc[-1])),
-            ('lower_3', float(recent['lower_3'].iloc[-1])),
-            ('lower_4', float(recent['lower_4'].iloc[-1])),
-            ('lower_5', float(recent['lower_5'].iloc[-1])),
-            ('lower_6', float(recent['lower_6'].iloc[-1])),
-        ]
         # Para LONG: buscar la banda INFERIOR más cercana
         # que no fue tocada (el precio está por encima)
         candidate_bands = [
-            (name, val) for name, val in bands
-            if val < price  # banda está debajo del precio
+            (name, val) for name, val in all_bands
+            if val > 0 and val < price  # banda está debajo del precio
         ]
-
     else:  # short
-        bands = [
-            ('upper_1', float(recent['upper_1'].iloc[-1])),
-            ('upper_2', float(recent['upper_2'].iloc[-1])),
-            ('upper_3', float(recent['upper_3'].iloc[-1])),
-            ('upper_4', float(recent['upper_4'].iloc[-1])),
-            ('upper_5', float(recent['upper_5'].iloc[-1])),
-            ('upper_6', float(recent['upper_6'].iloc[-1])),
-        ]
+        # Para SHORT: buscar la banda SUPERIOR más cercana
+        # que no fue tocada (el precio está por debajo)
         candidate_bands = [
-            (name, val) for name, val in bands
-            if val > price  # banda está encima del precio
+            (name, val) for name, val in all_bands
+            if val > 0 and val > price  # banda está encima del precio
         ]
 
     results = []
@@ -72,7 +71,7 @@ def find_untouched_band(
             continue
 
         # Contar cuántas velas tocaron esta banda
-        # "tocar" = low (para lower) o high (para upper)
+        # "tocar" = low (para long) o high (para short)
         # llegó dentro del 0.1% de la banda
         touch_threshold = band_value * 0.001  # 0.1%
 
@@ -123,23 +122,13 @@ def find_untouched_band(
     if not results:
         return None
 
-    # Ordenar: priorizar bandas NO tocadas
-    # y más cercanas al precio actual
-    untouched = [r for r in results if r['is_untouched']]
-    touched   = sorted(
-        [r for r in results if not r['is_untouched']],
-        key=lambda x: x['last_touch_candles'],
-        reverse=True  # más antigua primero
-    )
-
-    # Preferir la banda no tocada más cercana
-    ranked = untouched + touched
-
-    # Ordenar por distancia para tomar la más cercana
-    ranked = sorted(
-        ranked,
-        key=lambda x: x['distance_pct']
-    )
+    if (direction == 'long' and movement_type == 'ascending') or \
+       (direction == 'short' and movement_type == 'descending'):
+        # En tendencia fuerte, priorizamos la distancia (banda más cercana) sin importar si fue tocada
+        ranked = sorted(results, key=lambda x: x['distance_pct'])
+    else:
+        # Ordenar por prioridad principal (intacto es mejor), y secundariamente por distancia
+        ranked = sorted(results, key=lambda x: (not x['is_untouched'], x['distance_pct']))
 
     return ranked[0] if ranked else None
 
@@ -152,6 +141,7 @@ def calculate_smart_limit_price(
     margin_pct:        float = 0.0015,  # 0.15% margen
     min_margin_pct:    float = 0.0005,  # 0.05% mínimo
     max_margin_pct:    float = 0.0030,  # 0.30% máximo
+    max_distance_pct:  float = 2.5,     # 2.5% max distance
 ) -> dict:
     """
     Calcula el precio LIMIT óptimo basado en:
@@ -194,7 +184,7 @@ def calculate_smart_limit_price(
 
     # ── 2. Encontrar banda objetivo ──────────────────
     band_info = find_untouched_band(
-        df, direction, lookback
+        df, direction, lookback, movement_type
     )
 
     if not band_info:
@@ -295,6 +285,19 @@ def calculate_smart_limit_price(
         f"Margen aplicado: {margin*100:.2f}%. "
         f"Sizing: {sizing*100:.0f}%."
     )
+
+    # Filtro Anti-Fantasmas: descartar si está muy lejos
+    if distance_pct > max_distance_pct:
+        return {
+            'limit_price':    None,
+            'rationale':      f'Orden fantasma: muy lejana ({distance_pct:.2f}% > {max_distance_pct}% limit).',
+            'signal_quality': 'low',
+            'band_target':    'none',
+            'sizing_pct':     0.0,
+            'distance_pct':   distance_pct,
+            'is_untouched':   band_info['is_untouched'],
+            'last_touch_candles': band_info['last_touch_candles']
+        }
 
     return {
         'band_target':      band_name,

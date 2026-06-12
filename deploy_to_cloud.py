@@ -8,10 +8,12 @@ REMOTE_PATH = "/home/etrade/etrade/backend"
 
 # Archivos críticos para sincronizar
 files_to_sync = [
+    "app/strategy/smart_loss_guard.py",
     "app/strategy/dca_manager.py",
     "app/strategy/profit_capture.py",
     "app/strategy/profit_ladder.py",
     "app/strategy/erep_manager.py",
+    "app/strategy/macro_filter.py",
     "app/workers/scheduler.py",
     "app/analysis/indicators_v2.py",
     "app/analysis/swing_detector.py",
@@ -59,7 +61,9 @@ files_to_sync = [
     "app/data/ib_scanner.py",
     "app/core/startup.py",
     "app/candle_signals/candle_execution.py",
-    "app/ws/ws_manager.py"
+    "app/ws/ws_manager.py",
+    "app/core/market_hours.py",
+    "app/execution/providers/ctrader_provider.py"
 ]
 
 def check_syntax():
@@ -105,6 +109,8 @@ def deploy():
             local_file, remote_file
         ]
         subprocess.run(cmd, check=True)
+        import time
+        time.sleep(1)
 
     print("\nReiniciando servicios en el servidor...")
     restart_cmd = [

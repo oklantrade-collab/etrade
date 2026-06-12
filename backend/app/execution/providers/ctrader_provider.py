@@ -59,7 +59,7 @@ from ctrader_open_api.messages.OpenApiModelMessages_pb2 import (
 
 from .base_provider import BaseMarketProvider
 from app.core.logger import log_info, log_error, log_warning
-
+from app.core.market_hours import is_forex_market_open
 
 import threading
 from twisted.internet import reactor
@@ -527,9 +527,11 @@ class CTraderProtobufProvider(BaseMarketProvider):
                 ]['mid']
             await asyncio.sleep(0.1)
 
-        log_error('CTRADER',
-            f'Sin precio para {symbol}'
-        )
+        if not is_forex_market_open():
+            log_warning('CTRADER', f'Sin precio para {symbol} (Mercado Cerrado)')
+        else:
+            log_error('CTRADER', f'Sin precio para {symbol}')
+            
         return 0.0
 
     async def get_ohlcv(
@@ -543,7 +545,10 @@ class CTraderProtobufProvider(BaseMarketProvider):
         Equivalente a client.get_klines() de Binance.
         """
         if not self._authenticated:
-            log_error('CTRADER', 'No autenticado')
+            if not is_forex_market_open():
+                log_warning('CTRADER', 'No autenticado (Mercado Cerrado)')
+            else:
+                log_error('CTRADER', 'No autenticado')
             return pd.DataFrame()
 
         symbol_id = self._symbol_ids.get(symbol)

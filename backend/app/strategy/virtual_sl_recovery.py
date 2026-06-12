@@ -324,7 +324,8 @@ async def process_symbol_5m_with_slvm_v2(
     current_price: float,
     snap:          dict,
     sb,
-    market_type:   str = 'crypto_futures'
+    market_type:   str = 'crypto_futures',
+    position:      dict = None
 ):
     """
     Funcion de conveniencia para llamar desde el scheduler cada 5m.
@@ -333,12 +334,13 @@ async def process_symbol_5m_with_slvm_v2(
     try:
         table_name = 'forex_positions' if 'forex' in market_type else 'positions'
         
-        # 1. Buscar posición abierta
-        res = sb.table(table_name).select('*').eq('symbol', symbol).eq('status', 'open').maybe_single().execute()
-        if not res or not hasattr(res, 'data') or not res.data:
-            return
-            
-        position = res.data
+        # 1. Usar posición pasada o buscar
+        if not position:
+            res = sb.table(table_name).select('*').eq('symbol', symbol).eq('status', 'open').execute()
+            if not res or not hasattr(res, 'data') or not res.data:
+                return
+            # Si hay varias, usar la primera por compatibilidad si no se pasa position
+            position = res.data[0]
         
         # 1.5 Si la posición no está en modo recuperación, sólo verificamos si debe activarse
         if not position.get('recovery_mode'):

@@ -74,7 +74,7 @@ class ForexExecutionService:
         self.log      = worker.log
         self.protection_states = {} # Cache de estados de proteccion
         # Usar variable de entorno directamente para el modo
-        self.mode     = os.getenv('CTRADER_ENV', 'paper')
+        self.mode     = os.getenv('FOREX_MODE', 'paper')
         self._open_positions_list = []
         self._load_open_positions()
 
@@ -1350,6 +1350,7 @@ class ForexExecutionService:
         df_4h:         pd.DataFrame,
         market_type:   str,
         supabase,
+        df_5m:         pd.DataFrame = None,
     ) -> bool:
         """
         Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP.
@@ -1382,7 +1383,7 @@ class ForexExecutionService:
                     min_drawdown = 1.2
                     if drawdown >= min_drawdown:
                         from app.strategy.erep_manager import detect_p2_entry_signal
-                        sig = detect_p2_entry_signal(df_15m, snap, side, symbol, market_type)
+                        sig = detect_p2_entry_signal(df_15m, snap, side, symbol, market_type, df_5m)
                         if sig['has_signal']:
                             self.log(f"🔥 PROACTIVE EREP TRIGGERED for {symbol}: drawdown={drawdown:.2f}% >= {min_drawdown}%. Signal: {sig['reason']}")
                             
@@ -1475,7 +1476,7 @@ class ForexExecutionService:
         if erep_active:
             action = evaluate_erep_phase(
                 position, current_price,
-                snap, df_15m, df_4h, market_type
+                snap, df_15m, df_4h, market_type, df_5m
             )
             result = await execute_erep_action(
                 action        = action,
@@ -1508,7 +1509,7 @@ class ForexExecutionService:
 
             action = evaluate_erep_phase(
                 position, current_price,
-                snap, df_15m, df_4h, market_type
+                snap, df_15m, df_4h, market_type, df_5m
             )
 
             if action['action'] == 'close_sl':
@@ -1547,6 +1548,7 @@ class ForexExecutionService:
             for col in ['open','high','low','close']: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
             return df
             
+        df_5m  = _get_df('5m')
         df_15m = _get_df('15m')
         df_4h  = _get_df('4h')
         
@@ -1558,7 +1560,8 @@ class ForexExecutionService:
             df_15m=df_15m,
             df_4h=df_4h,
             market_type='forex_futures',
-            supabase=supabase
+            supabase=supabase,
+            df_5m=df_5m
         )
 
     def _manage_position_fast(self, pos, price, snap=None):
@@ -1609,15 +1612,14 @@ class ForexExecutionService:
             return True # Retornamos True para saltar el resto de la gestión estándar en este ciclo
 
         if hit_tp:
-            self._close_position(pos, price, 'tp', pips_pnl)
+            self._close_position(pos, price, 'tp', pips_pnl, snap=snap)
             return True
 
-        #   3. TP Band (Si tenemos snap)
         if snap:
             u6 = self._safe_float(snap.get('upper_6'))
             l6 = self._safe_float(snap.get('lower_6'))
             if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
-                self._close_position(pos, price, 'tp_band', pips_pnl)
+                self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
                 return True
         
         return False
@@ -1913,7 +1915,7 @@ class ForexExecutionService:
                 f"Pips: {pips_pnl:.1f} (max: -{max_loss_pips}) | "
                 f"USD: ${pnl_usd:.2f} (max: -${HARD_CAP_LOSS_USD:.2f}) - CIERRE FORZADO"
             )
-            self._close_position(pos, price, 'hard_cap_loss', pips_pnl)
+            self._close_position(pos, price, 'hard_cap_loss', pips_pnl, snap=snap)
             self._send_telegram(
                 f"HARD CAP LOSS [{symbol}]\n"
                 f"Pips: {pips_pnl:.1f} | USD: ${pnl_usd:.2f}\n"
@@ -1926,7 +1928,7 @@ class ForexExecutionService:
             u6 = self._safe_float(snap.get('upper_6'))
             l6 = self._safe_float(snap.get('lower_6'))
             if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
-                self._close_position(pos, price, 'tp_band', pips_pnl)
+                self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
                 return
 
         #    Verificaci n estricta de SL/TP   
@@ -1936,9 +1938,9 @@ class ForexExecutionService:
         if hit_sl or hit_tp:
             reason = 'sl' if hit_sl else 'tp'
             self.log(f"[EXECUTION] Disparando cierre {reason.upper()} para {symbol} at {price} (SL: {sl}, TP: {tp})")
-            self._close_position(pos, price, reason, pips_pnl)
+            self._close_position(pos, price, reason, pips_pnl, snap=snap)
 
-    def _close_position(self, pos, close_price, reason, pips_pnl, mr_result=None):
+    def _close_position(self, pos, close_price, reason, pips_pnl, mr_result=None, snap=None):
         try:
             symbol = pos['symbol']
             
@@ -1947,9 +1949,18 @@ class ForexExecutionService:
             pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
             
             # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS FOREX 🛡️
-            # Bloquea al 100% cualquier cierre en pérdida (PNL negativo) a menos que sea un Take Profit (tp) o provenga de EREP/Manual/Trailing
-            if pips_pnl < 0 and 'tp' not in str(reason).lower() and 'weekend_close' not in str(reason).lower() and 'erep' not in str(reason).lower() and 'manual' not in str(reason).lower() and 'trailing' not in str(reason).lower() and 'ts_close' not in str(reason).lower() and 'apexconfluence' not in str(reason).lower():
-                self.log(f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre Forex para {symbol} ({reason}) con P&L negativo: ${pnl_usd:.2f} ({pips_pnl:.1f} pips). La posición permanece ABIERTA.")
+            from app.strategy.smart_loss_guard import should_block_close
+            guard_result = should_block_close(
+                snap=snap,
+                side=pos.get('side', '').lower(),
+                reason=reason,
+                total_pnl=pnl_usd,
+                market_type='forex_futures',
+                symbol=symbol
+            )
+            
+            if guard_result['block']:
+                self.log(f"🛡️ [ANTI-LOSS GUARD] Bloqueando intento de cierre Forex para {symbol} ({reason}) con P&L negativo: ${pnl_usd:.2f} ({pips_pnl:.1f} pips). {guard_result['reason']}")
                 
                 # Suspendemos el Stop Loss físico en Supabase y derivamos a EREP Phase 2
                 try:

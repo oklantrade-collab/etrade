@@ -67,6 +67,47 @@ async def get_forex_status(
     except Exception as e:
         return {'connected': False, 'error': str(e)}
 
+@router.get('/live-balance')
+async def get_live_balance():
+    """Obtiene el balance en vivo directamente de cTrader."""
+    try:
+        from app.execution.providers.ctrader_provider import CTraderProtobufProvider
+        
+        client_id = os.getenv('CTRADER_CLIENT_ID')
+        client_secret = os.getenv('CTRADER_CLIENT_SECRET')
+        account_id = os.getenv('CTRADER_ACCOUNT_ID')
+        access_token = os.getenv('CTRADER_ACCESS_TOKEN')
+        env = os.getenv('CTRADER_ENV', 'demo')
+
+        if not all([client_id, client_secret, account_id, access_token]):
+            return {'error': 'Faltan credenciales de cTrader'}
+
+        provider = CTraderProtobufProvider(
+            client_id=client_id,
+            client_secret=client_secret,
+            account_id=account_id,
+            access_token=access_token,
+            environment=env
+        )
+        
+        connected = await provider.connect()
+        if not connected:
+            return {'error': 'No se pudo conectar a cTrader API'}
+            
+        balance_info = await provider.get_account_balance()
+        
+        # Opcional: desconectar o dejar que el garbage collector lo cierre
+        if provider._client:
+            try:
+                # El cliente Twisted TCP se cerrará eventualmente o podríamos intentar pararlo
+                pass
+            except:
+                pass
+                
+        return balance_info
+    except Exception as e:
+        return {'error': str(e)}
+
 @router.get('/snapshots')
 async def get_forex_snapshots(
     sb = Depends(get_supabase)

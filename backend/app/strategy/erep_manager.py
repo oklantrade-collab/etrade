@@ -155,6 +155,7 @@ def detect_p2_entry_signal(
     side:      str,
     symbol:    str,
     market_type: str = 'crypto_futures',
+    df_5m:     pd.DataFrame = None,
 ) -> dict:
     """
     Detecta la señal para comprar P2.
@@ -243,6 +244,159 @@ def detect_p2_entry_signal(
                     'strength': 0.95,
                     'reason':   f'Vela 15m completamente sobre Bollinger: open (${o:.4f}) > BB_U (${bb_upper:.4f}) y close (${c:.4f}) > BB_U',
                 })
+
+    # ── SEÑAL NUEVA: Bollinger 5m con tendencia EMA20 ──────────
+    if df_5m is not None and len(df_5m) >= 2:
+        if 'bb_lower' not in df_5m.columns or 'ema_20' not in df_5m.columns:
+            try:
+                col_close_5m = 'close' if 'close' in df_5m.columns else ('c' if 'c' in df_5m.columns else '')
+                if col_close_5m:
+                    closes_5m = pd.to_numeric(df_5m[col_close_5m], errors='coerce').ffill()
+                    rolling_mean_5m = closes_5m.rolling(window=20).mean()
+                    rolling_std_5m = closes_5m.rolling(window=20).std()
+                    df_5m['bb_lower'] = rolling_mean_5m - (2 * rolling_std_5m)
+                    df_5m['bb_upper'] = rolling_mean_5m + (2 * rolling_std_5m)
+                    df_5m['ema_3'] = closes_5m.ewm(span=3, adjust=False).mean()
+                    df_5m['ema_9'] = closes_5m.ewm(span=9, adjust=False).mean()
+                    df_5m['ema_20'] = closes_5m.ewm(span=20, adjust=False).mean()
+                    df_5m['ema_50'] = closes_5m.ewm(span=50, adjust=False).mean()
+                    df_5m['ema_200'] = closes_5m.ewm(span=200, adjust=False).mean()
+                    
+                    # RSI 14
+                    delta = closes_5m.diff()
+                    gain = delta.clip(lower=0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+                    loss = (-1 * delta.clip(upper=0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+                    rs = gain / loss
+                    df_5m['rsi_14'] = 100 - (100 / (1 + rs))
+            except Exception as e:
+                log_error('EREP_BOLLINGER_5M', f"Error calculando indicadores 5m: {e}")
+
+        if 'bb_lower' in df_5m.columns and 'ema_20' in df_5m.columns:
+            last_closed_5m = df_5m.iloc[-2]
+            prev_closed_5m = df_5m.iloc[-3] if len(df_5m) >= 3 else last_closed_5m
+
+            c_5m = float(last_closed_5m.get('close', last_closed_5m.get('c', 0)))
+            o_5m = float(last_closed_5m.get('open', last_closed_5m.get('o', 0)))
+            h_5m = float(last_closed_5m.get('high', last_closed_5m.get('h', 0)))
+            l_5m = float(last_closed_5m.get('low', last_closed_5m.get('l', 0)))
+            bb_lower_5m = float(last_closed_5m.get('bb_lower', 0))
+            bb_upper_5m = float(last_closed_5m.get('bb_upper', 0))
+            ema20_now = float(last_closed_5m.get('ema_20', 0))
+            ema20_prev = float(prev_closed_5m.get('ema_20', 0))
+            
+            ema3 = float(last_closed_5m.get('ema_3', 0))
+            ema9 = float(last_closed_5m.get('ema_9', 0))
+            ema50 = float(last_closed_5m.get('ema_50', 0))
+            ema200 = float(last_closed_5m.get('ema_200', 0))
+            rsi_5m = float(last_closed_5m.get('rsi_14', 50))
+            
+            lower_6 = float(snap.get('lower_6', 0))
+            upper_6 = float(snap.get('upper_6', 0))
+            
+            # SIPV helper 5m
+            body_5m = c_5m - o_5m
+            body_pct_5m = abs(body_5m) / (h_5m - l_5m) if (h_5m > l_5m) else 0
+
+            if is_long:
+                # Original BB + EMA20
+                if bb_lower_5m > 0 and c_5m < bb_lower_5m and ema20_now < ema20_prev:
+                    signals_found.append({
+                        'type':     'bollinger_breakout_5m_long',
+                        'strength': 0.95,
+                        'reason':   f'Vela 5m bajo Bollinger ({c_5m:.4f} < {bb_lower_5m:.4f}) con EMA20 en caída',
+                    })
+                
+                # Rule 1: Cruce LOWER_6
+                if lower_6 > 0 and c_5m <= lower_6:
+                    signals_found.append({
+                        'type':     'fib_extreme_low_6_5m',
+                        'strength': 0.95,
+                        'reason':   f'Vela 5m cierra bajo LOWER_6 ({c_5m:.4f} <= {lower_6:.4f})',
+                    })
+                    
+                # Rule 2: RSI <= 10
+                if rsi_5m <= 10:
+                    signals_found.append({
+                        'type':     'rsi_extreme_low_5m',
+                        'strength': 0.95,
+                        'reason':   f'RSI 5m Extremo Bajo ({rsi_5m:.2f} <= 10)',
+                    })
+                    
+                # Rule 3: Vela Flotante bajo BB_L
+                if bb_lower_5m > 0 and o_5m < bb_lower_5m and c_5m < bb_lower_5m:
+                    signals_found.append({
+                        'type':     'floating_bb_low_5m',
+                        'strength': 0.95,
+                        'reason':   f'Vela 5m flotante bajo Bollinger (O y C < BB_L)',
+                    })
+                    
+                # Rule 4: SIPV tras cruce BB
+                c_prev = float(prev_closed_5m.get('close', prev_closed_5m.get('c', 0)))
+                bb_l_prev = float(prev_closed_5m.get('bb_lower', 0))
+                if bb_l_prev > 0 and c_prev < bb_l_prev and body_5m > 0 and body_pct_5m >= 0.30:
+                    signals_found.append({
+                        'type':     'sipv_reversal_bb_low_5m',
+                        'strength': 0.95,
+                        'reason':   f'SIPV Alcista (cuerpo {body_pct_5m*100:.1f}%) tras vela previa bajo BB_L',
+                    })
+                    
+                # Rule 5: EMA Alignment
+                if ema50 < ema200 and ema20 < ema50 and ema9 < ema20 and ema3 > ema9:
+                    signals_found.append({
+                        'type':     'ema_alignment_reversal_long_5m',
+                        'strength': 0.95,
+                        'reason':   f'Alineación EMA Reversión (50<200, 20<50, 9<20, 3>9)',
+                    })
+            else:
+                # Original BB + EMA20
+                if bb_upper_5m > 0 and c_5m > bb_upper_5m and ema20_now > ema20_prev:
+                    signals_found.append({
+                        'type':     'bollinger_breakout_5m_short',
+                        'strength': 0.95,
+                        'reason':   f'Vela 5m sobre Bollinger ({c_5m:.4f} > {bb_upper_5m:.4f}) con EMA20 en subida',
+                    })
+                    
+                # Rule 1: Cruce UPPER_6
+                if upper_6 > 0 and c_5m >= upper_6:
+                    signals_found.append({
+                        'type':     'fib_extreme_high_6_5m',
+                        'strength': 0.95,
+                        'reason':   f'Vela 5m cierra sobre UPPER_6 ({c_5m:.4f} >= {upper_6:.4f})',
+                    })
+                    
+                # Rule 2: RSI >= 80
+                if rsi_5m >= 80:
+                    signals_found.append({
+                        'type':     'rsi_extreme_high_5m',
+                        'strength': 0.95,
+                        'reason':   f'RSI 5m Extremo Alto ({rsi_5m:.2f} >= 80)',
+                    })
+                    
+                # Rule 3: Vela Flotante sobre BB_U
+                if bb_upper_5m > 0 and o_5m > bb_upper_5m and c_5m > bb_upper_5m:
+                    signals_found.append({
+                        'type':     'floating_bb_high_5m',
+                        'strength': 0.95,
+                        'reason':   f'Vela 5m flotante sobre Bollinger (O y C > BB_U)',
+                    })
+                    
+                # Rule 4: SIPV tras cruce BB
+                c_prev = float(prev_closed_5m.get('close', prev_closed_5m.get('c', 0)))
+                bb_u_prev = float(prev_closed_5m.get('bb_upper', 0))
+                if bb_u_prev > 0 and c_prev > bb_u_prev and body_5m < 0 and body_pct_5m >= 0.30:
+                    signals_found.append({
+                        'type':     'sipv_reversal_bb_high_5m',
+                        'strength': 0.95,
+                        'reason':   f'SIPV Bajista (cuerpo {body_pct_5m*100:.1f}%) tras vela previa sobre BB_U',
+                    })
+                    
+                # Rule 5: EMA Alignment
+                if ema50 > ema200 and ema20 > ema50 and ema9 > ema20 and ema3 < ema9:
+                    signals_found.append({
+                        'type':     'ema_alignment_reversal_short_5m',
+                        'strength': 0.95,
+                        'reason':   f'Alineación EMA Reversión (50>200, 20>50, 9>20, 3<9)',
+                    })
 
     # ── SEÑAL B: Fibonacci extremo (Existente lower_6 / upper_6) ─────────────
     price = float(snap.get('price', 0))
@@ -458,6 +612,7 @@ def evaluate_erep_phase(
     df_15m:        pd.DataFrame,
     df_4h:         pd.DataFrame = None,
     market_type:   str = 'crypto_futures',
+    df_5m:         pd.DataFrame = None,
 ) -> dict:
     """
     Función principal del EREP.
@@ -562,7 +717,7 @@ def evaluate_erep_phase(
             }
 
         signal = detect_p2_entry_signal(
-            df_15m, snap, side, '', market_type
+            df_15m, snap, side, '', market_type, df_5m
         )
 
         if signal['has_signal']:

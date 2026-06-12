@@ -7,11 +7,10 @@ REMOTE_PATH = "/home/etrade/etrade/backend"
 
 # Only sync the files we actually modified
 files_to_sync = [
-    "app/execution/providers/ctrader_provider.py",
-    "app/strategy/virtual_sl_recovery.py",
-    "app/core/position_monitor.py",
-    "app/strategy/swing_orders.py",
-    "app/workers/forex_scheduler.py"
+    "app/workers/stocks_scheduler.py",
+    "app/stocks/stocks_rule_engine.py",
+    "app/stocks/apex_score.py",
+    "app/ws/ws_manager.py"
 ]
 
 def check_syntax():

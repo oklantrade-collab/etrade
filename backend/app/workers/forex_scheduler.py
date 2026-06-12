@@ -65,6 +65,7 @@ from app.strategy.band_exit import evaluate_band_exit
 # Alerts
 from app.workers.alerts_service import send_telegram_message
 from app.workers.performance_monitor import check_performance_alerts
+from app.strategy.macro_filter import check_usd_exposure_filter
 
 # Forex config
 from app.config.forex_config import (
@@ -114,8 +115,26 @@ async def _warm_up_forex_symbol_tf(symbol: str, tf: str, provider: CTraderProtob
     try:
         df = await provider.get_ohlcv(symbol, tf, limit=300)
         if df is not None and not df.empty:
-            df = calculate_all_indicators(df, BOT_STATE.config_cache)
+            loop = asyncio.get_running_loop()
+            df = await loop.run_in_executor(None, calculate_all_indicators, df, BOT_STATE.config_cache)
             update_memory_df(symbol, tf, df)
+            
+            # Rehidratar caché en memoria (Evita base de datos pero soluciona el reinicio)
+            if tf == '15m':
+                last_row = df.iloc[-1]
+                MARKET_SNAPSHOT_CACHE.setdefault(symbol, {}).update({
+                    'price': float(last_row['close']),
+                    'ema_3': float(last_row.get('ema1', 0) if last_row.get('ema1') is not None else 0),
+                    'ema_9': float(last_row.get('ema2', 0) if last_row.get('ema2') is not None else 0),
+                    'ema_20': float(last_row.get('ema3', 0) if last_row.get('ema3') is not None else 0),
+                    'ema_50': float(last_row.get('ema4', 0) if last_row.get('ema4') is not None else 0),
+                    'rsi_14': float(last_row.get('rsi1', 0) if last_row.get('rsi1') is not None else 0),
+                    'atr': float(last_row.get('atr', 0) if last_row.get('atr') is not None else 0),
+                    'adx': float(last_row.get('adx', 0) if last_row.get('adx') is not None else 0),
+                    'macd_histogram': float(last_row.get('macd_hist', 0) if last_row.get('macd_hist') is not None else 0),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                })
+                
             log_info(MODULE, f"  {symbol}/{tf}: {len(df)} velas cargadas")
         else:
             log_warning(MODULE, f"  {symbol}/{tf}: sin datos")
@@ -279,6 +298,7 @@ async def write_forex_snapshot(
             'mtf_score':         round(float(mtf_score), 4),
             'ema20_phase':       str(last.get('ema20_phase', '')),
             'adx':               float(last.get('adx', 0)),
+            'atr':               float(last.get('atr', 0)),
             'regime':            regime.get('category', ''),
             'risk_score':        regime.get('risk_score', 0),
             'spike_detected':    spike.get('detected', False),
@@ -308,10 +328,44 @@ async def write_forex_snapshot(
             'updated_at':            datetime.now(timezone.utc).isoformat(),
         }
 
-        if sar_changed:
-            upsert_data['sar_phase_changed_at'] = changed_at_iso
+        # Extraer indicadores para el caché en memoria (no están en la tabla DB)
+        upsert_data['ema_3'] = float(last.get('ema1', last.get('ema_3', 0)))
+        upsert_data['ema_9'] = float(last.get('ema2', last.get('ema_9', 0)))
+        upsert_data['ema_20'] = float(last.get('ema3', last.get('ema_20', 0)))
+        upsert_data['ema_50'] = float(last.get('ema4', last.get('ema_50', 0)))
+        upsert_data['rsi_14'] = float(last.get('rsi_14', last.get('rsi', 50)))
+        upsert_data['macd_histogram'] = float(last.get('macd_histogram', last.get('macd', 0)))
+        
+        # Calcular Bollinger Bands estándar (20, 2)
+        try:
+            rolling_mean = df['close'].rolling(20).mean()
+            rolling_std = df['close'].rolling(20).std()
+            upsert_data['bb_upper'] = float(rolling_mean.iloc[-1] + 2 * rolling_std.iloc[-1])
+            upsert_data['bb_lower'] = float(rolling_mean.iloc[-1] - 2 * rolling_std.iloc[-1])
+        except Exception:
+            upsert_data['bb_upper'] = 0.0
+            upsert_data['bb_lower'] = 0.0
 
-        sb.table('market_snapshot').upsert(upsert_data).execute()
+        # Para compatibilidad con algunos scripts que leen 'rsi_14_prev'
+        try:
+            if len(df) >= 2:
+                prev_row = df.iloc[-2]
+                upsert_data['rsi_14_prev'] = float(prev_row.get('rsi_14', prev_row.get('rsi', 50)))
+        except:
+            pass
+
+        # Preparar datos para base de datos (excluyendo campos solo de caché)
+        db_data = upsert_data.copy()
+        for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower']:
+            db_data.pop(k, None)
+
+        if sar_changed:
+            db_data['sar_phase_changed_at'] = changed_at_iso
+
+        sb.table('market_snapshot').upsert(db_data).execute()
+        
+        # Actualizar caché en memoria completo (incluyendo indicadores rápidos)
+        MARKET_SNAPSHOT_CACHE[symbol] = upsert_data
         log_info('SNAPSHOT_FX', f'Snapshot OK: {symbol} mtf={mtf_score:.4f}')
 
     except Exception as e:
@@ -374,6 +428,80 @@ async def upsert_forex_candles(symbol: str, timeframe: str, df: pd.DataFrame, sb
 #  FOREX POSITION OPENING
 # ══════════════════════════════════════════════════
 
+# ── TP Dinámico con Fibonacci ─────────────────────
+# Mínimo ratio Riesgo:Beneficio aceptable por símbolo
+MIN_TP_RR_RATIO = {
+    'EURUSD': 1.5,
+    'GBPUSD': 1.5,
+    'USDJPY': 1.5,
+    'XAUUSD': 1.2,
+}
+# Porcentaje de la distancia a la banda para el TP (95% = no exigir toque exacto)
+TP_BAND_PCT = 0.95
+# Bandas Fibonacci a evaluar (de más cerca a más lejos)
+TP_BANDS_LONG  = ['upper_1', 'upper_2', 'upper_3', 'upper_4', 'upper_5', 'upper_6']
+TP_BANDS_SHORT = ['lower_1', 'lower_2', 'lower_3', 'lower_4', 'lower_5', 'lower_6']
+
+
+def _find_dynamic_tp(symbol, direction, entry_price, sl_price, snap, pip_size, atr):
+    """
+    Busca la primera banda de Fibonacci cuya distancia al entry
+    supere el mínimo de RR ratio respecto al SL.
+    Si ninguna banda cumple, usa un TP fijo basado en sl_pips × min_rr.
+    """
+    min_rr = MIN_TP_RR_RATIO.get(symbol, 1.5)
+    sl_distance_pips = abs(entry_price - sl_price) / pip_size
+    min_tp_pips = sl_distance_pips * min_rr
+
+    bands = TP_BANDS_LONG if direction == 'long' else TP_BANDS_SHORT
+
+    for band_name in bands:
+        band_price = float(snap.get(band_name) or 0)
+        if band_price <= 0:
+            continue
+
+        # Distancia de la banda al entry (en pips)
+        if direction == 'long':
+            tp_distance_pips = (band_price - entry_price) / pip_size
+        else:
+            tp_distance_pips = (entry_price - band_price) / pip_size
+
+        # La banda debe estar del lado correcto (ganancia positiva)
+        if tp_distance_pips <= 0:
+            continue
+
+        # Usar el 95% de la distancia a la banda
+        effective_tp_pips = tp_distance_pips * TP_BAND_PCT
+
+        if effective_tp_pips >= min_tp_pips:
+            # Calcular el precio TP al 95% de la banda
+            if direction == 'long':
+                tp_price = entry_price + (effective_tp_pips * pip_size)
+            else:
+                tp_price = entry_price - (effective_tp_pips * pip_size)
+
+            rr_actual = effective_tp_pips / sl_distance_pips if sl_distance_pips > 0 else 0
+            log_info(MODULE,
+                f"TP DINÁMICO [{symbol}]: Banda {band_name} seleccionada. "
+                f"SL={sl_distance_pips:.0f} pips, TP={effective_tp_pips:.0f} pips, "
+                f"RR=1:{rr_actual:.1f}"
+            )
+            return tp_price
+
+    # Fallback: si ninguna banda cumple, usar RR mínimo fijo
+    fallback_tp_pips = sl_distance_pips * min_rr
+    if direction == 'long':
+        tp_fallback = entry_price + (fallback_tp_pips * pip_size)
+    else:
+        tp_fallback = entry_price - (fallback_tp_pips * pip_size)
+
+    log_info(MODULE,
+        f"TP DINÁMICO [{symbol}]: Ninguna banda cumple RR mínimo ({min_rr}). "
+        f"Usando fallback: {fallback_tp_pips:.0f} pips (SL={sl_distance_pips:.0f} pips)"
+    )
+    return tp_fallback
+
+
 def calculate_forex_sl_tp(
     symbol: str,
     direction: str,
@@ -381,7 +509,8 @@ def calculate_forex_sl_tp(
     snap: dict = None,
 ) -> dict:
     """
-    Calcula SL/TP en precio usando bandas de Fibonacci (Nivel 3/6).
+    Calcula SL/TP en precio usando bandas de Fibonacci.
+    TP Dinámico: busca la primera banda que cumpla un RR mínimo.
     """
     pip_size = PIP_SIZES.get(symbol, 0.0001)
     
@@ -392,10 +521,10 @@ def calculate_forex_sl_tp(
         
         if direction == 'long':
             sl = float(snap.get('lower_6') or (entry_price - 50 * pip_size)) - (0.5 * atr)
-            tp = float(snap.get('upper_3') or (entry_price + 3 * atr))
         else:
             sl = float(snap.get('upper_6') or (entry_price + 50 * pip_size)) + (0.5 * atr)
-            tp = float(snap.get('lower_3') or (entry_price - 3 * atr))
+        
+        tp = _find_dynamic_tp(symbol, direction, entry_price, sl, snap, pip_size, atr)
     else:
         # Fallback si no hay snapshot
         sl_pips = FOREX_RISK_CONFIG['sl_pips_default']
@@ -459,6 +588,22 @@ async def open_forex_position(
     """
     direction = signal['direction']
     rule_code = signal['rule_code']
+
+    # === ESCUDO DE SEGURIDAD ESTRICTO ===
+    from app.core.safety_manager import validate_signal
+    snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+    v_signal = validate_signal(
+        symbol=symbol,
+        price=price,
+        market_type='forex_futures',
+        direction=direction,
+        rule_code=rule_code,
+        snap=snap
+    )
+    if not v_signal['valid']:
+        log_warning(MODULE, f"❌ BLOQUEO DE SEGURIDAD [{symbol}]: Posición abortada. Motivo: {v_signal['reason']}")
+        return
+    # ====================================
 
     # Leer config de trading
     try:
@@ -582,13 +727,14 @@ async def open_forex_position(
     pip_size = PIP_SIZES.get(symbol, 0.0001)
     sl_pips = abs(price - levels['sl_price']) / pip_size
     tp_pips = abs(levels['tp_price'] - price) / pip_size
+    rr_ratio = tp_pips / sl_pips if sl_pips > 0 else 0
     
     await send_telegram_message(
         f"FOREX {side_emoji} [{symbol}]\n"
         f"Regla: {rule_code} | Score: {signal.get('score', 0):.2f}\n"
         f"Entrada: {price:.5f}\n"
         f"SL: {levels['sl_price']:.5f} (-{sl_pips:.0f} pips)\n"
-        f"TP: {levels['tp_price']:.5f} (+{tp_pips:.0f} pips)\n"
+        f"TP: {levels['tp_price']:.5f} (+{tp_pips:.0f} pips) RR 1:{rr_ratio:.1f}\n"
         f"Lotes: {sizing['lotes']} | Riesgo: ${sizing['risk_usd']:.2f}"
     )
 
@@ -634,7 +780,8 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 current_price = current_price,
                 snap          = snap,
                 sb            = sb,
-                market_type   = 'forex_futures'
+                market_type   = 'forex_futures',
+                position      = position
             )
 
             # 4. Smart Exit: SAR Phase Change
@@ -814,10 +961,17 @@ async def process_forex_profit_management_15m(
     # ── Actualizar cruce de BASIS ─────────────
     basis_check = check_basis_crossed(position, current_price, snap, df_15m)
     if basis_check['crossed'] and not position.get('basis_crossed'):
-        sb.table('positions').update({
-            'basis_crossed': True,
-            'basis_crossed_at': datetime.now(timezone.utc).isoformat(),
-        }).eq('id', pos_id).execute()
+        from app.strategy.virtual_sl_recovery import get_db_key_and_record_id
+        db_key_name, db_record_id = get_db_key_and_record_id(position, 'forex_positions')
+        try:
+            sb.table('forex_positions').update({
+                'basis_crossed': True,
+                'basis_crossed_at': datetime.now(timezone.utc).isoformat(),
+            }).eq(db_key_name, db_record_id).execute()
+        except Exception as e:
+            from app.core.logger import log_error
+            log_error('PROFIT_FX', f"Error updating basis_crossed: {e}")
+            
         position['basis_crossed'] = True
         log_info('PROFIT_FX', f'📊 BASIS CRUZADO [{symbol}]: {basis_check["reason"]}')
 
@@ -842,11 +996,18 @@ async def process_forex_profit_management_15m(
         return True
 
     elif result_b['action'] == 'update_floor':
-        sb.table('positions').update({
-            'profit_floor_band': result_b['new_floor_band'],
-            'profit_floor_price': result_b['new_floor_price'],
-            'highest_band_reached': result_b['current_band'],
-        }).eq('id', pos_id).execute()
+        from app.strategy.virtual_sl_recovery import get_db_key_and_record_id
+        db_key_name, db_record_id = get_db_key_and_record_id(position, 'forex_positions')
+        try:
+            sb.table('forex_positions').update({
+                'profit_floor_band': result_b['new_floor_band'],
+                'profit_floor_price': result_b['new_floor_price'],
+                'highest_band_reached': result_b['current_band'],
+            }).eq(db_key_name, db_record_id).execute()
+        except Exception as e:
+            from app.core.logger import log_error
+            log_error('PROFIT_FX', f"Error updating profit floor: {e}")
+            
         log_info('PROFIT_FX', f'⬆️ FLOOR ACTUALIZADO [{symbol}]: {result_b["reason"]}')
         position['profit_floor_band'] = result_b['new_floor_band']
         position['profit_floor_price'] = result_b['new_floor_price']
@@ -883,7 +1044,8 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                 try:
                     res = await provider.get_ohlcv(symbol, tf, limit=limit)
                     if res is not None and not res.empty:
-                        df_tf = calculate_all_indicators(res, BOT_STATE.config_cache)
+                        loop = asyncio.get_running_loop()
+                        df_tf = await loop.run_in_executor(None, calculate_all_indicators, res, BOT_STATE.config_cache)
                         update_memory_df(symbol, tf, df_tf)
                         await upsert_forex_candles(symbol, tf, df_tf, sb)
                 except Exception as res_err:
@@ -1021,14 +1183,20 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                                     except Exception as e:
                                         log_error(MODULE, f"Error en flip close para {symbol}: {e}")
                                         
-                        # Proceder a abrir
-                        await open_forex_position(
-                            symbol=symbol,
-                            signal=signal,
-                            price=current_price,
-                            provider=provider,
-                            sb=sb,
-                        )
+                        # ── MEJORA C: Filtro Correlación USD ──
+                        all_forex_pos = [p for p in BOT_STATE.positions.values() if p.get('market_type') == 'forex']
+                        usd_check = check_usd_exposure_filter(symbol, signal['direction'], all_forex_pos)
+                        if not usd_check['passed']:
+                            log_info('USD_CORR_FX', f"{symbol}: {usd_check['reason']}")
+                        else:
+                            # Proceder a abrir
+                            await open_forex_position(
+                                symbol=symbol,
+                                signal=signal,
+                                price=current_price,
+                                provider=provider,
+                                sb=sb,
+                            )
             else:
                 # Log near-misses
                 all_results = (
@@ -1088,13 +1256,19 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                                     can_open = False
                             
                             if can_open:
-                                await open_forex_position(
-                                    symbol=symbol,
-                                    signal=signal_4h,
-                                    price=current_price,
-                                    provider=provider,
-                                    sb=sb,
-                                )
+                                # ── MEJORA C: Filtro Correlación USD (4h) ──
+                                all_forex_pos_4h = [p for p in BOT_STATE.positions.values() if p.get('market_type') == 'forex']
+                                usd_check_4h = check_usd_exposure_filter(symbol, signal_4h['direction'], all_forex_pos_4h)
+                                if not usd_check_4h['passed']:
+                                    log_info('USD_CORR_FX_4H', f"{symbol}: {usd_check_4h['reason']}")
+                                else:
+                                    await open_forex_position(
+                                        symbol=symbol,
+                                        signal=signal_4h,
+                                        price=current_price,
+                                        provider=provider,
+                                        sb=sb,
+                                    )
             except Exception as swing_e:
                 log_error(MODULE, f'{symbol}/4h swing error: {swing_e}')
 
@@ -1219,8 +1393,8 @@ async def init_forex_worker(supabase) -> Optional[CTraderProtobufProvider]:
                 )
                 if df is not None and \
                    not df.empty:
-                    df = fibonacci_bollinger(df)
-                    df = calculate_all_indicators(df, BOT_STATE.config_cache)
+                    loop = asyncio.get_running_loop()
+                    df = await loop.run_in_executor(None, calculate_all_indicators, df, BOT_STATE.config_cache)
                     df = calculate_parabolic_sar(df)
 
                     MEMORY_STORE[symbol][tf] = {

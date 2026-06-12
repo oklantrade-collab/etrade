@@ -803,7 +803,43 @@ def evaluate_trailing_stop(
     Evalúa si el SL debe subir al siguiente nivel. El SL NUNCA retrocede.
     """
     symbol = state.symbol
+    is_long = state.side.lower() in ('long', 'buy')
 
+    # ── FALLBACK 5M PROTECTION ──
+    if df_15m is not None and len(df_15m) >= 20 and df_5m is not None and len(df_5m) >= 20:
+        try:
+            has_profit = (current_price > state.entry_price) if is_long else (current_price < state.entry_price)
+            if has_profit:
+                df15 = df_15m.copy()
+                ema3_15 = float(df15['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15 = float(df15['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_15 = float(df15['close'].ewm(span=20, adjust=False).mean().iloc[-1])
+                
+                df5 = df_5m.copy()
+                ema3_5 = float(df5['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_5 = float(df5['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_5 = float(df5['close'].ewm(span=20, adjust=False).mean().iloc[-1])
+                close_5 = float(df5['close'].iloc[-1])
+                
+                if is_long:
+                    # 15m adverse or weak (EMA3 < EMA9 or EMA9 < EMA20)
+                    if ema3_15 < ema9_15 or ema9_15 < ema20_15:
+                        # 5m bullish micro-impulse (EMA3 > EMA9 > EMA20)
+                        if ema3_5 > ema9_5 and ema9_5 > ema20_5:
+                            # 5m close below EMA3
+                            if close_5 < ema3_5:
+                                return {'action': 'close_market', 'reason': 'Fallback_5m_EMA3_close', 'new_level': 99}
+                else:
+                    # 15m adverse or weak (EMA3 > EMA9 or EMA9 > EMA20)
+                    if ema3_15 > ema9_15 or ema9_15 > ema20_15:
+                        # 5m bearish micro-impulse (EMA3 < EMA9 < EMA20)
+                        if ema3_5 < ema9_5 and ema9_5 < ema20_5:
+                            # 5m close above EMA3
+                            if close_5 > ema3_5:
+                                return {'action': 'close_market', 'reason': 'Fallback_5m_EMA3_close', 'new_level': 99}
+        except Exception as e:
+            from app.core.logger import log_error
+            log_error('FALLBACK_5M', f"Error evaluando protección 5m para {symbol}: {e}")
     # ── CUSTOM DYNAMIC TRAILING: ApexConfluence ──
     rule_code = getattr(state, 'rule_code', '')
     if rule_code == 'ApexConfluence' and df_15m is not None and len(df_15m) >= 20:

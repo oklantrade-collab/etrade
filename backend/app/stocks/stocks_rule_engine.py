@@ -159,6 +159,31 @@ class StocksRuleEngine:
         sipv_val = context.get("sipv_signal", "")
         current_price = float(context.get("close") or 0)
 
+        # ── CHECK 0: Daily Timeframe Macro Trend (Anti-Crash Filter) ──
+        if direction == "buy":
+            ema_50_1d = float(context.get("ema_50_1d") or 0.0)
+            ema_200_1d = float(context.get("ema_200_1d") or 0.0)
+            ema_3_1d = float(context.get("ema_3_1d") or 0.0)
+            ema_9_1d = float(context.get("ema_9_1d") or 0.0)
+            
+            # Bloquear entradas si la tendencia macro diaria (50 vs 200) es bajista
+            if ema_50_1d > 0 and ema_200_1d > 0 and ema_50_1d < ema_200_1d:
+                failures.append(f"1D Macro Bearish (No Buy): EMA50 ({ema_50_1d:.2f}) < EMA200 ({ema_200_1d:.2f})")
+                
+            # Bloquear entradas si la tendencia local diaria (3 vs 9) es bajista
+            if ema_3_1d > 0 and ema_9_1d > 0 and ema_3_1d < ema_9_1d:
+                failures.append(f"1D Local Bearish (No Buy): EMA3 ({ema_3_1d:.2f}) < EMA9 ({ema_9_1d:.2f})")
+                
+            # Bloquear entradas si la tendencia local en 15m es bajista pura (Cascada)
+            ema_3_15m = float(context.get("ema_3") or 0.0)
+            ema_9_15m = float(context.get("ema_9") or 0.0)
+            ema_20_15m = float(context.get("ema_20") or 0.0)
+            
+            if ema_3_15m > 0 and ema_9_15m > 0 and ema_20_15m > 0:
+                if ema_3_15m < ema_9_15m and ema_9_15m < ema_20_15m:
+                    failures.append(f"15m Bearish Waterfall (No Buy): EMA3 ({ema_3_15m:.2f}) < EMA9 ({ema_9_15m:.2f}) < EMA20 ({ema_20_15m:.2f})")
+
+
         # ── CHECK 1: IA Score ─────────────────────────────
         ia_min = float(rule.get("ia_min") or 0)
         if ia_min > 0:

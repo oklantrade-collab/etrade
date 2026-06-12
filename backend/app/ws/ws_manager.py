@@ -34,6 +34,12 @@ class WebSocketManager:
         
         # Combine streams for all symbols
         streams = [f"{s}@ticker" for s in self.symbols]
+        
+        if not streams:
+            log_warning(MODULE, "No symbols provided for WebSocket Monitor. Exiting gracefully.")
+            self._running = False
+            return
+            
         log_info(MODULE, f"Starting WebSocket Speed 1 for symbols: {self.symbols}")
         
         while self._running:
@@ -49,12 +55,16 @@ class WebSocketManager:
                             if res:
                                 await self._process_message(res)
                         except Exception as recv_err:
-                            log_error(MODULE, f"WebSocket read error (will reconnect): {recv_err}")
+                            err_str = str(recv_err)
+                            if "Read loop has been closed" in err_str or "disconnect" in err_str.lower():
+                                log_warning(MODULE, f"WebSocket read error (will reconnect): {recv_err}")
+                            else:
+                                log_error(MODULE, f"WebSocket read error (will reconnect): {recv_err}")
                             break  # Break inner loop to exit context manager and reconnect
             except Exception as e:
                 err_str = str(e)
-                if "502" in err_str or "503" in err_str or "504" in err_str or "Gateway" in err_str or "disconnect" in err_str:
-                    log_warning(MODULE, f"Transient WebSocket error (Bad Gateway/Disconnect): {e}. Retrying gracefully.")
+                if "502" in err_str or "503" in err_str or "504" in err_str or "Gateway" in err_str or "disconnect" in err_str or "timed out" in err_str:
+                    log_warning(MODULE, f"Transient WebSocket error (Bad Gateway/Disconnect/Timeout): {e}. Retrying gracefully.")
                 else:
                     log_error(MODULE, f"WebSocket connection/manager error: {e}")
             
@@ -111,11 +121,37 @@ class WebSocketManager:
                 is_long = side in ('long', 'buy')
                 
                 # A. Check Stop Loss Hit (Direct breach)
-                sl_hit = (is_long and price <= sl) or (not is_long and price >= sl)
-                if sl > 0 and sl_hit:
-                    log_warning(MODULE, f"EMERGENCY SL HIT for {symbol}! Price {price} reached SL {sl}. Closing...")
-                    await _execute_paper_close(pos, price, 'emergency_sl_ws', sb)
-                    continue 
+                # Skip tight SL check if EREP is already active or in recovery mode
+                if pos.get('erep_active') or pos.get('erep_phase', 0) > 0 or pos.get('recovery_mode'):
+                    pass
+                else:
+                    sl_hit = (is_long and price <= sl) or (not is_long and price >= sl)
+                    if sl > 0 and sl_hit:
+                        sl_type = str(pos.get('sl_type') or '')
+                        if sl_type.startswith('trailing'):
+                            log_warning(MODULE, f"EMERGENCY SL HIT (trailing) for {symbol}! Price {price} reached SL {sl}. Closing...")
+                            await _execute_paper_close(pos, price, 'emergency_sl_ws', sb)
+                            continue
+                        else:
+                            log_warning(MODULE, f"EMERGENCY SL HIT for {symbol}! Price {price} reached SL {sl}. Routing to EREP Phase 1...")
+                            from app.core.crypto_symbols import resolve_crypto_position_quantity
+                            qty = resolve_crypto_position_quantity(sb, pos)
+                            
+                            try:
+                                sb.table('positions').update({
+                                    'erep_phase': 1,
+                                    'erep_p1_price': entry,
+                                    'erep_q1': qty,
+                                    'erep_market_type': 'crypto_futures',
+                                }).eq('id', pos['id']).execute()
+                                
+                                pos['erep_phase'] = 1
+                                pos['erep_p1_price'] = entry
+                                pos['erep_q1'] = qty
+                                pos['erep_market_type'] = 'crypto_futures'
+                            except Exception as db_err:
+                                log_error(MODULE, f"Error routing {symbol} to EREP Phase 1: {db_err}")
+                            continue 
                     
                 # B. Check Hard Cap (-5% from entry as ultimate safety net)
                 pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
@@ -124,14 +160,37 @@ class WebSocketManager:
                     await _execute_paper_close(pos, price, 'hard_cap_ws', sb)
                     continue
                     
-                # C. Check Sharp Drop from Peak (-3% drop from highest recorded price)
-                peak = float(pos.get('highest_price_reached') or entry if is_long else pos.get('lowest_price_reached') or entry)
-                if peak > 0:
-                    drop_from_peak = ((peak - price) / peak * 100) if is_long else ((price - peak) / peak * 100)
-                    if drop_from_peak >= 3.0:
-                        log_warning(MODULE, f"SHARP DROP for {symbol}! Price dropped {drop_from_peak:.2f}% from peak {peak}. Closing...")
-                        await _execute_paper_close(pos, price, 'sharp_drop_ws', sb)
-                        continue
+                # C. EREP 5-Minute Timeout: force close if recovery is taking too long
+                erep_active = pos.get('erep_active', False)
+                erep_activated_at = pos.get('erep_activated_at')
+                if erep_active and erep_activated_at:
+                    from datetime import datetime, timezone
+                    try:
+                        if isinstance(erep_activated_at, str):
+                            activated_dt = datetime.fromisoformat(erep_activated_at.replace('Z', '+00:00'))
+                        else:
+                            activated_dt = erep_activated_at
+                        elapsed = (datetime.now(timezone.utc) - activated_dt).total_seconds()
+                        if elapsed >= 300:  # 5 minutos
+                            log_warning(MODULE, 
+                                f"EREP TIMEOUT for {symbol}! {elapsed:.0f}s elapsed (>300s). "
+                                f"PnL={pnl_pct:.2f}%. Forcing closure to limit loss.")
+                            await _execute_paper_close(pos, price, 'erep_timeout_5m', sb)
+                            continue
+                    except Exception as dt_err:
+                        log_warning(MODULE, f"Error parsing erep_activated_at for {symbol}: {dt_err}")
+
+                # D. Check Sharp Drop from Peak (ONLY for non-EREP positions)
+                # EREP positions: SKIP sharp_drop — let the dip happen, wait for 5min recovery
+                # Normal positions: 3% drop triggers close
+                if not erep_active:
+                    peak = float(pos.get('highest_price_reached') or entry if is_long else pos.get('lowest_price_reached') or entry)
+                    if peak > 0:
+                        drop_from_peak = ((peak - price) / peak * 100) if is_long else ((price - peak) / peak * 100)
+                        if drop_from_peak >= 3.0:
+                            log_warning(MODULE, f"SHARP DROP for {symbol}! Price dropped {drop_from_peak:.2f}% from peak {peak}. Closing...")
+                            await _execute_paper_close(pos, price, 'sharp_drop_ws', sb)
+                            continue
 
         # --- 2. ATR SPIKE MONITORING (Existing) ---
         # CORRECT LOGIC: Compare Current ATR (last closed) vs Average ATR 20

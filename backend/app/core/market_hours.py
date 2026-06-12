@@ -52,3 +52,28 @@ def get_market_status_dict():
         "nyc_time": now.strftime("%H:%M:%S"),
         "date": now.strftime("%Y-%m-%d")
     }
+
+def is_forex_market_open() -> bool:
+    """
+    Checks if the Forex market is open.
+    Forex is open from Sunday 5:00 PM EST to Friday 5:00 PM EST.
+    """
+    now = get_nyc_now()
+    
+    # 0 = Monday, ..., 4 = Friday, 5 = Saturday, 6 = Sunday
+    if now.weekday() == 5:
+        # Saturday is always closed
+        return False
+    elif now.weekday() == 6:
+        # Sunday: open after 5:00 PM (17:00)
+        if now.hour >= 17:
+            return True
+        return False
+    elif now.weekday() == 4:
+        # Friday: closed at/after 5:00 PM (17:00)
+        if now.hour >= 17:
+            return False
+        return True
+    
+    # Monday to Thursday
+    return True

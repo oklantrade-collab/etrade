@@ -339,7 +339,38 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
         if sar_changed:
              upsert_data['sar_phase_changed_at'] = changed_at_iso
 
-        supabase.table('market_snapshot').upsert(upsert_data).execute()
+        # Extraer indicadores para el caché en memoria (no están en la tabla DB)
+        upsert_data['ema_3'] = float(last.get('ema1', last.get('ema_3', 0)))
+        upsert_data['ema_9'] = float(last.get('ema2', last.get('ema_9', 0)))
+        upsert_data['ema_20'] = float(last.get('ema3', last.get('ema_20', 0)))
+        upsert_data['ema_50'] = float(last.get('ema4', last.get('ema_50', 0)))
+        upsert_data['rsi_14'] = float(last.get('rsi_14', last.get('rsi', 50)))
+        upsert_data['macd_histogram'] = float(last.get('macd_histogram', last.get('macd', 0)))
+        
+        # Calcular Bollinger Bands estándar (20, 2)
+        try:
+            rolling_mean = df['close'].rolling(20).mean()
+            rolling_std = df['close'].rolling(20).std()
+            upsert_data['bb_upper'] = float(rolling_mean.iloc[-1] + 2 * rolling_std.iloc[-1])
+            upsert_data['bb_lower'] = float(rolling_mean.iloc[-1] - 2 * rolling_std.iloc[-1])
+        except Exception:
+            upsert_data['bb_upper'] = 0.0
+            upsert_data['bb_lower'] = 0.0
+
+        # Para compatibilidad con algunos scripts que leen 'rsi_14_prev'
+        try:
+            if len(df) >= 2:
+                prev_row = df.iloc[-2]
+                upsert_data['rsi_14_prev'] = float(prev_row.get('rsi_14', prev_row.get('rsi', 50)))
+        except:
+            pass
+
+        # Preparar datos para base de datos (excluyendo campos solo de caché)
+        db_data = upsert_data.copy()
+        for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower']:
+            db_data.pop(k, None)
+
+        supabase.table('market_snapshot').upsert(db_data).execute()
         
         # Actualizar cache local para otros ciclos (ej: 5m)
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
@@ -491,7 +522,8 @@ async def backfill_candles(symbol: str, bars: int = 200, sb = None):
             if df_raw is not None:
                 # FIX: Calcular indicadores antes de subir a DB
                 from app.analysis.indicators_v2 import calculate_all_indicators
-                df = calculate_all_indicators(df_raw, BOT_STATE.config_cache)
+                loop = asyncio.get_running_loop()
+                df = await loop.run_in_executor(None, calculate_all_indicators, df_raw, BOT_STATE.config_cache)
                 await upsert_candles_to_db(symbol, tf, df, sb)
                 log_info('BACKFILL', f'{symbol} {tf}: {len(df)} velas sincronizadas con indicadores')
         except Exception as e:
@@ -867,7 +899,8 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
             try:
                 log_info(MODULE, f"Descargando df_5m inicial para {symbol} (no encontrado en memoria)")
                 df_raw = await provider.get_ohlcv(symbol, '5m', limit=300)
-                df_5m = calculate_all_indicators(df_raw, BOT_STATE.config_cache)
+                loop = asyncio.get_running_loop()
+                df_5m = await loop.run_in_executor(None, calculate_all_indicators, df_raw, BOT_STATE.config_cache)
                 update_memory_df(symbol, '5m', df_5m)
             except Exception as e:
                 log_error(MODULE, f"Error en descarga forzada de 5m para {symbol}: {e}")
@@ -1241,48 +1274,51 @@ async def cycle_5m():
     provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret, testnet=settings.binance_testnet)
     
     try:
-        
-        events = await check_open_positions_5m(
-            provider    = provider,
-            supabase    = sb,
-            telegram_bot = None # Will use internal send_telegram from position_monitor
-        )
+        async def _run_cycle():
+            events = await check_open_positions_5m(
+                provider    = provider,
+                supabase    = sb,
+                telegram_bot = None # Will use internal send_telegram from position_monitor
+            )
 
-        # ── TICK STATE MACHINE (Waiting/Ambiguous) ──
-        active_symbols = BOT_STATE.config_cache.get('active_symbols', [])
-        for sym in active_symbols:
-            sm.tick_waiting(sym)
-            sm.tick_ambiguous(sym)
+            # ── TICK STATE MACHINE (Waiting/Ambiguous) ──
+            active_symbols = BOT_STATE.config_cache.get('active_symbols', [])
+            for sym in active_symbols:
+                sm.tick_waiting(sym)
+                sm.tick_ambiguous(sym)
 
-        # Si hubo cierre inesperado, no procesar más para este símbolo en este ciclo
-        # (Though cycle_5m processes ALL symbols now, so we filter by symbol in the loop below)
-        
-        gs_data = {}
-        try:
-            global_state = sb.table("bot_global_state").select("*").eq("id", 1).maybe_single().execute()
-            gs_data = global_state.data or {}
-        except Exception as e:
-            log_warning(MODULE, f"bot_global_state match failed: {e}")
-        
-        if is_ip_banned():
-            log_info(MODULE, "IP baneada. Ciclo 5m omitido.")
-            return
+            # Si hubo cierre inesperado, no procesar más para este símbolo en este ciclo
+            # (Though cycle_5m processes ALL symbols now, so we filter by symbol in the loop below)
+            
+            gs_data = {}
+            try:
+                global_state = sb.table("bot_global_state").select("*").eq("id", 1).maybe_single().execute()
+                gs_data = global_state.data or {}
+            except Exception as e:
+                log_warning(MODULE, f"bot_global_state match failed: {e}")
+            
+            if is_ip_banned():
+                log_info(MODULE, "IP baneada. Ciclo 5m omitido.")
+                return
 
-        # Prepare filtered symbols (those NOT unexpectedly closed)
-        closed_symbols = [e['symbol'] for e in events if e['event'] == 'unexpected_close']
-        active_symbols = [s for s in symbols if s not in closed_symbols]
+            # Prepare filtered symbols (those NOT unexpectedly closed)
+            closed_symbols = [e['symbol'] for e in events if e['event'] == 'unexpected_close']
+            active_symbols = [s for s in symbols if s not in closed_symbols]
 
-        sem = asyncio.Semaphore(2)
-        async def sem_process(s):
-            async with sem:
-                return await _process_symbol_5m(s, provider, gs_data, sb)
+            sem = asyncio.Semaphore(5)
+            async def sem_process(s):
+                async with sem:
+                    return await _process_symbol_5m(s, provider, gs_data, sb)
 
-        tasks = [sem_process(s) for s in active_symbols]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Executive heartbeat is still global but restricted to columns that exist
-        sb.table("bot_global_state").update({"updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", 1).execute()
+            tasks = [sem_process(s) for s in active_symbols]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Executive heartbeat is still global but restricted to columns that exist
+            sb.table("bot_global_state").update({"updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", 1).execute()
 
+        await asyncio.wait_for(_run_cycle(), timeout=280.0)
+    except asyncio.TimeoutError:
+        log_error(MODULE, "Global error in 5m cycle: TIMEOUT (cycle took > 4 minutes)")
     except Exception as e:
         log_error(MODULE, f"Global error in 5m cycle: {e}")
     finally:
@@ -1603,7 +1639,8 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                     log_error(MODULE, f"Error descargando {tf} para {symbol}: {repr(res)}")
                     if tf == '15m': raise res # 15m es crítico
                 else:
-                    df_tf = calculate_all_indicators(res, BOT_STATE.config_cache)
+                    loop = asyncio.get_running_loop()
+                    df_tf = await loop.run_in_executor(None, calculate_all_indicators, res, BOT_STATE.config_cache)
                     update_memory_df(symbol, tf, df_tf)
                     # Escribir en Supabase para el frontend
                     await upsert_candles_to_db(symbol, tf, df_tf, sb)
@@ -1937,16 +1974,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             else:
                 # ── 3. Validar Señal (Zombie Check) ──────
                 from app.core.memory_store import MARKET_SNAPSHOT_CACHE
-                snap_eval = MARKET_SNAPSHOT_CACHE.get(symbol, {}).copy() if MARKET_SNAPSHOT_CACHE.get(symbol) else {}
-                snap_eval.update({
-                    'price': float(last_row['close']),
-                    'ema_3': float(last_row.get('ema1') if last_row.get('ema1') is not None else 0),
-                    'ema_9': float(last_row.get('ema2') if last_row.get('ema2') is not None else 0),
-                    'ema_20': float(last_row.get('ema3') if last_row.get('ema3') is not None else 0),
-                    'atr': float(last_row.get('atr') if last_row.get('atr') is not None else 0),
-                    'adx': float(last_row.get('adx') if last_row.get('adx') is not None else 0),
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                })
+                snap_eval = MARKET_SNAPSHOT_CACHE.get(symbol, {})
                 
                 v_signal = validate_signal(
                     symbol=symbol,
@@ -1961,9 +1989,11 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                     blocked_by = f"safety_block ({v_signal['reason']})"
                     rule_match = None
 
-            # ── 4. Filtro Macro (BTC Compass) ─────────
+            # ── 4. Filtro Macro (EMA 5m) ─────────
             if rule_match and not blocked_by:
-                macro = await fetch_macro_context('crypto_futures', symbol, sb)
+                df_5m_local = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                rc = rule_match.get('rule', {}).get('rule_code')
+                macro = await fetch_macro_context('crypto_futures', symbol, sb, rule_code=rc, df_5m=df_5m_local)
                 if (rule_match['direction'] == 'long' and not macro['allow_long']) or \
                    (rule_match['direction'] == 'short' and not macro['allow_short']):
                     blocked_by = f"macro_filter ({macro['reason']})"
@@ -1985,45 +2015,6 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                     f'dir_checked={direction_checked})'
                 )
 
-            if not rule_match:
-                blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
-            else:
-                # ── 3. Validar Señal (Zombie Check) ──────
-                from app.core.memory_store import MARKET_SNAPSHOT_CACHE
-                snap_eval = MARKET_SNAPSHOT_CACHE.get(symbol, {}).copy() if MARKET_SNAPSHOT_CACHE.get(symbol) else {}
-                snap_eval.update({
-                    'price': float(last_row['close']),
-                    'ema_3': float(last_row.get('ema1') if last_row.get('ema1') is not None else 0),
-                    'ema_9': float(last_row.get('ema2') if last_row.get('ema2') is not None else 0),
-                    'ema_20': float(last_row.get('ema3') if last_row.get('ema3') is not None else 0),
-                    'atr': float(last_row.get('atr') if last_row.get('atr') is not None else 0),
-                    'adx': float(last_row.get('adx') if last_row.get('adx') is not None else 0),
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                })
-                
-                v_signal = validate_signal(
-                    symbol=symbol,
-                    price=float(last_row['close']),
-                    timestamp=last_row.name if hasattr(last_row, 'name') else None,
-                    market_type='crypto_futures',
-                    direction=rule_match.get('direction') if rule_match else None,
-                    rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None,
-                    snap=snap_eval
-                )
-                if not v_signal['valid']:
-                    blocked_by = f"safety_block ({v_signal['reason']})"
-                    rule_match = None
-
-            # ── 4. Filtro Macro (BTC Compass) ─────────
-            if rule_match and not blocked_by:
-                macro = await fetch_macro_context('crypto_futures', symbol, sb)
-                if (rule_match['direction'] == 'long' and not macro['allow_long']) or \
-                   (rule_match['direction'] == 'short' and not macro['allow_short']):
-                    blocked_by = f"macro_filter ({macro['reason']})"
-                    rule_match = None
-                elif macro.get('reduce_sizing'):
-                    log_info('MACRO', f'{symbol}: Reduciendo sizing por contexto macro cauteloso')
-                    # Opcional: ajustar sizing aquí si se desea
 
             # Validar pre-filtros si hay match
             if rule_match and rule_match['direction'] in ['long', 'short']:
@@ -2364,44 +2355,49 @@ async def cycle_15m():
         provider = PaperTradingProvider(provider)
 
     try:
-        sb = get_supabase()
-        raw_symbols = BOT_STATE.config_cache.get("symbols_active") or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]
-        symbols = list(set([s.replace("/", "") for s in raw_symbols]))
-        
-        if is_ip_banned():
-            log_info(MODULE, "IP baneada. Ciclo 15m omitido.")
-            return
+        async def _run_cycle():
+            sb = get_supabase()
+            raw_symbols = BOT_STATE.config_cache.get("symbols_active") or ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]
+            symbols = list(set([s.replace("/", "") for s in raw_symbols]))
+            
+            if is_ip_banned():
+                log_info(MODULE, "IP baneada. Ciclo 15m omitido.")
+                return
 
-        await sync_db_config_to_memory()
-        
-        gs_data = {}
-        try:
-            global_state = sb.table("bot_global_state").select("*").eq("id", 1).maybe_single().execute()
-            gs_data = global_state.data or {}
-        except Exception as e:
-            log_warning(MODULE, f"global_state fetch error: {e}")
+            await sync_db_config_to_memory()
+            
+            gs_data = {}
+            try:
+                global_state = sb.table("bot_global_state").select("*").eq("id", 1).maybe_single().execute()
+                gs_data = global_state.data or {}
+            except Exception as e:
+                log_warning(MODULE, f"global_state fetch error: {e}")
 
-        # Ejecución paralela controlada (Sprint 3)
-        # Usamos un semáforo para no saturar a Binance (evita 418 IP Ban)
-        sem = asyncio.Semaphore(3)
-        
-        async def sem_process(s):
-            async with sem:
-                return await _process_symbol_15m(s, provider, gs_data, sb)
+            # Ejecución paralela controlada (Sprint 3)
+            # Usamos un semáforo para no saturar a Binance (evita 418 IP Ban)
+            sem = asyncio.Semaphore(3)
+            
+            async def sem_process(s):
+                async with sem:
+                    return await _process_symbol_15m(s, provider, gs_data, sb)
 
-        tasks = [sem_process(s) for s in symbols]
-        await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # --- PHASE 1: Performance Alerts ---
-        try:
-            from app.workers.performance_monitor import check_performance_alerts
-            await check_performance_alerts()
-            log_info(MODULE, "Performance alerts check completed.")
-        except Exception as e:
-            log_error(MODULE, f"Performance alerts check failed: {e}")
-        
-        # Executive heartbeat
-        sb.table("bot_global_state").update({"updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", 1).execute()
+            tasks = [sem_process(s) for s in symbols]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # --- PHASE 1: Performance Alerts ---
+            try:
+                from app.workers.performance_monitor import check_performance_alerts
+                await check_performance_alerts()
+                log_info(MODULE, "Performance alerts check completed.")
+            except Exception as e:
+                log_error(MODULE, f"Performance alerts check failed: {e}")
+            
+            # Executive heartbeat
+            sb.table("bot_global_state").update({"updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", 1).execute()
+
+        await asyncio.wait_for(_run_cycle(), timeout=840.0)
+    except asyncio.TimeoutError:
+        log_error(MODULE, "Global error in 15m cycle: TIMEOUT (cycle took > 14 minutes)")
 
     except Exception as e:
         log_error(MODULE, f"Global error in 15m cycle: {e}")

@@ -137,13 +137,16 @@ class BinanceCryptoProvider(DataProvider):
         klines = []
         for attempt in range(max_retries):
             try:
+                import asyncio
                 if self.market == "futures":
-                    klines = await client.futures_klines(
-                        symbol=symbol_clean, interval=interval, limit=limit
+                    klines = await asyncio.wait_for(
+                        client.futures_klines(symbol=symbol_clean, interval=interval, limit=limit),
+                        timeout=15.0
                     )
                 else:
-                    klines = await client.get_klines(
-                        symbol=symbol_clean, interval=interval, limit=limit
+                    klines = await asyncio.wait_for(
+                        client.get_klines(symbol=symbol_clean, interval=interval, limit=limit),
+                        timeout=15.0
                     )
                 break # Success!
             except Exception as e:
@@ -194,10 +197,11 @@ class BinanceCryptoProvider(DataProvider):
             try:
                 client = await self._get_async_client()
                 symbol_clean = symbol.replace("/", "")
+                import asyncio
                 if self.market == "futures":
-                    ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
+                    ticker = await asyncio.wait_for(client.futures_symbol_ticker(symbol=symbol_clean), timeout=10.0)
                 else:
-                    ticker = await client.get_symbol_ticker(symbol=symbol_clean)
+                    ticker = await asyncio.wait_for(client.get_symbol_ticker(symbol=symbol_clean), timeout=10.0)
                 return float(ticker["price"])
             except Exception as e:
                 err_str = repr(e)
@@ -223,10 +227,11 @@ class BinanceCryptoProvider(DataProvider):
             try:
                 client = await self._get_async_client()
                 symbol_clean = symbol.replace("/", "")
+                import asyncio
                 if self.market == "futures":
-                    ticker = await client.futures_symbol_ticker(symbol=symbol_clean)
+                    ticker = await asyncio.wait_for(client.futures_symbol_ticker(symbol=symbol_clean), timeout=10.0)
                 else:
-                    ticker = await client.get_symbol_ticker(symbol=symbol_clean)
+                    ticker = await asyncio.wait_for(client.get_symbol_ticker(symbol=symbol_clean), timeout=10.0)
 
                 return {
                     "symbol": symbol_clean,

@@ -339,26 +339,23 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         today_open = float(df_1d.iloc[-1]["open"])
         current_price = float(df_15m.iloc[-1]["close"])
 
-        # Case 1: Gap Up Trap (Price opens high and starts falling)
-        if gap_pct > 5.0 and current_price < today_open:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap ({gap_pct}%). Price below open (${current_price} < ${today_open}).")
+        # Case 1: Gap Up Trap (Merged)
+        # Si abre con gap alcista (> 1.5%) pero la vela del día ya es roja (precio < apertura),
+        # significa debilidad inmediata y toma de ganancias.
+        if gap_pct > 1.5 and current_price < today_open:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap (${current_price} < Open ${today_open}). Gap: {gap_pct}%.")
             return None
-
-        # Case 2: Falling Knife (Price gaps down and stays down)
-        if gap_pct < -5.0 and current_price <= today_open:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Falling Knife ({gap_pct}%). No bounce from open yet.")
+        # Case 2: Falling Knife (Gap Down)
+        # Un gap a la baja severo arruina el sentimiento para todo el día.
+        # Bloqueamos inmediatamente si la acción abre con -2.0% o peor.
+        if gap_pct < -2.0:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Down ({gap_pct}%). Bearish sentiment for the day.")
             return None
 
         # Case 3: Extreme Extension
-        if gap_pct > 12.0:
+        # Un gap positivo inmenso (+8%) deja a la acción agotada y vulnerable a masivas tomas de ganancia.
+        if gap_pct > 8.0:
             log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Gap ({gap_pct}%). High reversal risk.")
-            return None
-        
-        # Case 4: Gap Up Trap (V5.1 Upgrade)
-        # Si abre con gap alcista pero el precio cae por debajo del precio de apertura,
-        # significa que no hay fuerza para sostener el movimiento.
-        if gap_pct > 1.5 and current_price < today_open:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap detected (${current_price} < Open ${today_open}). Gap: {gap_pct}%.")
             return None
 
         # 4. TECHNICAL RULES
@@ -725,6 +722,10 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         rule_ctx['ema_3_5m'] = ema_3_5m
         rule_ctx['ema_9_5m'] = ema_9_5m
         rule_ctx['ema_20_5m'] = ema_20_5m
+        rule_ctx['ema_3_1d'] = float(ind_1d.get("ema_3") or 0.0)
+        rule_ctx['ema_9_1d'] = float(ind_1d.get("ema_9") or 0.0)
+        rule_ctx['ema_50_1d'] = float(ind_1d.get("ema_50") or 0.0)
+        rule_ctx['ema_200_1d'] = float(ind_1d.get("ema_200") or 999999.0)
         rule_ctx['bb_expanding_5m'] = bb_expanding_5m
         rule_ctx['rsi_5m'] = rsi_5m
         rule_ctx['gap_up_exhaustion'] = gap_up_exhaustion
@@ -1219,6 +1220,7 @@ async def check_sl_with_erep(
     df_4h:         pd.DataFrame,
     market_type:   str,
     supabase,
+    df_5m:         pd.DataFrame = None,
 ) -> bool:
     """
     Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP para Stocks.
@@ -1274,7 +1276,7 @@ async def check_sl_with_erep(
     if erep_active:
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type
+            snap, df_15m, df_4h, market_type, df_5m
         )
         result = await execute_erep_action(
             action        = action,
@@ -1307,7 +1309,7 @@ async def check_sl_with_erep(
 
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type
+            snap, df_15m, df_4h, market_type, df_5m
         )
 
         if action['action'] == 'close_sl':
@@ -1335,6 +1337,7 @@ async def check_stocks_erep(
     snap:          dict,
     df_15m:        pd.DataFrame,
     supabase,
+    df_5m:         pd.DataFrame = None,
 ) -> bool:
     """
     EREP para Stocks. Solo aplica a posiciones
@@ -1351,7 +1354,8 @@ async def check_stocks_erep(
         df_15m=df_15m,
         df_4h=df_4h,
         market_type=market_type,
-        supabase=supabase
+        supabase=supabase,
+        df_5m=df_5m
     )
 
 
@@ -1381,9 +1385,11 @@ async def run_stocks_tp_v2_cycle():
 
             df_15m = await _get_timeframe_df_for_tp(ticker, '15m', '60d')
             
+            df_5m  = await _get_timeframe_df_for_tp(ticker, '5m', '5d')
+            
             # ── Integración EREP para Stocks ──
             try:
-                if await check_stocks_erep(ticker, pos, price, snap, df_15m, sb):
+                if await check_stocks_erep(ticker, pos, price, snap, df_15m, sb, df_5m):
                     continue
                 
                 # Recargar posición local para verificar si EREP ya está activo
@@ -1393,7 +1399,6 @@ async def run_stocks_tp_v2_cycle():
                     continue
             except Exception as erep_err:
                 log_warning('EREP_SCHEDULER', f"Error checking EREP for {ticker}: {erep_err}")
-            df_5m  = await _get_timeframe_df_for_tp(ticker, '5m', '5d')
             df_4h  = await _get_timeframe_df_for_tp(ticker, '4h', '120d')
             rvol   = float(snap.get('rvol', 1.0))
             sar_15m = int(snap.get('sar_trend_15m', 1))

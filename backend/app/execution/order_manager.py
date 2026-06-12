@@ -303,7 +303,7 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
         
         pos_resp = sb.table("positions").select("*, orders(oco_list_client_id)").eq("id", position_id).execute()
         if not pos_resp.data:
-            log_error("ORDER_MANAGER", f"Position {position_id} not found in DB.")
+            log_warning("ORDER_MANAGER", f"Position {position_id} not found in DB (already closed).")
             return False
 
         position = pos_resp.data[0]

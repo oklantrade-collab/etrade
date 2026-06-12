@@ -343,10 +343,13 @@ async def process_swing_orders(
         if direction == 'short' and movement_type == 'ascending' and movement['confidence'] > 0.80:
             continue
 
+        is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+        max_dist = 0.4 if is_forex else 2.5
+
         # 2. Calcular precio LIMIT óptimo
         limit_result = calculate_smart_limit_price(
             df=df, direction=direction, movement_type=movement_type, 
-            lookback=50, margin_pct=0.0015
+            lookback=50, margin_pct=0.0015, max_distance_pct=max_dist
         )
 
         if not limit_result or not limit_result.get('limit_price') or limit_result['signal_quality'] == 'low':
@@ -447,6 +450,27 @@ async def check_limit_order_execution(symbol: str, current_price: float, provide
 
         price_hit = (direction == 'long' and current_price <= limit_price) or (direction == 'short' and current_price >= limit_price)
         if not price_hit: continue
+
+        # --- REAL-TIME MOMENTUM GUARD ---
+        try:
+            df_1m = await provider.get_ohlcv(symbol=symbol, timeframe='1m', limit=20)
+            if df_1m is not None and not df_1m.empty and len(df_1m) >= 10:
+                df_1m['ema3'] = df_1m['close'].ewm(span=3, adjust=False).mean()
+                df_1m['ema9'] = df_1m['close'].ewm(span=9, adjust=False).mean()
+                ema3_1m = float(df_1m.iloc[-1]['ema3'])
+                ema9_1m = float(df_1m.iloc[-1]['ema9'])
+                
+                if direction == 'long' and ema3_1m < ema9_1m:
+                    log_warning('SWING', f"[MOMENTUM GUARD] Orden Límite cancelada en tiempo real. {symbol} LONG pero EMA3 ({ema3_1m:.4f}) < EMA9 ({ema9_1m:.4f}) mid-candle.")
+                    await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='realtime_momentum_reversal', sb=sb, direction=direction)
+                    continue
+                if direction == 'short' and ema3_1m > ema9_1m:
+                    log_warning('SWING', f"[MOMENTUM GUARD] Orden Límite cancelada en tiempo real. {symbol} SHORT pero EMA3 ({ema3_1m:.4f}) > EMA9 ({ema9_1m:.4f}) mid-candle.")
+                    await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='realtime_momentum_reversal', sb=sb, direction=direction)
+                    continue
+        except Exception as e:
+            log_warning('SWING', f"No se pudo verificar momentum en 1m para {symbol}: {e}")
+        # ---------------------------------
 
         log_info('SWING', f'{symbol}: LIMIT EJECUTADO {direction.upper()} @ ${current_price:,.4f}')
         if is_paper:

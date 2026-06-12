@@ -1,24 +1,38 @@
-import asyncio
-import os
 import sys
-from datetime import datetime
+import os
+import asyncio
+import json
 
-# Add backend to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.core.supabase_client import get_supabase
+from app.core.market_hours import get_nyc_now
 
-async def check_scores():
+async def check_tech_scores():
     sb = get_supabase()
-    res = sb.table("technical_scores").select("*").order("timestamp", desc=True).limit(5).execute()
-    print(f"Current UTC time: {datetime.utcnow().isoformat()}")
+    today_str = get_nyc_now().date().isoformat()
+    res = sb.table("technical_scores").select("*").gte("timestamp", today_str).order('timestamp', desc=True).limit(200).execute()
+    print(f"Tech scores today ({today_str}): {len(res.data)} items")
+    if not res.data:
+        res = sb.table("technical_scores").select("*").order('timestamp', desc=True).limit(200).execute()
+        print(f"Fallback tech scores: {len(res.data)} items")
+    
     if res.data:
-        for row in res.data:
-            print(f"Ticker: {row['ticker']}, Timestamp: {row['timestamp']}, Score: {row['technical_score']}")
-            sigs = row.get('signals_json', {})
-            print(f"  Signals keys: {list(sigs.keys())}")
-    else:
-        print("No data in technical_scores")
+        # Check what fields are in the first item
+        item = res.data[0]
+        # print keys
+        print("Keys:", item.keys())
+        # print signals_json keys
+        sigs = item.get("signals_json")
+        if isinstance(sigs, str):
+            try: sigs = json.loads(sigs)
+            except: sigs = {}
+        if sigs:
+            print("Signals keys:", sigs.keys())
+        
+        # Check how many have trade_type
+        types = [i.get("trade_type") or (json.loads(i.get("signals_json") or "{}")).get("trade_type") for i in res.data]
+        valid = [t for t in types if t]
+        print(f"Items with trade_type: {len(valid)}")
 
 if __name__ == "__main__":
-    asyncio.run(check_scores())
+    asyncio.run(check_tech_scores())

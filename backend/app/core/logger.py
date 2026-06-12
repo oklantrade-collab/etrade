@@ -8,6 +8,7 @@ import time
 import asyncio
 import sys
 from datetime import datetime, timezone
+from app.core.market_hours import is_forex_market_open
 
 # Reconfigure system streams to use UTF-8 on Windows
 try:
@@ -99,9 +100,13 @@ def _should_notify(module: str, message: str) -> bool:
     # Generic fingerprint for Binance ban or rate-limiting errors to prevent Telegram spam
     if "BinanceAPIException" in message or "APIError(code=-1003)" in message or "IP banned" in message or "IP is banned" in message or "418 I'm a teapot" in message or "baneada" in message.lower():
         return False
-    else:
-        # Fingerprint: módulo + primeros 40 caracteres del mensaje
-        fingerprint = (module, message[:40])
+        
+    if module == "CTRADER" and not is_forex_market_open():
+        if "Sin precio" in message or "No autenticado" in message or "Desconectado" in message:
+            return False
+
+    # Fingerprint: módulo + primeros 40 caracteres del mensaje
+    fingerprint = (module, message[:40])
     
     if now - ERROR_THROTTLE.get(fingerprint, 0) > THROTTLE_SECONDS:
         ERROR_THROTTLE[fingerprint] = now

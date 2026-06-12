@@ -636,13 +636,33 @@ async def send_sl_to_exchange(
             'status':           'active',
         }).execute()
 
+        table_name = 'forex_positions' if 'forex' in market_type else 'positions'
+        from app.strategy.virtual_sl_recovery import get_db_key_and_record_id
+        # We need the full position dict here to get the db key, but we only have position_id.
+        # Actually send_sl_to_exchange should receive position dict instead of position_id, 
+        # or we just use is_uuid check.
+        import uuid
+        is_uuid = False
+        if position_id:
+            try:
+                uuid.UUID(str(position_id))
+                is_uuid = True
+            except ValueError:
+                pass
+        db_key_name = 'id'
+        if table_name == 'forex_positions' and not is_uuid:
+            db_key_name = 'ctrader_order_id'
+
         # Actualizar position con el ID
-        supabase.table('positions')\
-            .update({
-                'sl_exchange_order_id': exchange_id
-            })\
-            .eq('id', position_id)\
-            .execute()
+        update_payload = {}
+        if table_name == 'positions':
+            update_payload['sl_exchange_order_id'] = exchange_id
+
+        if update_payload:
+            supabase.table(table_name)\
+                .update(update_payload)\
+                .eq(db_key_name, position_id)\
+                .execute()
 
         log_info('SL_MANAGER',
             f'SL enviado al exchange: '
@@ -671,15 +691,24 @@ async def cancel_all_sl_orders(
     if not position_id:
         return
 
-    # Obtener todas las SL activas
-    sl_res = supabase\
-        .table('sl_orders')\
-        .select('*')\
-        .eq('position_id', position_id)\
-        .eq('status', 'active')\
-        .execute()
+    import uuid
+    is_uuid = False
+    try:
+        uuid.UUID(str(position_id))
+        is_uuid = True
+    except ValueError:
+        is_uuid = False
 
-    sl_orders = sl_res.data or []
+    sl_orders = []
+    if is_uuid:
+        # Obtener todas las SL activas
+        sl_res = supabase\
+            .table('sl_orders')\
+            .select('*')\
+            .eq('position_id', position_id)\
+            .eq('status', 'active')\
+            .execute()
+        sl_orders = sl_res.data or []
 
     for sl_order in sl_orders:
         exchange_id = sl_order.get('exchange_order_id')
@@ -726,10 +755,22 @@ async def cancel_all_sl_orders(
             )
 
     # Limpiar en la posición
-    supabase.table('positions')\
-        .update({
-            'sl_exchange_order_id': None,
-            'sl_dynamic_price':     None,
-        })\
-        .eq('id', position_id)\
-        .execute()
+    market_type = position.get('market_type') or 'crypto_futures'
+    table_name = 'forex_positions' if 'forex' in market_type else 'positions'
+    
+    from app.strategy.virtual_sl_recovery import get_db_key_and_record_id
+    db_key_name, db_record_id = get_db_key_and_record_id(position, table_name)
+    
+    update_data = {}
+    if table_name == 'positions':
+        update_data['sl_exchange_order_id'] = None
+        update_data['sl_dynamic_price'] = None
+
+    if update_data:
+        try:
+            supabase.table(table_name)\
+                .update(update_data)\
+                .eq(db_key_name, db_record_id)\
+                .execute()
+        except Exception as e:
+            log_error('SL_MANAGER', f"Error clearing position SL data: {e}")

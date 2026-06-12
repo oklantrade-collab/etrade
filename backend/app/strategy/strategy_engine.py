@@ -507,7 +507,7 @@ class StrategyEngine:
                 pine_not_opposite = (pine != 'Sell')
                 
                 # REFINAMIENTO V4: Pullback ordenado + gatillo de ruptura EMA3 + confirmación de giro
-                pullback_confirmed = (ema9 > ema20) and (ema20 <= price <= ema9 * (1.0 + pb_pct)) and (price > ema3) and (ema3 > ema9) if (ema3 and ema9 and ema20) else True
+                pullback_confirmed = (ema9 > ema20) and (ema20 <= price <= ema9 * (1.0 + pb_pct)) and (price > ema3) and (ema3 > ema9) if (ema3 and ema9 and ema20) else False
                 
                 # Para la variante 'b' (zona extrema), exigimos zona lower_3 o inferior
                 zone_ok = (fib_zone <= -3) if '31b' in rule_code else (fib_zone <= 3)
@@ -539,7 +539,7 @@ class StrategyEngine:
                 pine_not_opposite = (pine != 'Buy')
                 
                 # REFINAMIENTO V4: Pullback ordenado + gatillo de ruptura EMA3 + confirmación de giro
-                pullback_confirmed = (ema9 < ema20) and (ema9 * (1.0 - pb_pct) <= price <= ema20) and (price < ema3) and (ema3 < ema9) if (ema3 and ema9 and ema20) else True
+                pullback_confirmed = (ema9 < ema20) and (ema9 * (1.0 - pb_pct) <= price <= ema20) and (price < ema3) and (ema3 < ema9) if (ema3 and ema9 and ema20) else False
                 
                 # Para la variante 'b' (zona extrema), exigimos zona upper_3 o superior
                 zone_ok = (fib_zone >= 3) if '31b' in rule_code else (fib_zone >= -3)

@@ -117,6 +117,24 @@ async def _warm_up_symbol_tf(symbol: str, tf: str, provider: BinanceCryptoProvid
         from app.analysis.indicators_v2 import calculate_all_indicators
         df = calculate_all_indicators(df, BOT_STATE.config_cache)
         update_memory_df(symbol, tf, df)
+        
+        # Rehidratar caché en memoria para validación de seguridad y motor de estrategia
+        if tf == '15m' and not df.empty:
+            from app.core.memory_store import MARKET_SNAPSHOT_CACHE
+            last_row = df.iloc[-1]
+            MARKET_SNAPSHOT_CACHE.setdefault(symbol, {}).update({
+                'price': float(last_row['close']),
+                'ema_3': float(last_row.get('ema1', 0) if last_row.get('ema1') is not None else 0),
+                'ema_9': float(last_row.get('ema2', 0) if last_row.get('ema2') is not None else 0),
+                'ema_20': float(last_row.get('ema3', 0) if last_row.get('ema3') is not None else 0),
+                'ema_50': float(last_row.get('ema4', 0) if last_row.get('ema4') is not None else 0),
+                'rsi_14': float(last_row.get('rsi1', 0) if last_row.get('rsi1') is not None else 0),
+                'atr': float(last_row.get('atr', 0) if last_row.get('atr') is not None else 0),
+                'adx': float(last_row.get('adx', 0) if last_row.get('adx') is not None else 0),
+                'macd_histogram': float(last_row.get('macd_hist', 0) if last_row.get('macd_hist') is not None else 0),
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            })
+            
     except Exception as e:
         if "banned" in str(e).lower() or "ip_banned" in str(e).lower():
             raise e

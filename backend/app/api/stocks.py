@@ -57,12 +57,10 @@ async def get_stocks_opportunities():
             
             tech_data = res_tech.data or []
 
-            # FALLBACK: If no data for today (e.g. Weekend), fetch last 3 days
+            # FALLBACK: If no data for today (e.g. Weekend), fetch the latest 200 records regardless of date
             if not tech_data:
-                three_days_ago = (get_nyc_now() - timedelta(days=3)).date().isoformat()
                 res_tech = sb.table("technical_scores")\
                     .select("*")\
-                    .gte("timestamp", three_days_ago)\
                     .order("timestamp", desc=True)\
                     .limit(200)\
                     .execute()
@@ -169,7 +167,7 @@ async def get_stocks_opportunities():
 
             # ── APEX MINIMUM FILTER: Hide low-probability opportunities ──
             # Read configurable threshold from stocks_config
-            apex_min = 40  # default
+            apex_min = 0  # default
             try:
                 cfg_res = sb.table("stocks_config").select("value").eq("key", "apex_min_opportunities").execute()
                 if cfg_res.data:
@@ -179,10 +177,16 @@ async def get_stocks_opportunities():
             
             if apex_min > 0:
                 before_count = len(flattened)
-                flattened = [
-                    item for item in flattened
-                    if float(item.get("apex_4h") or 0) >= apex_min
-                ]
+                safe_flattened = []
+                for item in flattened:
+                    val = item.get("apex_4h")
+                    try:
+                        f_val = float(val) if val not in (None, "", "N/A", "NaN") else 0.0
+                    except:
+                        f_val = 0.0
+                    if f_val >= apex_min:
+                        safe_flattened.append(item)
+                flattened = safe_flattened
                 filtered_count = before_count - len(flattened)
                 if filtered_count > 0:
                     log_info("stocks_api", f"APEX filter: {filtered_count} opportunities hidden (APEX < {apex_min})")
@@ -589,7 +593,7 @@ async def get_priority_queue():
             
             # Use apex_score_4h from queue or fallback to 0
             apex_4h = float(q.get("apex_score_4h") or 0)
-            if apex_4h < 60: continue
+            # Remove strict filter: if apex_4h < 60: continue
             
             queue.append(q)
             existing_tickers.add(ticker)
@@ -598,13 +602,12 @@ async def get_priority_queue():
         if len(queue) < 10:
             try:
                 # Get top APEX-scoring tickers from market_snapshot
-                limit_time_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+                limit_time_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 
                 snap_res = sb.table("market_snapshot")\
                     .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf")\
-                    .not_.is_("apex_4h", "null")\
                     .gt("updated_at", limit_time_iso)\
-                    .order("apex_4h", desc=True)\
+                    .order("updated_at", desc=True)\
                     .limit(40)\
                     .execute()
                 
@@ -617,11 +620,10 @@ async def get_priority_queue():
                     
                     apex_4h = float(snap.get("apex_4h") or 0)
                     apex_1d = float(snap.get("apex_1d") or 0)
-                    rvol = float(snap.get("rvol") or 1.0)
+                    rvol = 1.0  # fallback since rvol isn't in market_snapshot
                     
-                    # Only include decent APEX scores
-                    if apex_4h < 60:
-                        continue
+                    # Instead of hard filtering by APEX > 60, we allow them through if APEX is missing
+                    # but rank them properly.
                     
                     # Build a dynamic queue entry with consistent ranking logic
                     # Rank = 30% 4H + 25% 1D + 25% RVOL + 5% Conf + 15% Gain(0 fallback)

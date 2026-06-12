@@ -1191,9 +1191,6 @@ class StandaloneForexWorker:
                 'sar_trend_15m': 1 if last.get('sar_trend', 0) > 0 else -1,
                 'sar_phase': 'long' if sar_trend_4h > 0 else ('short' if sar_trend_4h < 0 else ('long' if price > sar_15m else 'short')),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
-                'ema_3': ema3,
-                'ema_9': ema9,
-                'ema_20': ema20,
                 'bb_expanding': bb_expanding,
                 'adx': adx,
                 'pinescript_signal': 'Buy' if last.get('macd_buy') else ('Sell' if last.get('macd_sell') else None)
@@ -1209,9 +1206,9 @@ class StandaloneForexWorker:
                     return q.execute()
                 except Exception as e:
                     err_str = str(e).lower()
-                    if "column" in err_str and ("atr" in err_str or "bb_expanding" in err_str or "ema_" in err_str or "ema_exhaustion" in err_str):
-                        # Limpieza agresiva de columnas conflictivas
-                        for col in ['atr', 'bb_expanding', 'ema_3', 'ema_9', 'ema_20', 'ema_exhaustion']:
+                    if "column" in err_str and ("ema_" in err_str or "ema_exhaustion" in err_str):
+                        # Limpieza de columnas conflictivas que no existen en DB
+                        for col in ['ema_3', 'ema_9', 'ema_20', 'ema_exhaustion', 'ema20_phase']:
                             if col in s: del s[col]
                         return sb.table('market_snapshot').upsert(s, on_conflict='symbol').execute()
 

@@ -33,7 +33,19 @@ def is_exempt_reason(reason: str) -> bool:
     Estas razones SIEMPRE se permiten sin evaluación de tendencia.
     """
     reason_lower = str(reason).lower()
-    return any(kw in reason_lower for kw in EXEMPT_KEYWORDS)
+    
+    # tp_band ya no es exento para que pueda ser bloqueado por el Guard
+    # si está en pérdida y la tendencia macro aún nos favorece.
+    if 'tp_band' in reason_lower:
+        return False
+        
+    # Validar 'tp' exacto o prefijos conocidos para verdaderos Take Profits
+    if reason_lower == 'tp' or reason_lower.startswith('tp_hit'):
+        return True
+        
+    # Filtrar 'tp' de la lista de keywords generales para evitar colisiones
+    general_keywords = [kw for kw in EXEMPT_KEYWORDS if kw != 'tp']
+    return any(kw in reason_lower for kw in general_keywords)
 
 
 def _safe_float(val, default=0.0):

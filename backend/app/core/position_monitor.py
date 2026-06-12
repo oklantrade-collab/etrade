@@ -47,17 +47,13 @@ async def check_signal_reversal(
     if not position:
         return {'should_exit': False}
 
-    # Propuesta 1: Excluir explícitamente estrategias Swing (Dd11/Dd12) de salidas por reversión
+    # Exclusión de estrategias Swing (Dd11/Dd12) SOLO para reversiones de MTF, pero permitiendo salidas rápidas de EMA.
     rule_code = (position.get('rule_code') or '').lower()
-    if 'dd11' in rule_code or 'dd12' in rule_code:
-        return {'should_exit': False}
+    is_swing_excluded = ('dd11' in rule_code or 'dd12' in rule_code)
 
     side      = (position.get('side') or '').lower()
     entry     = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
-    threshold = float(config.get('exit_mtf_threshold', 0.0))
-    min_pct   = float(config.get('min_profit_exit_pct', 0.30))
-    min_usd   = float(config.get('min_profit_exit_usd', 1.00))
-
+    
     if entry == 0:
         return {'should_exit': False}
 
@@ -67,25 +63,35 @@ async def check_signal_reversal(
     else:
         pnl_pct = (entry - current_price) / entry * 100
 
-    capital  = float(position.get('size', 0)) * entry
-    pnl_usd  = capital * (pnl_pct / 100)
-
-    # --- LÓGICA DE SALIDA AGRESIVA ---
     # 1. ¿MTF o SARS giró en contra?
-    # Para Longs: MTF negativo (< -0.1). Para Shorts: MTF positivo (> 0.1)
     mtf_reversed = (
         (side == 'long'  and current_mtf < -0.1) or
         (side == 'short' and current_mtf > 0.1)
     )
+    
+    if is_swing_excluded:
+        mtf_reversed = False
 
-    if not mtf_reversed:
+    # 2. ¿Cruce Rápido de EMA (EMA3 vs EMA9) en contra?
+    ema_reversed = False
+    if snap:
+        ema3 = float(snap.get('ema_3') or 0)
+        ema9 = float(snap.get('ema_9') or 0)
+        if ema3 > 0 and ema9 > 0:
+            if side == 'long' and ema3 < ema9:
+                ema_reversed = True
+            elif side == 'short' and ema3 > ema9:
+                ema_reversed = True
+
+    if not mtf_reversed and not ema_reversed:
         return {'should_exit': False}
 
-    # 2. Evaluación de P&L para decidir la agresividad
-    # Si tenemos ganancia (aunque sea mínima), salimos YA para asegurar.
+    # Evaluación de P&L para decidir la agresividad
+    # Si tenemos ganancia (pnl > 0.05%), salimos YA para asegurar por cualquiera de los dos motivos.
     if pnl_pct >= 0.05:
-        # Validación extra: Esperar si la tendencia corta (EMA3 vs EMA9) sigue a nuestro favor
-        if snap:
+        # Validación extra: Si el motivo de salida fue SOLO el MTF lento, 
+        # esperamos a que el EMA rápido también gire para no salir prematuramente de un buen trade.
+        if mtf_reversed and not ema_reversed and snap:
             ema3 = float(snap.get('ema_3') or 0)
             ema9 = float(snap.get('ema_9') or 0)
             if ema3 > 0 and ema9 > 0:
@@ -94,16 +100,15 @@ async def check_signal_reversal(
                 if side == 'short' and ema3 < ema9:
                     return {'should_exit': False}
 
+        reason_str = 'early_profit_protection_ema' if ema_reversed else 'early_profit_protection_mtf'
         return {
             'should_exit': True,
-            'reason': 'early_profit_protection',
+            'reason': reason_str,
             'pnl_pct': round(pnl_pct, 4),
-            'detail': f'Reversión detectada con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
+            'detail': f'Reversión (EMA={ema_reversed}, MTF={mtf_reversed}) con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
         }
     
-    # 3. Si estamos en pérdida, pero la reversión es FUERTE (MTF > 0.5 en contra),
-    # Bloqueado: No cerramos si el PNL es negativo. Esperamos recuperación por EREP o SLV.
-    # (anteriormente hacía exit para evitar SL completo)
+    # Si estamos en pérdida, no cerramos por esta regla. Esperamos recuperación o SL.
     return {'should_exit': False}
 
 async def check_sl_proximity_alert(
@@ -205,6 +210,7 @@ async def check_sl_with_erep(
     df_4h:         pd.DataFrame,
     market_type:   str,
     supabase,
+    df_5m:         pd.DataFrame = None,
 ) -> bool:
     """
     Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP.
@@ -293,7 +299,7 @@ async def check_sl_with_erep(
     if erep_active:
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type
+            snap, df_15m, df_4h, market_type, df_5m
         )
         result = await execute_erep_action(
             action        = action,
@@ -309,7 +315,8 @@ async def check_sl_with_erep(
 
     # ── SL RECIÉN TOCADO ───────────────────────
     if sl_touched:
-        if reason == 'sl_trailing':
+        sl_type = str(position.get('sl_type') or '')
+        if sl_type.startswith('trailing'):
             await close_position(symbol, current_price, 'sl_trailing', supabase)
             return True
             
@@ -331,7 +338,7 @@ async def check_sl_with_erep(
 
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type
+            snap, df_15m, df_4h, market_type, df_5m
         )
 
         if action['action'] == 'close_sl':
@@ -359,6 +366,7 @@ async def check_crypto_erep(
     EREP para Crypto.
     """
     from app.core.memory_store import get_memory_df
+    df_5m  = get_memory_df(symbol, "5m")
     df_15m = get_memory_df(symbol, "15m")
     df_4h  = get_memory_df(symbol, "4h")
     
@@ -370,7 +378,8 @@ async def check_crypto_erep(
         df_15m=df_15m,
         df_4h=df_4h,
         market_type='crypto_futures',
-        supabase=supabase
+        supabase=supabase,
+        df_5m=df_5m
     )
 
 async def trigger_trailing_stop_reentry(symbol, side, size, df_15m, supabase):
@@ -586,7 +595,7 @@ async def check_protections(
                 qty = float(position.get('size') or 0)
                 await trigger_trailing_stop_reentry(symbol, side, qty, df_15m, supabase)
                 
-            return True
+            return 'closed'
 
     # ── CHECK 3: SL backstop hit ──────────────
     sl = state.current_sl
@@ -614,7 +623,7 @@ async def check_protections(
                 log_error('PROTECTION', f"Error activating EREP in check_protections: {e}")
                 
             _protection_cache.pop(pos_id, None)
-            return True
+            return 'erep_activated'
 
     return False
 
@@ -710,12 +719,15 @@ async def check_open_positions_5m(
                 except Exception as erep_err:
                     log_warning(MODULE, f"Error checking EREP for {norm_symbol}: {erep_err}")
 
-                closed = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
-                if closed:
-                    # Register SL cooldown when closed by protection (SL hit)
+                closed_status = await check_protections(norm_symbol, pos, price, current_snap_obj, supabase)
+                if closed_status == 'closed':
+                    # Register SL cooldown when closed by protection (TS close/trailing hit)
                     side = (pos.get('side') or 'long').lower()
                     register_sl_event(norm_symbol, side)
                     events.append({'symbol': norm_symbol, 'event': 'protection_close'})
+                    continue
+                elif closed_status == 'erep_activated':
+                    events.append({'symbol': norm_symbol, 'event': 'erep_activated'})
                     continue
 
                 # 0.1.1 TIME-BASED SL (Corrección #1)
@@ -1170,6 +1182,41 @@ async def _execute_paper_open_unlocked(
         
         tp_full    = float(levels.get(tp_target_col, price * (1.1 if side == 'long' else 0.9)))
         tp_partial = float(levels.get(tp_partial_col, price * (1.05 if side == 'long' else 0.95)))
+        
+        # ── TP DINÁMICO: Validar que el TP cumpla un RR mínimo vs SL ──
+        # Si la banda asignada por velocidad está muy cerca del precio (bandas comprimidas),
+        # iterar hacia bandas más lejanas hasta encontrar una con RR >= 1.2
+        MIN_RR_CRYPTO = 1.2
+        TP_BAND_PCT_CRYPTO = 0.95
+        
+        sl_ref = float(levels.get('lower_6' if side == 'long' else 'upper_6', 0))
+        if sl_ref > 0:
+            sl_dist = abs(price - sl_ref)
+            tp_dist = abs(tp_full - price)
+            
+            if sl_dist > 0 and (tp_dist / sl_dist) < MIN_RR_CRYPTO:
+                # TP insuficiente, buscar banda superior
+                bands_to_check = [f"{prefix}_{i}" for i in range(int(level_num) + 1, 7)]
+                for band_name in bands_to_check:
+                    band_val = float(levels.get(band_name, 0))
+                    if band_val <= 0:
+                        continue
+                    band_dist = abs(band_val - price) * TP_BAND_PCT_CRYPTO
+                    if band_dist > 0 and (band_dist / sl_dist) >= MIN_RR_CRYPTO:
+                        if side == 'long':
+                            tp_full = price + band_dist
+                        else:
+                            tp_full = price - band_dist
+                        log_info(MODULE, f"TP DINÁMICO CRYPTO [{symbol}]: Banda {band_name} (95%) seleccionada. RR=1:{band_dist/sl_dist:.1f}")
+                        break
+                else:
+                    # Fallback: usar RR mínimo fijo
+                    tp_fallback_dist = sl_dist * MIN_RR_CRYPTO
+                    if side == 'long':
+                        tp_full = price + tp_fallback_dist
+                    else:
+                        tp_full = price - tp_fallback_dist
+                    log_info(MODULE, f"TP DINÁMICO CRYPTO [{symbol}]: Ninguna banda cumple RR. Fallback {tp_fallback_dist:.2f}")
     except:
         tp_full    = price * (1.08 if side == 'long' else 0.92)
         tp_partial = price * (1.04 if side == 'long' else 0.96)
@@ -1421,9 +1468,9 @@ async def _execute_paper_partial_close(pos, price, supabase):
 async def _execute_paper_close(pos, price, reason, supabase, snap=None):
     """Cierra la posición completamente en Paper Trading."""
     symbol = pos['symbol']
-    entry = float(pos.get('entry_price') or 0)
+    entry = float(pos.get('avg_entry_price') or pos.get('entry_price') or 0)
     side = (pos.get('side') or '').lower()
-    qty = float(pos['size'])
+    qty = float(pos.get('size') or pos.get('lots') or 0)
     
     is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')) or pos.get('market_type') == 'forex_futures'
     table_name = 'forex_positions' if is_forex else 'positions'
@@ -1471,7 +1518,9 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
     )
 
     if guard_result['block']:
-        # Tendencia sana: bloquear cierre y activar EREP con columnas seguras por tabla
+        # Tendencia sana: bloquear cierre y activar EREP
+        # Estrategia: sl_price=0 para dejar que la caída ocurra sin cerrar,
+        # esperar 5 minutos al rebote, y cerrar DESPUÉS de la recuperación.
         log_warning(MODULE,
             f"SMART GUARD: Protegiendo {symbol} ({reason}) PnL=${total_pnl:.4f}. "
             f"{guard_result['reason']}"
@@ -1485,11 +1534,12 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
                 'erep_q1': qty,
                 'erep_market_type': market_type,
                 'erep_cycles_elapsed': 0,
+                'erep_activated_at': datetime.now(timezone.utc).isoformat(),
                 'sl_price': 0,
             }
             # Columnas exclusivas de crypto (NO existen en forex_positions)
             if not is_forex:
-                guard_update['sl_type'] = 'smart_guard_protect'
+                guard_update['sl_type'] = 'erep_recovery_wait'
                 guard_update['stop_loss'] = 0
                 guard_update['sl_dynamic_price'] = 0
 

@@ -63,16 +63,33 @@ async def check_performance_alerts():
                 ev = (win_rate * avg_win_pct) - ((1 - win_rate) * avg_loss_pct)
                 
                 if ev < 0:
-                    alert_key = f"ev_{rule_code}"
-                    last_alert = BOT_STATE_PERF.get(alert_key)
-                    if not last_alert or (now - last_alert >= timedelta(hours=4)):
-                        mensaje = f"""⚠️ *ALERTA PERFORMANCE*
+                    # Evitar alertas duplicadas al reiniciar el servicio
+                    most_recent_trade = curr_trades[0]
+                    closed_at_str = most_recent_trade.get('closed_at') or most_recent_trade.get('created_at')
+                    is_recent = False
+                    if closed_at_str:
+                        try:
+                            closed_at_dt = pd.to_datetime(closed_at_str)
+                            if closed_at_dt.tzinfo is None:
+                                closed_at_dt = closed_at_dt.replace(tzinfo=timezone.utc)
+                            if (now - closed_at_dt) <= timedelta(minutes=60): # 1 hour max
+                                is_recent = True
+                        except Exception:
+                            is_recent = True
+                    else:
+                        is_recent = True
+
+                    if is_recent:
+                        alert_key = f"ev_{rule_code}"
+                        last_alert = BOT_STATE_PERF.get(alert_key)
+                        if not last_alert or (now - last_alert >= timedelta(hours=4)):
+                            mensaje = f"""⚠️ *ALERTA PERFORMANCE*
 Regla `{rule_code}`: EV={ev:.4f} (negativo)
 Win rate: {win_rate:.1%} | Trades: {total_trades}
 Considerar desactivar en Rule Engine."""
-                        await send_telegram_message(mensaje)
-                        BOT_STATE_PERF[alert_key] = now
-                        log_info("performance_monitor", f"Alerta EV negativo enviada para rule {rule_code}")
+                            await send_telegram_message(mensaje)
+                            BOT_STATE_PERF[alert_key] = now
+                            log_info("performance_monitor", f"Alerta EV negativo enviada para rule {rule_code}")
 
             # --- ALERTA 2: SL Consecutivos ---
             if len(curr_trades) >= 3:

@@ -1507,6 +1507,9 @@ def execute_candle_signal(
     snap = MARKET_SNAPSHOT_CACHE.get(sym, {})
     
     if snap:
+        ema_3 = float(snap.get("ema_3") or snap.get("ema1") or 0)
+        ema_9 = float(snap.get("ema_9") or snap.get("ema2") or 0)
+        ema_20 = float(snap.get("ema_20") or snap.get("ema3") or 0)
         ema_50 = float(snap.get("ema_50", 0))
         ema_200 = float(snap.get("ema_200", 0))
         mtf_score = float(snap.get("mtf_score", 0))
@@ -1515,15 +1518,24 @@ def execute_candle_signal(
         trend_reason = ""
         
         if pattern.action == "BUY":
-            # Si EMA50 está debajo de EMA200 Y MTF es muy bajista
-            if ema_50 > 0 and ema_200 > 0 and ema_50 < ema_200 and mtf_score < -0.5:
+            # 1. Short-Term Momentum Guard (EVITA ATRAPAR CUCHILLOS)
+            if ema_3 > 0 and ema_9 > 0 and ema_20 > 0 and ema_3 < ema_9 and ema_9 < ema_20:
                 trend_blocked = True
-                trend_reason = f"Downtrend Guard: EMA50({ema_50:.4f}) < EMA200({ema_200:.4f}) and MTF({mtf_score:.2f}) < -0.5"
+                trend_reason = f"Short-Term Downtrend Guard: EMA3({ema_3:.4f}) < EMA9({ema_9:.4f}) < EMA20({ema_20:.4f})"
+            # 2. Macro Downtrend Guard
+            elif ema_50 > 0 and ema_200 > 0 and ema_50 < ema_200 and mtf_score < -0.5:
+                trend_blocked = True
+                trend_reason = f"Macro Downtrend Guard: EMA50({ema_50:.4f}) < EMA200({ema_200:.4f}) and MTF({mtf_score:.2f}) < -0.5"
+                
         elif pattern.action == "SELL":
-            # Si EMA50 está sobre EMA200 Y MTF es muy alcista
-            if ema_50 > 0 and ema_200 > 0 and ema_50 > ema_200 and mtf_score > 0.5:
+            # 1. Short-Term Momentum Guard (EVITA VENDER EN SUBIDAS FUERTES)
+            if ema_3 > 0 and ema_9 > 0 and ema_20 > 0 and ema_3 > ema_9 and ema_9 > ema_20:
                 trend_blocked = True
-                trend_reason = f"Uptrend Guard: EMA50({ema_50:.4f}) > EMA200({ema_200:.4f}) and MTF({mtf_score:.2f}) > 0.5"
+                trend_reason = f"Short-Term Uptrend Guard: EMA3({ema_3:.4f}) > EMA9({ema_9:.4f}) > EMA20({ema_20:.4f})"
+            # 2. Macro Uptrend Guard
+            elif ema_50 > 0 and ema_200 > 0 and ema_50 > ema_200 and mtf_score > 0.5:
+                trend_blocked = True
+                trend_reason = f"Macro Uptrend Guard: EMA50({ema_50:.4f}) > EMA200({ema_200:.4f}) and MTF({mtf_score:.2f}) > 0.5"
                 
         if trend_blocked:
             strategy_code = _get_strategy_code(market, pattern.action, pool_type)

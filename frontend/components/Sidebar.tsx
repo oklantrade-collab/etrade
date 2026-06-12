@@ -46,6 +46,7 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
         { href: '/forex/signals', icon: '⚡', label: 'Signals' },
         { href: '/forex/positions', icon: '📋', label: 'Positions' },
         { href: '/forex/orders', icon: '📝', label: 'Orders' },
+        { href: '/forex/brokers', icon: '🏦', label: 'Brokers' },
       ],
     },
     {
