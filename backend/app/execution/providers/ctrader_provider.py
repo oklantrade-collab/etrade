@@ -796,13 +796,15 @@ class CTraderProtobufProvider(BaseMarketProvider):
                 break
             await asyncio.sleep(0.1)
 
-        if hasattr(self, '_last_trader') \
-           and self._last_trader:
+        if hasattr(self, '_last_trader') and self._last_trader:
             trader = self._last_trader
+            # cTrader Open API solo expone balance. Equity y FreeMargin se calculan localmente o se extraen de MarginChangedEvent.
+            # Temporalmente usamos el balance para evitar errores.
+            bal = trader.balance / 100
             return {
-                'balance':     trader.balance / 100,
-                'equity':      trader.equity / 100,
-                'margin_free': trader.freeMargin / 100,
+                'balance':     bal,
+                'equity':      bal,
+                'margin_free': bal,
                 'currency':    trader.depositCurrency,
             }
         return {}
