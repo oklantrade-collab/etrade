@@ -484,6 +484,30 @@ const ForexSettings = ({ config, onSave }: any) => {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
       <StatusBadge label="IC Markets / cTrader" status={isConnected ? 'ACTIVO' : 'PENDIENTE'} color={isConnected ? '#00C896' : '#555'} detail="Conexión API" />
+      
+      <div style={{ 
+          background: 'rgba(255, 193, 7, 0.05)', 
+          border: '1px dashed rgba(255, 193, 7, 0.3)', 
+          borderRadius: '10px', 
+          padding: '16px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+      }}>
+          <div>
+              <div style={{ color: '#FFC107', fontWeight: 900, fontSize: '13px', letterSpacing: '1px' }}>⚠️ CUENTA DEMO ACTIVA</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: '11px', marginTop: '4px' }}>Operando en entorno de simulación (Paper Trading)</div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+              <div style={{ color: '#FFF', fontSize: '20px', fontWeight: 800 }}>
+                  ${(Number(config.capital_forex_futures || 0) + Number(config.accumulated_profit_forex || 0)).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD
+              </div>
+              <div style={{ color: '#FFC107', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '1px', marginTop: '2px' }}>
+                  Saldo Demo Actual
+              </div>
+          </div>
+      </div>
+
       <SettingsSection title="💰 Gestión Forex">
         <SettingRow label="Capital asignado (Base)" value={config.capital_forex_futures} type="number" prefix="$" disabled={!isConnected} onChange={(v: any) => onSave({ capital_forex_futures: v })} />
         <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_forex || 0} type="number" prefix="$" onChange={(v: any) => onSave({ accumulated_profit_forex: v })} />
