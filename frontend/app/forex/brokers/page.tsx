@@ -88,14 +88,16 @@ export default function BrokersPage() {
              ) : error ? (
                 <div style={{ color: '#EF4444', fontSize: '14px', fontWeight: 700 }}>Error: {error}</div>
              ) : (
-                <div style={{ color: '#FFF', fontSize: '28px', fontWeight: 900 }}>
-                  ${balanceAmount?.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD
-                </div>
-                {balanceSource && (
-                  <div style={{ color: 'var(--text-muted)', fontSize: '10px', marginTop: '4px' }}>
-                    📡 {balanceSource}
+                <>
+                  <div style={{ color: '#FFF', fontSize: '28px', fontWeight: 900 }}>
+                    ${balanceAmount?.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USD
                   </div>
-                )}
+                  {balanceSource && (
+                    <div style={{ color: 'var(--text-muted)', fontSize: '10px', marginTop: '4px' }}>
+                      📡 {balanceSource}
+                    </div>
+                  )}
+                </>
              )}
           </div>
           
