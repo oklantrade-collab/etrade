@@ -316,11 +316,13 @@ DEFAULT_RULES = [
         "confidence": "high",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema4_cross_below_basis", "operator": "==", "value": True},
+            {"indicator": "ema9_below_ema20", "operator": "==", "value": True},
             {"indicator": "ema20_angle", "operator": "<=", "value": 0},
+            {"indicator": "rsi_14", "operator": ">=", "value": 40},
+            {"indicator": "high_touched_ema20", "operator": "==", "value": True},
         ],
         "logic": "AND",
-        "notes": "Comprar SHORT al primer Sell del PineScript. Sizing: T1. (v2 forced)",
+        "notes": "Estrategia Pullback Institucional: Toque a EMA20 en tendencia bajista con RSI sano. Aplica a Crypto y Forex.",
     },
     # ═══ HOT MOMENTUM RULES (15m) — RAMA HOT ═══
     {
@@ -599,6 +601,12 @@ def build_market_data_dict(
         # ADX
         "adx": float(last.get("adx", 0)) if pd.notna(last.get("adx")) else 0.0,
         "adx_above_regime_min": float(last.get("adx", 0)) >= adx_min if pd.notna(last.get("adx")) else False,
+        
+        # Nuevos controles PULLBACK (Agregados vía UI conditions)
+        "rsi_14": float(last.get("rsi1", last.get("rsi_14", 50.0))) if pd.notna(last.get("rsi1", last.get("rsi_14"))) else 50.0,
+        "high_touched_ema20": float(last.get("high", 0)) >= float(last.get("ema3", last.get("ema_20", 999999))) if pd.notna(last.get("high")) else False,
+        "ema9_below_ema20": float(last.get("ema2", last.get("ema_9", 0))) < float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema2")) else False,
+        
         # DI
         "plus_di": float(last.get("plus_di", 0)) if pd.notna(last.get("plus_di")) else 0.0,
         "minus_di": float(last.get("minus_di", 0)) if pd.notna(last.get("minus_di")) else 0.0,
