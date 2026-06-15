@@ -1441,7 +1441,7 @@ async def process_profit_management_15m(
     Corre MÓDULO A y MÓDULO B en secuencia.
     Retorna True si la posición fue cerrada.
     """
-    side   = str(position.get('side', 'long'))
+    side   = str(position.get('side', 'long')).lower()
     pos_id = position.get('id')
     table  = (
         'positions'

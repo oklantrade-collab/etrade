@@ -116,19 +116,13 @@ async def get_positions_live_crypto(
         side   = str(pos.get('side', 'long'))
 
         if price > 0 and entry > 0:
-            if side in ('long', 'buy'):
-                pnl_pct = (
-                    price - entry
-                ) / entry * 100
-            else:
-                pnl_pct = (
-                    entry - price
-                ) / entry * 100
+            qty = float(pos.get('size') or pos.get('quantity') or 0)
+            from app.core.pnl_calculator import calculate_pnl
+            from app.core.supabase_client import get_supabase
+            _, pnl_pct = calculate_pnl('crypto', side, entry, price, qty, symbol, get_supabase())
 
             pos['current_price'] = price
-            pos['unrealized_pnl_pct'] = round(
-                pnl_pct, 4
-            )
+            pos['unrealized_pnl_pct'] = round(pnl_pct, 4)
             pos['fib_zone'] = snap.get(
                 'fibonacci_zone', 0
             )

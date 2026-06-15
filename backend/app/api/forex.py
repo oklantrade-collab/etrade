@@ -251,7 +251,10 @@ async def get_positions_live_forex(
             else:
                 pnl_pips = (entry - price) / pip
             
-            pnl_pct = pnl_pips * pip / entry * 100 if entry > 0 else 0
+            qty = float(pos.get('lots') or pos.get('size') or 0.01)
+            from app.core.pnl_calculator import calculate_pnl
+            from app.core.supabase_client import get_supabase
+            _, pnl_pct = calculate_pnl('forex', side, entry, price, qty, symbol, get_supabase())
 
             pos['current_price'] = price
             pos['unrealized_pnl_pct'] = round(pnl_pct, 4)

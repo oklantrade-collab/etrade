@@ -456,6 +456,9 @@ const CryptoSettings = ({ config, onSave }: any) => {
 
 const ForexSettings = ({ config, onSave }: any) => {
   const isConnected = config.capital_forex_futures > 0
+  const [isLevModalOpen, setIsLevModalOpen] = useState(false)
+  const [levMap, setLevMap] = useState<any>(config.leverage_map_forex || { XAU: 100, JPY: 200, DEFAULT: 500 })
+
   const [form, setForm] = useState({ 
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
     max_risk_per_trade_forex_pct: config.regime_params?.max_risk_per_trade_forex_pct || config.max_risk_per_trade_pct || 2.0,
@@ -477,8 +480,14 @@ const ForexSettings = ({ config, onSave }: any) => {
     const newRegimeParams = { ...config.regime_params, forex_assets: symbols, max_total_risk_forex_pct: form.max_total_risk_forex_pct, max_risk_per_trade_forex_pct: form.max_risk_per_trade_forex_pct }
     onSave({
       ...form,
-      regime_params: newRegimeParams
+      regime_params: newRegimeParams,
+      leverage_map_forex: levMap
     })
+  }
+
+  const handleSaveLevMap = () => {
+    setIsLevModalOpen(false)
+    onSave({ leverage_map_forex: levMap })
   }
 
   return (
@@ -490,7 +499,20 @@ const ForexSettings = ({ config, onSave }: any) => {
         <div style={{ padding: '4px 20px', color: 'var(--text-muted)', fontSize: '11px', fontStyle: 'italic' }}>
              Capital Operativo Total: ${( Number(config.capital_forex_futures) + Number(config.accumulated_profit_forex || 0) ).toLocaleString()} USD
         </div>
-        <SettingRow label="Apalancamiento (Leverage)" value={config.leverage_forex || 500} type="number" suffix="x" onChange={(v: any) => onSave({ leverage_forex: v })} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '20px' }}>
+          <div style={{ flex: 1 }}>
+            <SettingRow label="Apalancamiento (Global)" value={config.leverage_forex || 500} type="number" suffix="x" onChange={(v: any) => onSave({ leverage_forex: v })} />
+          </div>
+          <button 
+            onClick={() => setIsLevModalOpen(true)}
+            style={{ 
+              padding: '6px 12px', background: 'var(--bg-card-hover)', border: '1px solid var(--border-color)', 
+              borderRadius: '6px', color: 'var(--text-color)', cursor: 'pointer', fontSize: '12px' 
+            }}
+          >
+            Configurar por Moneda
+          </button>
+        </div>
         <SettingRow label="% Inversión (Global Portion)" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSave({ pct_for_trading: v })} />
         <SettingRow label="Monedas Operan" value={form.forex_symbols_str} flexInput onChange={(v: any) => setForm({ ...form, forex_symbols_str: v })} />
       </SettingsSection>
@@ -502,6 +524,61 @@ const ForexSettings = ({ config, onSave }: any) => {
       </SettingsSection>
 
       <SaveButton onSave={handleLocalSave} />
+
+      {isLevModalOpen && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--bg-card)', padding: '24px', borderRadius: '12px', width: '300px', border: '1px solid var(--border-color)' }}>
+            <h3 style={{ marginTop: 0, color: 'var(--text-color)', fontSize: '16px' }}>Apalancamiento por Símbolo</h3>
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
+              Define el multiplicador real por grupo o moneda para cálculos precisos de PNL%.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {Object.keys(levMap).map(key => (
+                <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: 'var(--text-color)', fontSize: '14px', fontWeight: 'bold' }}>{key}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <input 
+                      type="number" 
+                      value={levMap[key]} 
+                      onChange={(e) => setLevMap({ ...levMap, [key]: Number(e.target.value) })}
+                      style={{ 
+                        width: '60px', padding: '4px 8px', background: 'var(--bg-input)', border: '1px solid var(--border-color)', 
+                        color: 'var(--text-color)', borderRadius: '4px', textAlign: 'right'
+                      }}
+                    />
+                    <span style={{ color: 'var(--text-muted)' }}>x</span>
+                    <button 
+                      onClick={() => { const newMap = {...levMap}; delete newMap[key]; setLevMap(newMap); }}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--danger-color)', cursor: 'pointer', padding: '0 4px' }}
+                    >×</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+              <input 
+                id="newLevKey" 
+                placeholder="Ej. EUR" 
+                style={{ flex: 1, padding: '6px', background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-color)', borderRadius: '4px' }} 
+              />
+              <button 
+                onClick={() => {
+                  const el = document.getElementById('newLevKey') as HTMLInputElement;
+                  if (el && el.value.trim()) {
+                    setLevMap({ ...levMap, [el.value.trim().toUpperCase()]: 500 });
+                    el.value = '';
+                  }
+                }}
+                style={{ padding: '6px 12px', background: 'var(--primary-color)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+              >Add</button>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '24px' }}>
+              <button onClick={() => setIsLevModalOpen(false)} style={{ padding: '8px 16px', background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-color)', borderRadius: '4px', cursor: 'pointer' }}>Cancelar</button>
+              <button onClick={handleSaveLevMap} style={{ padding: '8px 16px', background: 'var(--primary-color)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Guardar</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

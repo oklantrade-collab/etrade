@@ -283,6 +283,77 @@ def evaluate_proactive_exit(
         except Exception as e61:
             log_error(MODULE, f"Error en evaluación Bb61 para Crypto: {e61}")
 
+    # ── NUEVO: Take Profit Especial para Scalping 5m (Aa30 / Bb30) ──
+    rule_code_pos_upper = rule_code_pos.upper()
+    if rule_code_pos_upper in ['AA30', 'BB30']:
+        try:
+            # Requerimos que la posición tenga al menos algo de ganancia para tomar profits por momentum
+            pnl_data = calculate_position_pnl(position, current_price, market_type)
+            if pnl_data['has_profit']:
+                from app.core.memory_store import MEMORY_STORE
+                df_5m = MEMORY_STORE.get(position['symbol'], {}).get('5m', {}).get('df')
+                
+                if df_5m is not None and len(df_5m) >= 2:
+                    last_5m = df_5m.iloc[-1]
+                    
+                    ema3_5m = safe_float(last_5m.get('ema1', last_5m.get('ema_3')))
+                    ema9_5m = safe_float(last_5m.get('ema2', last_5m.get('ema_9')))
+                    close_5m = safe_float(last_5m.get('close', current_price))
+                    pine_signal = str(last_5m.get('pinescript_signal', '')).lower()
+                    
+                    # 1. Take Profit por Cruce EMA3/EMA9 en 5m
+                    if ema3_5m > 0 and ema9_5m > 0:
+                        cruce_contra_long = is_long and ema3_5m < ema9_5m
+                        cruce_contra_short = not is_long and ema3_5m > ema9_5m
+                        
+                        if cruce_contra_long or cruce_contra_short:
+                            return {
+                                'should_close': True,
+                                'rule_code':    'Aa30TP_EMA' if is_long else 'Bb30TP_EMA',
+                                'reason':       f'TP Momentum 5m: EMA3 cruzó EMA9 en contra. PNL={pnl_data["pnl_usd"]:.2f}',
+                                'pnl':          pnl_data,
+                                'urgency':      'urgent'
+                            }
+                    
+                    # 2. Cierre de Emergencia por SAR 5m en contra
+                    sar_ini_high_5m = bool(last_5m.get('sar_ini_high', False))
+                    sar_ini_low_5m  = bool(last_5m.get('sar_ini_low', False))
+                    
+                    sar_contra_long = is_long and sar_ini_high_5m
+                    sar_contra_short = not is_long and sar_ini_low_5m
+                    
+                    if sar_contra_long or sar_contra_short:
+                        return {
+                            'should_close': True,
+                            'rule_code':    'Aa30TP_SAR' if is_long else 'Bb30TP_SAR',
+                            'reason':       f'TP/Stop Momentum 5m: SAR volteó en contra. PNL={pnl_data["pnl_usd"]:.2f}',
+                            'pnl':          pnl_data,
+                            'urgency':      'urgent'
+                        }
+                    
+                    # 3. Take Profit por Extensión Bollinger + Vela en contra / SIPV / Close < EMA3
+                    bb_up_5m = safe_float(last_5m.get('upper_band', 0))
+                    bb_dn_5m = safe_float(last_5m.get('lower_band', 0))
+                    
+                    extremo_long = is_long and close_5m > bb_up_5m and bb_up_5m > 0
+                    extremo_short = not is_long and close_5m < bb_dn_5m and bb_dn_5m > 0
+                    
+                    if extremo_long or extremo_short:
+                        agotamiento_long = pine_signal == 'sell' or close_5m < ema3_5m
+                        agotamiento_short = pine_signal == 'buy' or close_5m > ema3_5m
+                        
+                        if (is_long and agotamiento_long) or (not is_long and agotamiento_short):
+                            return {
+                                'should_close': True,
+                                'rule_code':    'Aa30TP_EXT' if is_long else 'Bb30TP_EXT',
+                                'reason':       f'TP Extremo 5m: Fuera de BB + Agotamiento (SIPV o Close vs EMA3). PNL={pnl_data["pnl_usd"]:.2f}',
+                                'pnl':          pnl_data,
+                                'urgency':      'urgent'
+                            }
+                            
+        except Exception as e_30:
+            log_error(MODULE, f"Error en evaluación de salida rápida Aa30/Bb30: {e_30}")
+
     # ── NUEVO: Protección por Zona Extrema (UPPER_6) ──
     # Se requiere profit mínimo y señal SIPV para evitar cierres prematuros en spikes.
     fib_zone = safe_int(snap.get('fibonacci_zone', 0))

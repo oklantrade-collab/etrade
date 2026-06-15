@@ -320,6 +320,128 @@ def check_active_rules(ticker: str, snap: dict, supabase) -> dict:
 
 
 # ════════════════════════════════════════════
+# MÓDULO 6B — EVALUACIÓN BREAKOUT 5m (Aa30_STK)
+# ════════════════════════════════════════════
+
+def evaluate_5m_breakout(
+    ticker:  str,
+    df_5m:   'pd.DataFrame',
+    df_1d:   'pd.DataFrame',
+    snap:    dict,
+) -> dict:
+    """
+    Evalúa si un ticker de la lista de Oportunidades presenta
+    un Squeeze Breakout en velas de 5 minutos, filtrado por
+    confirmación macro diaria (EMA50>EMA200 + SIPV Buy 1D).
+
+    Retorna:
+        {'triggered': True/False, 'reason': str, 'rule_code': 'Aa30_STK'}
+    """
+    import pandas as pd
+    import numpy as np
+
+    result = {'triggered': False, 'reason': '', 'rule_code': 'Aa30_STK'}
+
+    try:
+        # ── FASE A: FILTRO MACRO (Gráfico Diario 1D) ──
+        if df_1d is None or len(df_1d) < 200:
+            result['reason'] = 'Sin datos diarios suficientes (necesita 200 velas para EMA200)'
+            return result
+
+        close_col = 'close' if 'close' in df_1d.columns else 'Close'
+
+        # 1. EMA50 > EMA200 en el gráfico diario
+        ema50_1d = df_1d[close_col].ewm(span=50, adjust=False).mean()
+        ema200_1d = df_1d[close_col].ewm(span=200, adjust=False).mean()
+
+        if ema50_1d.iloc[-1] <= ema200_1d.iloc[-1]:
+            result['reason'] = f'Filtro macro: EMA50_1D ({ema50_1d.iloc[-1]:.2f}) <= EMA200_1D ({ema200_1d.iloc[-1]:.2f})'
+            return result
+
+        # 2. SIPV (PineScript Signal) en el gráfico diario = Buy
+        # Calculamos el MACD 4-color en 1D para determinar la señal SIPV
+        ema_fast = df_1d[close_col].ewm(span=12, adjust=False).mean()
+        ema_slow = df_1d[close_col].ewm(span=26, adjust=False).mean()
+        macd_1d = ema_fast - ema_slow
+
+        c = np.where(
+            (macd_1d > 0) & (macd_1d > macd_1d.shift(1)), 1,
+            np.where(
+                (macd_1d > 0) & (macd_1d <= macd_1d.shift(1)), 2,
+                np.where(
+                    (macd_1d < 0) & (macd_1d < macd_1d.shift(1)), 3,
+                    np.where(
+                        (macd_1d < 0) & (macd_1d >= macd_1d.shift(1)), 4, 0
+                    )
+                )
+            )
+        )
+        c_series = pd.Series(c, index=df_1d.index)
+
+        # Buy = c==4 preceded by c==3,3  |  Sell = c==2 preceded by c==1,1
+        sipv_buy_1d = (
+            c_series.iloc[-1] == 4
+            and c_series.iloc[-2] == 3
+            and c_series.iloc[-3] == 3
+        )
+        # Also accept "momentum positivo sostenido" (c == 1: verde fuerte)
+        sipv_momentum_1d = c_series.iloc[-1] == 1
+
+        if not sipv_buy_1d and not sipv_momentum_1d:
+            result['reason'] = f'Filtro macro: SIPV 1D no es Buy ni Momentum+ (código MACD 4c = {int(c_series.iloc[-1])})'
+            return result
+
+        # ── FASE B: GATILLO MICRO (Velas de 5 minutos) ──
+        if df_5m is None or len(df_5m) < 20:
+            result['reason'] = 'Sin datos 5m suficientes'
+            return result
+
+        close_5m = 'close' if 'close' in df_5m.columns else 'Close'
+
+        ema3_5m = df_5m[close_5m].ewm(span=3, adjust=False).mean()
+        ema9_5m = df_5m[close_5m].ewm(span=9, adjust=False).mean()
+        ema20_5m = df_5m[close_5m].ewm(span=20, adjust=False).mean()
+
+        last_ema3 = ema3_5m.iloc[-1]
+        last_ema9 = ema9_5m.iloc[-1]
+        last_ema20 = ema20_5m.iloc[-1]
+
+        # Condición 1: EMA Stack alcista
+        if not (last_ema3 > last_ema9 > last_ema20):
+            result['reason'] = f'5m: EMA stack no alcista (EMA3={last_ema3:.4f} EMA9={last_ema9:.4f} EMA20={last_ema20:.4f})'
+            return result
+
+        # Condición 2: Ángulos positivos (EMA9 y EMA20 subiendo)
+        ema9_angle = (ema9_5m.iloc[-1] - ema9_5m.iloc[-2]) / ema9_5m.iloc[-2] * 100
+        ema20_angle = (ema20_5m.iloc[-1] - ema20_5m.iloc[-2]) / ema20_5m.iloc[-2] * 100
+
+        if ema9_angle < 0:
+            result['reason'] = f'5m: EMA9 ángulo negativo ({ema9_angle:.4f}%)'
+            return result
+
+        if ema20_angle < 0:
+            result['reason'] = f'5m: EMA20 ángulo negativo ({ema20_angle:.4f}%)'
+            return result
+
+        # ¡TODAS LAS CONDICIONES CUMPLIDAS!
+        price = float(df_5m[close_5m].iloc[-1])
+        result['triggered'] = True
+        result['reason'] = (
+            f'🎯 BREAKOUT 5m CONFIRMADO: '
+            f'EMA3={last_ema3:.4f} > EMA9={last_ema9:.4f} > EMA20={last_ema20:.4f} | '
+            f'Ángulos EMA9={ema9_angle:.4f}% EMA20={ema20_angle:.4f}% | '
+            f'Macro OK: EMA50_1D > EMA200_1D + SIPV_1D=Buy | '
+            f'Precio={price:.2f}'
+        )
+        result['price'] = price
+        return result
+
+    except Exception as e:
+        result['reason'] = f'Error evaluando breakout: {e}'
+        return result
+
+
+# ════════════════════════════════════════════
 # MÓDULO 7 — CONSTRUIR LA COLA DE PRIORIDAD
 # ════════════════════════════════════════════
 
@@ -488,16 +610,27 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             enters_by_apex = (apex_4h >= min_score) and vol_spike_ok
             enters_by_rule = rule_signal['has_signal'] and vol_spike_ok
 
+            # ── REGLA 5: Breakout 5m (Aa30_STK) — Fast Track ──
+            breakout_5m = evaluate_5m_breakout(
+                ticker=ticker, df_5m=df_5m, df_1d=df_daily, snap=snap
+            )
+            enters_by_breakout = breakout_5m.get('triggered', False)
+
+            if enters_by_breakout:
+                log_info(MODULE, f'🎯 {ticker}: {breakout_5m["reason"]}')
+
             # Definir estado inicial
             # Si tiene señal de regla o score alto -> pending (lista para comprar)
             # Si no -> watching (solo monitoreo)
-            status = 'pending' if (enters_by_apex or enters_by_rule) else 'watching'
+            status = 'pending' if (enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
 
             # Verificar sobrecompra
             overbought = is_overbought(snap, cfg)
 
             entry_reason = 'apex_auto'
-            if enters_by_rule:
+            if enters_by_breakout:
+                entry_reason = 'breakout_5m_Aa30_STK'
+            elif enters_by_rule:
                 entry_reason = f'rule_{rule_signal.get("rule_code", "")}'
 
             candidate = {
@@ -512,7 +645,8 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 'overbought_reason': overbought.get('reason', ''),
                 'rsi':               overbought['rsi'],
                 'fib_zone':          overbought['fib_zone'],
-                'has_rule_signal':   enters_by_rule,
+                'has_rule_signal':   enters_by_rule or enters_by_breakout,
+                'is_breakout_5m':    enters_by_breakout,
                 'rule_signal':       rule_signal,
                 'entry_reason':      entry_reason,
                 'price':             float(snap.get('price', 0)),
@@ -530,12 +664,13 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             log_warning(MODULE, f'{ticker}: {e}')
             continue
 
-    # Ordenar la cola
+    # Ordenar la cola (Breakout 5m tiene máxima prioridad)
     def sort_key(c):
+        is_breakout    = c.get('is_breakout_5m', False)
         has_rule       = c['has_rule_signal']
         not_overbought = not c['is_overbought']
         rank           = c['composite_rank']
-        return (has_rule and not_overbought, not_overbought, rank)
+        return (is_breakout, has_rule and not_overbought, not_overbought, rank)
 
     queue_candidates.sort(key=sort_key, reverse=True)
 
@@ -602,7 +737,11 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase)
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
-        if rule_sig.get('has_signal'):
+        # Breakout 5m override — Fast Track
+        if candidate.get('is_breakout_5m'):
+            rule_code = 'Aa30_STK'
+            order_type = 'market'
+        elif rule_sig.get('has_signal'):
             best_rule  = rule_sig.get('best_rule', {})
             order_type = best_rule.get('order_type', 'market')
             rule_code  = rule_sig.get('rule_code', 'APEX_AUTO')

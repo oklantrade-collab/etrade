@@ -598,12 +598,8 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
 
             side_u = (pos.get("side") or "").upper()
             size_abs = abs(size) # Usamos valor absoluto para el cálculo pecuniario
-            if side_u in ("LONG", "BUY"):
-                pnl = (close_price - entry_price) * size_abs
-                pnl_pct = ((close_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
-            else:
-                pnl = (entry_price - close_price) * size_abs
-                pnl_pct = ((entry_price - close_price) / entry_price * 100) if entry_price > 0 else 0.0
+            from app.core.pnl_calculator import calculate_pnl
+            pnl, pnl_pct = calculate_pnl(pos.get('market_type') or 'crypto', side_u, entry_price, close_price, size_abs, pos.get('symbol', ''), sb)
 
             is_opposite = False
             if new_signal_action:

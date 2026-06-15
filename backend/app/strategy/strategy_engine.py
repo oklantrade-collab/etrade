@@ -177,6 +177,7 @@ class StrategyEngine:
             last_5m_row = df_5m_local.iloc[-1]
             sar_ini_high_5m = bool(last_5m_row.get('sar_ini_high', False))
             sar_ini_low_5m  = bool(last_5m_row.get('sar_ini_low', False))
+            sar_trend_5m    = int(last_5m_row.get('sar_trend', 0))
             pine_buy_5m     = (str(last_5m_row.get('pinescript_signal', '')) == 'Buy')
             pine_sell_5m    = (str(last_5m_row.get('pinescript_signal', '')) == 'Sell')
 
@@ -245,6 +246,14 @@ class StrategyEngine:
             'ema20':             safe_float(last_15m.get('ema_20') if last_15m.get('ema_20') is not None else last_15m.get('ema20')),
             'ema50':             safe_float(last_15m.get('ema_50') if last_15m.get('ema_50') is not None else last_15m.get('ema50')),
             'ema200':            safe_float(last_15m.get('ema_200') if last_15m.get('ema_200') is not None else last_15m.get('ema200')),
+            
+            # EMAs 5m
+            'ema3_5m':           safe_float(last_5m.get('ema_3') if last_5m.get('ema_3') is not None else last_5m.get('ema1')),
+            'ema9_5m':           safe_float(last_5m.get('ema_9') if last_5m.get('ema_9') is not None else last_5m.get('ema2')),
+            'ema20_5m':          safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else last_5m.get('ema3')),
+            'ema9_angle_5m':     safe_float(last_5m.get('ema9_angle', 0.0)),
+            'ema20_angle_5m':    safe_float(last_5m.get('ema20_angle', 0.0)),
+            
             'ema3_open_up_15m':  ema3_open_up_15m,
             'ema3_open_up_5m':   ema3_open_up_5m,
             'ema3_cross_ema9_up': safe_bool(last_15m.get('ema3_cross_ema9_up') if last_15m.get('ema3_cross_ema9_up') is not None else (safe_float(last_15m.get('ema_3') or last_15m.get('ema3')) > safe_float(last_15m.get('ema_9') or last_15m.get('ema9')))),
@@ -280,6 +289,7 @@ class StrategyEngine:
             'sar_ini_low_15m':   safe_bool(snap.get('sar_ini_low_15m')),
             'sar_ini_high_4h':   safe_bool(snap.get('sar_ini_high_4h')),
             'sar_ini_low_4h':    safe_bool(snap.get('sar_ini_low_4h')),
+            'sar_trend_5m':      sar_trend_5m if df_5m is not None and not df_5m.empty else 0,
             # Sistema
             'mtf_score':         safe_float(snap.get('mtf_score')),
             'pinescript_signal': str(snap.get('pinescript_signal', '')),

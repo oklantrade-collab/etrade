@@ -765,13 +765,11 @@ async def check_open_positions_5m(
                 tp_f = float(pos.get('tp_full_price') or pos.get('take_profit') or 0)
                 mtf_score = mtf_scores.get(norm_symbol) or 0
                 
-                is_long = side in ['long', 'buy']
-                
                 from app.core.crypto_symbols import resolve_crypto_position_quantity
                 current_qty = resolve_crypto_position_quantity(supabase, pos)
-                
-                upnl = (price - entry_p) * current_qty if is_long else (entry_p - price) * current_qty
-                
+                from app.core.pnl_calculator import calculate_pnl
+                upnl, upnl_pct = calculate_pnl(pos.get('market_type') or ('forex' if 'EUR' in symbol or 'GBP' in symbol or 'JPY' in symbol or 'XAU' in symbol else 'crypto'), side, entry_p, price, current_qty, symbol, supabase)
+
                 try:
                     supabase.table('positions').update({
                         'current_price': price,
@@ -1400,18 +1398,10 @@ async def _execute_paper_partial_close(pos, price, supabase):
     is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')) or pos.get('market_type') == 'forex_futures'
     table_name = 'forex_positions' if is_forex else 'positions'
     
-    # PnL %
-    is_long = side in ['long', 'buy']
-    pnl_pct = 0.0
-    if entry > 0:
-        pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
-    
-    # Asumimos que T1 es todo el capital actual (v4 simple distribution)
-    # Si queremos ser precisos necesitamos 'capital_per_symbol'
-    # Por ahora, cerramos el 50% de la cantidad 'size'
-    partial_qty = float(pos['size']) * 0.5
-    partial_pnl_usd = (price - entry) * partial_qty if is_long else (entry - price) * partial_qty
-    
+    partial_qty = float(pos.get('size') or pos.get('lots') or 0) * 0.5
+    from app.core.pnl_calculator import calculate_pnl
+    partial_pnl_usd, partial_pnl_pct = calculate_pnl(pos.get('market_type') or ('forex' if is_forex else 'crypto'), side, entry, price, partial_qty, symbol, supabase)
+    pnl_pct = partial_pnl_pct
     # Check UUID formatting to avoid database validation crashes
     import uuid
     is_uuid = False
@@ -1493,11 +1483,8 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         db_key_name = 'ctrader_order_id'
         db_record_id = pos.get('ctrader_order_id') or pos_id
     
-    is_long = side in ['long', 'buy']
-    pnl_usd = (price - entry) * qty if is_long else (entry - price) * qty
-    pnl_pct = 0.0
-    if entry > 0:
-        pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
+    from app.core.pnl_calculator import calculate_pnl
+    pnl_usd, pnl_pct = calculate_pnl(pos.get('market_type') or ('forex' if is_forex else 'crypto'), side, entry, price, qty, symbol, supabase)
 
     # Si hubo cierre parcial previo, sumar sus USD
     partial_pnl = pos.get('partial_pnl_usd')

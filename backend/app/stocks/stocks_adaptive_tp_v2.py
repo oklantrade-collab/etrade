@@ -478,6 +478,68 @@ def evaluate_stock_tp_v2(
                 'reason': f'Posición joven ({age_mins:.1f}m < {MIN_HOLDING_MINUTES}m) — bloqueo de salida prematura para buscar ganancias importantes.'
             }
 
+    # ── NUEVO: EXIT AGRESIVO para posiciones Aa30_STK (Breakout 5m) ──
+    rule_code_pos = str(position.get('rule_code', '')).upper()
+    if rule_code_pos == 'AA30_STK' and df_5m is not None and len(df_5m) >= 10:
+        try:
+            close_col_5m = 'close' if 'close' in df_5m.columns else 'Close'
+            ema3_s = df_5m[close_col_5m].ewm(span=3, adjust=False).mean()
+            ema9_s = df_5m[close_col_5m].ewm(span=9, adjust=False).mean()
+            last_close = float(df_5m[close_col_5m].iloc[-1])
+
+            ema3_val = float(ema3_s.iloc[-1])
+            ema9_val = float(ema9_s.iloc[-1])
+
+            if gain_pct > 0:
+                # 1. Cruce EMA3 < EMA9 en 5m → cerrar con ganancias
+                if ema3_val < ema9_val:
+                    return {
+                        'action':  'close_total',
+                        'pct':     100,
+                        'shares':  shares_rem,
+                        'gain_pct': round(gain_pct, 2),
+                        'debug_indicators': {
+                            'ema3_5m': round(ema3_val, 4),
+                            'ema9_5m': round(ema9_val, 4),
+                        },
+                        'reason': (
+                            f'Aa30_STK TP Momentum 5m: EMA3({ema3_val:.4f}) cruzó EMA9({ema9_val:.4f}) en contra. '
+                            f'Ganancia asegurada: +{gain_pct:.2f}%'
+                        ),
+                    }
+
+                # 2. Close < EMA3 en 5m → señal de debilidad
+                if last_close < ema3_val:
+                    return {
+                        'action':  'close_total',
+                        'pct':     100,
+                        'shares':  shares_rem,
+                        'gain_pct': round(gain_pct, 2),
+                        'debug_indicators': {
+                            'close_5m': round(last_close, 4),
+                            'ema3_5m': round(ema3_val, 4),
+                        },
+                        'reason': (
+                            f'Aa30_STK TP Agotamiento 5m: Close({last_close:.4f}) < EMA3({ema3_val:.4f}). '
+                            f'Ganancia asegurada: +{gain_pct:.2f}%'
+                        ),
+                    }
+
+            # Si está perdiendo y EMA stack se rompió, cortar pérdidas rápido
+            if gain_pct < -0.5 and ema3_val < ema9_val:
+                return {
+                    'action':  'close_total',
+                    'pct':     100,
+                    'shares':  shares_rem,
+                    'gain_pct': round(gain_pct, 2),
+                    'debug_indicators': {},
+                    'reason': (
+                        f'Aa30_STK Stop Momentum 5m: Pérdida {gain_pct:.2f}% + EMA stack rota. Cortando.'
+                    ),
+                }
+        except Exception as e_30:
+            pass  # Fallback al flujo normal si hay error
+
     # Sin ganancia → no evaluar TP
     if gain_pct <= 0:
         return {
