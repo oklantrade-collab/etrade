@@ -16,9 +16,12 @@ def get_positions(
 ):
     """Get positions (open and closed)."""
     sb = get_supabase()
-    query = sb.table("positions").select("*").order("opened_at", desc=True).limit(limit)
-    if status:
-        query = query.eq("status", status)
+    if status == 'closed':
+        query = sb.table("positions").select("*").eq("status", status).order("closed_at", desc=True).limit(limit)
+    else:
+        query = sb.table("positions").select("*").order("opened_at", desc=True).limit(limit)
+        if status:
+            query = query.eq("status", status)
     result = query.execute()
     return {"positions": result.data}
 

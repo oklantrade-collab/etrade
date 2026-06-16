@@ -145,12 +145,17 @@ async def get_forex_positions(
 ):
     """Obtener posiciones de Forex (abiertas o cerradas)."""
     try:
-        query = sb.table('forex_positions')\
-            .select('*')\
-            .eq('status', status)\
-            .order('opened_at', desc=True)
         if status == 'closed':
-            query = query.limit(100)
+            query = sb.table('forex_positions')\
+                .select('*')\
+                .eq('status', status)\
+                .order('closed_at', desc=True)\
+                .limit(100)
+        else:
+            query = sb.table('forex_positions')\
+                .select('*')\
+                .eq('status', status)\
+                .order('opened_at', desc=True)
         res = query.execute()
         return res.data or []
     except Exception as e:
