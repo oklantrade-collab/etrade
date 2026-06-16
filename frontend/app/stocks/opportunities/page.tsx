@@ -541,6 +541,7 @@ const ApexBadge = ({ score4h, score1d, signal, confidence, edge }: {
 
   const signalConfig: Record<string, {color: string, bg: string, label: string}> = {
     STRONG_BUY: { color:'#00C896', bg:'rgba(0,200,150,0.12)', label:'STRONG BUY' },
+    STRONG_BUY_BLUE: { color:'#4169E1', bg:'rgba(65,105,225,0.12)', label:'STRONG BUY' },
     BUY:        { color:'#4FC3F7', bg:'rgba(79,195,247,0.12)', label:'BUY' },
     NEUTRAL:    { color:'#FFB74D', bg:'rgba(255,183,77,0.12)', label:'NEUTRAL' },
     CAUTION:    { color:'#FF8A65', bg:'rgba(255,138,101,0.12)', label:'CAUTION' },
