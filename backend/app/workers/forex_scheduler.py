@@ -1169,6 +1169,25 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
         else:
             signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
             
+            # --- FASE 5.5: V1 Engine Fallback (Crypto Logic para Aa23, Bb23, etc) ---
+            if not signal:
+                from app.strategy.rule_engine import evaluate_all_rules, load_rules_to_memory
+                from app.analysis.fibonacci_bb import extract_fib_levels
+                
+                # Fetch V1 rules from supabase 
+                # (We can use a cached version ideally, but load_rules_to_memory caches internally if we pass it)
+                all_v1_rules = await load_rules_to_memory(sb)
+                fib_levels = extract_fib_levels(df)
+                
+                # We evaluate V1 engine for Long
+                v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
+                v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
+                
+                if v1_long:
+                    signal = {'rule_code': v1_long, 'direction': 'long', 'strategy_type': 'scalping', 'cycle': '15m'}
+                elif v1_short:
+                    signal = {'rule_code': v1_short, 'direction': 'short', 'strategy_type': 'scalping', 'cycle': '15m'}
+
             if signal:
                 await engine.log_evaluation(symbol, signal, context)
 

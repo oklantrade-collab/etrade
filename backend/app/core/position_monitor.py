@@ -87,8 +87,8 @@ async def check_signal_reversal(
         return {'should_exit': False}
 
     # Evaluación de P&L para decidir la agresividad
-    # Si tenemos ganancia (pnl > 0.05%), salimos YA para asegurar por cualquiera de los dos motivos.
-    if pnl_pct >= 0.05:
+    # Si tenemos ganancia (pnl > 0.20%), salimos YA para asegurar por cualquiera de los dos motivos.
+    if pnl_pct >= 0.20:
         # Validación extra: Si el motivo de salida fue SOLO el MTF lento, 
         # esperamos a que el EMA rápido también gire para no salir prematuramente de un buen trade.
         if mtf_reversed and not ema_reversed and snap:

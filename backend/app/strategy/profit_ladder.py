@@ -439,25 +439,38 @@ def evaluate_profit_ladder(
 
     # CIERRE por pérdida de momentum (EMA)
     if ema_check['momentum_lost']:
-        if price_action_exit:
-            mode = 'defensivo' if not bb_check['valid'] \
-                   else 'normal'
-            return {
-                'action':       'close',
-                'reason': (
-                    f'MOMENTUM PERDIDO [modo {mode}]: '
-                    f'EMA3{"<" if is_long else ">"}EMA9 por '
-                    f'{ema_check["consec_below"]} velas Y rotura de precio '
-                    f'({"Low" if is_long else "High"} actual {"<" if is_long else ">"} anterior)'
-                ),
-                'triggered_by':  'ema_cross_confirmed',
-                'current_band':  current_band,
-                'bb_valid':      bb_check['valid'],
-                'consec_below':  ema_check['consec_below'],
-                'floor_data':    floor_data,
-            }
+        # Solo permitimos el cierre defensivo de la escalera si estamos en ganancia.
+        # Si el trade está en pérdida, dejamos que el SL o Smart Exit actúe, no el Profit Ladder.
+        entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+        pnl_pct = 0.0
+        if entry > 0:
+            if is_long:
+                pnl_pct = (current_price - entry) / entry * 100
+            else:
+                pnl_pct = (entry - current_price) / entry * 100
+                
+        if pnl_pct > 0:
+            if price_action_exit:
+                mode = 'defensivo' if not bb_check['valid'] \
+                       else 'normal'
+                return {
+                    'action':       'close',
+                    'reason': (
+                        f'MOMENTUM PERDIDO [modo {mode}]: '
+                        f'EMA3{"<" if is_long else ">"}EMA9 por '
+                        f'{ema_check["consec_below"]} velas Y rotura de precio '
+                        f'({"Low" if is_long else "High"} actual {"<" if is_long else ">"} anterior)'
+                    ),
+                    'triggered_by':  'ema_cross_confirmed',
+                    'current_band':  current_band,
+                    'bb_valid':      bb_check['valid'],
+                    'consec_below':  ema_check['consec_below'],
+                    'floor_data':    floor_data,
+                }
+            else:
+                log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: EMA {"<" if is_long else ">"} EMA9 pero Accion de Precio sostiene ({"Low" if is_long else "High"} actual >= anterior). Esperando...')
         else:
-            log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: EMA {"<" if is_long else ">"} EMA9 pero Accion de Precio sostiene ({"Low" if is_long else "High"} actual >= anterior). Esperando...')
+            log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: EMA {"<" if is_long else ">"} EMA9 pero PNL ({pnl_pct:.2f}%) <= 0. Profit Ladder exige ganancia.')
 
     # CIERRE por violación del Profit Floor
     if floor_breached:

@@ -45,16 +45,18 @@ CAPTURE_CONFIG = {
         # cuerpo mínimo de la vela BB
         'bb_invalid_width_pct': 0.005,
         # ancho BB < 0.5% = inválido
+        'min_pnl_pct':          0.00,
     },
     'forex_futures': {
-        'rsi_overbought_long':  75,
-        'rsi_oversold_short':   25,
+        'rsi_overbought_long':  80,
+        'rsi_oversold_short':   20,
         'rsi_must_be_turning':  True,
         'rsi_turning_lookback': 2,
-        'min_conditions_to_close': 1,
+        'min_conditions_to_close': 2,
         'min_conditions_to_flip':  2,
         'bb_body_min_pct':      0.30,
         'bb_invalid_width_pct': 0.003,
+        'min_pnl_pct':          0.15,
     },
     'stocks_spot': {
         'rsi_overbought_long':  75,
@@ -321,6 +323,47 @@ def check_bollinger_breakout(
     }
 
 
+def check_extreme_structure_fx(snap: dict, df_15m: pd.DataFrame, side: str) -> dict:
+    """
+    Verifica si hay una extensión doble (Bollinger + Fibonacci) específica para Forex.
+    SHORT: CLOSE <= BB_LOWER AND LOW <= LOWER_6
+    LONG:  CLOSE >= BB_UPPER AND HIGH >= UPPER_6
+    """
+    is_long = side in ('long', 'buy')
+    bb_upper = float(snap.get('bb_upper', snap.get('upper_bollinger', 0)))
+    bb_lower = float(snap.get('bb_lower', snap.get('lower_bollinger', 0)))
+    
+    triggered = False
+    vela_reason = 'Sin datos de vela'
+
+    if df_15m is not None and len(df_15m) >= 2:
+        last = df_15m.iloc[-2]
+        c = float(last.get('close', 0))
+        h = float(last.get('high', 0))
+        l = float(last.get('low', 0))
+        
+        if c > 0:
+            if is_long:
+                upper_6 = float(snap.get('upper_6', 0))
+                if upper_6 > 0 and bb_upper > 0:
+                    triggered = (c >= bb_upper) and (h >= upper_6)
+                    vela_reason = f'Close({c:.5f}) >= BB_up({bb_upper:.5f}) AND High({h:.5f}) >= U6({upper_6:.5f})'
+                else:
+                    vela_reason = 'upper_6 o bb_upper no disponibles'
+            else:
+                lower_6 = float(snap.get('lower_6', 0))
+                if lower_6 > 0 and bb_lower > 0:
+                    triggered = (c <= bb_lower) and (l <= lower_6)
+                    vela_reason = f'Close({c:.5f}) <= BB_low({bb_lower:.5f}) AND Low({l:.5f}) <= L6({lower_6:.5f})'
+                else:
+                    vela_reason = 'lower_6 o bb_lower no disponibles'
+
+    return {
+        'triggered': triggered,
+        'reason': vela_reason,
+    }
+
+
 def evaluate_profit_capture(
     symbol:      str,
     side:        str,
@@ -353,6 +396,7 @@ def evaluate_profit_capture(
     is_long      = side in ('long', 'buy')
 
     # ── Verificar ganancia mínima ──────────────
+    min_pnl = float(cfg.get('min_pnl_pct', 0.0))
     entry  = float(position.get(
         'avg_entry_price',
         position.get('entry_price',
@@ -360,49 +404,56 @@ def evaluate_profit_capture(
     ))
     if entry > 0:
         if is_long:
-            pnl_pct = (
-                current_price - entry
-            ) / entry * 100
+            pnl_pct = (current_price - entry) / entry * 100
         else:
-            pnl_pct = (
-                entry - current_price
-            ) / entry * 100
+            pnl_pct = (entry - current_price) / entry * 100
     else:
         pnl_pct = 0
 
-    # No cerrar si hay pérdida
-    # (este módulo es para MAXIMIZAR ganancias)
-    if pnl_pct <= 0:
+    # No cerrar si la ganancia es menor al mínimo exigido
+    # (este módulo es para MAXIMIZAR ganancias en extremos)
+    if pnl_pct <= min_pnl:
         return {
             'action':  'hold',
             'pnl_pct': round(pnl_pct, 3),
-            'reason':  'Sin ganancia — no aplica profit capture',
+            'reason':  f'Ganancia ({pnl_pct:.2f}%) no supera el mínimo exigido ({min_pnl}%) — hold',
         }
 
-    # ── Evaluar las 3 condiciones ──────────────
+    # ── Evaluar las condiciones ──────────────
     c1_rsi = check_rsi_exhaustion(
         snap, df_15m, side, market_type
     )
-    c2_fib = check_fibonacci_extreme(
-        snap, df_15m, side
-    )
-    c3_bb  = check_bollinger_breakout(
-        snap, df_15m, side, market_type
-    )
-
-    conditions = {
-        'C1_rsi':        c1_rsi,
-        'C2_fibonacci':  c2_fib,
-        'C3_bollinger':  c3_bb,
-    }
-
-    triggered_list = []
-    if c1_rsi['triggered']:
-        triggered_list.append('rsi_exhaustion')
-    if c2_fib['triggered']:
-        triggered_list.append('fib_extreme')
-    if c3_bb['triggered']:
-        triggered_list.append('bb_breakout')
+    
+    if market_type == 'forex_futures':
+        c4_struct = check_extreme_structure_fx(snap, df_15m, side)
+        conditions = {
+            'C1_rsi':        c1_rsi,
+            'C4_structure':  c4_struct,
+        }
+        triggered_list = []
+        if c1_rsi['triggered']:
+            triggered_list.append('rsi_exhaustion')
+        if c4_struct['triggered']:
+            triggered_list.append('extreme_structure')
+    else:
+        c2_fib = check_fibonacci_extreme(
+            snap, df_15m, side
+        )
+        c3_bb  = check_bollinger_breakout(
+            snap, df_15m, side, market_type
+        )
+        conditions = {
+            'C1_rsi':        c1_rsi,
+            'C2_fibonacci':  c2_fib,
+            'C3_bollinger':  c3_bb,
+        }
+        triggered_list = []
+        if c1_rsi['triggered']:
+            triggered_list.append('rsi_exhaustion')
+        if c2_fib['triggered']:
+            triggered_list.append('fib_extreme')
+        if c3_bb['triggered']:
+            triggered_list.append('bb_breakout')
 
     n_triggered = len(triggered_list)
 
