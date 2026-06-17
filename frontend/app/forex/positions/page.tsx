@@ -396,6 +396,26 @@ export default function ForexPositions() {
                                   >
                                      <span className="text-[0.6rem] font-black">ℹ️</span>
                                   </button>
+                                  <button 
+                                    onClick={async () => {
+                                      if (confirm(`¿ELIMINAR registro de ${pos.symbol} permanentemente? No aparecerá en el historial.`)) {
+                                        try {
+                                          const res = await fetch(`/api/v1/positions/forex/${pos.id}`, { method: 'DELETE' })
+                                          if (res.ok) {
+                                            fetchData()
+                                          } else {
+                                            alert("Error al eliminar registro")
+                                          }
+                                        } catch (err) {
+                                          console.error("Delete error:", err)
+                                        }
+                                      }
+                                    }}
+                                    className="w-8 h-8 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-500 hover:bg-rose-500 hover:text-white transition-all shadow-lg shadow-rose-500/10 group-hover:scale-110"
+                                    title="ELIMINAR Registro (Borrado Permanente)"
+                                  >
+                                     <span className="text-xs font-black">🗑️</span>
+                                  </button>
                                 </div>
                              </td>
                           </tr>
