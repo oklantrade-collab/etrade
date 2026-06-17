@@ -83,6 +83,7 @@ DEFAULT_RULES = [
         "entry_trades": [1],
         "conditions": [
             {"indicator": "ema4_cross_above_basis", "operator": "==", "value": True},
+            {"indicator": "ema3_above_ema9", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Al momento del cruce comprar al primer señal de Buy. (v2 forced)",
