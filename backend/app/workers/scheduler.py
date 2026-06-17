@@ -775,6 +775,19 @@ async def check_proactive_exit_crypto(
     if not result['should_close']:
         return False
 
+    # Block if PNL < -1.0%
+    entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+    pnl_pct = 0.0
+    if entry > 0:
+        if position.get('side', '').lower() in ('long', 'buy'):
+            pnl_pct = (current_price - entry) / entry * 100
+        else:
+            pnl_pct = (entry - current_price) / entry * 100
+            
+    if pnl_pct < -1.0:
+        log_info('PROACTIVE_EXIT', f'[{symbol}] Proactive Exit bloqueado: PNL {pnl_pct:.2f}% < -1.0%. Se retiene para EREP.')
+        return False
+
     # ── Cerrar posición ───────────────────────
     log_info('PROACTIVE_EXIT', f'🛡️ {symbol}: {result["rule_code"]} — {result["reason"]}')
 
@@ -1377,16 +1390,32 @@ async def sync_positions_to_memory():
     """Synchronize BOT_STATE.positions with the 'positions' table in Supabase and notify StateMachine."""
     try:
         sb = get_supabase()
-        res = sb.table("positions").select("*").eq("status", "open").execute()
+        res_crypto = sb.table("positions").select("*").eq("status", "open").execute()
+        res_forex = sb.table("forex_positions").select("*").eq("status", "open").execute()
+        res_stocks = sb.table("stocks_positions").select("*").eq("status", "open").execute()
+        
+        all_positions = (res_crypto.data or []) + (res_forex.data or []) + (res_stocks.data or [])
         
         # Clear current and rebuild to ensure closed ones are removed
         new_positions = {}
         symbols_to_sync = set()
         
-        for p in res.data:
-            pos_id = str(p.get('id', p['symbol']))
+        for p in all_positions:
+            sym = p.get('symbol') or p.get('ticker')
+            if not sym: continue
+            
+            pos_id = str(p.get('id', sym))
+            # Tag the market type
+            if 'ticker' in p:
+                p['market_type'] = 'stocks'
+                p['symbol'] = sym
+            elif p.get('pair') and p.get('leverage'):
+                p['market_type'] = 'crypto'
+            else:
+                p['market_type'] = 'forex'
+                
             new_positions[pos_id] = p
-            symbols_to_sync.add(p['symbol'])
+            symbols_to_sync.add(sym)
             
         BOT_STATE.positions = new_positions
         
@@ -1950,24 +1979,57 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 from app.strategy.rule_engine import get_rules_from_memory
                 all_r = get_rules_from_memory() or []
                 
+                # --- INJECT MTF TRENDS ---
+                df_4h = get_memory_df(symbol, "4h")
+                df_1d = get_memory_df(symbol, "1d")
+                
+                mtf_4h_trend = "neutral"
+                if df_4h is not None and not df_4h.empty:
+                    l_4h = df_4h.iloc[-1]
+                    e3_4h = l_4h.get('ema1', l_4h.get('ema_3', 0))
+                    e9_4h = l_4h.get('ema2', l_4h.get('ema_9', 0))
+                    e20_4h = l_4h.get('ema3', l_4h.get('ema_20', 0))
+                    if pd.notna(e3_4h) and pd.notna(e9_4h) and pd.notna(e20_4h) and e9_4h > 0 and e20_4h > 0:
+                        if e3_4h > e9_4h and e9_4h > e20_4h:
+                            mtf_4h_trend = "long"
+                        elif e3_4h < e9_4h and e9_4h < e20_4h:
+                            mtf_4h_trend = "short"
+                
+                mtf_1d_trend = "neutral"
+                if df_1d is not None and not df_1d.empty:
+                    l_1d = df_1d.iloc[-1]
+                    e3_1d = l_1d.get('ema1', l_1d.get('ema_3', 0))
+                    e9_1d = l_1d.get('ema2', l_1d.get('ema_9', 0))
+                    if pd.notna(e3_1d) and pd.notna(e9_1d) and e9_1d > 0:
+                        if e3_1d > e9_1d:
+                            mtf_1d_trend = "long"
+                        elif e3_1d < e9_1d:
+                            mtf_1d_trend = "short"
+                
+                df.loc[df.index[-1], 'mtf_4h_trend'] = mtf_4h_trend
+                df.loc[df.index[-1], 'mtf_1d_trend'] = mtf_1d_trend
+                # -------------------------
+                
                 if allowed_direction:
-                    if allowed_direction == 'long' and cur_mtf_score >= mtf_threshold:
+                    if allowed_direction == 'long' and (cur_mtf_score >= mtf_threshold or mtf_4h_trend == 'long'):
                         direction_checked = 'long'
                         rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf)
-                    elif allowed_direction == 'short' and cur_mtf_score <= -mtf_threshold:
+                    elif allowed_direction == 'short' and (cur_mtf_score <= -mtf_threshold or mtf_4h_trend == 'short'):
                         direction_checked = 'short'
                         bearish_action = get_bearish_action(market_type=market_type, has_long_open=bool(BOT_STATE.get_positions_by_symbol(symbol)))
                         if bearish_action == 'open_short':
                             rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
                 else:
-                    if cur_mtf_score >= mtf_threshold:
+                    if cur_mtf_score >= mtf_threshold or mtf_4h_trend == 'long':
                         direction_checked = 'long'
                         rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf)
-                    elif cur_mtf_score <= -mtf_threshold:
+                    
+                    if not rule_match and (cur_mtf_score <= -mtf_threshold or mtf_4h_trend == 'short'):
                         direction_checked = 'short'
                         bearish_action = get_bearish_action(market_type=market_type, has_long_open=bool(BOT_STATE.get_positions_by_symbol(symbol)))
                         if bearish_action == 'open_short':
                             rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
+
             
             if not rule_match:
                 blocked_by = f"no_signal_{source_tf}" if not (p_signal or m_buy or m_sell) else "evaluated_no_trigger"
@@ -2058,8 +2120,21 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                             positions = BOT_STATE.get_positions_by_symbol(symbol)
                             for p in positions:
                                 if p.get('side', '').lower() != rule_match['direction'].lower():
+                                    current_price = float(last_row['close'])
+                                    entry = float(p.get('avg_entry_price') or p.get('entry_price') or current_price)
+                                    pnl_pct = 0.0
+                                    if entry > 0:
+                                        if p.get('side', '').lower() in ('long', 'buy'):
+                                            pnl_pct = (current_price - entry) / entry * 100
+                                        else:
+                                            pnl_pct = (entry - current_price) / entry * 100
+                                            
+                                    if pnl_pct < -1.0:
+                                        log_info('FLIP_CRYPTO', f"[{symbol}] Flip abortado para esta posición: PNL {pnl_pct:.2f}% < -1.0%. Se retiene para EREP.")
+                                        continue
+                                        
                                     try:
-                                        await _execute_paper_close(p, float(last_row['close']), f"flip_{rule_match['direction']}", sb)
+                                        await _execute_paper_close(p, current_price, f"flip_{rule_match['direction']}", sb)
                                         sm.on_position_closed(symbol, f"flip_{rule_match['direction']}", all_closed=True)
                                     except Exception as e:
                                         log_error(MODULE, f"Error en flip close para {symbol}: {e}")

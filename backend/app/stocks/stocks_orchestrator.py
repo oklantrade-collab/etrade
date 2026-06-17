@@ -598,17 +598,31 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             rank = calculate_composite_rank(apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg)
 
             # ── REGLA 4: Confirmación de Volumen (15m Spike) ──
-            # El volumen actual debe ser >= 2x el promedio de las últimas 5 velas
+            # Se ha relajado la regla de volumen estricto por petición del usuario
             vol_spike_ok = True
-            if df_15m is not None and len(df_15m) >= 6:
-                last_vol = df_15m['volume'].iloc[-1]
-                avg_vol_5 = df_15m['volume'].iloc[-6:-1].mean()
-                if avg_vol_5 > 0:
-                    vol_spike_ok = last_vol >= (avg_vol_5 * 2)
+
+            # ── GATILLO MACRO BONUS (15m) ──
+            macro_bonus_trigger_ok = True
+            if apex.get('has_macro_bonus'):
+                macro_bonus_trigger_ok = False
+                try:
+                    if df_15m is not None and len(df_15m) >= 20:
+                        c15_col = 'Close' if 'Close' in df_15m.columns else 'close'
+                        c15 = pd.to_numeric(df_15m[c15_col], errors='coerce').dropna()
+                        ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                        ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                        
+                        if ema3_15 > ema9_15:
+                            macro_bonus_trigger_ok = True
+                            log_info(MODULE, f'🔥 {ticker}: 15m alcista (EMA3 > EMA9). Gatillo APEX ACTIVO.')
+                        else:
+                            log_info(MODULE, f'⏳ {ticker}: Esperando EMA3 > EMA9 en 15m para APEX.')
+                except Exception as e:
+                    pass
 
             # Criterios de entrada a la cola de alta prioridad
-            enters_by_apex = (apex_4h >= min_score) and vol_spike_ok
-            enters_by_rule = rule_signal['has_signal'] and vol_spike_ok
+            enters_by_apex = (apex_4h >= min_score) and macro_bonus_trigger_ok
+            enters_by_rule = rule_signal['has_signal']
 
             # ── REGLA 5: Breakout 5m (Aa30_STK) — Fast Track ──
             breakout_5m = evaluate_5m_breakout(

@@ -662,6 +662,9 @@ def build_market_data_dict(
         "di_cross_bullish": bool(last.get("di_cross_bullish", False)),
         "di_cross_bearish": bool(last.get("di_cross_bearish", False)),
         "di_margin": float(last.get("minus_di", 0)) - float(last.get("plus_di", 0)),
+        # MTF Trends
+        "mtf_4h_trend": str(last.get("mtf_4h_trend", "neutral")),
+        "mtf_1d_trend": str(last.get("mtf_1d_trend", "neutral")),
         # EMA20 phase
         "ema20_phase": str(last.get("ema20_phase", "flat")),
         # EMA crosses

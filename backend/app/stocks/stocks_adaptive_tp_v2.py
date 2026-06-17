@@ -466,8 +466,12 @@ def evaluate_stock_tp_v2(
         except Exception:
             pass
 
+    # Identificar si es HOT / SCALPING
+    group = str(position.get("group_name", "")).upper()
+    is_hot = ("HOT" in group or "SCALPING" in group)
+
     MIN_HOLDING_MINUTES = 15.0
-    if age_mins < MIN_HOLDING_MINUTES:
+    if age_mins < MIN_HOLDING_MINUTES and not is_hot:
         # Permitimos saltar la restricción únicamente si no hay ganancia (evaluado por seguridad en otros lados)
         # o si la posición tiene ganancias pero es demasiado joven, la obligamos a madurar.
         if gain_pct > 0:
@@ -646,6 +650,78 @@ def evaluate_stock_tp_v2(
             'reason': (
                 f'SIPV 15m = SELL: '
                 f'CIERRE TOTAL {remaining} shares por señal bajista confirmada.'
+            ),
+        }
+
+    # ── NUEVO PASO SCALPING (HOT GROUP) EN 5M ──
+    if is_hot and df_5m is not None and len(df_5m) >= 20:
+        c_col = 'Close' if 'Close' in df_5m.columns else 'close'
+        l_col = 'Low' if 'Low' in df_5m.columns else 'low'
+        h_col = 'High' if 'High' in df_5m.columns else 'high'
+        
+        close_5m = df_5m[c_col]
+        sma20_5m = close_5m.rolling(window=20).mean()
+        std20_5m = close_5m.rolling(window=20).std()
+        bb_upper_5m = sma20_5m + 2 * std20_5m
+        
+        ema3_5m = close_5m.ewm(span=3, adjust=False).mean()
+        ema9_5m = close_5m.ewm(span=9, adjust=False).mean()
+        
+        curr_low = df_5m[l_col].iloc[-1]
+        curr_high = df_5m[h_col].iloc[-1]
+        curr_bb_upper = bb_upper_5m.iloc[-1]
+        
+        prev_close = close_5m.iloc[-2]
+        prev_low = df_5m[l_col].iloc[-2]
+        prev_high = df_5m[h_col].iloc[-2]
+        prev_bb_upper = bb_upper_5m.iloc[-2]
+        
+        bb_upper_slope = curr_bb_upper - prev_bb_upper
+        
+        # Escenario 1: Agotamiento Parabólico
+        if prev_close > prev_bb_upper and (curr_low < prev_low or curr_high < prev_high):
+            remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
+            return {
+                'action':  'close_total',
+                'pct':     100,
+                'shares':  remaining,
+                'trigger': 'hot_parabolic_exhaustion',
+                'debug_indicators': debug_indicators,
+                'reason': (
+                    f'HOT SCALPING: Agotamiento Parabólico en 5m. '
+                    f'Vela anterior sobre BB_Upper y vela actual falló en max/min. '
+                    f'Ganancia: +{gain_pct:.2f}%'
+                ),
+            }
+            
+        # Escenario 2: Reversión de Tendencia Corta
+        if ema3_5m.iloc[-1] < ema9_5m.iloc[-1] and bb_upper_slope <= 0:
+            remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
+            return {
+                'action':  'close_total',
+                'pct':     100,
+                'shares':  remaining,
+                'trigger': 'hot_trend_reversal',
+                'debug_indicators': debug_indicators,
+                'reason': (
+                    f'HOT SCALPING: Reversión de Tendencia en 5m. '
+                    f'EMA3 < EMA9 y BB_Upper_slope <= 0. '
+                    f'Ganancia: +{gain_pct:.2f}%'
+                ),
+            }
+
+    # ── NUEVO: TOMA DE GANANCIA GARANTIZADA (+10%) ──
+    # Solicitado por el usuario: Si llega a +10%, vender automáticamente la mitad (50%) para asegurar.
+    if gain_pct >= 10.0 and not b1_done:
+        calc_b1_shares = b1_shares if b1_shares > 0 else max(1, int(total_shares * 0.5))
+        return {
+            'action':  'close_block1',
+            'shares':  calc_b1_shares,
+            'trigger': 'guaranteed_10pct_tp',
+            'debug_indicators': debug_indicators,
+            'reason': (
+                f'GANANCIA GARANTIZADA: Alcanzó +10% (+{gain_pct:.2f}%). '
+                f'Asegurando la mitad de la posición ({calc_b1_shares} shares).'
             ),
         }
 

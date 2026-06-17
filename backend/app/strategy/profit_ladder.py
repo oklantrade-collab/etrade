@@ -437,18 +437,19 @@ def evaluate_profit_ladder(
         except Exception:
             pass
 
+    # ── 7c. Calcular PNL Actual ─────────────────
+    entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+    pnl_pct = 0.0
+    if entry > 0:
+        if is_long:
+            pnl_pct = (current_price - entry) / entry * 100
+        else:
+            pnl_pct = (entry - current_price) / entry * 100
+
     # CIERRE por pérdida de momentum (EMA)
     if ema_check['momentum_lost']:
         # Solo permitimos el cierre defensivo de la escalera si estamos en ganancia.
         # Si el trade está en pérdida, dejamos que el SL o Smart Exit actúe, no el Profit Ladder.
-        entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
-        pnl_pct = 0.0
-        if entry > 0:
-            if is_long:
-                pnl_pct = (current_price - entry) / entry * 100
-            else:
-                pnl_pct = (entry - current_price) / entry * 100
-                
         if pnl_pct > 0:
             if price_action_exit:
                 mode = 'defensivo' if not bb_check['valid'] \
@@ -474,21 +475,24 @@ def evaluate_profit_ladder(
 
     # CIERRE por violación del Profit Floor
     if floor_breached:
-        return {
-            'action':      'close',
-            'reason': (
-                f'PROFIT FLOOR VIOLADO: '
-                f'precio {current_price:.5f} '
-                f'cruzó el piso '
-                f'{floor_price:.5f} '
-                f'({position.get("profit_floor_band")}). '
-                f'Cerrar para proteger ganancia.'
-            ),
-            'triggered_by': 'profit_floor_breach',
-            'current_band': current_band,
-            'floor_band':   position.get('profit_floor_band'),
-            'floor_price':  floor_price,
-        }
+        if pnl_pct > 0:
+            return {
+                'action':      'close',
+                'reason': (
+                    f'PROFIT FLOOR VIOLADO: '
+                    f'precio {current_price:.5f} '
+                    f'cruzó el piso '
+                    f'{floor_price:.5f} '
+                    f'({position.get("profit_floor_band")}). '
+                    f'Cerrar para proteger ganancia.'
+                ),
+                'triggered_by': 'profit_floor_breach',
+                'current_band': current_band,
+                'floor_band':   position.get('profit_floor_band'),
+                'floor_price':  floor_price,
+            }
+        else:
+            log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: Floor Breached pero PNL ({pnl_pct:.2f}%) <= 0. Profit Ladder exige ganancia.')
 
     # Actualizar el Profit Floor si mejoró
     if floor_data.get('updated'):

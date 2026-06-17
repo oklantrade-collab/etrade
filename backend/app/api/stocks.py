@@ -137,15 +137,16 @@ async def get_stocks_opportunities():
                     merged["is_pro_member"] = is_pro
                     merged["pool_type"] = pool
 
-                    # Ensure last_scan_time is present (extract from timestamp if missing)
+                    # Ensure last_scan_time is present and formatted with date
                     ts = item.get("timestamp")
-                    if not merged.get("last_scan_time") and ts:
+                    if ts:
                         try:
                             dt = parse_dt(ts)
                             dt_lima = convert_to_lima(dt)
-                            merged["last_scan_time"] = dt_lima.strftime("%H:%M")
+                            merged["last_scan_time"] = dt_lima.strftime("%H:%M %d/%m/%Y")
                         except:
-                            merged["last_scan_time"] = "--:--"
+                            if not merged.get("last_scan_time"):
+                                merged["last_scan_time"] = "--:--"
                     
                     if not merged.get("last_scan_time"):
                         merged["last_scan_time"] = "--:--"
@@ -602,12 +603,12 @@ async def get_priority_queue():
         if len(queue) < 10:
             try:
                 # Get top APEX-scoring tickers from market_snapshot
-                limit_time_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+                limit_time_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
                 
                 snap_res = sb.table("market_snapshot")\
                     .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf")\
                     .gt("updated_at", limit_time_iso)\
-                    .order("updated_at", desc=True)\
+                    .order("apex_1d", desc=True)\
                     .limit(40)\
                     .execute()
                 
@@ -616,6 +617,10 @@ async def get_priority_queue():
                         break
                     ticker = snap.get("symbol")
                     if not ticker or ticker in existing_tickers:
+                        continue
+                        
+                    # Filtrar símbolos de Forex y Crypto que hayan caído en market_snapshot general
+                    if len(ticker) >= 6 and (ticker.endswith("USD") or ticker.endswith("JPY") or ticker.endswith("EUR") or ticker.endswith("GBP") or "USDT" in ticker):
                         continue
                     
                     apex_4h = float(snap.get("apex_4h") or 0)

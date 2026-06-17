@@ -128,6 +128,9 @@ class StocksRuleEngine:
             "ema_exhaustion": ema_exhaustion or bool(snap.get("ema_exhaustion", False)),
             "ema3_cross_age": ema3_cross_age,
             "rsi_14": float(snap.get("rsi_14", 50.0)),
+            "apex_signal": str(snap.get("apex_signal", "") or ""),
+            "volume": float(snap.get("volume", 0) or 0),
+            "low": float(snap.get("low", 0) or 0),
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -633,6 +636,91 @@ class StocksRuleEngine:
                 failures.append(
                     f"Gap Up Exhaustion: Stock gapped {gap_pct:.1f}% and explosion is stale."
                 )
+
+        # ── CHECK 9: BLUE_DEEP_PULLBACK (APEX AZUL - Retroceso a EMA20) ──
+        if normalized_code == "BLUE_DEEP_PULLBACK":
+            apex_signal = str(context.get("apex_signal", ""))
+            ema3_5m  = float(context.get("ema_3_5m") or 0)
+            ema9_5m  = float(context.get("ema_9_5m") or 0)
+            ema20_5m = float(context.get("ema_20_5m") or 0)
+            rsi_5m   = float(context.get("rsi_5m") or 50.0)
+            low_price = float(context.get("low") or 0)
+            close_price = float(context.get("close") or 0)
+
+            # Requisito 1: Solo para acciones APEX AZUL
+            if apex_signal != "STRONG_BUY_BLUE":
+                failures.append(f"Not APEX BLUE: signal={apex_signal}")
+
+            # Requisito 2: LOW tocó EMA20 en 5m (pullback profundo)
+            if ema20_5m > 0 and low_price > ema20_5m:
+                failures.append(f"No Deep Pullback: LOW={low_price:.2f} > EMA20_5m={ema20_5m:.2f}")
+
+            # Requisito 3: CLOSE sigue arriba de EMA20 (rebotó, no rompió)
+            if ema20_5m > 0 and close_price <= ema20_5m:
+                failures.append(f"Price broke EMA20: CLOSE={close_price:.2f} <= EMA20_5m={ema20_5m:.2f}")
+
+            # Requisito 4: RSI limpio (no sobrecomprado)
+            if rsi_5m >= 60:
+                failures.append(f"RSI still hot: {rsi_5m:.1f} >= 60")
+
+        # ── CHECK 10: BLUE_MOMENTUM_RESUME (APEX AZUL - Primer Cruce EMA3>EMA9) ──
+        if normalized_code == "BLUE_MOMENTUM_RESUME":
+            apex_signal = str(context.get("apex_signal", ""))
+            ema3_5m  = float(context.get("ema_3_5m") or 0)
+            ema9_5m  = float(context.get("ema_9_5m") or 0)
+            ema20_5m = float(context.get("ema_20_5m") or 0)
+            rsi_5m   = float(context.get("rsi_5m") or 50.0)
+
+            # Requisito 1: Solo para acciones APEX AZUL
+            if apex_signal != "STRONG_BUY_BLUE":
+                failures.append(f"Not APEX BLUE: signal={apex_signal}")
+
+            # Requisito 2: EMA3 > EMA9 en 5m (cruce alcista activo)
+            if ema3_5m > 0 and ema9_5m > 0 and ema3_5m <= ema9_5m:
+                failures.append(f"No bullish cross: EMA3_5m={ema3_5m:.2f} <= EMA9_5m={ema9_5m:.2f}")
+
+            # Requisito 3: Cruce fresco (distancia < 0.3% = recién cruzó)
+            if ema3_5m > 0 and ema9_5m > 0 and ema3_5m > ema9_5m:
+                cross_dist = (ema3_5m - ema9_5m) / ema9_5m
+                if cross_dist > 0.003:
+                    failures.append(f"Cross not fresh: distance={cross_dist*100:.2f}% > 0.3%")
+
+            # Requisito 4: RSI no sobrecomprado
+            if rsi_5m >= 70:
+                failures.append(f"RSI overbought: {rsi_5m:.1f} >= 70")
+
+        # ── CHECK 11: BLUE_MICRO_PULLBACK (APEX AZUL - Descanso bajo EMA3) ──
+        if normalized_code == "BLUE_MICRO_PULLBACK":
+            apex_signal = str(context.get("apex_signal", ""))
+            ema3_5m  = float(context.get("ema_3_5m") or 0)
+            ema9_5m  = float(context.get("ema_9_5m") or 0)
+            ema20_5m = float(context.get("ema_20_5m") or 0)
+            rsi_5m   = float(context.get("rsi_5m") or 50.0)
+            close_price = float(context.get("close") or 0)
+            bb_upper = float(context.get("bb_upper") or 99999)
+
+            # Requisito 1: Solo para acciones APEX AZUL
+            if apex_signal != "STRONG_BUY_BLUE":
+                failures.append(f"Not APEX BLUE: signal={apex_signal}")
+
+            # Requisito 2: CLOSE < EMA3 (micro retroceso)
+            if ema3_5m > 0 and close_price >= ema3_5m:
+                failures.append(f"No micro pullback: CLOSE={close_price:.2f} >= EMA3_5m={ema3_5m:.2f}")
+
+            # Requisito 3: CLOSE < BB_UPPER (dentro de la banda)
+            if close_price >= bb_upper:
+                failures.append(f"Above BB Upper: CLOSE={close_price:.2f} >= BB_UPPER={bb_upper:.2f}")
+
+            # Requisito 4: Tendencia intacta EMA3 > EMA9 > EMA20
+            if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                if not (ema3_5m > ema9_5m > ema20_5m):
+                    failures.append(
+                        f"Trend broken: EMA3={ema3_5m:.2f} EMA9={ema9_5m:.2f} EMA20={ema20_5m:.2f}"
+                    )
+
+            # Requisito 5: RSI no sobrecomprado
+            if rsi_5m >= 70:
+                failures.append(f"RSI overbought: {rsi_5m:.1f} >= 70")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

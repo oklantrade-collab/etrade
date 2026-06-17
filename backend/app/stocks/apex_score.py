@@ -734,8 +734,93 @@ def calculate_apex_score(
     # ── APEX Score 1D (fundamental importa) ───
     apex_1d = sum(blocks[k] * w_1d[k] for k in blocks)
 
-    apex_4h = round(max(5, min(95, apex_4h)), 1)
-    apex_1d = round(max(5, min(95, apex_1d)), 1)
+    # ── BONO TENDENCIA MACRO (Buy the Dip) ────────
+    macro_bonus = 0
+    has_macro_bonus = False
+    if df_daily is not None and len(df_daily) >= 200:
+        try:
+            c_col_1d = 'Close' if 'Close' in df_daily.columns else 'close'
+            c_1d = pd.to_numeric(df_daily[c_col_1d], errors='coerce').dropna()
+            if len(c_1d) >= 200:
+                ema3_1d = float(c_1d.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_1d = float(c_1d.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_1d = float(c_1d.ewm(span=20, adjust=False).mean().iloc[-1])
+                ema50_1d = float(c_1d.ewm(span=50, adjust=False).mean().iloc[-1])
+                ema200_1d = float(c_1d.ewm(span=200, adjust=False).mean().iloc[-1])
+                
+                if (ema50_1d > ema200_1d) and (ema3_1d > ema9_1d) and (ema9_1d > ema20_1d):
+                    macro_bonus = 10
+                    has_macro_bonus = True
+        except Exception:
+            pass
+
+    # ── NUEVOS FILTROS DE EXCLUSION Y PRIORIDAD ────────
+    has_gap = False
+    is_low_volume_micro = False
+    is_horizontal = False
+    is_blue_priority = False
+    
+    if df_daily is not None and len(df_daily) >= 14:
+        try:
+            o_col = 'Open' if 'Open' in df_daily.columns else 'open'
+            h_col = 'High' if 'High' in df_daily.columns else 'high'
+            l_col = 'Low' if 'Low' in df_daily.columns else 'low'
+            c_col = 'Close' if 'Close' in df_daily.columns else 'close'
+            v_col = 'Volume' if 'Volume' in df_daily.columns else 'volume'
+            
+            cur_open = float(df_daily.iloc[-1][o_col])
+            prev_close = float(df_daily.iloc[-2][c_col])
+            cur_close = float(df_daily.iloc[-1][c_col])
+            cur_vol = float(df_daily.iloc[-1][v_col])
+            
+            # Filtro 1: Gaps (>2.5%)
+            if prev_close > 0:
+                gap_pct = abs(cur_open - prev_close) / prev_close
+                if gap_pct > 0.025:
+                    has_gap = True
+                    
+            # Filtro 2: Micro Velas y Bajo Volumen USD
+            usd_volume = cur_vol * cur_close
+            candle_body_pct = abs(cur_close - cur_open) / cur_open if cur_open > 0 else 0
+            if usd_volume < 500000 and candle_body_pct < 0.005:
+                is_low_volume_micro = True
+                
+            # Filtro 3: Comportamiento Horizontal
+            recent_closes = pd.to_numeric(df_daily[c_col].tail(14), errors='coerce').dropna()
+            std_pct = (recent_closes.std() / recent_closes.mean()) if recent_closes.mean() > 0 else 1
+            if std_pct < 0.005:
+                is_horizontal = True
+                
+            # Regla Azul: EMA3 > EMA9 > EMA20
+            c_1d = pd.to_numeric(df_daily[c_col], errors='coerce').dropna()
+            ema3_1d = float(c_1d.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_1d = float(c_1d.ewm(span=9, adjust=False).mean().iloc[-1])
+            ema20_1d = float(c_1d.ewm(span=20, adjust=False).mean().iloc[-1])
+            
+            if ema3_1d > ema9_1d and ema9_1d > ema20_1d:
+                is_blue_priority = True
+
+        except Exception as e:
+            pass
+
+    apex_4h += macro_bonus
+    apex_1d += macro_bonus
+    
+    # Apply penalties
+    if has_gap:
+        apex_4h *= 0.5
+        apex_1d *= 0.5
+        
+    if is_low_volume_micro or is_horizontal:
+        apex_4h = min(apex_4h, 40.0)
+        apex_1d = min(apex_1d, 40.0)
+        
+    if is_blue_priority and not (has_gap or is_low_volume_micro or is_horizontal):
+        apex_4h += 25
+        apex_1d += 25
+
+    apex_4h = round(max(5, min(99.0 if is_blue_priority else 95.0, apex_4h)), 1)
+    apex_1d = round(max(5, min(99.0 if is_blue_priority else 95.0, apex_1d)), 1)
 
     # ── Retorno esperado ──────────────────────
     atr_pct = atr / price * 100 if price > 0 else 2
@@ -781,7 +866,9 @@ def calculate_apex_score(
     }
 
     # ── Clasificación del score ────────────────
-    if apex_4h >= 75:
+    if is_blue_priority and not (has_gap or is_low_volume_micro or is_horizontal):
+        signal, color, emoji = 'STRONG_BUY_BLUE', '#4169E1', '🔵🔵'
+    elif apex_4h >= 75:
         signal, color, emoji = 'STRONG_BUY', '#00C896', '🟢🟢'
     elif apex_4h >= 60:
         signal, color, emoji = 'BUY', '#4FC3F7', '🟢'
@@ -802,6 +889,7 @@ def calculate_apex_score(
         'price': price,
         'apex_score_4h': apex_4h,
         'apex_score_1d': apex_1d,
+        'has_macro_bonus': has_macro_bonus,
         'signal': signal,
         'color': color,
         'confidence': confidence,
@@ -811,6 +899,10 @@ def calculate_apex_score(
         'return_expected_1d': round(return_1d, 3),
         'scenarios': scenarios,
         'blocks': blocks,
+        'has_gap': has_gap,
+        'is_horizontal': is_horizontal,
+        'is_low_volume_micro': is_low_volume_micro,
+        'is_blue_priority': is_blue_priority,
         'regime_type': b4['regime_type'],
         'detail': {
             'b1': b1, 'b2': b2, 'b3': b3, 'b4': b4, 'b5': b5,

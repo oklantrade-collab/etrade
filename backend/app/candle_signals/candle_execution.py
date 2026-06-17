@@ -877,6 +877,32 @@ def execute_forex_signal(
         f"Fib Zone: {fib_zone:+d}"
     )
 
+    # ── GUARD #0: 15-minute Structural Trend Filter (Aa41) ──
+    try:
+        import pandas as pd
+        db_symbol = pair.replace("/", "").replace("-", "")
+        mc_res = sb.table("market_candles") \
+            .select("close") \
+            .eq("symbol", db_symbol) \
+            .eq("timeframe", "15m") \
+            .order("open_time", desc=True) \
+            .limit(20) \
+            .execute()
+        if mc_res.data and len(mc_res.data) >= 10:
+            closes = [float(r['close']) for r in reversed(mc_res.data)]
+            df_15m = pd.DataFrame({'close': closes})
+            ema3_15 = float(df_15m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_15 = float(df_15m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+            
+            if action == "BUY" and ema3_15 <= ema9_15:
+                log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: BUY {pair} | EMA3({ema3_15:.5f}) <= EMA9({ema9_15:.5f})")
+                return {"success": False, "reason": "15m_downtrend", "pair": pair}
+            elif action == "SELL" and ema3_15 >= ema9_15:
+                log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: SELL {pair} | EMA3({ema3_15:.5f}) >= EMA9({ema9_15:.5f})")
+                return {"success": False, "reason": "15m_uptrend", "pair": pair}
+    except Exception as e:
+        log_warning(MODULE, f"Could not verify 15m trend for {pair}: {e}")
+
     # ── GUARD #3: Anti-spam de señales Forex (Corrección #3) ──
     signal_check = check_signal_interval(pair, action)
     if not signal_check['allowed']:
@@ -951,7 +977,9 @@ def execute_forex_signal(
     risk_config = get_risk_config()
     max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
     
-    total_open_symbol = sb.table("forex_positions").select("id", count='exact').eq("symbol", pair).eq("status", "open").execute().count
+    db_symbol = pair.replace("/", "").replace("-", "")
+    res_count = sb.table("forex_positions").select("id", count='exact').eq("symbol", db_symbol).eq("status", "open").execute()
+    total_open_symbol = res_count.count if res_count.count is not None else len(res_count.data or [])
     
     if total_open_symbol >= max_per_symbol:
         log_warning(MODULE, f"🚫 LÍMITE ALCANZADO para {pair}: {total_open_symbol}/{max_per_symbol} posiciones.")
@@ -1515,9 +1543,9 @@ def execute_candle_signal(
         
         if pattern.action == "BUY":
             # 1. Short-Term Momentum Guard (EVITA ATRAPAR CUCHILLOS)
-            if ema_3 > 0 and ema_9 > 0 and ema_20 > 0 and ema_3 < ema_9 and ema_9 < ema_20:
+            if ema_3 > 0 and ema_9 > 0 and ema_3 < ema_9:
                 trend_blocked = True
-                trend_reason = f"Short-Term Downtrend Guard: EMA3({ema_3:.4f}) < EMA9({ema_9:.4f}) < EMA20({ema_20:.4f})"
+                trend_reason = f"Short-Term Downtrend Guard: EMA3({ema_3:.4f}) < EMA9({ema_9:.4f})"
             # 2. Macro Downtrend Guard
             elif ema_50 > 0 and ema_200 > 0 and ema_50 < ema_200 and mtf_score < -0.5:
                 trend_blocked = True
@@ -1525,9 +1553,9 @@ def execute_candle_signal(
                 
         elif pattern.action == "SELL":
             # 1. Short-Term Momentum Guard (EVITA VENDER EN SUBIDAS FUERTES)
-            if ema_3 > 0 and ema_9 > 0 and ema_20 > 0 and ema_3 > ema_9 and ema_9 > ema_20:
+            if ema_3 > 0 and ema_9 > 0 and ema_3 > ema_9:
                 trend_blocked = True
-                trend_reason = f"Short-Term Uptrend Guard: EMA3({ema_3:.4f}) > EMA9({ema_9:.4f}) > EMA20({ema_20:.4f})"
+                trend_reason = f"Short-Term Uptrend Guard: EMA3({ema_3:.4f}) > EMA9({ema_9:.4f})"
             # 2. Macro Uptrend Guard
             elif ema_50 > 0 and ema_200 > 0 and ema_50 > ema_200 and mtf_score > 0.5:
                 trend_blocked = True

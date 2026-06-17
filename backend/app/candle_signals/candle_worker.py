@@ -433,6 +433,15 @@ async def run_crypto_forex_cycle():
     cycle_start = time.time()
     log_info(MODULE, "═══ CANDLE SIGNAL CYCLE (Crypto + Forex) START ═══")
 
+    # ── Ejecutar salida parcial global por Exhaustion Bollinger (15m) ──
+    from app.strategy.bollinger_exhaustion import execute_market_bollinger_exhaustion
+    now = datetime.now(timezone.utc)
+    if now.minute % 15 < 5:  # Corre cada 5 mins, atrapamos la ejecución que cae en 00, 15, 30, 45
+        log_info(MODULE, "Evaluating 15m Bollinger Exhaustion for Crypto & Forex...")
+        await execute_market_bollinger_exhaustion("crypto")
+        if now.weekday() < 5:
+            await execute_market_bollinger_exhaustion("forex")
+
     crypto_detector = CandlePatternDetector(market="crypto")
     forex_detector = CandlePatternDetector(market="forex")
 
@@ -503,6 +512,13 @@ async def run_stocks_candle_cycle():
 
     cycle_start = time.time()
     log_info(MODULE, "═══ CANDLE SIGNAL CYCLE (Stocks) START ═══")
+
+    # ── Ejecutar salida parcial global por Exhaustion Bollinger (15m) ──
+    from app.strategy.bollinger_exhaustion import execute_market_bollinger_exhaustion
+    now = datetime.now(timezone.utc)
+    if now.minute % 15 < 3:  # Corre cada 2 mins, aseguramos que atrape el cierre de la vela de 15m
+        log_info(MODULE, "Evaluating 15m Bollinger Exhaustion for Stocks...")
+        await execute_market_bollinger_exhaustion("stocks")
 
     detector = CandlePatternDetector(market="stocks")
     tickers = await _get_stocks_watchlist()

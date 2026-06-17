@@ -1,349 +1,885 @@
 [
-  {
-    "rule_code": "Bb22",
-    "name": "Agotamiento upper_6",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "price_touched_upper_6"
-      },
-      {
-        "value": 40,
-        "operator": ">",
-        "indicator": "adx"
-      },
-      {
-        "value": "nivel_2_long",
-        "operator": "==",
-        "indicator": "ema20_phase"
-      },
-      {
-        "value": 0,
-        "operator": "<=",
-        "indicator": "ema50_angle"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "reversal_confirmation_short"
-      }
-    ],
-    "priority": 1,
-    "regime_allowed": [
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "Bb13",
-    "name": "EMA50\u2264basis+ADX+DI",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "ema4_below_basis"
-      },
-      {
-        "value": 20,
-        "operator": "<",
-        "indicator": "adx"
-      },
-      {
-        "value": [
-          "flat",
-          "nivel_1_short"
+    {
+        "rule_code": "Bb22",
+        "name": "Agotamiento upper_6",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
         ],
-        "operator": "in",
-        "indicator": "ema20_phase"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "di_cross_bearish"
-      },
-      {
-        "value": 0,
-        "operator": "<=",
-        "indicator": "ema20_angle"
-      }
-    ],
-    "priority": 2,
-    "regime_allowed": [
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "Bb21",
-    "name": "SHORT Bollinger lower (bajo riesgo)",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures",
-      "forex_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": 0,
-        "operator": "<=",
-        "indicator": "ema20_angle"
-      },
-      {
-        "value": "nivel_2_short",
-        "operator": "==",
-        "indicator": "ema20_phase"
-      },
-      {
-        "value": 10,
-        "operator": ">",
-        "indicator": "di_margin"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "close_above_lower"
-      }
-    ],
-    "priority": 3,
-    "regime_allowed": [
-      "bajo_riesgo",
-      "riesgo_medio",
-      "alto_riesgo"
-    ]
-  },
-  {
-    "rule_code": "Bb12",
-    "name": "EMA50 cruza basis\u2193",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "ema4_cross_below_basis"
-      }
-    ],
-    "priority": 1,
-    "regime_allowed": [
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "Bb23",
-    "name": "EMA50 cruza basis\u2193+EMA20",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "ema4_cross_below_basis"
-      },
-      {
-        "value": 0,
-        "operator": "<=",
-        "indicator": "ema20_angle"
-      }
-    ],
-    "priority": 2,
-    "regime_allowed": [
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "BbPullback",
-    "name": "Pullback a EMA3 SHORT",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures",
-      "forex_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "pullback_short"
-      },
-      {
-        "value": -3,
-        "operator": ">=",
-        "indicator": "fib_zone"
-      },
-      {
-        "value": 6,
-        "operator": "<=",
-        "indicator": "fib_zone"
-      },
-      {
-        "value": false,
-        "operator": "==",
-        "indicator": "strong_contratrend_short"
-      }
-    ],
-    "priority": 9,
-    "regime_allowed": [
-      "riesgo_alto",
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "BbHot",
-    "name": "HOT Momentum SHORT",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures",
-      "forex_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "fresh_cross_short"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "hot_mtf_ok_short"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "bb_expanding_or_mtf_short_or_top"
-      },
-      {
-        "value": -2,
-        "operator": ">=",
-        "indicator": "fib_zone"
-      },
-      {
-        "value": 6,
-        "operator": "<=",
-        "indicator": "fib_zone"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "sar_or_signal_short"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "adx_floor_ok"
-      },
-      {
-        "value": false,
-        "operator": "==",
-        "indicator": "strong_contratrend_short"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "rsi_ok_short"
-      },
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "not_in_floor"
-      },
-      {
-        "value": false,
-        "operator": "==",
-        "indicator": "ema_exhaustion"
-      }
-    ],
-    "priority": 10,
-    "regime_allowed": [
-      "riesgo_alto",
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "Bb41",
-    "name": "SHORT BB41: ANTIGRAVITY CANDLE SELL",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": true,
-        "operator": "==",
-        "indicator": "ema4_cross_below_basis"
-      }
-    ],
-    "priority": 1,
-    "regime_allowed": [
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  },
-  {
-    "rule_code": "Bb11",
-    "name": "SHORT ADX fuerte macro bajista",
-    "direction": "short",
-    "market_type": [
-      "crypto_spot",
-      "crypto_futures"
-    ],
-    "enabled": true,
-    "conditions": [
-      {
-        "value": 0,
-        "operator": "<=",
-        "indicator": "ema20_angle"
-      },
-      {
-        "value": 40,
-        "operator": ">",
-        "indicator": "adx"
-      },
-      {
-        "value": "nivel_2_short",
-        "operator": "==",
-        "indicator": "ema20_phase"
-      },
-      {
-        "value": 5,
-        "operator": ">",
-        "indicator": "di_margin"
-      }
-    ],
-    "priority": 3,
-    "regime_allowed": [
-      "riesgo_medio",
-      "bajo_riesgo"
-    ]
-  }
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "price_touched_upper_6"
+            },
+            {
+                "value": 40,
+                "operator": ">",
+                "indicator": "adx"
+            },
+            {
+                "value": "nivel_2_long",
+                "operator": "==",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": 0,
+                "operator": "<=",
+                "indicator": "ema50_angle"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "reversal_confirmation_short"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 1,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb22_Long",
+        "name": "Agotamiento upper_6",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "price_touched_lower_6"
+            },
+            {
+                "value": 40,
+                "operator": ">",
+                "indicator": "adx"
+            },
+            {
+                "value": "nivel_2_long",
+                "operator": "==",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": 0,
+                "operator": ">=",
+                "indicator": "ema50_angle"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "reversal_confirmation_long"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 1,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "Bb13",
+        "name": "EMA50\u2264basis+ADX+DI",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_below_basis"
+            },
+            {
+                "value": 20,
+                "operator": "<",
+                "indicator": "adx"
+            },
+            {
+                "value": [
+                    "flat",
+                    "nivel_1_short"
+                ],
+                "operator": "in",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "di_cross_bearish"
+            },
+            {
+                "value": 0,
+                "operator": "<=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 2,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb13_Long",
+        "name": "EMA50\u2264basis+ADX+DI",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_above_basis"
+            },
+            {
+                "value": 20,
+                "operator": "<",
+                "indicator": "adx"
+            },
+            {
+                "value": [
+                    "flat",
+                    "nivel_1_long"
+                ],
+                "operator": "in",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "di_cross_bullish"
+            },
+            {
+                "value": 0,
+                "operator": ">=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 2,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "Bb21",
+        "name": "SHORT Bollinger lower (bajo riesgo)",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures",
+            "forex_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": 0,
+                "operator": "<=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "value": "nivel_2_short",
+                "operator": "==",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": 10,
+                "operator": ">",
+                "indicator": "di_margin"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "close_above_lower"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 3,
+        "regime_allowed": [
+            "bajo_riesgo",
+            "riesgo_medio",
+            "alto_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb21_Long",
+        "name": "LONG Bollinger lower (bajo riesgo)",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures",
+            "forex_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": 0,
+                "operator": ">=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "value": "nivel_2_long",
+                "operator": "==",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": -10,
+                "operator": "<",
+                "indicator": "di_margin"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "close_above_upper"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 3,
+        "regime_allowed": [
+            "bajo_riesgo",
+            "riesgo_medio",
+            "alto_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "Bb12",
+        "name": "EMA50 cruza basis\u2193",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_cross_below_basis"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 1,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb12_Long",
+        "name": "EMA50 cruza basis\u2193",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_cross_above_basis"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 1,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "Bb23",
+        "name": "EMA50 cruza basis\u2193+EMA20",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_cross_below_basis"
+            },
+            {
+                "value": 0,
+                "operator": "<=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 2,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb23_Long",
+        "name": "EMA50 cruza basis\u2193+EMA20",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_cross_above_basis"
+            },
+            {
+                "value": 0,
+                "operator": ">=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 2,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "BbPullback",
+        "name": "Pullback a EMA3 SHORT",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures",
+            "forex_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "pullback_short"
+            },
+            {
+                "value": -3,
+                "operator": ">=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": 6,
+                "operator": "<=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": false,
+                "operator": "==",
+                "indicator": "strong_contratrend_short"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 9,
+        "regime_allowed": [
+            "riesgo_alto",
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "BbPullback_Long",
+        "name": "Pullback a EMA3 LONG",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures",
+            "forex_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "pullback_long"
+            },
+            {
+                "value": -3,
+                "operator": ">=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": 6,
+                "operator": "<=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": false,
+                "operator": "==",
+                "indicator": "strong_contratrend_long"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 9,
+        "regime_allowed": [
+            "riesgo_alto",
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "BbHot",
+        "name": "HOT Momentum SHORT",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures",
+            "forex_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "fresh_cross_short"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "hot_mtf_ok_short"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "bb_expanding_or_mtf_short_or_top"
+            },
+            {
+                "value": -2,
+                "operator": ">=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": 6,
+                "operator": "<=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "sar_or_signal_short"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "adx_floor_ok"
+            },
+            {
+                "value": false,
+                "operator": "==",
+                "indicator": "strong_contratrend_short"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "rsi_ok_short"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "not_in_floor"
+            },
+            {
+                "value": false,
+                "operator": "==",
+                "indicator": "ema_exhaustion"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 10,
+        "regime_allowed": [
+            "riesgo_alto",
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "BbHot_Long",
+        "name": "HOT Momentum LONG",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures",
+            "forex_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "fresh_cross_long"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "hot_mtf_ok_long"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "bb_expanding_or_mtf_long_or_bottom"
+            },
+            {
+                "value": -2,
+                "operator": ">=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": 6,
+                "operator": "<=",
+                "indicator": "fib_zone"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "sar_or_signal_long"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "adx_floor_ok"
+            },
+            {
+                "value": false,
+                "operator": "==",
+                "indicator": "strong_contratrend_long"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "rsi_ok_long"
+            },
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "not_in_ceiling"
+            },
+            {
+                "value": false,
+                "operator": "==",
+                "indicator": "ema_exhaustion"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 10,
+        "regime_allowed": [
+            "riesgo_alto",
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "Bb41",
+        "name": "SHORT BB41: ANTIGRAVITY CANDLE SELL",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_cross_below_basis"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 1,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb41_Long",
+        "name": "LONG BB41: ANTIGRAVITY CANDLE SELL",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": true,
+                "operator": "==",
+                "indicator": "ema4_cross_above_basis"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 1,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    },
+    {
+        "rule_code": "Bb11",
+        "name": "SHORT ADX fuerte macro bajista",
+        "direction": "short",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": 0,
+                "operator": "<=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "value": 40,
+                "operator": ">",
+                "indicator": "adx"
+            },
+            {
+                "value": "nivel_2_short",
+                "operator": "==",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": 5,
+                "operator": ">",
+                "indicator": "di_margin"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "short"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "short"
+            }
+        ],
+        "priority": 3,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ]
+    },
+    {
+        "rule_code": "Bb11_Long",
+        "name": "LONG ADX fuerte macro bajista",
+        "direction": "long",
+        "market_type": [
+            "crypto_spot",
+            "crypto_futures"
+        ],
+        "enabled": true,
+        "conditions": [
+            {
+                "value": 0,
+                "operator": ">=",
+                "indicator": "ema20_angle"
+            },
+            {
+                "value": 40,
+                "operator": ">",
+                "indicator": "adx"
+            },
+            {
+                "value": "nivel_2_long",
+                "operator": "==",
+                "indicator": "ema20_phase"
+            },
+            {
+                "value": -5,
+                "operator": "<",
+                "indicator": "di_margin"
+            },
+            {
+                "indicator": "mtf_4h_trend",
+                "operator": "==",
+                "value": "long"
+            },
+            {
+                "indicator": "mtf_1d_trend",
+                "operator": "==",
+                "value": "long"
+            }
+        ],
+        "priority": 3,
+        "regime_allowed": [
+            "riesgo_medio",
+            "bajo_riesgo"
+        ],
+        "id": 1000
+    }
 ]

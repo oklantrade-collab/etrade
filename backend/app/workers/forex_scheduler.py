@@ -783,6 +783,33 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 market_type   = 'forex_futures',
                 position      = position
             )
+            
+            # --- MARGIN CALL ALERT (Amenaza al Capital) ---
+            entry_p_margin = float(position.get('entry_price') or position.get('avg_entry_price') or 0)
+            if entry_p_margin > 0:
+                is_long_margin = (position.get('side') or 'long').lower() in ['long', 'buy']
+                qty_margin = float(position.get('size') or position.get('lots') or 0)
+                # Aproximación USD (En Forex real se debería usar pip_value * pips, pero esto es aproximado)
+                # Usaremos la misma lógica básica de pnl_pct y lo proyectamos si es posible, o pnl raw.
+                if 'total_pnl_usd' in position:
+                    upnl_usd_margin = float(position['total_pnl_usd'] or 0)
+                else:
+                    # Alternativa simple: usar el %
+                    upnl_pct_margin = (current_price - entry_p_margin) / entry_p_margin * 100 if is_long_margin else (entry_p_margin - current_price) / entry_p_margin * 100
+                    # Asumimos que margin_call_alert_pct ya lidia con el ratio sobre la cuenta. 
+                    # Pero check_margin_call espera pnl_usd. Lo pasamos crudo.
+                    from app.core.pnl_calculator import calculate_pnl
+                    upnl_usd_margin, _ = calculate_pnl('forex', position.get('side', 'long'), entry_p_margin, current_price, qty_margin, symbol, sb)
+                
+                from app.core.position_monitor import check_margin_call_alert
+                await check_margin_call_alert(
+                    symbol  = symbol,
+                    pnl_usd = upnl_usd_margin,
+                    sb      = sb,
+                    pos_id  = str(position.get('id', ''))
+                )
+
+
 
             # 4. Smart Exit: SAR Phase Change
             if sar_changed_at:
@@ -1204,10 +1231,22 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                         log_info('STATE_MACHINE_FX', f"{symbol}: Bloqueado - {sm_check['reason']}")
                     else:
                         if sm_check.get('is_flip'):
-                            log_info('FLIP_FX', f"{symbol}: FLIP {signal['direction']} - Cerrando opuestas")
+                            log_info('FLIP_FX', f"{symbol}: FLIP {signal['direction']} - Evaluando posiciones opuestas")
                             existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
                             for p in existing_positions:
                                 if p.get('side', '').lower() != signal['direction'].lower():
+                                    entry = float(p.get('avg_entry_price') or p.get('entry_price') or current_price)
+                                    pnl_pct = 0.0
+                                    if entry > 0:
+                                        if p.get('side', '').lower() in ('long', 'buy'):
+                                            pnl_pct = (current_price - entry) / entry * 100
+                                        else:
+                                            pnl_pct = (entry - current_price) / entry * 100
+                                            
+                                    if pnl_pct < -1.0:
+                                        log_info('FLIP_FX', f"[{symbol}] Flip abortado para esta posición: PNL {pnl_pct:.2f}% < -1.0%. Se retiene para EREP.")
+                                        continue
+
                                     try:
                                         from app.core.position_monitor import _execute_paper_close
                                         await _execute_paper_close(p, current_price, f"flip_{signal['direction']}_fx", sb)

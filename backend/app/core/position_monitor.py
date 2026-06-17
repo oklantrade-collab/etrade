@@ -198,6 +198,58 @@ async def check_sl_proximity_alert(
         log_info(MODULE, f"SL Danger Zone RECOVERY for {norm_symbol}: {distance_pct:.1f}%")
         return
 
+async def check_margin_call_alert(
+    symbol: str,
+    pnl_usd: float,
+    sb,
+    pos_id: str = ""
+) -> None:
+    """Verifica si la posición amenaza el capital total de la cuenta."""
+    try:
+        # Obtener margin_call_alert_pct desde trading_config
+        config_res = sb.table('trading_config').select('*').eq('id', 1).maybe_single().execute()
+        config = config_res.data or {}
+        
+        # Default 20% si no existe
+        alert_pct = float(config.get('margin_call_alert_pct', 20.0))
+        
+        regime_params = config.get('regime_params') or {}
+        # Obtener el balance del broker (usaremos el de crypto o forex según haya disponible)
+        balance = float(regime_params.get('broker_balance') or regime_params.get('broker_balance_forex') or 1000.0)
+        
+        if balance <= 0:
+            return
+            
+        # PNL USD es positivo, no hay amenaza
+        if pnl_usd >= 0:
+            return
+            
+        loss_pct_of_capital = (abs(pnl_usd) / balance) * 100
+        
+        # Evitar spam: solo enviar si cruzó el umbral y no se ha enviado recientemente
+        if not hasattr(BOT_STATE, 'margin_alerts'):
+            BOT_STATE.margin_alerts = {}
+            
+        norm_symbol = symbol.replace("/", "").upper()
+        alert_key = f"{norm_symbol}_{pos_id}" if pos_id else norm_symbol
+        last_alert = BOT_STATE.margin_alerts.get(alert_key, 0)
+        
+        # Alerta cada 5% adicional
+        if loss_pct_of_capital >= alert_pct and (loss_pct_of_capital - last_alert) >= 5.0:
+            from app.workers.alerts_service import send_telegram_message
+            await send_telegram_message(
+                f"🚨 ALERTA URGENTE (MARGIN CALL) 🚨\n"
+                f"La posición en {symbol} está amenazando tu capital.\n"
+                f"Pérdida Flotante: -${abs(pnl_usd):.2f}\n"
+                f"Representa: {loss_pct_of_capital:.2f}% de tu balance total (${balance:.2f}).\n"
+                f"El límite de seguridad es {alert_pct}%.\n"
+                f"Revisa el margen disponible de inmediato."
+            )
+            BOT_STATE.margin_alerts[alert_key] = loss_pct_of_capital
+            
+    except Exception as e:
+        log_error(MODULE, f"Error en check_margin_call_alert para {symbol}: {e}")
+
 # Cache en memoria para estados de protección
 _protection_cache = {}
 
@@ -936,6 +988,20 @@ async def check_open_positions_5m(
                     escalation_drop_pct  = 1.0,
                     pos_id               = str(pos.get('id', ''))
                 )
+                
+                # 5b. MARGIN CALL ALERT (Amenaza al Capital)
+                entry_p_margin = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+                if entry_p_margin > 0:
+                    is_long_margin = (pos.get('side') or 'long').lower() in ['long', 'buy']
+                    qty_margin = float(pos.get('size') or 0)
+                    upnl_usd_margin = (price - entry_p_margin) * qty_margin if is_long_margin else (entry_p_margin - price) * qty_margin
+                    
+                    await check_margin_call_alert(
+                        symbol  = norm_symbol,
+                        pnl_usd = upnl_usd_margin,
+                        sb      = supabase,
+                        pos_id  = str(pos.get('id', ''))
+                    )
 
                 # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
                 # Evalúa si la tendencia giró para salir antes del SL o asegurar TP.

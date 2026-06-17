@@ -217,12 +217,89 @@ class PositionMonitor:
                     highest = current_price
                     sb.table("stocks_positions").update({"highest_price_reached": highest}).eq("id", trade["id"]).execute()
                 
-                # Ajuste: Retroceso de 2.5% (antes 1.5%) y Profit Mínimo de 1% (antes > 0)
+                # Ajuste: Retroceso de 1.5% y Profit Mínimo de 0.8% para Scalping
                 pullback = ((highest - current_price) / highest) * 100
-                if pullback >= 2.5 and pnl_pct >= 1.0:
+                if pullback >= 1.5 and pnl_pct >= 0.8:
                     log_warning(MODULE, f"⚡ FLASH EXIT: {ticker} retroceso de {pullback:.1f}% detectado con profit de {pnl_pct:.2f}%. Cerrando.")
                     await self._close_position(trade, current_price, "hot_pullback_exit")
                     return
+
+            # ── NUEVO: BLUE PROACTIVE EXIT (Salidas Rápidas 5m para APEX AZUL) ──
+            rule_code_pos = str(trade.get("rule_code", "") or trade.get("strategy", "") or "")
+            if rule_code_pos.startswith("BLUE_"):
+                try:
+                    hist_5m_blue = t_obj.history(period="2d", interval="5m")
+
+                    if not hist_5m_blue.empty and len(hist_5m_blue) >= 20:
+                        import pandas as pd
+                        last_5m = hist_5m_blue.iloc[-1]
+                        close_5m = float(last_5m['Close'])
+                        high_5m = float(last_5m['High'])
+
+                        # EMAs 5m
+                        c5 = hist_5m_blue['Close'].astype(float)
+                        ema3_5m = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
+                        ema9_5m = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
+
+                        # RSI 5m
+                        delta = c5.diff()
+                        gain = delta.clip(lower=0).rolling(14).mean()
+                        loss = (-delta.clip(upper=0)).rolling(14).mean()
+                        rs = gain / loss.replace(0, 1e-10)
+                        rsi_5m = float((100 - 100 / (1 + rs)).iloc[-1])
+
+                        # Bollinger 5m
+                        sma20_5m = float(c5.rolling(20).mean().iloc[-1])
+                        std20_5m = float(c5.rolling(20).std().iloc[-1])
+                        bb_upper_5m = sma20_5m + 2 * std20_5m
+
+                        # Fibonacci zone 5m
+                        atr_5m = float((hist_5m_blue['High'] - hist_5m_blue['Low']).rolling(14).mean().iloc[-1])
+                        fib_zone_5m = calculate_fibonacci_zone(current_price, sma20_5m, atr_5m)
+
+                        # Señales externas
+                        pine_sig = str(snap_val.get('pinescript_signal', '') or '').upper()
+                        sipv_15m = str(snap_val.get('sipv_signal_15m', '') or snap_val.get('sipv_signal', '') or '')
+
+                        exit_reason = None
+
+                        # A. HIGH >= UPPER_6 (Fibonacci zona extrema)
+                        if fib_zone_5m >= 6:
+                            exit_reason = f"BLUE_EXIT_UPPER6: Fib zone {fib_zone_5m} >= 6 (Overextended)"
+
+                        # B. RSI_5m >= 80 (Agotamiento)
+                        elif rsi_5m >= 80:
+                            exit_reason = f"BLUE_EXIT_RSI80: RSI_5m={rsi_5m:.1f} >= 80 (Exhaustion)"
+
+                        # C. SIPV 15m Reversión Bajista
+                        elif 'revers' in sipv_15m.lower() and 'bajist' in sipv_15m.lower():
+                            exit_reason = f"BLUE_EXIT_SIPV_REV: SIPV_15m={sipv_15m}"
+
+                        # D. Pine SELL + EMA3 < EMA9
+                        elif pine_sig == 'SELL' and ema3_5m < ema9_5m:
+                            exit_reason = f"BLUE_EXIT_PINE_EMA: SELL + EMA3={ema3_5m:.2f} < EMA9={ema9_5m:.2f}"
+
+                        # E. Pine SELL + HIGH >= BB_UPPER
+                        elif pine_sig == 'SELL' and high_5m >= bb_upper_5m:
+                            exit_reason = f"BLUE_EXIT_PINE_BB: SELL + HIGH={high_5m:.2f} >= BB={bb_upper_5m:.2f}"
+
+                        # F. Pine SELL + CLOSE < EMA3
+                        elif pine_sig == 'SELL' and close_5m < ema3_5m:
+                            exit_reason = f"BLUE_EXIT_PINE_EMA3: SELL + CLOSE={close_5m:.2f} < EMA3={ema3_5m:.2f}"
+
+                        if exit_reason:
+                            log_warning(MODULE, f"🔵 BLUE EXIT: {ticker} @ ${current_price:.2f} | {exit_reason}")
+                            await self._close_position(trade, current_price, exit_reason.split(":")[0])
+                            from app.core.telegram_notifier import send_telegram
+                            await send_telegram(
+                                f'🔵 CIERRE BLUE EXIT [{ticker}]\n'
+                                f'P&L: {pnl_pct:+.2f}%\n'
+                                f'Razón: {exit_reason}'
+                            )
+                            return
+
+                except Exception as blue_e:
+                    log_error(MODULE, f"Error en BLUE EXIT {ticker}: {blue_e}")
 
             # ── NUEVO: Adaptive TP v2 (Stocks) ──
             try:

@@ -19,15 +19,15 @@ from app.core.logger import log_info, log_error
 # ── Configuración por mercado ─────────────────
 PROTECTION_CONFIG = {
     'crypto_futures': {
-        'be_trigger_pct':    0.006,  # +0.6%
-        'be_buffer_pct':     0.001, # +0.1%
+        'be_trigger_pct':    0.012,  # +1.2%
+        'be_buffer_pct':     0.002, # +0.2%
         'trailing_levels': [
             # (trigger_pct, new_sl_pct)
-            (0.003,  0.0005),  # +0.3% → SL a +0.05%
-            (0.006,  0.002),   # +0.6% → SL a +0.2%
-            (0.010,  0.005),   # +1.0% → SL a +0.5%
-            (0.015,  0.008),   # +1.5% → SL a +0.8%
-            (0.025,  0.015),   # +2.5% → SL a +1.5%
+            (0.010,  0.002),   # +1.0% → SL a +0.2%
+            (0.020,  0.008),   # +2.0% → SL a +0.8%
+            (0.035,  0.015),   # +3.5% → SL a +1.5%
+            (0.050,  0.025),   # +5.0% → SL a +2.5%
+            (0.080,  0.040),   # +8.0% → SL a +4.0%
         ],
         'min_time_before_inverse_close': 2,
         # ciclos de 5m = 10 minutos

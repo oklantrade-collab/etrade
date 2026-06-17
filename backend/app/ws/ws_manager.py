@@ -188,8 +188,24 @@ class WebSocketManager:
                     if peak > 0:
                         drop_from_peak = ((peak - price) / peak * 100) if is_long else ((price - peak) / peak * 100)
                         if drop_from_peak >= 3.0:
-                            log_warning(MODULE, f"SHARP DROP for {symbol}! Price dropped {drop_from_peak:.2f}% from peak {peak}. Closing...")
-                            await _execute_paper_close(pos, price, 'sharp_drop_ws', sb)
+                            log_warning(MODULE, f"SHARP DROP for {symbol}! Price dropped {drop_from_peak:.2f}% from peak {peak}. Routing to EREP Phase 1...")
+                            from app.core.crypto_symbols import resolve_crypto_position_quantity
+                            qty = resolve_crypto_position_quantity(sb, pos)
+                            
+                            try:
+                                sb.table('positions').update({
+                                    'erep_phase': 1,
+                                    'erep_p1_price': entry,
+                                    'erep_q1': qty,
+                                    'erep_market_type': 'crypto_futures',
+                                }).eq('id', pos['id']).execute()
+                                
+                                pos['erep_phase'] = 1
+                                pos['erep_p1_price'] = entry
+                                pos['erep_q1'] = qty
+                                pos['erep_market_type'] = 'crypto_futures'
+                            except Exception as db_err:
+                                log_error(MODULE, f"Error routing {symbol} to EREP Phase 1 on Sharp Drop: {db_err}")
                             continue
 
         # --- 2. ATR SPIKE MONITORING (Existing) ---

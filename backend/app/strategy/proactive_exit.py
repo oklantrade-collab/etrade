@@ -383,40 +383,26 @@ def evaluate_proactive_exit(
             'pnl':          pnl,
             'urgency':      'normal'
         }
-
     # ── NUEVO: Cierre Preventivo por Reversión de Tendencia de EMAs (AaTRC / BbTRC) ──
     # Para evitar pérdidas completas por Stop Loss físico (emergency_sl_ws).
-    # Evaluamos en la temporalidad de 15m (que es el gráfico principal para scalping/swing).
+    # Evaluamos en la temporalidad de 5m (modificado a petición del usuario).
     try:
         from app.core.memory_store import MEMORY_STORE
-        df_15m = MEMORY_STORE.get(position['symbol'], {}).get('15m', {}).get('df')
-        if df_15m is not None and len(df_15m) >= 2:
-            last_bar = df_15m.iloc[-1]
+        df_5m = MEMORY_STORE.get(position['symbol'], {}).get('5m', {}).get('df')
+        if df_5m is not None and len(df_5m) >= 2:
+            last_bar = df_5m.iloc[-1]
             
             # Obtener EMAs de la vela más reciente
             ema3 = safe_float(last_bar.get('ema_3', last_bar.get('ema1')))
             ema9 = safe_float(last_bar.get('ema_9', last_bar.get('ema2')))
-            ema20 = safe_float(last_bar.get('ema_20', last_bar.get('ema3')))
-            adx = safe_float(last_bar.get('adx_14', last_bar.get('adx', 25)))
             
-            if ema3 > 0 and ema9 > 0 and ema20 > 0:
-                is_trending = adx > 25
+            if ema3 > 0 and ema9 > 0:
+                long_cut = ema3 < ema9
+                short_cut = ema3 > ema9
+                cut_type = "Fast (EMA3/9 en 5m)"
                 
-                # Determinamos la condición según la fuerza de tendencia
-                if is_trending:
-                    # En tendencia, corte rápido (EMA3 vs EMA9)
-                    long_cut = ema3 < ema9
-                    short_cut = ema3 > ema9
-                    cut_type = "Fast (EMA3/9)"
-                else:
-                    # En rango/lateral, corte más conservador y robusto (EMA9 vs EMA20)
-                    long_cut = ema9 < ema20
-                    short_cut = ema9 > ema20
-                    cut_type = "Stable (EMA9/20)"
-                
-                # Solo cerramos preventivamente si la posición está en pérdida y la tendencia es adversa
-                # para evitar tragarse el stop loss completo.
-                if pnl['pnl_pct'] < -0.15: # Solo si la pérdida supera el -0.15% (evita comisiones en micro-ruido)
+                # Solo cerramos preventivamente si la posición está en pérdida
+                if pnl['pnl_pct'] <= -0.20: # Solo si la pérdida supera el -0.20%
                     if is_long and long_cut:
                         return {
                             'should_close': True,
@@ -435,6 +421,7 @@ def evaluate_proactive_exit(
                         }
     except Exception as trc_e:
         log_error(MODULE, f"Error en protección EMA TRC: {trc_e}")
+
 
     # ── Calcular P&L actual ───────────────────
     pnl = calculate_position_pnl(position, current_price, market_type)
