@@ -36,6 +36,7 @@ export default function ForexPositions() {
   }, [])
   const ITEMS_PER_PAGE = 10
   const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState<string>('')
   const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
   
   useEffect(() => {
@@ -258,6 +259,14 @@ export default function ForexPositions() {
                                       title="Ver Gráfico"
                                     >
                                        <span className="text-[0.6rem] font-black">📈</span>
+                                    </button>
+
+                                    <button 
+                                      onClick={() => setSelectedPosition(pos)}
+                                      className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500 hover:bg-blue-500 hover:text-white transition-all shadow-lg shadow-blue-500/10 group-hover:scale-110"
+                                      title="Información Detallada"
+                                    >
+                                       <span className="text-[0.6rem] font-black">ℹ️</span>
                                     </button>
 
                                     <button 
@@ -526,7 +535,7 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
       "autosize": true,
       "symbol": getFxtvSymbol(symbol),
       "interval": "15",
-      "timezone": "America/Lima",
+      "timezone": tvTimezone,
       "theme": "dark",
       "style": "1",
       "locale": "en",
@@ -596,6 +605,7 @@ function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }
 
 function TransactionModal({ position, onClose }: { position: any, onClose: () => void }) {
   const isLong = position.side.toLowerCase() === 'long' || position.side.toLowerCase() === 'buy';
+  const isOpen = !position.closed_at && position.pnl_usd === undefined;
   const exitPrice = position.exit_price || position.close_price || position.current_price || position.entry_price;
   const pnl = parseFloat(position.pnl_usd || position.realized_pnl || '0');
   const size = position.lots || position.size || 0;
@@ -637,21 +647,21 @@ function TransactionModal({ position, onClose }: { position: any, onClose: () =>
           <hr className="border-white/5 my-2" />
           <div className="flex justify-between">
             <span className="text-slate-500">Estrategia Cierre:</span>
-            <span className="font-bold text-white">{position.close_reason || 'N/A'}</span>
+            <span className="font-bold text-white">{isOpen ? 'En Proceso' : (position.close_reason || 'N/A')}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-slate-500">Fecha Cierre:</span>
-            <span>{formatDateInTimezone(position.closed_at || position.opened_at, 'date')} {formatDateInTimezone(position.closed_at || position.opened_at, 'time')}</span>
+            <span>{isOpen ? '---' : `${formatDateInTimezone(position.closed_at || position.opened_at, 'date')} ${formatDateInTimezone(position.closed_at || position.opened_at, 'time')}`}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-slate-500">Precio Cierre:</span>
-            <span className="font-mono">${parseFloat(exitPrice).toFixed(5)}</span>
+            <span className="font-mono">{isOpen ? '---' : `$${parseFloat(exitPrice).toFixed(5)}`}</span>
           </div>
           
           <div className="mt-4 p-4 rounded-xl bg-white/5 flex justify-between items-center border border-white/5">
             <span className="font-bold text-slate-400">PNL Final:</span>
             <span className={`text-xl font-black ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+              {isOpen ? '---' : `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`}
             </span>
           </div>
         </div>
