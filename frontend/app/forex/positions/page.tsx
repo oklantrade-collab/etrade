@@ -262,7 +262,7 @@ export default function ForexPositions() {
                                     </button>
 
                                     <button 
-                                      onClick={() => setSelectedPosition(pos)}
+                                      onClick={() => setSelectedPosition({ ...pos, isOpen: true, currentPnl: pnl.usd, currentPrice: curPrice })}
                                       className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500 hover:bg-blue-500 hover:text-white transition-all shadow-lg shadow-blue-500/10 group-hover:scale-110"
                                       title="Información Detallada"
                                     >
@@ -605,9 +605,9 @@ function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }
 
 function TransactionModal({ position, onClose }: { position: any, onClose: () => void }) {
   const isLong = position.side.toLowerCase() === 'long' || position.side.toLowerCase() === 'buy';
-  const isOpen = !position.closed_at && position.pnl_usd === undefined;
-  const exitPrice = position.exit_price || position.close_price || position.current_price || position.entry_price;
-  const pnl = parseFloat(position.pnl_usd || position.realized_pnl || '0');
+  const isOpen = position.isOpen || false;
+  const exitPrice = isOpen ? position.currentPrice : (position.exit_price || position.close_price || position.current_price || position.entry_price);
+  const pnl = isOpen ? position.currentPnl : parseFloat(position.pnl_usd || position.realized_pnl || '0');
   const size = position.lots || position.size || 0;
   
   return (
@@ -659,9 +659,9 @@ function TransactionModal({ position, onClose }: { position: any, onClose: () =>
           </div>
           
           <div className="mt-4 p-4 rounded-xl bg-white/5 flex justify-between items-center border border-white/5">
-            <span className="font-bold text-slate-400">PNL Final:</span>
+            <span className="font-bold text-slate-400">{isOpen ? 'PNL Flotante:' : 'PNL Final:'}</span>
             <span className={`text-xl font-black ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {isOpen ? '---' : `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`}
+              {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
             </span>
           </div>
         </div>
