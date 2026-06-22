@@ -524,11 +524,11 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
     
     // Mapeo de símbolos para Forex
     const getFxtvSymbol = (s: string) => {
-        if (s.includes('XAU')) return `SAXO:XAUUSD`;
-        if (s.includes('JPY')) return `FX:USDJPY`;
-        if (s.includes('EUR')) return `FX:EURUSD`;
-        if (s.includes('GBP')) return `FX:GBPUSD`;
-        return `FX:${s}`;
+        if (s.includes('XAU')) return `ICMARKETS:XAUUSD`;
+        if (s.includes('JPY')) return `ICMARKETS:USDJPY`;
+        if (s.includes('EUR')) return `ICMARKETS:EURUSD`;
+        if (s.includes('GBP')) return `ICMARKETS:GBPUSD`;
+        return `ICMARKETS:${s}`;
     };
 
     script.innerHTML = JSON.stringify({

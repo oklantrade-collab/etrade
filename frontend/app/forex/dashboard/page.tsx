@@ -401,11 +401,15 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
     script.async = true;
     script.onload = () => {
       if ((window as any).TradingView && containerRef.current) {
+        const tvTimezone = typeof window !== "undefined" ? (localStorage.getItem("app_timezone") || "America/Lima") : "America/Lima";
+
+        const tvSymbol = symbol.includes(":") ? symbol : `ICMARKETS:${symbol}`;
+
         new (window as any).TradingView.widget({
           "autosize": true,
-          "symbol": symbol,
+          "symbol": tvSymbol,
           "interval": "15",
-          "timezone": "America/Lima",
+          "timezone": tvTimezone,
           "theme": "dark",
           "style": "1",
           "locale": "es",
