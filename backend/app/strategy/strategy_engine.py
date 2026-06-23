@@ -229,9 +229,59 @@ class StrategyEngine:
             if ema3_5m:
                 ema3_open_up_5m = ((low_5m < ema3_5m and high_5m > ema3_5m) or (open_5m > ema3_5m))
 
+        # ── 1H EMAs ──
+        ema3_above_ema9_1h = False
+        ema3_below_ema9_1h = False
+        symbol = snap.get('symbol', '')
+        if symbol:
+            df_1h = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
+            if df_1h is not None and not df_1h.empty:
+                last_1h = df_1h.iloc[-1]
+                ema3_1h = safe_float(last_1h.get('ema_3', last_1h.get('ema1')))
+                ema9_1h = safe_float(last_1h.get('ema_9', last_1h.get('ema2')))
+                if ema3_1h > 0 and ema9_1h > 0:
+                    ema3_above_ema9_1h = ema3_1h > ema9_1h
+                    ema3_below_ema9_1h = ema3_1h < ema9_1h
+
+        # ── Aa13 & Bb13 Custom Variables ──
+        bb_lower_ascending_15m = False
+        bb_upper_descending_15m = False
+        high_above_ema20_15m = False
+        ema20_below_ema50_15m = False
+        ema9_below_ema20_15m = False
+
+        if df_15m is not None and len(df_15m) >= 3:
+            # BB Lower Ascending
+            b_l_0 = safe_float(df_15m['lower_2'].iloc[-1] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series()).iloc[-1] if 'bb_lower' in df_15m.columns else 0)
+            b_l_1 = safe_float(df_15m['lower_2'].iloc[-2] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series()).iloc[-2] if 'bb_lower' in df_15m.columns else 0)
+            b_l_2 = safe_float(df_15m['lower_2'].iloc[-3] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series()).iloc[-3] if 'bb_lower' in df_15m.columns else 0)
+            if b_l_0 > b_l_1 and b_l_1 > b_l_2 and b_l_2 > 0:
+                bb_lower_ascending_15m = True
+
+            # BB Upper Descending
+            b_u_0 = safe_float(df_15m['upper_2'].iloc[-1] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-1] if 'bb_upper' in df_15m.columns else 0)
+            b_u_1 = safe_float(df_15m['upper_2'].iloc[-2] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-2] if 'bb_upper' in df_15m.columns else 0)
+            b_u_2 = safe_float(df_15m['upper_2'].iloc[-3] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-3] if 'bb_upper' in df_15m.columns else 0)
+            if b_u_0 < b_u_1 and b_u_1 < b_u_2 and b_u_0 > 0:
+                bb_upper_descending_15m = True
+
+            # EMAs and High
+            ema9_15m = safe_float(last_15m.get('ema_9') if last_15m.get('ema_9') is not None else last_15m.get('ema9'))
+            ema20_15m = safe_float(last_15m.get('ema_20') if last_15m.get('ema_20') is not None else last_15m.get('ema20'))
+            ema50_15m = safe_float(last_15m.get('ema_50') if last_15m.get('ema_50') is not None else last_15m.get('ema50'))
+            
+            if ema20_15m and ema50_15m and ema20_15m < ema50_15m:
+                ema20_below_ema50_15m = True
+                
+            if ema9_15m and ema20_15m and ema9_15m < ema20_15m:
+                ema9_below_ema20_15m = True
+            
+            if ema20_15m and high_15m >= ema20_15m:
+                high_above_ema20_15m = True
+
         return {
             # Precio
-            'symbol':            str(snap.get('symbol', '')),
+            'symbol':            str(symbol),
             'price':             safe_float(snap.get('price')),
             'dist_basis_pct':    safe_float(snap.get('dist_basis_pct')),
             # ADX
@@ -254,6 +304,9 @@ class StrategyEngine:
             'ema9_angle_5m':     safe_float(last_5m.get('ema9_angle', 0.0)),
             'ema20_angle_5m':    safe_float(last_5m.get('ema20_angle', 0.0)),
             
+            # EMAs 1h
+            'ema3_above_ema9_1h': ema3_above_ema9_1h,
+            'ema3_below_ema9_1h': ema3_below_ema9_1h,
             'ema3_open_up_15m':  ema3_open_up_15m,
             'ema3_open_up_5m':   ema3_open_up_5m,
             'ema3_cross_ema9_up': safe_bool(last_15m.get('ema3_cross_ema9_up') if last_15m.get('ema3_cross_ema9_up') is not None else (safe_float(last_15m.get('ema_3') or last_15m.get('ema3')) > safe_float(last_15m.get('ema_9') or last_15m.get('ema9')))),
@@ -333,6 +386,13 @@ class StrategyEngine:
             'ai_opportune_sell': safe_bool(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('opportune_sell', False)),
             'ai_candle_color':   str(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('current_candle_color', 'neutral')),
             
+            # Custom Aa13/Bb13 variables
+            'bb_lower_ascending_15m': bb_lower_ascending_15m,
+            'bb_upper_descending_15m': bb_upper_descending_15m,
+            'high_above_ema20_15m': high_above_ema20_15m,
+            'ema20_below_ema50_15m': ema20_below_ema50_15m,
+            'ema9_below_ema20_15m': ema9_below_ema20_15m,
+
             # Referencia al DataFrame original para reglas personalizadas avanzadas
             'df_15m': df_15m
         }

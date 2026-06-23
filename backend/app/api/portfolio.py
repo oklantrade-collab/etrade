@@ -58,7 +58,7 @@ async def get_global_portfolio():
                     supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute(),
                     supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute(),
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
-                    supabase.table('paper_trades').select('symbol, closed_at, total_pnl_usd, entry_price, side, rule_code').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(50).execute(),
+                    supabase.table('positions').select('*').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
                     supabase.table('forex_positions').select('*').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
                     supabase.table('stocks_positions').select('*').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute(),
                     supabase.table('risk_config').select('max_open_trades, max_positions_per_symbol').limit(1).execute()
@@ -242,7 +242,7 @@ async def get_global_portfolio():
                         'time': t.get('closed_at'),
                         'market': 'Crypto',
                         'symbol': t.get('symbol'),
-                        'pnl': float(t.get('total_pnl_usd') or 0),
+                        'pnl': float(t.get('realized_pnl') or t.get('total_pnl_usd') or 0),
                         'entry_price': t.get('entry_price'),
                         'status': 'closed',
                         'reason': t.get('close_reason', 'closed'),

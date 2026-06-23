@@ -587,7 +587,11 @@ async def open_forex_position(
     Replica la logica de _execute_paper_open para Crypto.
     """
     direction = signal['direction']
-    rule_code = signal['rule_code']
+    rc_raw = signal.get('rule_code', '')
+    if isinstance(rc_raw, dict):
+        rule_code = str(rc_raw.get('code', rc_raw.get('name', str(rc_raw))))
+    else:
+        rule_code = str(rc_raw)
 
     # === ESCUDO DE SEGURIDAD ESTRICTO ===
     from app.core.safety_manager import validate_signal
@@ -604,6 +608,38 @@ async def open_forex_position(
         log_warning(MODULE, f"❌ BLOQUEO DE SEGURIDAD [{symbol}]: Posición abortada. Motivo: {v_signal['reason']}")
         return
     # ====================================
+
+    # ═══════════════════════════════════════════════════
+    # PASO 1.5 — Reversión de posiciones opuestas (Netting Forex)
+    # ═══════════════════════════════════════════════════
+    try:
+        opposite_side = 'short' if direction.lower() == 'long' else 'long'
+        opp_res = sb.table('forex_positions').select('*')\
+            .eq('status', 'open')\
+            .eq('symbol', symbol)\
+            .execute()
+        
+        opp_positions = [p for p in (opp_res.data or []) if p.get('side', '').lower() == opposite_side]
+        
+        if opp_positions:
+            log_info(MODULE, f"{symbol}: [REVERSAL NETTING] Cerrando {len(opp_positions)} posiciones {opposite_side.upper()} antes de abrir {direction.upper()}")
+            from app.core.position_monitor import _execute_paper_close
+            for opp_pos in opp_positions:
+                try:
+                    # Cerrar en DB
+                    await _execute_paper_close(opp_pos, price, f'reversal_{direction.lower()}', sb)
+                    
+                    # Cerrar en cTrader si es LIVE
+                    if opp_pos.get('mode') == 'live' and opp_pos.get('ctrader_order_id') and provider:
+                        lots_abs = abs(float(opp_pos.get('lots') or opp_pos.get('size') or 0.01))
+                        await provider.close_order(str(opp_pos['ctrader_order_id']), int(lots_abs * 100000))
+                        
+                    log_info(MODULE, f"{symbol}: [REVERSAL] Cerrada posición opuesta {opp_pos['id']} ({opposite_side.upper()})")
+                except Exception as rev_err:
+                    log_error(MODULE, f"{symbol}: Error cerrando posición opuesta {opp_pos['id']}: {rev_err}")
+    except Exception as rev_outer_err:
+        log_error(MODULE, f"{symbol}: Error en lógica de reversión Forex: {rev_outer_err}")
+    # ═══════════════════════════════════════════════════
 
     # Leer config de trading
     try:
@@ -686,19 +722,19 @@ async def open_forex_position(
     # Registrar en Supabase
     try:
         sb.table('forex_positions').insert({
-            'symbol':           symbol,
-            'side':             direction,
+            'symbol':           str(symbol)[:20],
+            'side':             str(direction)[:20],
             'entry_price':      price,
             'lots':             sizing['lotes'],
             'sl_price':         levels['sl_price'],
             'slv_price':        slv_price,
             'slv_hard_stop_pips': slv_hs_pips,
             'tp_price':         levels['tp_price'],
-            'rule_code':        rule_code,
+            'rule_code':        str(rule_code)[:20],
             'status':           'open',
             'mode':             'paper' if is_paper else 'live',
             'market_type':      'forex_futures',
-            'ctrader_order_id': order.get('order_id'),
+            'ctrader_order_id': str(order.get('order_id'))[:50] if order.get('order_id') else None,
             'opened_at':        datetime.now(timezone.utc).isoformat(),
         }).execute()
     except Exception as e:
@@ -899,6 +935,11 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
 async def forex_cycle_5m():
     """Ciclo 5m Forex: Gestion de posiciones y smart exits."""
+    from app.core.market_hours import is_forex_market_open
+    if not is_forex_market_open():
+        log_debug("FOREX_SCHEDULER", "Mercado Forex cerrado. Omitiendo ciclo 5m.")
+        return
+
     global _forex_provider
     log_debug(MODULE, "--- Forex 5m Cycle ---")
 
@@ -912,6 +953,13 @@ async def forex_cycle_5m():
         return
 
     try:
+        # Sync positions to memory to enforce state limits
+        try:
+            from app.workers.scheduler import sync_positions_to_memory
+            await sync_positions_to_memory()
+        except Exception as e:
+            log_error(MODULE, f"Error syncing positions in forex 5m: {e}")
+
         tasks = [_forex_process_symbol_5m(s, provider, sb) for s in symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1009,7 +1057,6 @@ async def process_forex_profit_management_15m(
                 'basis_crossed_at': datetime.now(timezone.utc).isoformat(),
             }).eq(db_key_name, db_record_id).execute()
         except Exception as e:
-            from app.core.logger import log_error
             log_error('PROFIT_FX', f"Error updating basis_crossed: {e}")
             
         position['basis_crossed'] = True
@@ -1045,7 +1092,6 @@ async def process_forex_profit_management_15m(
                 'highest_band_reached': result_b['current_band'],
             }).eq(db_key_name, db_record_id).execute()
         except Exception as e:
-            from app.core.logger import log_error
             log_error('PROFIT_FX', f"Error updating profit floor: {e}")
             
         log_info('PROFIT_FX', f'⬆️ FLOOR ACTUALIZADO [{symbol}]: {result_b["reason"]}')
@@ -1198,22 +1244,52 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
             
             # --- FASE 5.5: V1 Engine Fallback (Crypto Logic para Aa23, Bb23, etc) ---
             if not signal:
-                from app.strategy.rule_engine import evaluate_all_rules, load_rules_to_memory
+                from app.strategy.rule_engine import evaluate_all_rules, get_rules_from_memory
                 from app.analysis.fibonacci_bb import extract_fib_levels
                 
-                # Fetch V1 rules from supabase 
-                # (We can use a cached version ideally, but load_rules_to_memory caches internally if we pass it)
-                all_v1_rules = await load_rules_to_memory(sb)
+                # Fetch V1 rules from memory cache
+                all_v1_rules = get_rules_from_memory()
                 fib_levels = extract_fib_levels(df)
                 
+                # --- INJECT 5M DATA FOR Aa13 ---
+                ema3_5m = 0
+                ema9_5m = 0
+                ema20_5m = 0
+                bb_upper_5m_opens = False
+                bb_lower_5m_opens = False
+                
+                if df_5m is not None and len(df_5m) >= 2:
+                    c0 = df_5m.iloc[-1]
+                    c1 = df_5m.iloc[-2]
+                    ema3_5m = c0.get('ema1', c0.get('ema_3', 0))
+                    ema9_5m = c0.get('ema2', c0.get('ema_9', 0))
+                    ema20_5m = c0.get('ema3', c0.get('ema_20', 0))
+                    
+                    u0 = float(c0.get('upper_2', 0))
+                    u1 = float(c1.get('upper_2', 0))
+                    if u0 > 0 and u1 > 0: bb_upper_5m_opens = (u0 > u1)
+                    
+                    l0 = float(c0.get('lower_2', 0))
+                    l1 = float(c1.get('lower_2', 0))
+                    if l0 > 0 and l1 > 0: bb_lower_5m_opens = (l0 < l1)
+                
+                df.loc[df.index[-1], 'ema3_5m'] = ema3_5m
+                df.loc[df.index[-1], 'ema9_5m'] = ema9_5m
+                df.loc[df.index[-1], 'ema20_5m'] = ema20_5m
+                df.loc[df.index[-1], 'bb_upper_5m_opens'] = bb_upper_5m_opens
+                df.loc[df.index[-1], 'bb_lower_5m_opens'] = bb_lower_5m_opens
+                # -------------------------
+                
                 # We evaluate V1 engine for Long
-                v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
-                v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
+                v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m')
+                v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m')
                 
                 if v1_long:
-                    signal = {'rule_code': v1_long, 'direction': 'long', 'strategy_type': 'scalping', 'cycle': '15m'}
+                    rc_str = v1_long.get("rule", {}).get("rule_code", str(v1_long)) if isinstance(v1_long, dict) else str(v1_long)
+                    signal = {'rule_code': rc_str, 'direction': 'long', 'strategy_type': 'scalping', 'cycle': '15m'}
                 elif v1_short:
-                    signal = {'rule_code': v1_short, 'direction': 'short', 'strategy_type': 'scalping', 'cycle': '15m'}
+                    rc_str = v1_short.get("rule", {}).get("rule_code", str(v1_short)) if isinstance(v1_short, dict) else str(v1_short)
+                    signal = {'rule_code': rc_str, 'direction': 'short', 'strategy_type': 'scalping', 'cycle': '15m'}
 
             if signal:
                 await engine.log_evaluation(symbol, signal, context)
@@ -1254,20 +1330,25 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                                     except Exception as e:
                                         log_error(MODULE, f"Error en flip close para {symbol}: {e}")
                                         
-                        # ── MEJORA C: Filtro Correlación USD ──
-                        all_forex_pos = [p for p in BOT_STATE.positions.values() if p.get('market_type') == 'forex']
-                        usd_check = check_usd_exposure_filter(symbol, signal['direction'], all_forex_pos)
-                        if not usd_check['passed']:
-                            log_info('USD_CORR_FX', f"{symbol}: {usd_check['reason']}")
+                        # ── RE-CHECK LIMIT POST-FLIP ──
+                        current_pair_count = len([p for p in BOT_STATE.positions.values() if p['symbol'] == symbol and p.get('status') == 'open'])
+                        if current_pair_count >= max_per_pair:
+                            log_info('POSITION_LIMIT_FX', f"[{symbol}] Flip abortado u open excedido: {current_pair_count}/{max_per_pair} alcanzado.")
                         else:
-                            # Proceder a abrir
-                            await open_forex_position(
-                                symbol=symbol,
-                                signal=signal,
-                                price=current_price,
-                                provider=provider,
-                                sb=sb,
-                            )
+                            # ── MEJORA C: Filtro Correlación USD ──
+                            all_forex_pos = [p for p in BOT_STATE.positions.values() if p.get('market_type') == 'forex']
+                            usd_check = check_usd_exposure_filter(symbol, signal['direction'], all_forex_pos)
+                            if not usd_check['passed']:
+                                log_info('USD_CORR_FX', f"{symbol}: {usd_check['reason']}")
+                            else:
+                                # Proceder a abrir
+                                await open_forex_position(
+                                    symbol=symbol,
+                                    signal=signal,
+                                    price=current_price,
+                                    provider=provider,
+                                    sb=sb,
+                                )
             else:
                 # Log near-misses
                 all_results = (
@@ -1353,6 +1434,11 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
 
 async def forex_cycle_15m():
     """Ciclo 15m Forex: Analisis completo + senales."""
+    from app.core.market_hours import is_forex_market_open
+    if not is_forex_market_open():
+        log_info("FOREX_SCHEDULER", "Mercado Forex cerrado. Omitiendo ciclo 15m.")
+        return
+
     global _forex_provider, _forex_cycle_count
     _forex_cycle_count += 1
 
@@ -1375,6 +1461,13 @@ async def forex_cycle_15m():
                 BOT_STATE.config_cache.update(res.data)
         except:
             pass
+
+        # Sync positions to memory to enforce state limits
+        try:
+            from app.workers.scheduler import sync_positions_to_memory
+            await sync_positions_to_memory()
+        except Exception as e:
+            log_error(MODULE, f"Error syncing positions in forex 15m: {e}")
 
         # Procesar todos los simbolos en paralelo
         tasks = [_forex_process_symbol_15m(s, provider, sb) for s in symbols]

@@ -564,8 +564,13 @@ async def check_protections(
             except Exception:
                 pass  # Non-critical, silently continue
 
+    # ── CARGAR DATOS ──────────────────────────
+    from app.core.memory_store import get_memory_df
+    df_15m = get_memory_df(symbol, "15m")
+    df_5m = get_memory_df(symbol, "5m")
+
     # ── CHECK 1: Break-Even ───────────────────
-    be = evaluate_break_even(state, current_price)
+    be = evaluate_break_even(state, current_price, df_15m, df_5m)
     if be['action'] == 'activate_be':
         new_sl = be['be_price']
         try:
@@ -595,9 +600,6 @@ async def check_protections(
             log_error(MODULE, f"Error actualizando BE para {symbol}: {e}")
 
     # ── CHECK 2: Trailing Stop ────────────────
-    from app.core.memory_store import get_memory_df
-    df_15m = get_memory_df(symbol, "15m")
-    df_5m = get_memory_df(symbol, "5m")
     
     trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
     
@@ -622,7 +624,7 @@ async def check_protections(
                 'sl_price': new_sl,
                 'stop_loss': new_sl,
                 'trailing_sl_price': new_sl,
-                'sl_type': f'trailing_l{trail["new_level"]}',
+                'sl_type': trail.get('sl_type', f'trailing_l{trail["new_level"]}'),
                 'protection_activated': True
             }).eq('id', pos_id).execute()
 
@@ -1127,7 +1129,38 @@ async def _execute_paper_open(
                 to_close.append(p)
         
         if to_close:
-            log_info(MODULE, f"🔄 REVERSIÓN: Cerrando {len(to_close)} posiciones opuestas ({opposite_side}) en {symbol} antes de abrir {side.upper()}")
+            total_value = 0.0
+            total_pnl = 0.0
+            for pos in to_close:
+                pos_entry = float(pos.get('avg_entry_price') or pos.get('entry_price') or 0)
+                pos_size = float(pos.get('size') or 1.0)
+                p_side = (pos.get('side') or '').upper()
+                if pos_entry > 0:
+                    pos_val = pos_entry * pos_size
+                    if p_side in ['LONG', 'BUY']:
+                        pos_pnl = (price - pos_entry) * pos_size
+                    else:
+                        pos_pnl = (pos_entry - price) * pos_size
+                    total_value += pos_val
+                    total_pnl += pos_pnl
+            
+            total_pnl_pct = (total_pnl / total_value * 100) if total_value > 0 else 0.0
+            
+            # Obtener el límite máximo de pérdida configurado en DB según mercado (por defecto -0.05%)
+            is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
+            max_rev_key = 'max_reversal_loss_pct_forex' if is_forex else 'max_reversal_loss_pct_crypto'
+            try:
+                from app.core.memory_store import BOT_STATE
+                MAX_REVERSAL_LOSS_PCT = float(BOT_STATE.config_cache.get(max_rev_key, -0.05))
+            except:
+                MAX_REVERSAL_LOSS_PCT = -0.05
+            
+            if total_pnl_pct < MAX_REVERSAL_LOSS_PCT:
+                from app.core.logger import log_warning
+                log_warning(MODULE, f"🚫 REVERSIÓN BLOQUEADA: La pérdida acumulada en {symbol} es {total_pnl_pct:.3f}% (límite {MAX_REVERSAL_LOSS_PCT}%). Se mantiene la posición original y se aborta la nueva entrada.")
+                return None
+
+            log_info(MODULE, f"🔄 REVERSIÓN: Cerrando {len(to_close)} posiciones opuestas ({opposite_side}) en {symbol} (PnL: {total_pnl_pct:.3f}%) antes de abrir {side.upper()}")
             for pos in to_close:
                 await _execute_paper_close(pos, price, f'reversal_{side.lower()}', supabase)
 

@@ -160,7 +160,7 @@ class WebSocketManager:
                     await _execute_paper_close(pos, price, 'hard_cap_ws', sb)
                     continue
                     
-                # C. EREP 5-Minute Timeout: force close if recovery is taking too long
+                # C. EREP 60-Minute Timeout: force close if recovery is taking too long
                 erep_active = pos.get('erep_active', False)
                 erep_activated_at = pos.get('erep_activated_at')
                 if erep_active and erep_activated_at:
@@ -171,11 +171,11 @@ class WebSocketManager:
                         else:
                             activated_dt = erep_activated_at
                         elapsed = (datetime.now(timezone.utc) - activated_dt).total_seconds()
-                        if elapsed >= 300:  # 5 minutos
+                        if elapsed >= 3600:  # 60 minutos
                             log_warning(MODULE, 
-                                f"EREP TIMEOUT for {symbol}! {elapsed:.0f}s elapsed (>300s). "
+                                f"EREP TIMEOUT for {symbol}! {elapsed:.0f}s elapsed (>3600s). "
                                 f"PnL={pnl_pct:.2f}%. Forcing closure to limit loss.")
-                            await _execute_paper_close(pos, price, 'erep_timeout_5m', sb)
+                            await _execute_paper_close(pos, price, 'erep_timeout_60m', sb)
                             continue
                     except Exception as dt_err:
                         log_warning(MODULE, f"Error parsing erep_activated_at for {symbol}: {dt_err}")

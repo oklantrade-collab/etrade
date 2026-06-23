@@ -35,6 +35,7 @@ files_to_sync = [
     "app/strategy/proactive_exit.py",
     "app/strategy/position_guards.py",
     "app/core/position_monitor.py",
+    "app/core/pnl_calculator.py",
     "app/strategy/rule_engine.py",
     "app/workers/unified_trading_worker.py",
     "app/execution/oco_builder.py",
@@ -61,6 +62,8 @@ files_to_sync = [
     "app/data/ib_scanner.py",
     "app/core/startup.py",
     "app/candle_signals/candle_execution.py",
+    "app/candle_signals/candle_worker.py",
+    "app/strategy/bollinger_exhaustion.py",
     "app/ws/ws_manager.py",
     "app/core/market_hours.py",
     "app/execution/providers/ctrader_provider.py"

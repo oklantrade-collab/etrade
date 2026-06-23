@@ -731,7 +731,7 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase)
         is_ob  = candidate['is_overbought']
 
         if is_ob:
-            log_info(MODULE, f'{ticker}: BLOQUEADA — {candidate["overbought_reason"]}')
+            log_info(MODULE, f'{ticker}: BLOQUEADA por sobrecompra')
             await _upsert_queue(supabase, candidate, status='blocked')
             continue
 
@@ -763,8 +763,8 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase)
         log_info(MODULE,
             f'✅ COMPRANDO {ticker}: {sizing["shares"]} shares × '
             f'${price:.2f} = ${sizing["capital"]:.2f} | '
-            f'Rank={candidate["composite_rank"]:.1f} | '
-            f'APEX={candidate["apex_4h"]:.0f}% | '
+            f'Rank={candidate.get("composite_rank", 0):.1f} | '
+            f'APEX={candidate.get("apex_score_4h", 0):.0f}% | '
             f'Regla={rule_code} ({order_type})'
         )
 
@@ -800,10 +800,10 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase)
                 executed.append({
                     'ticker':    ticker,
                     'shares':    sizing['shares'],
-                    'capital':   sizing['capital'],
-                    'rank':      candidate['composite_rank'],
-                    'apex_4h':   candidate['apex_4h'],
-                    'rule_code': rule_code,
+                    'price':     price,
+                    'rank':      candidate.get('composite_rank', 0),
+                    'apex_4h':   candidate.get('apex_score_4h', 0),
+                    'rule':      rule_code,
                 })
 
                 ops_remaining -= 1
@@ -832,12 +832,12 @@ def _send_telegram_buy(candidate, sizing, cap_available, rule_code):
         _send_telegram_sync(
             f'🛒 APEX ORCHESTRATOR\n'
             f'Compra: {candidate["ticker"]}\n'
-            f'Shares: {sizing["shares"]}\n'
-            f'Capital: ${sizing["capital"]:.2f}\n'
-            f'APEX 4H: {candidate["apex_4h"]:.0f}%\n'
-            f'Rank: {candidate["composite_rank"]:.1f}\n'
             f'Regla: {rule_code}\n'
-            f'Retorno esp: +{candidate["return_expected"]:.2f}%\n'
+            f'Shares: {sizing["shares"]} × ${sizing["price"]:.2f}\n'
+            f'APEX 4H: {candidate.get("apex_score_4h", 0):.0f}%\n'
+            f'Rank: {candidate.get("composite_rank", 0):.1f}\n'
+            f'Capital: ${sizing["capital"]:.2f}\n'
+            f'Retorno esp: +{candidate.get("return_expected", 0):.2f}%\n'
             f'Capital restante: ${cap_available:.2f}'
         )
     except Exception:
@@ -858,8 +858,9 @@ async def _upsert_queue(
             .upsert({
                 'ticker':          candidate['ticker'],
                 'group_name':      candidate.get('group_name', ''),
-                'apex_score_4h':   candidate['apex_4h'],
-                'apex_score_1d':   candidate['apex_1d'],
+                'price_at_rank':   candidate.get('price'),
+                'apex_score_4h':   candidate.get('apex_score_4h'),
+                'apex_score_1d':   candidate.get('apex_score_1d'),
                 'return_expected': candidate.get('return_expected', 0),
                 'confidence':      candidate['confidence'],
                 'composite_rank':  candidate['composite_rank'],

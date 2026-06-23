@@ -395,6 +395,36 @@ def _process_symbol(
 
             log_info(MODULE, f"{symbol}: ✅ Validación OK | Balance: ${risk_result['balance_usdt']:,.2f} | Posiciones: {risk_result['open_positions']}", cycle_id=cycle_id)
 
+            # ═══════════════════════════════════════════════════
+            # PASO 11.5 — Reversión de posiciones opuestas (Netting Binance)
+            # Si vamos a abrir LONG y hay SHORTs abiertos del mismo símbolo (o viceversa),
+            # cerramos las opuestas primero para cumplir con el modelo netting.
+            # ═══════════════════════════════════════════════════
+            try:
+                new_direction = signal.get('signal_type', '').upper()  # 'LONG' o 'SHORT'
+                if new_direction in ('LONG', 'SHORT'):
+                    opposite_side = 'SHORT' if new_direction == 'LONG' else 'LONG'
+                    
+                    # Buscar posiciones abiertas del mismo símbolo en dirección opuesta
+                    opp_res = sb.table('positions').select('id, symbol, side, entry_price, size')\
+                        .eq('status', 'open')\
+                        .eq('symbol', signal['symbol'])\
+                        .execute()
+                    
+                    opp_positions = [p for p in (opp_res.data or []) if p.get('side', '').upper() == opposite_side]
+                    
+                    if opp_positions:
+                        log_info(MODULE, f"{symbol}: [REVERSAL NETTING] Cerrando {len(opp_positions)} posiciones {opposite_side} antes de abrir {new_direction}", cycle_id=cycle_id)
+                        for opp_pos in opp_positions:
+                            try:
+                                from app.execution.order_manager import close_position as close_pos_fn
+                                close_pos_fn(opp_pos['id'], reason=f'reversal_{new_direction.lower()}')
+                                log_info(MODULE, f"{symbol}: [REVERSAL] Cerrada posición opuesta {opp_pos['id']} ({opposite_side})", cycle_id=cycle_id)
+                            except Exception as rev_err:
+                                log_error(MODULE, f"{symbol}: Error cerrando posición opuesta {opp_pos['id']}: {rev_err}", cycle_id=cycle_id)
+            except Exception as rev_outer_err:
+                log_error(MODULE, f"{symbol}: Error en lógica de reversión crypto: {rev_outer_err}", cycle_id=cycle_id)
+
             executed_order = order_manager.execute_trade(
                 signal=signal,
                 oco_params=oco_params,

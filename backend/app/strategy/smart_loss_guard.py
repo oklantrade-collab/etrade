@@ -24,6 +24,7 @@ EXEMPT_KEYWORDS = [
     'sharp_drop',      # Sharp drop protection
     'apexconfluence',  # Apex confluence signal
     'cleanup',         # Limpieza administrativa
+    'reversal',        # Reversión de dirección (netting IC Markets: SIEMPRE debe cerrar la opuesta)
 ]
 
 

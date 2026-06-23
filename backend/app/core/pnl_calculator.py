@@ -22,7 +22,10 @@ def calculate_pnl(market_type, side, entry_price, current_price, qty, symbol, su
     pnl_pct = 0.0
     margin = 0.0
 
-    if market_type == 'forex' or 'forex' in str(market_type).lower() or market_type is None and ('USD' in symbol or 'EUR' in symbol or 'JPY' in symbol or 'XAU' in symbol):
+    # Evitar que símbolos de crypto como ETHUSDT sean clasificados como forex en el fallback
+    is_forex_fallback = market_type is None and ('USD' in symbol or 'EUR' in symbol or 'JPY' in symbol or 'XAU' in symbol) and ('USDT' not in symbol)
+
+    if market_type == 'forex' or 'forex' in str(market_type).lower() or is_forex_fallback:
         # Es Forex
         pip_size = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
         pip_val_std = 1.0 if 'XAU' in symbol else (6.5 if 'JPY' in symbol else 10.0)

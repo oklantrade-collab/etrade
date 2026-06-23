@@ -5,12 +5,9 @@ SERVER_IP = "165.22.87.171"
 SSH_KEY = "C:/Users/jyups/.ssh/etrade_cloud_key"
 REMOTE_PATH = "/home/etrade/etrade/backend"
 
-# Only sync the files we actually modified
 files_to_sync = [
-    "app/workers/stocks_scheduler.py",
-    "app/stocks/stocks_rule_engine.py",
-    "app/stocks/apex_score.py",
-    "app/ws/ws_manager.py"
+    "app/workers/scheduler.py",
+    "app/workers/forex_scheduler.py"
 ]
 
 def check_syntax():

@@ -32,7 +32,10 @@ def safe_int(val, default=0) -> int:
 def get_rule_expected_direction(rule_code: str) -> str:
     if not rule_code:
         return None
-    rc = rule_code.strip().lower()
+    if isinstance(rule_code, dict):
+        rc = str(rule_code.get('code', rule_code.get('name', ''))).strip().lower()
+    else:
+        rc = str(rule_code).strip().lower()
     if rc.startswith('dd11'):
         return 'long'
     if rc.startswith('dd12'):
@@ -234,10 +237,11 @@ def validate_signal(
     # CHECK 6: Coherencia de Regla vs Dirección
     if direction and rule_code:
         expected = get_rule_expected_direction(rule_code)
-        if expected and expected != direction.strip().lower():
+        if expected and expected != str(direction).strip().lower():
+            rc_str = rule_code.get('code', str(rule_code)) if isinstance(rule_code, dict) else str(rule_code)
             errors.append(
                 f"Dirección incoherente para la regla: "
-                f"regla {rule_code} ({expected}) != dirección {direction}"
+                f"regla {rc_str} ({expected}) != dirección {direction}"
             )
 
     # CHECK 7: Sanidad de Indicadores Técnicos en el Snapshot

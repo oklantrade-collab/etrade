@@ -915,7 +915,8 @@ def evaluate_trailing_stop(
                             'action': 'update_sl',
                             'new_sl': ema3,
                             'reason': 'ApexConfluence_green_candle_trail',
-                            'new_level': 1
+                            'new_level': 1,
+                            'sl_type': 'ema_trail'
                         }
                         if upper_6 > 0:
                             action_dict['new_tp'] = upper_6
@@ -935,7 +936,8 @@ def evaluate_trailing_stop(
                             'action': 'update_sl',
                             'new_sl': ema3,
                             'reason': 'ApexConfluence_red_candle_trail',
-                            'new_level': 1
+                            'new_level': 1,
+                            'sl_type': 'ema_trail'
                         }
                         if lower_6 > 0:
                             action_dict['new_tp'] = lower_6
@@ -981,7 +983,8 @@ def evaluate_trailing_stop(
                             'action': 'update_sl',
                             'new_sl': ema3,
                             'reason': 'swing_ema_green_candle_trail',
-                            'new_level': 1
+                            'new_level': 1,
+                            'sl_type': 'ema_trail'
                         }
             else:
                 # SHORT: vela roja (close < open) y close < ema3
@@ -991,7 +994,8 @@ def evaluate_trailing_stop(
                             'action': 'update_sl',
                             'new_sl': ema3,
                             'reason': 'swing_ema_red_candle_trail',
-                            'new_level': 1
+                            'new_level': 1,
+                            'sl_type': 'ema_trail'
                         }
         return {'action': 'none'}
 
@@ -1176,6 +1180,7 @@ def evaluate_break_even(
     state:         ProtectionState,
     current_price: float,
     df_15m:        pd.DataFrame = None,
+    df_5m:         pd.DataFrame = None,
 ) -> dict:
     """
     REGLA 1: Break-Even Automático.
@@ -1212,6 +1217,49 @@ def evaluate_break_even(
                 return {'action': 'none'} # Suspendido por explosión bajista
     # ---------------------------------------------------
 
+    # --- NUEVA LÓGICA DE ACTIVACIÓN DE BREAK-EVEN (Por Eventos Técnicos) ---
+    # a) Para LONGs: HIGH supere bollinger superior en 15m
+    # b) En 5m: EMA3 < EMA9 (cambio de tendencia rápido)
+    
+    event_triggered = False
+    event_reason = ""
+    
+    if is_long:
+        # Condición a: 15m HIGH > Bollinger Upper
+        if df_15m is not None and len(df_15m) > 0:
+            c_15m = df_15m.iloc[-1]
+            high_15m = float(c_15m.get('high', 0))
+            upper_15m = float(c_15m.get('upper_2', 0))
+            if upper_15m > 0 and high_15m > upper_15m:
+                event_triggered = True
+                event_reason = "15m HIGH > BB Upper"
+                
+        # Condición b: 5m EMA3 < EMA9
+        if df_5m is not None and len(df_5m) > 0:
+            c_5m = df_5m.iloc[-1]
+            ema3_5m = float(c_5m.get('ema3', 0))
+            ema9_5m = float(c_5m.get('ema9', 0))
+            if ema3_5m > 0 and ema9_5m > 0 and ema3_5m < ema9_5m:
+                event_triggered = True
+                event_reason = "5m EMA3 < EMA9"
+    else:
+        # Lógica análoga para SHORTS (LOW < Lower Bollinger en 15m, o EMA3 > EMA9 en 5m)
+        if df_15m is not None and len(df_15m) > 0:
+            c_15m = df_15m.iloc[-1]
+            low_15m = float(c_15m.get('low', 0))
+            lower_15m = float(c_15m.get('lower_2', 0))
+            if lower_15m > 0 and low_15m < lower_15m:
+                event_triggered = True
+                event_reason = "15m LOW < BB Lower"
+                
+        if df_5m is not None and len(df_5m) > 0:
+            c_5m = df_5m.iloc[-1]
+            ema3_5m = float(c_5m.get('ema3', 0))
+            ema9_5m = float(c_5m.get('ema9', 0))
+            if ema3_5m > 0 and ema9_5m > 0 and ema3_5m > ema9_5m:
+                event_triggered = True
+                event_reason = "5m EMA3 > EMA9"
+
     cfg  = PROTECTION_CONFIG.get(state.market_type, {})
     entry = state.entry_price
     side  = state.side.lower()
@@ -1219,27 +1267,26 @@ def evaluate_break_even(
     pnl = calculate_pnl(entry, current_price, side, state.symbol, state.market_type)
 
     if state.market_type == 'forex_futures':
-        trigger = cfg.get('be_trigger_pips', 8)
         buffer  = cfg.get('be_buffer_pips', 1)
         pip     = PIP_SIZES.get(state.symbol, 0.0001)
 
-        if pnl['pips'] >= trigger:
+        if event_triggered and pnl['pips'] > buffer:  # Solo si ya es rentable lo suficiente para el buffer
             be_price = entry + (buffer * pip) if is_long else entry - (buffer * pip)
             return {
                 'action':   'activate_be',
                 'be_price': round(be_price, 6),
-                'reason':   f'Break-Even: +{pnl["pips"]:.1f} pips ≥ {trigger} pips → SL a {be_price:.6f}'
+                'reason':   event_reason
             }
-    else:  # crypto / stocks
-        trigger = cfg.get('be_trigger_pct', 0.003)
-        buffer  = cfg.get('be_buffer_pct', 0.0005)
+    else:
+        # Crypto
+        buffer_pct  = cfg.get('be_buffer_pct', 0.05)
 
-        if pnl['pct'] / 100 >= trigger:
-            be_price = entry * (1 + buffer) if is_long else entry * (1 - buffer)
+        if event_triggered and pnl['pct'] > buffer_pct:
+            be_price = entry * (1 + buffer_pct / 100) if is_long else entry * (1 - buffer_pct / 100)
             return {
                 'action':   'activate_be',
                 'be_price': round(be_price, 8),
-                'reason':   f'Break-Even: +{pnl["pct"]:.3f}% ≥ {trigger*100:.2f}% → SL a {be_price:.8f}'
+                'reason':   event_reason
             }
 
     return {'action': 'none'}

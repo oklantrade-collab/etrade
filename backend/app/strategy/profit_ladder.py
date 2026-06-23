@@ -64,7 +64,7 @@ def get_current_band(
     el precio actualmente.
     """
     basis = float(snap.get('basis', 0))
-    is_long = side in ('long', 'buy')
+    is_long = side.lower() in ('long', 'buy')
 
     # Construir mapa de bandas
     bands = {'basis': basis}
@@ -179,7 +179,7 @@ def check_basis_crossed(
         return {'crossed': False, 'confirmed': False, 'reason': 'BASIS <= 0 (no disponible)'}
 
     side    = str(position.get('side', 'long'))
-    is_long = side in ('long', 'buy')
+    is_long = side.lower() in ('long', 'buy')
 
     # Verificar 2 velas consecutivas sobre BASIS
     if df_15m is not None and len(df_15m) >= 3:
@@ -212,6 +212,7 @@ def check_basis_crossed(
 
 def check_ema_momentum(
     df_15m:       pd.DataFrame,
+    is_long:      bool = True,
     fast_period:  int = 3,
     slow_period:  int = 9,
     consec_needed: int = 2,
@@ -250,16 +251,23 @@ def check_ema_momentum(
         span=slow_period, adjust=False
     ).mean()
 
-    # Contar velas consecutivas con EMA3 < EMA9
+    # Contar velas consecutivas con momentum perdido
     consec_below = 0
     for i in range(1, min(consec_needed + 2, len(closes))):
-        if ema_fast.iloc[-i] < ema_slow.iloc[-i]:
+        if is_long:
+            momentum_condition = ema_fast.iloc[-i] < ema_slow.iloc[-i]
+        else:
+            momentum_condition = ema_fast.iloc[-i] > ema_slow.iloc[-i]
+            
+        if momentum_condition:
             consec_below += 1
         else:
             break
 
-    is_fast_above = float(ema_fast.iloc[-1]) > \
-                    float(ema_slow.iloc[-1])
+    if is_long:
+        is_fast_above = float(ema_fast.iloc[-1]) > float(ema_slow.iloc[-1])
+    else:
+        is_fast_above = float(ema_fast.iloc[-1]) < float(ema_slow.iloc[-1])
     momentum_lost = consec_below >= consec_needed
 
     return {
@@ -271,9 +279,9 @@ def check_ema_momentum(
         'valid':         True,
         'reason': (
             f'EMA3={ema_fast.iloc[-1]:.4f} '
-            f'{">" if is_fast_above else "<"} '
+            f'{">" if ema_fast.iloc[-1] > ema_slow.iloc[-1] else "<"} '
             f'EMA9={ema_slow.iloc[-1]:.4f}. '
-            f'EMA3<EMA9 por {consec_below} velas '
+            f'Momentum {"lost" if momentum_lost else "ok"} por {consec_below} velas '
             f'{"→ MOMENTUM PERDIDO ⚠️" if momentum_lost else ""}'
         ),
     }
@@ -362,7 +370,7 @@ def evaluate_profit_ladder(
       reason: str
     """
     side    = str(position.get('side', 'long'))
-    is_long = side in ('long', 'buy')
+    is_long = side.lower() in ('long', 'buy')
 
     # ── 1. Verificar cruce del BASIS ───────────
     basis_check = check_basis_crossed(
@@ -406,6 +414,7 @@ def evaluate_profit_ladder(
 
     ema_check = check_ema_momentum(
         df_15m,
+        is_long=is_long,
         consec_needed=consec_needed,
     )
 

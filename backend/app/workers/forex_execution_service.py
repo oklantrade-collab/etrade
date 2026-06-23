@@ -1128,9 +1128,17 @@ class ForexExecutionService:
                     if price <= 0:
                         continue
                     entry = self._safe_float(p.get('entry_price'))
+                    if entry <= 0:
+                        continue
                     pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
                     side = p.get('side', 'long').lower()
                     pips = (price - entry)/pip_size if side == 'long' else (entry - price)/pip_size
+                    
+                    pct = ((price - entry) / entry * 100) if side == 'long' else ((entry - price) / entry * 100)
+                    if pct < -1.0:
+                        self.log(f"⏸️ [WEEKEND CLOSE SKIP] {symbol} {side.upper()} se mantiene activa. Pérdida {pct:.2f}% supera el 1%.")
+                        continue
+
                     self._close_position(p, price, 'weekend_close', pips)
                 except Exception as e:
                     self.log(f"Error cerrando posición en fin de semana: {e}", "ERROR")
@@ -1689,13 +1697,14 @@ class ForexExecutionService:
         )
 
         # Cerrar posicion
-        self._close_position(pos, price, result['rule_code'], pnl['pnl_pips'])
-        self._send_telegram(
-            f"CIERRE PROACTIVO FOREX [{symbol}]\n"
-            f"Regla: {result['rule_code']}\n"
-            f"Pips: +{pnl['pnl_pips']:.1f}\n"
-            f"Razon: {result['reason']}"
-        )
+        closed = self._close_position(pos, price, result['rule_code'], pnl['pnl_pips'])
+        if closed:
+            self._send_telegram(
+                f"CIERRE PROACTIVO FOREX [{symbol}]\n"
+                f"Regla: {result['rule_code']}\n"
+                f"Pips: +{pnl['pnl_pips']:.1f}\n"
+                f"Razon: {result['reason']}"
+            )
 
         return True
 
@@ -1986,7 +1995,7 @@ class ForexExecutionService:
                     
                 except Exception as upd_e:
                     self.log(f"Error actualizando estado anti-loss forex para {symbol}: {upd_e}")
-                return
+                return False
 
             # Cerrar en cTrader si es cuenta real
             if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
@@ -2023,7 +2032,10 @@ class ForexExecutionService:
             
             self._open_positions_list = [p for p in self._open_positions_list if p['id'] != pos['id']]
             self.log(f'Cerrada {symbol}: {reason} | PnL: {pips_pnl:.1f} pips | USD: {pnl_usd:.2f}')
-        except Exception as e: self.log(f'Error cierre: {e}')
+            return True
+        except Exception as e:
+            self.log(f'Error cierre: {e}')
+            return False
 
     def _send_telegram(self, message):
         try:

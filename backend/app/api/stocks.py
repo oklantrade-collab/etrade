@@ -483,8 +483,7 @@ async def manual_close_stock_position(position_id: str):
         update_res = sb.table("stocks_positions").update({
             "status": "closed",
             "updated_at": now,
-            "exit_price": current_price,
-            "close_reason": "MANUAL_CLOSE",
+            "current_price": current_price,
             "unrealized_pnl": round(pnl_usd, 2),
             "unrealized_pnl_pct": round(pnl_pct, 2)
         }).eq("id", position_id).execute()

@@ -81,7 +81,7 @@ async def evaluate_crypto_pair(pair: str, detector: CandlePatternDetector) -> li
         from app.execution.binance_connector import get_client
         client = get_client()
 
-        for tf, interval, limit in [("4H", "4h", 10), ("1D", "1d", 10)]:
+        for tf, interval, limit in [("4H", "4h", 25), ("1D", "1d", 25)]:
             try:
                 klines = client.get_klines(symbol=binance_symbol, interval=interval, limit=limit)
                 if not klines or len(klines) < 3:
@@ -105,12 +105,17 @@ async def evaluate_crypto_pair(pair: str, detector: CandlePatternDetector) -> li
                 current = candles[-1]
                 history = candles[:-1]
 
-                # Calculate volume SMA20 approximation
-                vol_sma = sum(c.volume for c in candles) / len(candles) if candles else None
+                # Calculate volume SMA approximation (previous N candles)
+                vol_sma = sum(c.volume for c in history) / len(history) if history else None
 
                 result = detector.evaluate(current, history, volume_sma20=vol_sma)
 
                 if result.action in ("BUY", "SELL"):
+                    # VOLUME FILTER FOR CRYPTO
+                    if vol_sma and current.volume <= vol_sma:
+                        log_info(MODULE, f"🚫 CRYPTO VOLUME GUARD BLOCKED: {result.action} {norm_pair} | Vol({current.volume:.2f}) <= SMA({vol_sma:.2f})")
+                        continue
+
                     if not _is_alert_recent(norm_pair, tf):
                         candle_data = {
                             "open": current.open,
@@ -439,7 +444,8 @@ async def run_crypto_forex_cycle():
     if now.minute % 15 < 5:  # Corre cada 5 mins, atrapamos la ejecución que cae en 00, 15, 30, 45
         log_info(MODULE, "Evaluating 15m Bollinger Exhaustion for Crypto & Forex...")
         await execute_market_bollinger_exhaustion("crypto")
-        if now.weekday() < 5:
+        from app.core.market_hours import is_forex_market_open
+        if is_forex_market_open():
             await execute_market_bollinger_exhaustion("forex")
 
     crypto_detector = CandlePatternDetector(market="crypto")
@@ -457,10 +463,9 @@ async def run_crypto_forex_cycle():
             log_error(MODULE, f"Crypto pair {pair} failed: {e}")
         await asyncio.sleep(0.5)  # Rate limit
 
-    # ── FOREX (only during market hours Mon-Fri) ──
-    now = datetime.now(timezone.utc)
-    weekday = now.weekday()  # 0=Mon, 6=Sun
-    if weekday < 5:  # Mon-Fri
+    # ── FOREX (only during market hours) ──
+    from app.core.market_hours import is_forex_market_open
+    if is_forex_market_open():
         forex_pairs = await _get_forex_watchlist()
         for pair in forex_pairs:
             try:

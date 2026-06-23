@@ -1165,11 +1165,13 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
         // Formato para Binance si es Crypto
         const tvSymbol = symbol.includes('USDT') ? `BINANCE:${symbol}` : symbol;
         
+        const tvTimezone = typeof window !== 'undefined' ? (localStorage.getItem('app_timezone') || 'America/Lima') : 'America/Lima';
+
         new (window as any).TradingView.widget({
           "autosize": true,
           "symbol": tvSymbol,
           "interval": "15",
-          "timezone": "America/Lima",
+          "timezone": tvTimezone,
           "theme": "dark",
           "style": "1",
           "locale": "es",

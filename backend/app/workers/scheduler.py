@@ -497,10 +497,21 @@ async def upsert_candles_to_db(symbol: str, timeframe: str, df, sb):
         
         # Usamos upsert con on_conflict para manejar duplicados
         log_info('CANDLES', f"Upserting {len(rows)} candles for {symbol} {timeframe}")
-        sb.table('market_candles').upsert(
-            rows, 
-            on_conflict="symbol,exchange,timeframe,open_time"
-        ).execute()
+        
+        for attempt in range(3):
+            try:
+                sb.table('market_candles').upsert(
+                    rows, 
+                    on_conflict="symbol,exchange,timeframe,open_time"
+                ).execute()
+                break  # Éxito
+            except Exception as upsert_err:
+                log_error('CANDLES', f"Intento {attempt+1} fallido en upsert velas {symbol} {timeframe}: {upsert_err}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    sb = get_supabase()  # Refrescar conexión a Supabase
+                else:
+                    raise upsert_err  # Lanza al except principal después de 3 intentos
         
     except Exception as e:
         log_error('CANDLES', f"FALLO upsert velas para {symbol} {timeframe}: {e}")
@@ -1409,10 +1420,10 @@ async def sync_positions_to_memory():
             if 'ticker' in p:
                 p['market_type'] = 'stocks'
                 p['symbol'] = sym
-            elif p.get('pair') and p.get('leverage'):
+            elif 'USDT' in sym or p.get('market_type') in ['crypto', 'crypto_futures']:
                 p['market_type'] = 'crypto'
             else:
-                p['market_type'] = 'forex'
+                p['market_type'] = p.get('market_type') or 'forex'
                 
             new_positions[pos_id] = p
             symbols_to_sync.add(sym)
@@ -2008,7 +2019,39 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 
                 df.loc[df.index[-1], 'mtf_4h_trend'] = mtf_4h_trend
                 df.loc[df.index[-1], 'mtf_1d_trend'] = mtf_1d_trend
+                
+                # --- INJECT 5M DATA FOR Aa13 ---
+                df_5m = get_memory_df(symbol, "5m")
+                ema3_5m = 0
+                ema9_5m = 0
+                ema20_5m = 0
+                bb_upper_5m_opens = False
+                bb_lower_5m_opens = False
+                
+                if df_5m is not None and len(df_5m) >= 2:
+                    c0 = df_5m.iloc[-1]
+                    c1 = df_5m.iloc[-2]
+                    ema3_5m = c0.get('ema1', c0.get('ema_3', 0))
+                    ema9_5m = c0.get('ema2', c0.get('ema_9', 0))
+                    ema20_5m = c0.get('ema3', c0.get('ema_20', 0))
+                    
+                    # Upper band positive open (expanding up)
+                    u0 = float(c0.get('upper_2', 0))
+                    u1 = float(c1.get('upper_2', 0))
+                    if u0 > 0 and u1 > 0: bb_upper_5m_opens = (u0 > u1)
+                    
+                    # Lower band negative open (expanding down)
+                    l0 = float(c0.get('lower_2', 0))
+                    l1 = float(c1.get('lower_2', 0))
+                    if l0 > 0 and l1 > 0: bb_lower_5m_opens = (l0 < l1)
+                
+                df.loc[df.index[-1], 'ema3_5m'] = ema3_5m
+                df.loc[df.index[-1], 'ema9_5m'] = ema9_5m
+                df.loc[df.index[-1], 'ema20_5m'] = ema20_5m
+                df.loc[df.index[-1], 'bb_upper_5m_opens'] = bb_upper_5m_opens
+                df.loc[df.index[-1], 'bb_lower_5m_opens'] = bb_lower_5m_opens
                 # -------------------------
+                
                 
                 if allowed_direction:
                     if allowed_direction == 'long' and (cur_mtf_score >= mtf_threshold or mtf_4h_trend == 'long'):
@@ -2139,16 +2182,22 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                     except Exception as e:
                                         log_error(MODULE, f"Error en flip close para {symbol}: {e}")
                                     
-                        # Filtro de correlación
-                    corr_result = check_correlation_filter(
-                        symbol_new     = symbol,
-                        direction_new  = rule_match['direction'],
-                        open_positions = list(BOT_STATE.positions.values()),
-                        df_dict        = {s: MEMORY_STORE[s]['15m']['df'] for s in MEMORY_STORE if '15m' in MEMORY_STORE[s]},
-                        regime         = regime['category']
-                    )
-                    if corr_result['blocked']:
-                        blocked_by = f"correlation_limit ({corr_result['reason']})"
+                        # RE-CHECK LIMIT POST-FLIP
+                        current_pair_count = len([p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol and p.get('status') == 'open'])
+                        if current_pair_count >= max_per_symbol:
+                            log_info('POSITION_LIMIT_CRYPTO', f"[{symbol}] Flip abortado u open excedido: {current_pair_count}/{max_per_symbol} alcanzado.")
+                            blocked_by = f"max_positions_per_symbol_reached ({current_pair_count}/{max_per_symbol})"
+                        else:
+                            # Filtro de correlación
+                            corr_result = check_correlation_filter(
+                                symbol_new     = symbol,
+                                direction_new  = rule_match['direction'],
+                                open_positions = list(BOT_STATE.positions.values()),
+                                df_dict        = {s: MEMORY_STORE[s]['15m']['df'] for s in MEMORY_STORE if '15m' in MEMORY_STORE[s]},
+                                regime         = regime['category']
+                            )
+                            if corr_result['blocked']:
+                                blocked_by = f"correlation_limit ({corr_result['reason']})"
 
         t4 = time.time()
         

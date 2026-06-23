@@ -83,7 +83,12 @@ DEFAULT_RULES = [
         "entry_trades": [1],
         "conditions": [
             {"indicator": "ema4_cross_above_basis", "operator": "==", "value": True},
-            {"indicator": "ema3_above_ema9", "operator": "==", "value": True},
+            {"indicator": "ema9_above_ema20", "operator": "==", "value": True},
+            {"indicator": "ema3_above_ema9_5m", "operator": "==", "value": True},
+            {"indicator": "ema9_above_ema20_5m", "operator": "==", "value": True},
+            {"indicator": "bb_upper_5m_opens", "operator": "==", "value": True},
+            {"indicator": "bb_lower_5m_opens", "operator": "==", "value": True},
+            {"indicator": "bb_lower_slope_positive", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Al momento del cruce comprar al primer señal de Buy. (v2 forced)",
@@ -188,6 +193,7 @@ DEFAULT_RULES = [
         "conditions": [
             {"indicator": "ema3_cross_ema9_up", "operator": "==", "value": True},
             {"indicator": "ema3_ema9_trend_ok", "operator": "==", "value": True},
+            {"indicator": "ema3_above_ema9", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Nueva regla experimental de continuación.",
@@ -365,10 +371,10 @@ DEFAULT_RULES = [
             {"indicator": "fresh_cross_long", "operator": "==", "value": True},
             {"indicator": "hot_mtf_ok_long", "operator": "==", "value": True},
             {"indicator": "bb_expanding_or_mtf_long_or_bottom", "operator": "==", "value": True},
+            {"indicator": "bb_upper_slope_positive", "operator": "==", "value": True},
+            {"indicator": "ema_alignment_long", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -6},
             {"indicator": "fib_zone", "operator": "<=", "value": 2},
-            {"indicator": "sar_or_signal_long", "operator": "==", "value": True},
-            {"indicator": "adx_floor_ok", "operator": "==", "value": True},
             {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
             {"indicator": "rsi_ok_long", "operator": "==", "value": True},
             {"indicator": "not_in_ceiling", "operator": "==", "value": True},
@@ -394,10 +400,10 @@ DEFAULT_RULES = [
             {"indicator": "fresh_cross_short", "operator": "==", "value": True},
             {"indicator": "hot_mtf_ok_short", "operator": "==", "value": True},
             {"indicator": "bb_expanding_or_mtf_short_or_top", "operator": "==", "value": True},
+            {"indicator": "bb_lower_slope_negative", "operator": "==", "value": True},
+            {"indicator": "ema_alignment_short", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -2},
             {"indicator": "fib_zone", "operator": "<=", "value": 6},
-            {"indicator": "sar_or_signal_short", "operator": "==", "value": True},
-            {"indicator": "adx_floor_ok", "operator": "==", "value": True},
             {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
             {"indicator": "rsi_ok_short", "operator": "==", "value": True},
             {"indicator": "not_in_floor", "operator": "==", "value": True},
@@ -514,10 +520,12 @@ DEFAULT_RULES = [
         "confidence": "high",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema3_above_ema9", "operator": "==", "value": True},
+            {"indicator": "ema3_above_ema9_5m", "operator": "==", "value": True},
+            {"indicator": "ema9_above_ema20_5m", "operator": "==", "value": True},
             {"indicator": "ema9_above_ema20", "operator": "==", "value": True},
             {"indicator": "ema9_angle", "operator": ">", "value": 0},
             {"indicator": "ema20_angle", "operator": ">", "value": 0},
+            {"indicator": "ema3_above_ema9_1h", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Estrategia Fast Track de 5 minutos.",
@@ -536,10 +544,12 @@ DEFAULT_RULES = [
         "confidence": "high",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema3_below_ema9", "operator": "==", "value": True},
+            {"indicator": "ema3_below_ema9_5m", "operator": "==", "value": True},
+            {"indicator": "ema9_below_ema20_5m", "operator": "==", "value": True},
             {"indicator": "ema9_below_ema20", "operator": "==", "value": True},
             {"indicator": "ema9_angle", "operator": "<", "value": 0},
             {"indicator": "ema20_angle", "operator": "<", "value": 0},
+            {"indicator": "ema3_below_ema9_1h", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Estrategia Fast Track de 5 minutos.",
@@ -656,6 +666,13 @@ def build_market_data_dict(
         "ema9_above_ema20": float(last.get("ema2", last.get("ema_9", 0))) > float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema2", last.get("ema_9"))) else False,
         "ema3_below_ema9": float(last.get("ema1", last.get("ema_3", 0))) < float(last.get("ema2", last.get("ema_9", 0))) if pd.notna(last.get("ema1", last.get("ema_3"))) else False,
 
+        # 5m indicators injected from scheduler
+        "ema3_above_ema9_5m": float(last.get("ema3_5m", 0)) > float(last.get("ema9_5m", 0)) if pd.notna(last.get("ema3_5m")) else False,
+        "ema9_above_ema20_5m": float(last.get("ema9_5m", 0)) > float(last.get("ema20_5m", 0)) if pd.notna(last.get("ema9_5m")) else False,
+        "ema3_below_ema9_5m": float(last.get("ema3_5m", 0)) < float(last.get("ema9_5m", 0)) if pd.notna(last.get("ema3_5m")) else False,
+        "ema9_below_ema20_5m": float(last.get("ema9_5m", 0)) < float(last.get("ema20_5m", 0)) if pd.notna(last.get("ema9_5m")) else False,
+        "bb_upper_5m_opens": bool(last.get("bb_upper_5m_opens", False)),
+        "bb_lower_5m_opens": bool(last.get("bb_lower_5m_opens", False)),
         
         # DI
         "plus_di": float(last.get("plus_di", 0)) if pd.notna(last.get("plus_di")) else 0.0,
@@ -764,6 +781,23 @@ def build_market_data_dict(
     slope_entry_short = (ema3_slope < 0) and (ema3_slope < ema3_slope_prev) and (ema3 < ema9)
 
     ema20 = float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema3")) or pd.notna(last.get("ema_20")) else 0.0
+    ema50 = float(last.get("ema4", last.get("ema_50", 0))) if pd.notna(last.get("ema4")) or pd.notna(last.get("ema_50")) else 0.0
+    
+    bb_upper_slope_positive = False
+    bb_lower_slope_negative = False
+    bb_lower_slope_positive = False
+    bb_upper_col = "bb_upper" if "bb_upper" in df.columns else ("upper_6" if "upper_6" in df.columns else None)
+    bb_lower_col = "bb_lower" if "bb_lower" in df.columns else ("lower_6" if "lower_6" in df.columns else None)
+    if bb_upper_col and len(df) >= 2:
+        bb_upper_s = pd.to_numeric(df[bb_upper_col], errors="coerce")
+        if pd.notna(bb_upper_s.iloc[-1]) and pd.notna(bb_upper_s.iloc[-2]):
+            bb_upper_slope_positive = bb_upper_s.iloc[-1] > bb_upper_s.iloc[-2]
+    if bb_lower_col and len(df) >= 3:
+        bb_lower_s = pd.to_numeric(df[bb_lower_col], errors="coerce")
+        if pd.notna(bb_lower_s.iloc[-1]) and pd.notna(bb_lower_s.iloc[-2]) and pd.notna(bb_lower_s.iloc[-3]):
+            bb_lower_slope_negative = bb_lower_s.iloc[-1] < bb_lower_s.iloc[-2]
+            bb_lower_slope_positive = (bb_lower_s.iloc[-1] >= bb_lower_s.iloc[-2]) and (bb_lower_s.iloc[-2] >= bb_lower_s.iloc[-3])
+
     ema3_ema9_trend_ok = (ema9 > ema20) or (ema3 > ema20)
     
     ema3_cruce_up = False
@@ -835,6 +869,11 @@ def build_market_data_dict(
             and (high_price >= ema3 * 0.998) 
             and (float(last["close"]) <= ema3 * 1.002)
         ),
+        "bb_upper_slope_positive": bb_upper_slope_positive,
+        "bb_lower_slope_negative": bb_lower_slope_negative,
+        "bb_lower_slope_positive": bb_lower_slope_positive,
+        "ema_alignment_long": (ema3 > ema9) and (ema9 > ema20),
+        "ema_alignment_short": (ema3 < ema9) and (ema9 < ema20) and (ema20 < ema50),
     })
 
     return data
@@ -952,6 +991,15 @@ def evaluate_all_rules(
         elif bool(market_data.get("pullback_short", False)):
             direction_filter = "short"
             pinescript_signal = "Sell" # Fake signal to pass filters
+
+    # HOT Autonomous Trigger: AaHot/BbHot can self-activate without MACD/TradingView
+    if direction_filter is None:
+        if market_data.get("ema_alignment_long") and market_data.get("bb_upper_slope_positive"):
+            direction_filter = "long"
+            pinescript_signal = "Buy"
+        elif market_data.get("ema_alignment_short") and market_data.get("bb_lower_slope_negative"):
+            direction_filter = "short"
+            pinescript_signal = "Sell"
         else:
             return None
 
@@ -976,22 +1024,17 @@ def evaluate_all_rules(
     ema20_phase = market_data.get("ema20_phase", "flat")
     fib_zone = market_data.get("fib_zone", 0)
     
-    # 1. Bloqueo para LONG
-    if direction_filter == "long":
-        if "short" in ema20_phase:
-            return None
-        if fib_zone >= 4:
-            return None 
-
-    # 2. Bloqueo para SHORT
-    if direction_filter == "short":
-        if "long" in ema20_phase:
-            return None
-        if fib_zone <= -4:
-            return None 
-
     # Evaluate each rule
     for rule in filtered:
+        # 1. Bloqueo para LONG
+        if direction_filter == "long" and rule.get("rule_code") != "AaHot":
+            if "short" in ema20_phase or fib_zone >= 4:
+                continue
+
+        # 2. Bloqueo para SHORT
+        if direction_filter == "short" and rule.get("rule_code") != "BbHot":
+            if "long" in ema20_phase or fib_zone <= -4:
+                continue
         if evaluate_rule_conditions(rule, market_data):
             log_info(
                 MODULE,

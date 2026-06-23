@@ -891,14 +891,14 @@ def execute_forex_signal(
         if mc_res.data and len(mc_res.data) >= 10:
             closes = [float(r['close']) for r in reversed(mc_res.data)]
             df_15m = pd.DataFrame({'close': closes})
-            ema3_15 = float(df_15m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
             ema9_15 = float(df_15m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+            ema20_15 = float(df_15m['close'].ewm(span=20, adjust=False).mean().iloc[-1])
             
-            if action == "BUY" and ema3_15 <= ema9_15:
-                log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: BUY {pair} | EMA3({ema3_15:.5f}) <= EMA9({ema9_15:.5f})")
+            if action == "BUY" and ema9_15 <= ema20_15:
+                log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: BUY {pair} | EMA9({ema9_15:.5f}) <= EMA20({ema20_15:.5f})")
                 return {"success": False, "reason": "15m_downtrend", "pair": pair}
-            elif action == "SELL" and ema3_15 >= ema9_15:
-                log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: SELL {pair} | EMA3({ema3_15:.5f}) >= EMA9({ema9_15:.5f})")
+            elif action == "SELL" and ema9_15 >= ema20_15:
+                log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: SELL {pair} | EMA9({ema9_15:.5f}) >= EMA20({ema20_15:.5f})")
                 return {"success": False, "reason": "15m_uptrend", "pair": pair}
     except Exception as e:
         log_warning(MODULE, f"Could not verify 15m trend for {pair}: {e}")

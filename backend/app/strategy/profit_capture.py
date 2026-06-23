@@ -52,7 +52,7 @@ CAPTURE_CONFIG = {
         'rsi_oversold_short':   20,
         'rsi_must_be_turning':  True,
         'rsi_turning_lookback': 2,
-        'min_conditions_to_close': 2,
+        'min_conditions_to_close': 1,
         'min_conditions_to_flip':  2,
         'bb_body_min_pct':      0.30,
         'bb_invalid_width_pct': 0.003,

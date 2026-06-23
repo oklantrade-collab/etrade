@@ -391,23 +391,36 @@ def evaluate_proactive_exit(
         df_5m = MEMORY_STORE.get(position['symbol'], {}).get('5m', {}).get('df')
         if df_5m is not None and len(df_5m) >= 2:
             last_bar = df_5m.iloc[-1]
+            prev_bar = df_5m.iloc[-2]
             
             # Obtener EMAs de la vela más reciente
             ema3 = safe_float(last_bar.get('ema_3', last_bar.get('ema1')))
             ema9 = safe_float(last_bar.get('ema_9', last_bar.get('ema2')))
+            ema20 = safe_float(last_bar.get('ema_20', last_bar.get('ema3')))
+
+            # Bollinger Bands de la última y penúltima vela
+            u0 = safe_float(last_bar.get('upper_2', 0))
+            u1 = safe_float(prev_bar.get('upper_2', 0))
+            l0 = safe_float(last_bar.get('lower_2', 0))
+            l1 = safe_float(prev_bar.get('lower_2', 0))
+
+            bb_expanding = False
+            if u0 > 0 and u1 > 0 and l0 > 0 and l1 > 0:
+                # Banda superior aumentando (ascenso) y banda inferior disminuyendo (hacia abajo)
+                bb_expanding = (u0 > u1) and (l0 < l1)
             
-            if ema3 > 0 and ema9 > 0:
-                long_cut = ema3 < ema9
-                short_cut = ema3 > ema9
-                cut_type = "Fast (EMA3/9 en 5m)"
+            if ema3 > 0 and ema9 > 0 and ema20 > 0:
+                long_cut = ema3 < ema9 and ema9 < ema20 and bb_expanding
+                short_cut = ema3 > ema9 and ema9 > ema20 and bb_expanding
+                cut_type = "Fast (EMA3/9/20 + BB Exp en 5m)"
                 
-                # Solo cerramos preventivamente si la posición está en pérdida
-                if pnl['pnl_pct'] <= -0.20: # Solo si la pérdida supera el -0.20%
+                # Tolerancia máxima permitida: cerramos si la pérdida es -0.05% o peor para evitar pérdidas mayores
+                if pnl['pnl_pct'] <= -0.05:
                     if is_long and long_cut:
                         return {
                             'should_close': True,
                             'rule_code':    'AaTRC',
-                            'reason':       f'Corte Preventivo {cut_type}: Reversión de EMAs detectada en pérdida ({pnl["pnl_pct"]}%). Evitando Stop Loss.',
+                            'reason':       f'Corte Preventivo {cut_type}: Reversión de EMAs y BB expandiendo en pérdida ({pnl["pnl_pct"]}%). Evitando Stop Loss.',
                             'pnl':          pnl,
                             'urgency':      'normal'
                         }
@@ -415,7 +428,7 @@ def evaluate_proactive_exit(
                         return {
                             'should_close': True,
                             'rule_code':    'BbTRC',
-                            'reason':       f'Corte Preventivo {cut_type}: Reversión de EMAs detectada en pérdida ({pnl["pnl_pct"]}%). Evitando Stop Loss.',
+                            'reason':       f'Corte Preventivo {cut_type}: Reversión de EMAs y BB expandiendo en pérdida ({pnl["pnl_pct"]}%). Evitando Stop Loss.',
                             'pnl':          pnl,
                             'urgency':      'normal'
                         }
@@ -472,8 +485,29 @@ def evaluate_proactive_exit(
     double_confirmed = (
         (c1_pine and c2_sar) or (c1_pine and c3_candle) or (c2_sar and c3_candle)
     )
-    # Reversión técnica fuerte: Pine + SAR (lo que el usuario reportó)
-    technical_reversal = c1_pine and c2_sar
+    # ── NUEVO: Filtro 1H para salidas prematuras ──
+    try:
+        from app.core.memory_store import MEMORY_STORE
+        df_1h = MEMORY_STORE.get(position['symbol'], {}).get('1h', {}).get('df')
+        reversal_confirmed_by_1h = True  # Asumimos True si no hay datos
+        if df_1h is not None and len(df_1h) >= 2:
+            last_1h = df_1h.iloc[-1]
+            ema3_1h = safe_float(last_1h.get('ema_3', last_1h.get('ema1')))
+            ema9_1h = safe_float(last_1h.get('ema_9', last_1h.get('ema2')))
+            if ema3_1h > 0 and ema9_1h > 0:
+                if is_long:
+                    # Queremos cerrar (reversal). Si EMA3 > EMA9 en 1H, la tendencia macro sigue alcista, bloqueamos el cierre.
+                    if ema3_1h > ema9_1h:
+                        reversal_confirmed_by_1h = False
+                else:
+                    if ema3_1h < ema9_1h:
+                        reversal_confirmed_by_1h = False
+    except Exception as e:
+        log_error(MODULE, f"Error obteniendo filtro 1H: {e}")
+        reversal_confirmed_by_1h = True
+
+    # Reversión técnica fuerte: Pine + SAR (lo que el usuario reportó) + Filtro 1H
+    technical_reversal = c1_pine and c2_sar and reversal_confirmed_by_1h
     
     urgent_exit = double_confirmed and pnl['is_urgent']
     

@@ -330,11 +330,13 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
     script.async = true;
     script.onload = () => {
       if ((window as any).TradingView && containerRef.current) {
+        const tvTimezone = typeof window !== "undefined" ? (localStorage.getItem("app_timezone") || "America/Lima") : "America/Lima";
+
         new (window as any).TradingView.widget({
           "autosize": true,
           "symbol": symbol,
           "interval": "D",
-          "timezone": "America/Lima",
+          "timezone": tvTimezone,
           "theme": "dark",
           "style": "1",
           "locale": "es",

@@ -156,7 +156,7 @@ export default function PositionsPage() {
               <table>
                 <thead>
                     <tr>
-                      <th>Time UTC</th>
+                      <th>Time (Local)</th>
                       <th>Symbol</th>
                       <th>Side</th>
                       <th className="text-center">Estrategia</th>
@@ -291,7 +291,7 @@ export default function PositionsPage() {
               <table>
                 <thead>
                   <tr>
-                    <th>Time UTC</th>
+                    <th>Time (Local)</th>
                     <th>Symbol</th>
                     <th>Side</th>
                     <th className="text-center">Size</th>
