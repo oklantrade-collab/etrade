@@ -82,7 +82,9 @@ export default function StrategiesPage() {
     try {
       const res = await fetch('/api/v1/strategies/rules')
       if (res.ok) {
-        setRules(await res.json())
+        const data = await res.json()
+        // Filtrar Aa30 y Bb30 originales de la UI (ya que ahora usamos las versiones Cripto Aa30C / Bb30C)
+        setRules(data.filter((r: StrategyRule) => !['Aa30', 'Bb30'].includes(r.rule_code)))
       }
     } catch (err) {
       console.error('Error loading rules:', err)
