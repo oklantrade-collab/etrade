@@ -1150,13 +1150,11 @@ async def _execute_paper_open(
             is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
             max_rev_key = 'max_reversal_loss_pct_forex' if is_forex else 'max_reversal_loss_pct_crypto'
             try:
-                from app.core.memory_store import BOT_STATE
                 MAX_REVERSAL_LOSS_PCT = float(BOT_STATE.config_cache.get(max_rev_key, -0.05))
             except:
                 MAX_REVERSAL_LOSS_PCT = -0.05
             
             if total_pnl_pct < MAX_REVERSAL_LOSS_PCT:
-                from app.core.logger import log_warning
                 log_warning(MODULE, f"🚫 REVERSIÓN BLOQUEADA: La pérdida acumulada en {symbol} es {total_pnl_pct:.3f}% (límite {MAX_REVERSAL_LOSS_PCT}%). Se mantiene la posición original y se aborta la nueva entrada.")
                 return None
 
@@ -1341,24 +1339,20 @@ async def _execute_paper_open_unlocked(
     if side.lower() in ['long', 'buy']:
         min_safe_sl = price * (1 - min_sl_dist_pct)
         if sl_final > min_safe_sl:
-            from app.core.logger import log_warning
             log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL activado para LONG. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
             sl_final = min_safe_sl
             
         if sl_final >= price and sl_final > 0:
             sl_final = price * (1 - min_sl_dist_pct)
-            from app.core.logger import log_warning
             log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
     elif side.lower() in ['short', 'sell']:
         min_safe_sl = price * (1 + min_sl_dist_pct)
         if sl_final < min_safe_sl:
-            from app.core.logger import log_warning
             log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL activado para SHORT. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
             sl_final = min_safe_sl
             
         if sl_final <= price and sl_final > 0:
             sl_final = price * (1 + min_sl_dist_pct)
-            from app.core.logger import log_warning
             log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
             
     sl_dict['sl_price'] = sl_final

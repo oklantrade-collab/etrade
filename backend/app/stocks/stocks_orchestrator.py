@@ -350,12 +350,12 @@ def evaluate_5m_breakout(
 
         close_col = 'close' if 'close' in df_1d.columns else 'Close'
 
-        # 1. EMA50 > EMA200 en el gráfico diario
+        # 1. EMA20 > EMA50 en el gráfico diario
+        ema20_1d = df_1d[close_col].ewm(span=20, adjust=False).mean()
         ema50_1d = df_1d[close_col].ewm(span=50, adjust=False).mean()
-        ema200_1d = df_1d[close_col].ewm(span=200, adjust=False).mean()
 
-        if ema50_1d.iloc[-1] <= ema200_1d.iloc[-1]:
-            result['reason'] = f'Filtro macro: EMA50_1D ({ema50_1d.iloc[-1]:.2f}) <= EMA200_1D ({ema200_1d.iloc[-1]:.2f})'
+        if ema20_1d.iloc[-1] <= ema50_1d.iloc[-1]:
+            result['reason'] = f'Filtro macro: EMA20_1D ({ema20_1d.iloc[-1]:.2f}) <= EMA50_1D ({ema50_1d.iloc[-1]:.2f})'
             return result
 
         # 2. SIPV (PineScript Signal) en el gráfico diario = Buy

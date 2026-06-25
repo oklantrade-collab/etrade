@@ -978,13 +978,23 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
 
             # 2. SL Adaptativo / SLV v5 (Recovery & Hard Stop)
             from app.strategy.virtual_sl_recovery import process_symbol_5m_with_slvm_v2
-            await process_symbol_5m_with_slvm_v2(
+            mr_result = await process_symbol_5m_with_slvm_v2(
                 symbol        = symbol,
                 current_price = current_price,
                 snap          = snap,
                 sb            = sb,
-                market_type   = 'crypto_futures'
+                market_type   = 'crypto_futures',
+                position      = position
             )
+            if mr_result and mr_result.get('should_close'):
+                side = position.get('side', 'long').lower()
+                entry = float(position.get('entry_price', 0))
+                pnl = (current_price - entry) / entry * 100 if side in ['long', 'buy'] else (entry - current_price) / entry * 100
+                await close_all_crypto_positions(
+                    symbol, [position], current_price, 
+                    f"slv_v2_{mr_result['exit_type']}", pnl, sb, is_tp=False
+                )
+                return
             
             # 2.5 DCA Proactivo / EREP Fase 0
             from app.strategy.dca_manager import evaluate_proactive_dca

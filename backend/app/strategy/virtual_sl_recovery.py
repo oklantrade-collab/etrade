@@ -378,20 +378,8 @@ async def process_symbol_5m_with_slvm_v2(
         if mr_result['should_close']:
             log_info('SLVM', f"Closing {symbol} by {mr_result['exit_type']}: {mr_result['reason']}")
             
-            # Preparar datos de cierre
-            update_data = {
-                'status': 'closed',
-                'close_reason': f"slv_v2_{mr_result['exit_type']}",
-                'closed_at': datetime.now(timezone.utc).isoformat(),
-                # Logging extendido para auditoria
-                'slv_hard_stop_trigger': mr_result.get('exit_type'),
-                'slv_hard_stop_pips': mr_result.get('hs_pips'),
-                'slv_v1_open': safe_float(snap.get('open_15m', 0)),
-                'v2_close_prev': safe_float(snap.get('close_prev_15m', 0)),
-                'slv_timeframe_trigger': '5m'
-            }
-            
-            safe_db_update(sb, table_name, db_record_id, update_data, key_name=db_key_name)
+            # Devolvemos el resultado para que el caller (execution service) lo cierre físicamente
+            return mr_result
             
             # Alerta Telegram
             from app.workers.alerts_service import send_telegram_message

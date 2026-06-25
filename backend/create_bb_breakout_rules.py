@@ -126,14 +126,15 @@ res = sb.table('strategy_rules_v2').upsert(aa30).execute()
 print(f"\nRegla Aa30 (LONG Breakout): OK - ID {aa30['id']}")
 
 # Bb30: SHORT Bollinger Breakout + EMA Stack
-# Condiciones: EMA3<EMA9, EMA9<EMA20, EMA20 angulo-, EMA9 angulo-, SAR 15m bajista
-bb30_cond_ids = [ema3_lt_ema9, ema9_lt_ema20, 12, 14, 25]
+# Condiciones: EMA3<EMA9, EMA9<EMA20, EMA20 angulo-, EMA9 angulo-, SAR 15m bajista, BB lower descending
+bb30_cond_ids = [ema3_lt_ema9, ema9_lt_ema20, 12, 14, 25, 9914]
 bb30_weights = {
-    str(ema3_lt_ema9): 0.25,
-    str(ema9_lt_ema20): 0.25,
-    '12': 0.20,   # EMA20 angulo negativo
+    str(ema3_lt_ema9): 0.20,
+    str(ema9_lt_ema20): 0.20,
+    '12': 0.15,   # EMA20 angulo negativo
     '14': 0.15,   # EMA9 angulo negativo
     '25': 0.15,   # SAR 15m bajista
+    '9914': 0.15, # BB Lower Descending
 }
 
 bb30 = {

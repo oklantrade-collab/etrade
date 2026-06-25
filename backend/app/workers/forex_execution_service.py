@@ -1333,6 +1333,19 @@ class ForexExecutionService:
                          if not pos.get('recovery_mode'):
                              from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
                              activate_recovery_mode_sync(pos, price, symbol, 'forex_futures', self.sb, 'forex_positions')
+                             
+                    # 3. Modo Recuperación Virtual (SLVM v2) Evaluación continua
+                    if pos.get('recovery_mode') and not pos.get('erep_active'):
+                        from app.strategy.virtual_sl_recovery import evaluate_recovery_mode_v2
+                        mr_result = evaluate_recovery_mode_v2(pos, price, snap, symbol, 'forex_futures')
+                        if mr_result['should_close']:
+                            self.log(f"[SLVM V2] {symbol} {mr_result['exit_type']}: {mr_result['reason']}")
+                            pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+                            entry = self._safe_float(pos.get('entry_price'))
+                            side = pos.get('side', 'long').lower()
+                            pips_pnl = (price - entry) / pip_size if side in ['long', 'buy'] else (entry - price) / pip_size
+                            self._close_position(pos, price, f"slv_v2_{mr_result['exit_type']}", pips_pnl, mr_result=mr_result, snap=snap)
+                            continue
 
             except Exception as e: self.log(f'Error gestion: {e}')
 

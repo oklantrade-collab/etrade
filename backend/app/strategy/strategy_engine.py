@@ -245,18 +245,28 @@ class StrategyEngine:
 
         # ── Aa13 & Bb13 Custom Variables ──
         bb_lower_ascending_15m = False
+        bb_lower_ascending_2c_15m = False
+        prev_low_touch_lower56_15m = False
+        bb_lower_descending_15m = False
         bb_upper_descending_15m = False
         high_above_ema20_15m = False
+        high_above_ema20_5m = False
         ema20_below_ema50_15m = False
+        ema50_below_ema200_15m = False
         ema9_below_ema20_15m = False
+        ema9_above_ema20_15m = False
 
         if df_15m is not None and len(df_15m) >= 3:
-            # BB Lower Ascending
+            # BB Lower Ascending / Descending
             b_l_0 = safe_float(df_15m['lower_2'].iloc[-1] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series()).iloc[-1] if 'bb_lower' in df_15m.columns else 0)
             b_l_1 = safe_float(df_15m['lower_2'].iloc[-2] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series()).iloc[-2] if 'bb_lower' in df_15m.columns else 0)
             b_l_2 = safe_float(df_15m['lower_2'].iloc[-3] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series()).iloc[-3] if 'bb_lower' in df_15m.columns else 0)
             if b_l_0 > b_l_1 and b_l_1 > b_l_2 and b_l_2 > 0:
                 bb_lower_ascending_15m = True
+            if b_l_0 > b_l_1 and b_l_1 > 0:
+                bb_lower_ascending_2c_15m = True
+            if b_l_0 < b_l_1 and b_l_1 < b_l_2 and b_l_0 > 0:
+                bb_lower_descending_15m = True
 
             # BB Upper Descending
             b_u_0 = safe_float(df_15m['upper_2'].iloc[-1] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-1] if 'bb_upper' in df_15m.columns else 0)
@@ -265,19 +275,42 @@ class StrategyEngine:
             if b_u_0 < b_u_1 and b_u_1 < b_u_2 and b_u_0 > 0:
                 bb_upper_descending_15m = True
 
+            # Prev Low Touch Lower 5 or 6
+            prev_low = safe_float(df_15m['low'].iloc[-2] if 'low' in df_15m.columns else 0)
+            prev_basis = safe_float(df_15m['basis'].iloc[-2] if 'basis' in df_15m.columns else df_15m.get('sma_20', pd.Series()).iloc[-2] if 'sma_20' in df_15m.columns else 0)
+            if prev_basis > 0 and b_l_1 > 0:
+                std_15m = (prev_basis - b_l_1) / 2.0
+                prev_lower_5 = prev_basis - 5.0 * std_15m
+                prev_lower_6 = prev_basis - 6.0 * std_15m
+                if prev_low > 0 and (prev_low <= prev_lower_5 or prev_low <= prev_lower_6):
+                    prev_low_touch_lower56_15m = True
+
             # EMAs and High
             ema9_15m = safe_float(last_15m.get('ema_9') if last_15m.get('ema_9') is not None else last_15m.get('ema9'))
             ema20_15m = safe_float(last_15m.get('ema_20') if last_15m.get('ema_20') is not None else last_15m.get('ema20'))
             ema50_15m = safe_float(last_15m.get('ema_50') if last_15m.get('ema_50') is not None else last_15m.get('ema50'))
+            ema200_15m = safe_float(last_15m.get('ema_200') if last_15m.get('ema_200') is not None else last_15m.get('ema200'))
             
             if ema20_15m and ema50_15m and ema20_15m < ema50_15m:
                 ema20_below_ema50_15m = True
                 
-            if ema9_15m and ema20_15m and ema9_15m < ema20_15m:
-                ema9_below_ema20_15m = True
+            if ema50_15m and ema200_15m and ema50_15m < ema200_15m:
+                ema50_below_ema200_15m = True
+                
+            if ema9_15m and ema20_15m:
+                if ema9_15m < ema20_15m:
+                    ema9_below_ema20_15m = True
+                if ema9_15m > ema20_15m:
+                    ema9_above_ema20_15m = True
             
             if ema20_15m and high_15m >= ema20_15m:
                 high_above_ema20_15m = True
+
+        if last_5m:
+            ema20_5m_val = safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else last_5m.get('ema20'))
+            high_5m_val = safe_float(last_5m.get('high'))
+            if ema20_5m_val and high_5m_val >= ema20_5m_val:
+                high_above_ema20_5m = True
 
         return {
             # Precio
@@ -388,10 +421,16 @@ class StrategyEngine:
             
             # Custom Aa13/Bb13 variables
             'bb_lower_ascending_15m': bb_lower_ascending_15m,
+            'bb_lower_ascending_2c_15m': bb_lower_ascending_2c_15m,
+            'prev_low_touch_lower56_15m': prev_low_touch_lower56_15m,
+            'bb_lower_descending_15m': bb_lower_descending_15m,
             'bb_upper_descending_15m': bb_upper_descending_15m,
             'high_above_ema20_15m': high_above_ema20_15m,
+            'high_above_ema20_5m': high_above_ema20_5m,
             'ema20_below_ema50_15m': ema20_below_ema50_15m,
+            'ema50_below_ema200_15m': ema50_below_ema200_15m,
             'ema9_below_ema20_15m': ema9_below_ema20_15m,
+            'ema9_above_ema20_15m': ema9_above_ema20_15m,
 
             # Referencia al DataFrame original para reglas personalizadas avanzadas
             'df_15m': df_15m

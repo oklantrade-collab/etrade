@@ -164,14 +164,14 @@ class StocksRuleEngine:
 
         # ── CHECK 0: Daily Timeframe Macro Trend (Anti-Crash Filter) ──
         if direction == "buy":
+            ema_20_1d = float(context.get("ema_20_1d") or 0.0)
             ema_50_1d = float(context.get("ema_50_1d") or 0.0)
-            ema_200_1d = float(context.get("ema_200_1d") or 0.0)
             ema_3_1d = float(context.get("ema_3_1d") or 0.0)
             ema_9_1d = float(context.get("ema_9_1d") or 0.0)
             
-            # Bloquear entradas si la tendencia macro diaria (50 vs 200) es bajista
-            if ema_50_1d > 0 and ema_200_1d > 0 and ema_50_1d < ema_200_1d:
-                failures.append(f"1D Macro Bearish (No Buy): EMA50 ({ema_50_1d:.2f}) < EMA200 ({ema_200_1d:.2f})")
+            # Bloquear entradas si la tendencia macro diaria (20 vs 50) es bajista
+            if ema_20_1d > 0 and ema_50_1d > 0 and ema_20_1d < ema_50_1d:
+                failures.append(f"1D Macro Bearish (No Buy): EMA20 ({ema_20_1d:.2f}) < EMA50 ({ema_50_1d:.2f})")
                 
             # Bloquear entradas si la tendencia local diaria (3 vs 9) es bajista
             if ema_3_1d > 0 and ema_9_1d > 0 and ema_3_1d < ema_9_1d:
@@ -361,7 +361,7 @@ class StocksRuleEngine:
 
         # ── CHECK 5: RVOL mínimo ─────────────────────────
         # Usar el rvol_min de la regla, o el global de Settings como piso (V5.1)
-        global_rvol_min = float(self.config.get("rvol_min", 1.5))
+        global_rvol_min = float(self.config.get("rvol_min", 1.0))
         rvol_min = float(rule.get("rvol_min") or 0)
         
         # Si la regla no tiene rvol_min definido (>0), usamos el global
@@ -522,7 +522,7 @@ class StocksRuleEngine:
                 failures.append(f"Low Volume: {vol_24h/1e6:.1f}M < 1.0M (No traction)")
 
             # Requisito 2: Proyección de Volumen (RVOL)
-            dynamic_rvol_min = float(self.config.get("rvol_min", 1.5))
+            dynamic_rvol_min = float(self.config.get("rvol_min", 1.0))
             if rvol < dynamic_rvol_min:
                 failures.append(f"Insufficient RVOL: {rvol:.2f}x < {dynamic_rvol_min}x (No momentum projection)")
 
@@ -596,9 +596,9 @@ class StocksRuleEngine:
             if not bb_exp and not bb_exp_5m:
                 failures.append("BB Not Expanding: Bands are not opening on any timeframe")
             
-            # Requisito 2: Volumen masivo (RVOL > 2.0)
-            if rvol < 2.0:
-                failures.append(f"Low RVOL: {rvol:.2f} < 2.0x (Needed for explosion confirmation)")
+            # Requisito 2: Volumen masivo (RVOL > 1.0)
+            if rvol < 1.0:
+                failures.append(f"Low RVOL: {rvol:.2f} < 1.0x (Needed for explosion confirmation)")
             
             # Requisito 3: Alineación mínima EMA3 > EMA9 (15m)
             if ema3 and ema9 and ema3 < ema9:

@@ -602,9 +602,9 @@ async def send_sl_to_exchange(
                 symbol     = symbol,
                 side       = sl_side,
                 order_type = 'STOP_MARKET',
-                quantity   = quantity,
-                stop_price = sl_price,
-                reduce_only= True,  # Solo cerrar
+                size       = quantity,
+                stopPrice  = str(sl_price),
+                reduceOnly = True,  # Solo cerrar
             )
             # handle order returned
             exchange_id = None

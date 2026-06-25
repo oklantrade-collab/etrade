@@ -7,6 +7,7 @@ Evita el cierre inmediato en pérdida y busca una salida en breakeven o con gana
 utilizando compras de refuerzo inteligentes (P2) basadas en bandas de Fibonacci o factores de escala.
 """
 
+import asyncio
 import time
 import pandas as pd
 import numpy as np
@@ -1171,28 +1172,44 @@ async def execute_erep_action(
 
         log_info('EREP', f'{"✅" if "success" in close_type else "🔴"} EREP CIERRE [{symbol}] ({side.upper()}): {action.get("reason", "")}')
 
-        # Cerrar la posición principal
-        try:
-            await close_func(
-                symbol       = symbol,
-                side         = side,
-                size         = size,
-                price        = current_price,
-                reason       = f'EREP_{close_type.upper()}',
-                supabase     = supabase,
-            )
-        except Exception as e:
-            log_error('EREP', f'Error P1 close: {e}')
+        # Cerrar la posición principal (con reintentos por fallos de red)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await close_func(
+                    symbol       = symbol,
+                    side         = side,
+                    size         = size,
+                    price        = current_price,
+                    reason       = f'EREP_{close_type.upper()}',
+                    supabase     = supabase,
+                )
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    log_warning('EREP', f'Error P1 close attempt {attempt+1}: {e}. Retrying in 1s...')
+                    await asyncio.sleep(1.0)
+                else:
+                    log_error('EREP', f'Error P1 close final: {e}')
 
         # Limpiar campos EREP en base de datos e incorporar campos de cierre principales
-        supabase.table(table).update({
-            'erep_active':       False,
-            'erep_phase':        0,
-            'erep_close_reason': close_type,
-            'status':            'closed',
-            'closed_at':         datetime.now(timezone.utc).isoformat(),
-            'close_reason':      f'EREP_{close_type.upper()}'[:50]
-        }).eq('id', pos_id).execute()
+        for attempt in range(max_retries):
+            try:
+                supabase.table(table).update({
+                    'erep_active':       False,
+                    'erep_phase':        0,
+                    'erep_close_reason': close_type,
+                    'status':            'closed',
+                    'closed_at':         datetime.now(timezone.utc).isoformat(),
+                    'close_reason':      f'EREP_{close_type.upper()}'[:50]
+                }).eq('id', pos_id).execute()
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    log_warning('EREP', f'Error P1 DB update attempt {attempt+1}: {e}. Retrying in 1s...')
+                    await asyncio.sleep(1.0)
+                else:
+                    log_error('EREP', f'Error P1 DB update final: {e}')
 
         # Calcular P&L del EREP completo
         p1_price = float(position.get('erep_p1_price') or position.get('entry_price', current_price))

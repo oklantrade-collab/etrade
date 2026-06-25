@@ -259,6 +259,7 @@ class BinanceCryptoProvider(DataProvider):
         size: float,
         price: Optional[float] = None,
         order_type: str = "LIMIT",
+        **kwargs
     ) -> dict:
         client = await self._get_async_client()
         symbol_clean = symbol.replace("/", "")
@@ -272,6 +273,8 @@ class BinanceCryptoProvider(DataProvider):
         if price and order_type == "LIMIT":
             params["price"] = str(price)
             params["timeInForce"] = "GTC"
+            
+        params.update(kwargs)
 
         if self.market == "futures":
             result = await client.futures_create_order(**params)

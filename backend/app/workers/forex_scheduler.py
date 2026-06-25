@@ -622,6 +622,33 @@ async def open_forex_position(
         opp_positions = [p for p in (opp_res.data or []) if p.get('side', '').lower() == opposite_side]
         
         if opp_positions:
+            total_value = 0.0
+            total_pnl = 0.0
+            for opp_pos in opp_positions:
+                pos_entry = float(opp_pos.get('avg_entry_price') or opp_pos.get('entry_price') or 0)
+                pos_size = float(opp_pos.get('size') or 1.0)
+                p_side = (opp_pos.get('side') or '').upper()
+                if pos_entry > 0:
+                    pos_val = pos_entry * pos_size
+                    if p_side in ['LONG', 'BUY']:
+                        pos_pnl = (price - pos_entry) * pos_size
+                    else:
+                        pos_pnl = (pos_entry - price) * pos_size
+                    total_value += pos_val
+                    total_pnl += pos_pnl
+            
+            total_pnl_pct = (total_pnl / total_value * 100) if total_value > 0 else 0.0
+            
+            # Obtener el límite configurado (o usar -0.05% por defecto)
+            try:
+                MAX_REVERSAL_LOSS_PCT = float(BOT_STATE.config_cache.get('max_reversal_loss_pct_forex', -0.05))
+            except:
+                MAX_REVERSAL_LOSS_PCT = -0.05
+
+            if total_pnl_pct < MAX_REVERSAL_LOSS_PCT:
+                log_warning(MODULE, f"🚫 REVERSIÓN FOREX BLOQUEADA: Pérdida acumulada en {symbol} es {total_pnl_pct:.3f}% (límite {MAX_REVERSAL_LOSS_PCT}%). Se aborta la reversión.")
+                return
+
             log_info(MODULE, f"{symbol}: [REVERSAL NETTING] Cerrando {len(opp_positions)} posiciones {opposite_side.upper()} antes de abrir {direction.upper()}")
             from app.core.position_monitor import _execute_paper_close
             for opp_pos in opp_positions:
@@ -1319,8 +1346,8 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                                         else:
                                             pnl_pct = (entry - current_price) / entry * 100
                                             
-                                    if pnl_pct < -1.0:
-                                        log_info('FLIP_FX', f"[{symbol}] Flip abortado para esta posición: PNL {pnl_pct:.2f}% < -1.0%. Se retiene para EREP.")
+                                    if pnl_pct < -0.05:
+                                        log_info('FLIP_FX', f"[{symbol}] Flip abortado para esta posición: PNL {pnl_pct:.2f}% < -0.05%. Se retiene para EREP.")
                                         continue
 
                                     try:
