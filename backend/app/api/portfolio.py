@@ -52,11 +52,11 @@ async def get_global_portfolio():
                     supabase.table('forex_positions').select('*').eq('status', 'open').execute(),
                     supabase.table('stocks_positions').select('*').eq('status', 'open').execute(),
                     supabase.table('market_snapshot').select('*').in_('symbol', all_snap_symbols).execute(),
-                    supabase.table('paper_trades').select('total_pnl_usd').gte('closed_at', today_start).execute(),
+                    supabase.table('positions').select('realized_pnl').eq('status', 'closed').gte('closed_at', today_start).execute(),
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').gte('closed_at', today_start).execute(),
                     supabase.table('stocks_positions').select('unrealized_pnl').eq('status', 'closed').gte('updated_at', today_start).execute(),
                     supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute(),
-                    supabase.table('paper_trades').select('total_pnl_usd').not_.is_('closed_at', 'null').execute(),
+                    supabase.table('positions').select('realized_pnl').eq('status', 'closed').not_.is_('closed_at', 'null').execute(),
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
                     supabase.table('positions').select('*').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
                     supabase.table('forex_positions').select('*').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
@@ -85,13 +85,13 @@ async def get_global_portfolio():
             regime = latest_regime.data[0]['category'] if latest_regime.data else 'riesgo_medio'
 
             # --- 3. PROCESAMIENTO ---
-            full_history = [float(p['total_pnl_usd'] or 0) for p in (all_closed_crypto.data or [])]
+            full_history = [float(p.get('realized_pnl') or 0) for p in (all_closed_crypto.data or [])]
             full_history += [float(p['pnl_usd'] or 0) for p in (all_closed_forex.data or [])]
             
             wins = len([p for p in full_history if p > 0])
             win_rate = (wins / len(full_history) * 100) if full_history else 0.0
 
-            daily_pnl = sum(float(p['total_pnl_usd'] or 0) for p in (closed_crypto_res.data or []))
+            daily_pnl = sum(float(p.get('realized_pnl') or 0) for p in (closed_crypto_res.data or []))
             daily_pnl += sum(float(p['pnl_usd'] or 0) for p in (closed_forex_res.data or []))
             daily_pnl += sum(float(p['unrealized_pnl'] or 0) for p in (closed_stocks_res.data or []))
 
@@ -384,7 +384,7 @@ async def get_performance_summary():
             # Fetch from all markets sequentially to avoid thread-safety issues with httpx connection pool
             def fetch_perf_sync():
                 return (
-                    supabase.table('paper_trades').select('id, total_pnl_usd, closed_at, rule_code, mode').eq('mode', 'paper').not_.is_('closed_at', 'null').execute(),
+                    supabase.table('positions').select('id, realized_pnl, closed_at, rule_code').eq('status', 'closed').execute(),
                     supabase.table('forex_positions').select('id, pnl_usd, closed_at, rule_code').eq('status', 'closed').execute(),
                     supabase.table('stocks_positions').select('id, ticker, unrealized_pnl, updated_at').eq('status', 'closed').execute()
                 )
@@ -397,7 +397,7 @@ async def get_performance_summary():
             
             raw_combined = [] # ... processing ...
             for t in (res_crypto.data or []):
-                raw_combined.append({**t, 'pnl': t['total_pnl_usd'], 'time': t['closed_at'], 'market': 'crypto'})
+                raw_combined.append({**t, 'pnl': t.get('realized_pnl') or 0, 'time': t['closed_at'], 'market': 'crypto'})
             for t in (res_forex.data or []):
                 raw_combined.append({**t, 'pnl': t['pnl_usd'], 'time': t['closed_at'], 'market': 'forex'})
             for t in (res_stocks.data or []):

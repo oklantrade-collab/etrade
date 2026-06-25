@@ -11,9 +11,11 @@ function normalizeCryptoSymbol(s: string) {
 export default function PositionsPage() {
   const [positions, setPositions] = useState<any[]>([])
   const [closedPositions, setClosedPositions] = useState<any[]>([])
-  const [tab, setTab] = useState<'open'|'closed'>('open')
+  const [paperTrades, setPaperTrades] = useState<any[]>([])
+  const [tab, setTab] = useState<'open'|'closed'|'paper'>('open')
   const [maxPositions, setMaxPositions] = useState<number>(4)
   const [closedPage, setClosedPage] = useState(0)
+  const [paperPage, setPaperPage] = useState(0)
   const [tz, setTz] = useState('America/Lima')
   const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -31,6 +33,7 @@ export default function PositionsPage() {
   useEffect(() => {
     loadPositions()
     loadClosedPositions()
+    loadPaperTrades()
     loadMaxPositions()
     const channel = supabase
       .channel('positions-realtime')
@@ -67,6 +70,22 @@ export default function PositionsPage() {
       if (data) setClosedPositions(data)
     }
   }
+
+  async function loadPaperTrades() {
+    const { data, error } = await supabase
+      .from('paper_trades')
+      .select('*')
+      .eq('mode', 'paper')
+      .order('closed_at', { ascending: false, nullsFirst: false })
+      .limit(100)
+    if (error) {
+      console.error('Error loading paper trades:', error)
+      setErrorMsg(`Error loading paper trades: ${error.message}`)
+    } else {
+      if (data) setPaperTrades(data)
+    }
+  }
+
   async function loadMaxPositions() {
     const { data, error } = await supabase
       .from('risk_config')
@@ -147,6 +166,12 @@ export default function PositionsPage() {
             onClick={() => setTab('closed')}
           >
             Closed History
+          </button>
+          <button 
+            style={{ flex: 1, padding: 16, background: 'none', border: 'none', cursor: 'pointer', fontWeight: tab === 'paper' ? 'bold' : 'normal', borderBottom: tab === 'paper' ? '2px solid var(--accent-blue)' : 'none', color: tab === 'paper' ? 'var(--text)' : 'var(--text-muted)' }}
+            onClick={() => setTab('paper')}
+          >
+            Paper Trades
           </button>
         </div>
 
@@ -432,6 +457,107 @@ export default function PositionsPage() {
           ) : (
             <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
               <p>No closed positions history.</p>
+            </div>
+          )
+        )}
+
+        {tab === 'paper' && (
+          paperTrades.length > 0 ? (
+            <div className="table-container" style={{ margin: 0 }}>
+              <table>
+                <thead>
+                    <tr>
+                      <th>Time (Local)</th>
+                      <th>Symbol</th>
+                      <th>Side</th>
+                      <th className="text-center">Estrategia</th>
+                      <th>Entry Px</th>
+                      <th>Exit Px</th>
+                      <th className="text-end">Simulated PnL</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paperTrades.slice(paperPage * ITEMS_PER_PAGE, (paperPage + 1) * ITEMS_PER_PAGE).map((p) => {
+                      const pnl = parseFloat(p.total_pnl_usd || '0')
+                      return (
+                        <tr key={p.id}>
+                          <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: '1.2' }}>
+                            <div>{formatDateInTimezone(p.closed_at, 'date')}</div>
+                            <div style={{ fontWeight: 'bold' }}>{formatDateInTimezone(p.closed_at, 'time')}</div>
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <div style={{ 
+                                  width: '3px', 
+                                  height: '24px', 
+                                  borderRadius: '2px',
+                                  background: (p.side || '').toLowerCase().includes('buy') || (p.side || '').toLowerCase().includes('long') ? '#10b981' : '#f43f5e',
+                                  boxShadow: (p.side || '').toLowerCase().includes('buy') || (p.side || '').toLowerCase().includes('long') ? '0 0 10px #10b981' : '0 0 10px #f43f5e'
+                                }} />
+                                <span style={{ fontWeight: 600 }}>{normalizeCryptoSymbol(p.symbol)}</span>
+                            </div>
+                          </td>
+                          <td>
+                            <span className={`badge ${(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'badge-green' : 'badge-red'}`}>
+                              {(p.side || '').toLowerCase().includes('long') || (p.side || '').toLowerCase().includes('buy') ? 'BUY' : 'SELL'}
+                            </span>
+                          </td>
+                          <td className="text-center" style={{ fontWeight: 800, color: 'var(--accent-blue)', fontSize: '0.85rem' }}>
+                            {p.rule_code || '—'}
+                          </td>
+                          <td>${parseFloat(p.entry_price || '0').toFixed(4)}</td>
+                          <td>${parseFloat(p.exit_price || '0').toFixed(4)}</td>
+                          <td className="text-end" style={{ fontWeight: 800, color: pnl >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                            {fmtPnl(pnl)}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+              </table>
+              {paperTrades.length > ITEMS_PER_PAGE && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', padding: '16px', borderTop: '1px solid var(--border)', alignItems: 'center' }}>
+                  <button 
+                    onClick={() => setPaperPage(p => Math.max(0, p - 1))}
+                    disabled={paperPage === 0}
+                    style={{ padding: '8px 16px', borderRadius: '8px', background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: '0.8rem', opacity: paperPage === 0 ? 0.3 : 1 }}
+                  >
+                    Anterior
+                  </button>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {[...Array(Math.ceil(paperTrades.length / ITEMS_PER_PAGE))].map((_, i) => (
+                      <button 
+                        key={i}
+                        onClick={() => setPaperPage(i)}
+                        style={{ 
+                          width: '32px', 
+                          height: '32px', 
+                          borderRadius: '6px', 
+                          cursor: 'pointer', 
+                          fontWeight: 'bold', 
+                          fontSize: '0.8rem', 
+                          background: paperPage === i ? 'var(--accent-blue)' : 'var(--bg-card)', 
+                          color: paperPage === i ? '#ffffff' : 'var(--text-muted)',
+                          border: paperPage === i ? 'none' : '1px solid var(--border)'
+                        }}
+                      >
+                        {i + 1}
+                      </button>
+                    ))}
+                  </div>
+                  <button 
+                    onClick={() => setPaperPage(p => Math.min(Math.ceil(paperTrades.length / ITEMS_PER_PAGE) - 1, p + 1))}
+                    disabled={paperPage >= Math.ceil(paperTrades.length / ITEMS_PER_PAGE) - 1}
+                    style={{ padding: '8px 16px', borderRadius: '8px', background: 'var(--bg-card)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: '0.8rem', opacity: paperPage >= Math.ceil(paperTrades.length / ITEMS_PER_PAGE) - 1 ? 0.3 : 1 }}
+                  >
+                    Siguiente
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
+              <p>No paper trades history.</p>
             </div>
           )
         )}
