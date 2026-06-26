@@ -32,7 +32,8 @@ MODULE = "ib_scanner"
 try:
     from ibapi.scanner import ScannerSubscription
     from ibapi.tag_value import TagValue
-    IB_SCANNER_AVAILABLE = True
+    # FORCE DISABLE TO PREVENT HANGING ON CONNECT
+    IB_SCANNER_AVAILABLE = False
 except ImportError:
     IB_SCANNER_AVAILABLE = False
     log_warning(MODULE, "ibapi not installed — IB Scanner features disabled")
