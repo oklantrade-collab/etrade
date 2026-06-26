@@ -599,12 +599,13 @@ async def send_sl_to_exchange(
             provider = create_provider(market_type)
             # Stop Market: cierra al tocar el precio
             order = await provider.place_order(
-                symbol     = symbol,
-                side       = sl_side,
-                order_type = 'STOP_MARKET',
-                size       = quantity,
-                stopPrice  = str(sl_price),
-                reduceOnly = True,  # Solo cerrar
+                symbol       = symbol,
+                side         = sl_side,
+                order_type   = 'STOP_MARKET',
+                size         = quantity,
+                stopPrice    = str(sl_price),
+                reduceOnly   = True,  # Solo cerrar
+                positionSide = side.upper(),
             )
             # handle order returned
             exchange_id = None

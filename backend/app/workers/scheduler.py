@@ -938,31 +938,72 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
             "last_updated": datetime.now(timezone.utc).isoformat()
         }).eq("symbol", symbol).execute()
 
-        # 5. SMART EXIT (SAR Phase Change)
-        # Faster detection in 5m cycle to close before SL
+        # 4.5. SMART EXIT DELAYED (Rebote técnico tras SAR)
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
-
-        
         snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+        position = BOT_STATE.positions.get(symbol)
+        
+        if position and position.get('pending_sar_close'):
+            rsi_15m = snap.get('rsi_15m', 50)
+            side = (position.get('side') or '').lower()
+            bounce_triggered = False
+            
+            if side == 'long' and rsi_15m >= 55:
+                bounce_triggered = True
+            elif side == 'short' and rsi_15m <= 45:
+                bounce_triggered = True
+                
+            if bounce_triggered:
+                from app.workers.performance_monitor import send_telegram_message
+                await _execute_paper_close(position, current_price, 'sar_phase_change_delayed', sb)
+                await send_telegram_message(
+                    f"🎯 SAR EXIT DELAYED EJECUTADO [{symbol}]\n"
+                    f"Cerrando {side.upper()} tras rebote (RSI 15m: {rsi_15m:.1f})\n"
+                    f"Precio de Cierre: ${current_price:,.2f}"
+                )
+                position['pending_sar_close'] = False
+                return # Detener procesamiento
+
+        # 5. SMART EXIT (SAR Phase Change)
         sar_phase = snap.get('sar_phase', 'neutral')
         sar_changed_at = snap.get('sar_phase_changed_at')
         
-        position = BOT_STATE.positions.get(symbol)
-        if position and sar_changed_at:
+        if position and sar_changed_at and not position.get('pending_sar_close'):
             side = (position.get('side') or '').lower()
             if (sar_phase == 'short' and side == 'long') or \
                (sar_phase == 'long'  and side == 'short'):
                 
-                # Cerrar ANTES del SL
+                # Calcular PNL
+                entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+                if entry > 0:
+                    if side == 'long':
+                        pnl_pct = ((current_price - entry) / entry) * 100
+                    else:
+                        pnl_pct = ((entry - current_price) / entry) * 100
+                else:
+                    pnl_pct = 0.0
+
                 from app.workers.performance_monitor import send_telegram_message
-                await _execute_paper_close(position, current_price, 'sar_phase_change', sb)
-                await send_telegram_message(
-                    f"🔄 SAR CAMBIÓ DE FASE [{symbol}]\n"
-                    f"SAR 4h -> {sar_phase.upper()}\n"
-                    f"Cerrando {side.upper()} a ${current_price:,.2f}\n"
-                    f"(Antes del SL en ${position.get('sl_price', 0):,.2f})"
-                )
-                return # Detener procesamiento para este símbolo en este ciclo
+                
+                if pnl_pct >= -0.05:
+                    # Cerrar ANTES del SL (Pérdida pequeña o Ganancia)
+                    await _execute_paper_close(position, current_price, 'sar_phase_change', sb)
+                    await send_telegram_message(
+                        f"🔄 SAR CAMBIÓ DE FASE [{symbol}]\n"
+                        f"SAR 4h -> {sar_phase.upper()}\n"
+                        f"Cerrando {side.upper()} (PNL: {pnl_pct:.2f}%) a ${current_price:,.2f}\n"
+                        f"(Antes del SL en ${position.get('sl_price', 0):,.2f})"
+                    )
+                    return
+                else:
+                    # Pérdida profunda, esperar rebote
+                    position['pending_sar_close'] = True
+                    await send_telegram_message(
+                        f"⏳ SAR CAMBIÓ DE FASE (DELAYED) [{symbol}]\n"
+                        f"Pérdida actual {pnl_pct:.2f}% < -0.05%.\n"
+                        f"Esperando rebote técnico (RSI) para cerrar {side.upper()}."
+                    )
+                    # Sigue el ciclo normal sin hacer return
 
         # ── NUEVO: Cierre Proactivo / Adaptativo v5.0 ──
         if position:
@@ -1259,7 +1300,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                              levels=snap, vel_config=vel_config, supabase=sb
                          )
                     else:
-                         await provider.place_order(symbol=symbol, side=direction, size=qty, order_type="MARKET")
+                         await provider.place_order(symbol=symbol, side=direction, size=qty, order_type="MARKET", positionSide=direction.upper())
                     
                 if asyncio.iscoroutinefunction(send_telegram_message):
                     await send_telegram_message(
@@ -1842,29 +1883,47 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                         if side == 'long': pnl_pct = (current_price - entry) / entry * 100
                         else: pnl_pct = (entry - current_price) / entry * 100
 
-                    # SAR cambió a bajista → cerrar LONG
+                    # SAR cambió a bajista → cerrar LONG o aplicar DELAYED
                     if sar_phase == 'short' and side == 'long':
-                        await _execute_paper_close(position, current_price, 'sar_phase_change', sb)
-                        from app.workers.performance_monitor import send_telegram_message
-                        await send_telegram_message(
-                            f"🔄 CAMBIO DE FASE SAR [{symbol}]\n"
-                            f"SAR 4h → BAJISTA\n"
-                            f"Cerrando LONG a ${current_price:,.2f}\n"
-                            f"P&L: {pnl_pct:.2f}%\n"
-                            f"Sistema entra en FASE SHORT"
-                        )
+                        if pnl_pct >= -0.05:
+                            await _execute_paper_close(position, current_price, 'sar_phase_change', sb)
+                            from app.workers.performance_monitor import send_telegram_message
+                            await send_telegram_message(
+                                f"🔄 CAMBIO DE FASE SAR [{symbol}]\n"
+                                f"SAR 4h → BAJISTA\n"
+                                f"Cerrando LONG a ${current_price:,.2f}\n"
+                                f"P&L: {pnl_pct:.2f}%\n"
+                                f"Sistema entra en FASE SHORT"
+                            )
+                        else:
+                            position['pending_sar_close'] = True
+                            from app.workers.performance_monitor import send_telegram_message
+                            await send_telegram_message(
+                                f"⏳ SAR CAMBIÓ DE FASE (DELAYED) [{symbol}]\n"
+                                f"Pérdida actual {pnl_pct:.2f}% < -0.05%.\n"
+                                f"Esperando rebote técnico (RSI) para cerrar LONG."
+                            )
                     
-                    # SAR cambió a alcista → cerrar SHORT
+                    # SAR cambió a alcista → cerrar SHORT o aplicar DELAYED
                     elif sar_phase == 'long' and side == 'short':
-                        await _execute_paper_close(position, current_price, 'sar_phase_change', sb)
-                        from app.workers.performance_monitor import send_telegram_message
-                        await send_telegram_message(
-                            f"🔄 CAMBIO DE FASE SAR [{symbol}]\n"
-                            f"SAR 4h → ALCISTA\n"
-                            f"Cerrando SHORT a ${current_price:,.2f}\n"
-                            f"P&L: {pnl_pct:.2f}%\n"
-                            f"Sistema entra en FASE LONG"
-                        )
+                        if pnl_pct >= -0.05:
+                            await _execute_paper_close(position, current_price, 'sar_phase_change', sb)
+                            from app.workers.performance_monitor import send_telegram_message
+                            await send_telegram_message(
+                                f"🔄 CAMBIO DE FASE SAR [{symbol}]\n"
+                                f"SAR 4h → ALCISTA\n"
+                                f"Cerrando SHORT a ${current_price:,.2f}\n"
+                                f"P&L: {pnl_pct:.2f}%\n"
+                                f"Sistema entra en FASE LONG"
+                            )
+                        else:
+                            position['pending_sar_close'] = True
+                            from app.workers.performance_monitor import send_telegram_message
+                            await send_telegram_message(
+                                f"⏳ SAR CAMBIÓ DE FASE (DELAYED) [{symbol}]\n"
+                                f"Pérdida actual {pnl_pct:.2f}% < -0.05%.\n"
+                                f"Esperando rebote técnico (RSI) para cerrar SHORT."
+                            )
 
             # 2. DETERMINAR DIRECCIÓN PERMITIDA
             allowed_direction = None
@@ -2169,25 +2228,43 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                         if not sm_check['allowed']:
                             blocked_by = f"state_machine_block ({sm_check['reason']})"
                         elif sm_check.get('is_flip'):
-                            # Ejecutar flip: cerrar posiciones opuestas
-                            positions = BOT_STATE.get_positions_by_symbol(symbol)
-                            for p in positions:
-                                if p.get('side', '').lower() != rule_match['direction'].lower():
+                            # Ejecutar flip: Selective Reversal Netting
+                            opposite_side = 'short' if rule_match['direction'].lower() == 'long' else 'long'
+                            opp_positions = [p for p in BOT_STATE.get_positions_by_symbol(symbol) if (p.get('side') or '').lower() == opposite_side]
+                            
+                            if opp_positions:
+                                log_info(MODULE, f"{symbol}: Evaluando {len(opp_positions)} posiciones {opposite_side.upper()} para Selective Reversal Netting")
+                                from app.core.position_monitor import _execute_paper_close
+                                for opp_pos in opp_positions:
+                                    pos_entry = float(opp_pos.get('avg_entry_price') or opp_pos.get('entry_price') or 0)
+                                    pos_size = float(opp_pos.get('size') or 1.0)
+                                    p_side = (opp_pos.get('side') or '').upper()
                                     current_price = float(last_row['close'])
-                                    entry = float(p.get('avg_entry_price') or p.get('entry_price') or current_price)
-                                    pnl_pct = 0.0
-                                    if entry > 0:
-                                        if p.get('side', '').lower() in ('long', 'buy'):
-                                            pnl_pct = (current_price - entry) / entry * 100
+                                    pos_pnl = 0.0
+                                    
+                                    if pos_entry > 0:
+                                        if p_side in ['LONG', 'BUY']:
+                                            pos_pnl = (current_price - pos_entry) * pos_size
                                         else:
-                                            pnl_pct = (entry - current_price) / entry * 100
+                                            pos_pnl = (pos_entry - current_price) * pos_size
                                             
-                                    if pnl_pct < -1.0:
-                                        log_info('FLIP_CRYPTO', f"[{symbol}] Flip abortado para esta posición: PNL {pnl_pct:.2f}% < -1.0%. Se retiene para EREP.")
+                                    if pos_pnl <= 0:
+                                        log_info('FLIP_CRYPTO', f"[{symbol}] Flip omitido para esta posición: PNL <= 0. Se mantiene como Hedge.")
                                         continue
                                         
                                     try:
-                                        await _execute_paper_close(p, current_price, f"flip_{rule_match['direction']}", sb)
+                                        await _execute_paper_close(opp_pos, current_price, f"flip_{rule_match['direction']}", sb)
+                                        
+                                        if opp_pos.get('mode') == 'live' and provider:
+                                            try:
+                                                close_side = 'BUY' if p_side in ['SHORT', 'SELL'] else 'SELL'
+                                                await provider.place_order(
+                                                    symbol=symbol, side=close_side, size=pos_size, order_type="MARKET",
+                                                    positionSide=p_side, reduceOnly=True
+                                                )
+                                            except Exception as ex:
+                                                log_error(MODULE, f"Error cerrando en Binance {symbol}: {ex}")
+                                                
                                         sm.on_position_closed(symbol, f"flip_{rule_match['direction']}", all_closed=True)
                                     except Exception as e:
                                         log_error(MODULE, f"Error en flip close para {symbol}: {e}")
@@ -2371,7 +2448,8 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                          else:
                              await provider.place_order(
                                  symbol=symbol, side=rule_match['direction'],
-                                 size=qty, order_type="MARKET"
+                                 size=qty, order_type="MARKET",
+                                 positionSide=rule_match['direction'].upper()
                              )
         # --- 2) SWING (LIMIT ORDERS V5.0) ---
         from app.strategy.swing_orders import process_swing_orders

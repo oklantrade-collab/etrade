@@ -662,16 +662,22 @@ def evaluate_erep_phase(
             }
 
         if not check['can_activate']:
-            if check.get('loss_pct', 0) > 0:
+            # Calcular pérdida real independientemente de si 'check' la incluyó o no
+            entry_p = float(position.get('avg_entry_price', position.get('entry_price', current_price)))
+            real_loss_pct = 0.0
+            if entry_p > 0:
+                real_loss_pct = (entry_p - current_price) / entry_p * 100 if is_long else (current_price - entry_p) / entry_p * 100
+
+            if real_loss_pct > 0:
                 # 🛡️ Si el P&L es negativo, NO cerramos. Forzamos activación de EREP Fase 2 para promedio inteligente P2.
                 return {
                     'action':  'activate_phase2',
-                    'reason': f'🔄 EREP FORZADO POR PNL NEGATIVO ({check["loss_pct"]:.2f}%): Evitando cierre en pérdida. Entrando a fase 2 para buscar rebote.',
-                    'conditions': check['conditions'],
+                    'reason': f'🔄 EREP FORZADO POR PNL NEGATIVO ({real_loss_pct:.2f}%): Evitando cierre en pérdida. Entrando a fase 2 para buscar rebote.',
+                    'conditions': check.get('conditions', {}),
                 }
             return {
                 'action':   'close_sl',
-                'reason': f'EREP no puede activarse: {check["reason"]}. Cerrar por SL normal.',
+                'reason': f'EREP no puede activarse: {check.get("reason", "Condición no cumplida")}. Cerrar por SL normal.',
                 'close_type': 'sl_normal',
             }
 
@@ -683,7 +689,8 @@ def evaluate_erep_phase(
 
     # ── FASE 2: Esperando señal para P2 ───────
     elif phase == 2:
-        p1 = float(position.get('erep_p1_price') or 0)
+        entry_p = float(position.get('avg_entry_price', position.get('entry_price', current_price)))
+        p1 = float(position.get('erep_p1_price') or entry_p)
         max_loss = float(cfg.get('max_loss_pct_to_activate', 6.0)) * 1.5
         current_loss = 0.0
 

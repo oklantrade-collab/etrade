@@ -1218,15 +1218,38 @@ class ForexExecutionService:
                     if snap:
                         mtf_hot = self._safe_float(snap.get('mtf_score'))
                         adx_hot = self._safe_float(snap.get('adx'), 25.0)
+                        
+                        # Obtener df 5m para las EMAs rápidas
+                        from app.core.memory_store import MEMORY_STORE
+                        df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                        ema3_5m = ema9_5m = None
+                        
+                        if df_5m is not None and not df_5m.empty:
+                            if 'ema_3' in df_5m.columns:
+                                ema3_5m = float(df_5m['ema_3'].iloc[-1])
+                            else:
+                                ema3_5m = float(df_5m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                                
+                            if 'ema_9' in df_5m.columns:
+                                ema9_5m = float(df_5m['ema_9'].iloc[-1])
+                            else:
+                                ema9_5m = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+                        
                         if side_hot in ['long', 'buy'] and mtf_hot <= -0.4 and adx_hot > 30 and pnl_usd_hot < -2.0:
-                            self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF={mtf_hot} ADX={adx_hot} contra LONG con PnL=${pnl_usd_hot:.2f}. CIERRE.", "WARNING")
-                            self._close_position(pos, price, 'hot_guard_mtf_reversal', pips_hot)
-                            self._send_telegram(f"🛡️ [HOT MTF] {symbol} LONG cerrado: MTF={mtf_hot}, ADX={adx_hot}, PnL=${pnl_usd_hot:.2f}")
+                            if ema3_5m is not None and ema9_5m is not None and ema3_5m > ema9_5m:
+                                self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF en contra pero EMA3(5m) > EMA9(5m) [{ema3_5m:.5f} > {ema9_5m:.5f}]. Aguantando LONG.")
+                            else:
+                                self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF={mtf_hot} ADX={adx_hot} contra LONG con PnL=${pnl_usd_hot:.2f}. CIERRE.", "WARNING")
+                                self._close_position(pos, price, 'hot_guard_mtf_reversal', pips_hot)
+                                self._send_telegram(f"🛡️ [HOT MTF] {symbol} LONG cerrado: MTF={mtf_hot}, ADX={adx_hot}, PnL=${pnl_usd_hot:.2f} (EMA3 < EMA9 confirmado)")
                             continue
                         elif side_hot in ['short', 'sell'] and mtf_hot >= 0.4 and adx_hot > 30 and pnl_usd_hot < -2.0:
-                            self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF={mtf_hot} ADX={adx_hot} contra SHORT con PnL=${pnl_usd_hot:.2f}. CIERRE.", "WARNING")
-                            self._close_position(pos, price, 'hot_guard_mtf_reversal', pips_hot)
-                            self._send_telegram(f"🛡️ [HOT MTF] {symbol} SHORT cerrado: MTF={mtf_hot}, ADX={adx_hot}, PnL=${pnl_usd_hot:.2f}")
+                            if ema3_5m is not None and ema9_5m is not None and ema3_5m < ema9_5m:
+                                self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF en contra pero EMA3(5m) < EMA9(5m) [{ema3_5m:.5f} < {ema9_5m:.5f}]. Aguantando SHORT.")
+                            else:
+                                self.log(f"🛡️ [HOT GUARD MTF] {symbol}: MTF={mtf_hot} ADX={adx_hot} contra SHORT con PnL=${pnl_usd_hot:.2f}. CIERRE.", "WARNING")
+                                self._close_position(pos, price, 'hot_guard_mtf_reversal', pips_hot)
+                                self._send_telegram(f"🛡️ [HOT MTF] {symbol} SHORT cerrado: MTF={mtf_hot}, ADX={adx_hot}, PnL=${pnl_usd_hot:.2f} (EMA3 > EMA9 confirmado)")
                             continue
 
                 #    Primero: Verificar cierre proactivo   

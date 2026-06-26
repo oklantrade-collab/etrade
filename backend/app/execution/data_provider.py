@@ -110,6 +110,16 @@ class BinanceCryptoProvider(DataProvider):
                     self.api_secret,
                     testnet=self.testnet,
                 )
+                if self.market == "futures":
+                    try:
+                        await self._async_client.futures_change_position_mode(dualSidePosition='true')
+                        from app.core.logger import log_info
+                        log_info('BINANCE', 'Hedge Mode (dualSidePosition) activado correctamente.')
+                    except Exception as e:
+                        err_str = str(e)
+                        if "No need to change" not in err_str:
+                            from app.core.logger import log_warning
+                            log_warning('BINANCE', f'No se pudo activar Hedge Mode: {err_str} (Asegúrate de no tener posiciones abiertas).')
         return self._async_client
 
     async def get_ohlcv(

@@ -603,7 +603,7 @@ class CTraderProtobufProvider(BaseMarketProvider):
         try:
             response = await asyncio.wait_for(future, timeout=10.0)
         except asyncio.TimeoutError:
-            log_error('CTRADER',
+            log_warning('CTRADER',
                 f'Timeout descargando velas '
                 f'{symbol}/{timeframe}'
             )

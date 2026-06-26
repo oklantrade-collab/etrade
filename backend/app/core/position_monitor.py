@@ -72,16 +72,34 @@ async def check_signal_reversal(
     if is_swing_excluded:
         mtf_reversed = False
 
-    # 2. ¿Cruce Rápido de EMA (EMA3 vs EMA9) en contra?
+    # 2. ¿Cruce Rápido de EMA (EMA3 vs EMA9) en contra? (Versión 5 minutos)
     ema_reversed = False
-    if snap:
+    
+    from app.core.memory_store import MEMORY_STORE
+    symbol = position.get('symbol')
+    df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df') if symbol else None
+    
+    ema3 = ema9 = 0
+    if df_5m is not None and not df_5m.empty:
+        if 'ema_3' in df_5m.columns:
+            ema3 = float(df_5m['ema_3'].iloc[-1])
+        else:
+            ema3 = float(df_5m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+            
+        if 'ema_9' in df_5m.columns:
+            ema9 = float(df_5m['ema_9'].iloc[-1])
+        else:
+            ema9 = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+    elif snap:
+        # Fallback al snapshot de 15m
         ema3 = float(snap.get('ema_3') or 0)
         ema9 = float(snap.get('ema_9') or 0)
-        if ema3 > 0 and ema9 > 0:
-            if side == 'long' and ema3 < ema9:
-                ema_reversed = True
-            elif side == 'short' and ema3 > ema9:
-                ema_reversed = True
+
+    if ema3 > 0 and ema9 > 0:
+        if side == 'long' and ema3 < ema9:
+            ema_reversed = True
+        elif side == 'short' and ema3 > ema9:
+            ema_reversed = True
 
     if not mtf_reversed and not ema_reversed:
         return {'should_exit': False}
@@ -90,10 +108,8 @@ async def check_signal_reversal(
     # Si tenemos ganancia (pnl > 0.20%), salimos YA para asegurar por cualquiera de los dos motivos.
     if pnl_pct >= 0.20:
         # Validación extra: Si el motivo de salida fue SOLO el MTF lento, 
-        # esperamos a que el EMA rápido también gire para no salir prematuramente de un buen trade.
-        if mtf_reversed and not ema_reversed and snap:
-            ema3 = float(snap.get('ema_3') or 0)
-            ema9 = float(snap.get('ema_9') or 0)
+        # esperamos a que el EMA rápido (5m) también gire para no salir prematuramente de un buen trade.
+        if mtf_reversed and not ema_reversed:
             if ema3 > 0 and ema9 > 0:
                 if side == 'long' and ema3 > ema9:
                     return {'should_exit': False}
@@ -888,17 +904,17 @@ async def check_open_positions_5m(
                             'sl_activation_reason': sipv.get('pattern', 'sipv'),
                             'stop_loss':     sl_dynamic_price,
                         }).eq('id', pos['id']).execute()
-                        
-                        from app.strategy.dynamic_sl_manager import send_sl_to_exchange
-                        await send_sl_to_exchange(
-                            symbol      = norm_symbol,
-                            side        = side,
-                            sl_price    = sl_dynamic_price,
-                            quantity    = pos.get('size'),
-                            position_id = pos['id'],
-                            supabase    = supabase,
-                            market_type = 'crypto_futures'
-                        )
+                        if not pos.get('is_paper'):
+                            from app.strategy.dynamic_sl_manager import send_sl_to_exchange
+                            await send_sl_to_exchange(
+                                symbol      = norm_symbol,
+                                side        = side,
+                                sl_price    = sl_dynamic_price,
+                                quantity    = pos.get('size'),
+                                position_id = pos['id'],
+                                supabase    = supabase,
+                                market_type = 'crypto_futures'
+                            )
                     except Exception as upd_e:
                         log_warning(MODULE, f"Silent dynamic SL update fail for {symbol}: {upd_e}")
 

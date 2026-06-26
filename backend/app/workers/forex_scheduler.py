@@ -637,33 +637,35 @@ async def open_forex_position(
                     total_value += pos_val
                     total_pnl += pos_pnl
             
-            total_pnl_pct = (total_pnl / total_value * 100) if total_value > 0 else 0.0
-            
-            # Obtener el límite configurado (o usar -0.05% por defecto)
-            try:
-                MAX_REVERSAL_LOSS_PCT = float(BOT_STATE.config_cache.get('max_reversal_loss_pct_forex', -0.05))
-            except:
-                MAX_REVERSAL_LOSS_PCT = -0.05
-
-            if total_pnl_pct < MAX_REVERSAL_LOSS_PCT:
-                log_warning(MODULE, f"🚫 REVERSIÓN FOREX BLOQUEADA: Pérdida acumulada en {symbol} es {total_pnl_pct:.3f}% (límite {MAX_REVERSAL_LOSS_PCT}%). Se aborta la reversión.")
-                return
-
-            log_info(MODULE, f"{symbol}: [REVERSAL NETTING] Cerrando {len(opp_positions)} posiciones {opposite_side.upper()} antes de abrir {direction.upper()}")
+            log_info(MODULE, f"{symbol}: Evaluando {len(opp_positions)} posiciones {opposite_side.upper()} para Selective Reversal Netting")
             from app.core.position_monitor import _execute_paper_close
             for opp_pos in opp_positions:
                 try:
-                    # Cerrar en DB
-                    await _execute_paper_close(opp_pos, price, f'reversal_{direction.lower()}', sb)
+                    pos_entry = float(opp_pos.get('avg_entry_price') or opp_pos.get('entry_price') or 0)
+                    pos_size = float(opp_pos.get('size') or 1.0)
+                    p_side = (opp_pos.get('side') or '').upper()
                     
-                    # Cerrar en cTrader si es LIVE
-                    if opp_pos.get('mode') == 'live' and opp_pos.get('ctrader_order_id') and provider:
-                        lots_abs = abs(float(opp_pos.get('lots') or opp_pos.get('size') or 0.01))
-                        await provider.close_order(str(opp_pos['ctrader_order_id']), int(lots_abs * 100000))
+                    pos_pnl = 0.0
+                    if pos_entry > 0:
+                        if p_side in ['LONG', 'BUY']:
+                            pos_pnl = (price - pos_entry) * pos_size
+                        else:
+                            pos_pnl = (pos_entry - price) * pos_size
+                            
+                    if pos_pnl > 0:
+                        # Cerrar en DB
+                        await _execute_paper_close(opp_pos, price, f'reversal_{direction.lower()}', sb)
                         
-                    log_info(MODULE, f"{symbol}: [REVERSAL] Cerrada posición opuesta {opp_pos['id']} ({opposite_side.upper()})")
+                        # Cerrar en cTrader si es LIVE
+                        if opp_pos.get('mode') == 'live' and opp_pos.get('ctrader_order_id') and provider:
+                            lots_abs = abs(float(opp_pos.get('lots') or opp_pos.get('size') or 0.01))
+                            await provider.close_order(str(opp_pos['ctrader_order_id']), int(lots_abs * 100000))
+                            
+                        log_info(MODULE, f"{symbol}: [REVERSAL] Cerrada posición opuesta {opp_pos['id']} ({opposite_side.upper()}) con ganancia.")
+                    else:
+                        log_info(MODULE, f"🛡️ [HEDGE] {symbol}: Posición opuesta {opp_pos['id']} en pérdida. Manteniendo abierta y abriendo cobertura.")
                 except Exception as rev_err:
-                    log_error(MODULE, f"{symbol}: Error cerrando posición opuesta {opp_pos['id']}: {rev_err}")
+                    log_error(MODULE, f"{symbol}: Error procesando reversión para posición {opp_pos.get('id')}: {rev_err}")
     except Exception as rev_outer_err:
         log_error(MODULE, f"{symbol}: Error en lógica de reversión Forex: {rev_outer_err}")
     # ═══════════════════════════════════════════════════
@@ -874,30 +876,61 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
 
 
+            # 4.5 SMART EXIT DELAYED (Rebote técnico tras SAR)
+            if position.get('pending_sar_close'):
+                rsi_15m = snap.get('rsi_15m', 50)
+                side = (position.get('side') or '').lower()
+                bounce_triggered = False
+                
+                if side == 'long' and rsi_15m >= 55:
+                    bounce_triggered = True
+                elif side == 'short' and rsi_15m <= 45:
+                    bounce_triggered = True
+                    
+                if bounce_triggered:
+                    await _execute_paper_close(position, current_price, 'sar_phase_change_fx_delayed', sb)
+                    await send_telegram_message(
+                        f"🎯 FX SAR EXIT DELAYED EJECUTADO [{symbol}]\n"
+                        f"Cerrando {side.upper()} tras rebote (RSI 15m: {rsi_15m:.1f})\n"
+                        f"Precio: {current_price:.5f}"
+                    )
+                    position['pending_sar_close'] = False
+                    continue # Sigue con la siguiente posicion
+
             # 4. Smart Exit: SAR Phase Change
-            if sar_changed_at:
+            if sar_changed_at and not position.get('pending_sar_close'):
                 side = (position.get('side') or '').lower()
                 if (sar_phase == 'short' and side == 'long') or \
                    (sar_phase == 'long' and side == 'short'):
 
-                    await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
                     entry = float(position.get('avg_entry_price', 0))
+                    pnl_pct = 0.0
+                    pnl_pips = 0.0
                     if entry > 0:
                         if side == 'long':
+                            pnl_pct = (current_price - entry) / entry * 100
                             pnl_pips = (current_price - entry) / PIP_SIZES.get(symbol, 0.0001)
                         else:
+                            pnl_pct = (entry - current_price) / entry * 100
                             pnl_pips = (entry - current_price) / PIP_SIZES.get(symbol, 0.0001)
+
+                    if pnl_pct >= -0.05:
+                        await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
+                        await send_telegram_message(
+                            f"🔄 FOREX SAR REVERSAL [{symbol}]\n"
+                            f"SAR 4h -> {sar_phase.upper()}\n"
+                            f"Cerrando {side.upper()} (PNL: {pnl_pct:.2f}% | {pnl_pips:+.1f} pips)\n"
+                            f"Precio: {current_price:.5f}"
+                        )
+                        continue # Sigue con la siguiente posicion
                     else:
-                        pnl_pips = 0
-
-                    await send_telegram_message(
-                        f"FOREX SAR REVERSAL [{symbol}]\n"
-                        f"SAR 4h -> {sar_phase.upper()}\n"
-                        f"Cerrando {side.upper()}: {pnl_pips:+.1f} pips\n"
-                        f"Precio: {current_price:.5f}"
-                    )
-                    continue # Sigue con la siguiente posicion
-
+                        position['pending_sar_close'] = True
+                        await send_telegram_message(
+                            f"⏳ FX SAR REVERSAL (DELAYED) [{symbol}]\n"
+                            f"Pérdida actual {pnl_pct:.2f}% < -0.05%.\n"
+                            f"Esperando rebote técnico (RSI) para cerrar {side.upper()}."
+                        )
+                        # Sigue evaluando tp/sl normales
             # 5. Smart Exit: Signal Reversal
             current_mtf = float(snap.get('mtf_score', 0))
             trading_config = BOT_STATE.config_cache
@@ -1346,8 +1379,8 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                                         else:
                                             pnl_pct = (entry - current_price) / entry * 100
                                             
-                                    if pnl_pct < -0.05:
-                                        log_info('FLIP_FX', f"[{symbol}] Flip abortado para esta posición: PNL {pnl_pct:.2f}% < -0.05%. Se retiene para EREP.")
+                                    if pnl_pct <= 0:
+                                        log_info('FLIP_FX', f"[{symbol}] Flip omitido para esta posición: PNL {pnl_pct:.2f}% <= 0%. Se mantiene como Hedge.")
                                         continue
 
                                     try:
