@@ -243,6 +243,20 @@ class StrategyEngine:
                     ema3_above_ema9_1h = ema3_1h > ema9_1h
                     ema3_below_ema9_1h = ema3_1h < ema9_1h
 
+        ema20_ascending_1h = False
+        ema20_descending_1h = False
+        if symbol:
+            df_1h = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
+            if df_1h is not None and len(df_1h) >= 2:
+                c1h_col = 'Close' if 'Close' in df_1h.columns else 'close'
+                c1h = pd.to_numeric(df_1h[c1h_col], errors='coerce').dropna()
+                if len(c1h) >= 2:
+                    ema20_series_1h = c1h.ewm(span=20, adjust=False).mean()
+                    if float(ema20_series_1h.iloc[-1]) > float(ema20_series_1h.iloc[-2]):
+                        ema20_ascending_1h = True
+                    if float(ema20_series_1h.iloc[-1]) < float(ema20_series_1h.iloc[-2]):
+                        ema20_descending_1h = True
+
         # ── Aa13 & Bb13 Custom Variables ──
         bb_lower_ascending_15m = False
         bb_lower_ascending_2c_15m = False
@@ -359,6 +373,8 @@ class StrategyEngine:
             # EMAs 1h
             'ema3_above_ema9_1h': ema3_above_ema9_1h,
             'ema3_below_ema9_1h': ema3_below_ema9_1h,
+            'ema20_ascending_1h': ema20_ascending_1h,
+            'ema20_descending_1h': ema20_descending_1h,
             'ema3_open_up_15m':  ema3_open_up_15m,
             'ema3_open_up_5m':   ema3_open_up_5m,
             'ema3_cross_ema9_up': safe_bool(last_15m.get('ema3_cross_ema9_up') if last_15m.get('ema3_cross_ema9_up') is not None else (safe_float(last_15m.get('ema_3') or last_15m.get('ema3')) > safe_float(last_15m.get('ema_9') or last_15m.get('ema9')))),
