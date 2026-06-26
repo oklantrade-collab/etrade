@@ -904,6 +904,25 @@ async def execute_adaptive_sl_close(
             })\
             .execute()
 
+        # Registrar en trades_journal para Closed History
+        try:
+            journal_entry = {
+                'ticker': ticker,
+                'shares': shares,
+                'entry_price': entry_price,
+                'exit_price': current_price,
+                'entry_date': position.get('first_buy_at') or position.get('entry_time'),
+                'exit_date': datetime.now(timezone.utc).isoformat(),
+                'pnl_usd': pnl_usd,
+                'pnl_pct': loss_pct,
+                'result': 'loss' if pnl_usd < 0 else 'win',
+                'exit_reason': close_reason[:200],
+                'trade_type': position.get('strategy') or position.get('rule_code') or position.get('group_name') or 'ADAPTIVE_SL',
+            }
+            await supabase.table('trades_journal').insert(journal_entry).execute()
+        except Exception as e_journal:
+            log_error('ADAPTIVE_SL', f'Error registrando en trades_journal: {e_journal}')
+
     except Exception as e:
         log_error('ADAPTIVE_SL',
             f'Error cerrando en DB: {e}'
