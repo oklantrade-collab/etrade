@@ -608,15 +608,18 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 try:
                     if df_15m is not None and len(df_15m) >= 20:
                         c15_col = 'Close' if 'Close' in df_15m.columns else 'close'
+                        l15_col = 'Low' if 'Low' in df_15m.columns else 'low'
                         c15 = pd.to_numeric(df_15m[c15_col], errors='coerce').dropna()
-                        ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
-                        ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                        l15 = pd.to_numeric(df_15m[l15_col], errors='coerce').dropna()
                         
-                        if ema3_15 > ema9_15:
+                        ema20_15 = float(c15.ewm(span=20, adjust=False).mean().iloc[-1])
+                        low_15 = float(l15.iloc[-1])
+                        
+                        if low_15 <= ema20_15:
                             macro_bonus_trigger_ok = True
-                            log_info(MODULE, f'🔥 {ticker}: 15m alcista (EMA3 > EMA9). Gatillo APEX ACTIVO.')
+                            log_info(MODULE, f'🔥 {ticker}: Dip Sniper 15m (Low <= EMA20). Gatillo APEX ACTIVO.')
                         else:
-                            log_info(MODULE, f'⏳ {ticker}: Esperando EMA3 > EMA9 en 15m para APEX.')
+                            log_info(MODULE, f'⏳ {ticker}: Esperando retroceso (Low <= EMA20 en 15m) para APEX.')
                 except Exception as e:
                     pass
 
@@ -859,8 +862,8 @@ async def _upsert_queue(
                 'ticker':          candidate['ticker'],
                 'group_name':      candidate.get('group_name', ''),
                 'price_at_rank':   candidate.get('price'),
-                'apex_score_4h':   candidate.get('apex_score_4h'),
-                'apex_score_1d':   candidate.get('apex_score_1d'),
+                'apex_score_4h':   candidate.get('apex_4h'),
+                'apex_score_1d':   candidate.get('apex_1d'),
                 'return_expected': candidate.get('return_expected', 0),
                 'confidence':      candidate['confidence'],
                 'composite_rank':  candidate['composite_rank'],
