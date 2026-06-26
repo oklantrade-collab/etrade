@@ -904,7 +904,7 @@ async def check_open_positions_5m(
                             'sl_activation_reason': sipv.get('pattern', 'sipv'),
                             'stop_loss':     sl_dynamic_price,
                         }).eq('id', pos['id']).execute()
-                        if not pos.get('is_paper'):
+                        if pos.get('mode') != 'paper' and not pos.get('is_paper'):
                             from app.strategy.dynamic_sl_manager import send_sl_to_exchange
                             await send_sl_to_exchange(
                                 symbol      = norm_symbol,
