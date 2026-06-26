@@ -385,8 +385,29 @@ async def check_sl_with_erep(
     if sl_touched:
         sl_type = str(position.get('sl_type') or '')
         if sl_type.startswith('trailing'):
-            await close_position(symbol, current_price, 'sl_trailing', supabase)
-            return True
+            entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+            side = str(position.get('side', 'long')).lower()
+            pnl_usd = (current_price - entry) if side in ('long', 'buy') else (entry - current_price)
+            
+            # Check 1h trend for Crypto EREP bypass
+            trend_1h_favorable = False
+            if market_type in ('crypto_spot', 'crypto_futures'):
+                try:
+                    from app.core.memory_store import get_memory_df
+                    df_1h = get_memory_df(symbol, "1h")
+                    if df_1h is not None and len(df_1h) >= 10:
+                        ema3_1h = float(df_1h.get('ema1', df_1h.get('ema3', df_1h.get('ema_3'))).iloc[-1])
+                        ema9_1h = float(df_1h.get('ema2', df_1h.get('ema9', df_1h.get('ema_9'))).iloc[-1])
+                        trend_1h_favorable = (ema3_1h > ema9_1h) if side in ('long', 'buy') else (ema3_1h < ema9_1h)
+                except Exception as e:
+                    pass
+
+            if pnl_usd <= 0 and trend_1h_favorable:
+                log_info(MODULE, f"Trailing SL hit for {symbol}, but PNL<=0 and 1h trend favorable. Diverting to EREP.")
+                # Do NOT close here. Let it fall through to EREP setup below.
+            else:
+                await close_position(symbol, current_price, 'sl_trailing', supabase)
+                return True
             
         entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
         from app.core.crypto_symbols import resolve_crypto_position_quantity
