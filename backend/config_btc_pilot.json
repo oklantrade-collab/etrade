@@ -14,5 +14,6 @@
   "ai_candles_mode": "informative",
   "paper_trading": true,
   "log_level": "DEBUG",
-  "observe_only": false
+  "observe_only": false,
+  "use_strategy_engine_v2": true
 }
