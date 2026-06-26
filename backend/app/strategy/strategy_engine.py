@@ -296,8 +296,22 @@ class StrategyEngine:
             if ema20_15m and ema50_15m and ema20_15m < ema50_15m:
                 ema20_below_ema50_15m = True
                 
-            if ema50_15m and ema200_15m and ema50_15m < ema200_15m:
-                ema50_below_ema200_15m = True
+            ema3_ascending_15m = False
+            ema3_descending_15m = False
+            
+            if df_15m is not None and len(df_15m) >= 2:
+                c15_col = 'Close' if 'Close' in df_15m.columns else 'close'
+                c15 = pd.to_numeric(df_15m[c15_col], errors='coerce').dropna()
+                if len(c15) >= 2:
+                    ema3_series = c15.ewm(span=3, adjust=False).mean()
+                    if float(ema3_series.iloc[-1]) > float(ema3_series.iloc[-2]):
+                        ema3_ascending_15m = True
+                    if float(ema3_series.iloc[-1]) < float(ema3_series.iloc[-2]):
+                        ema3_descending_15m = True
+
+            if ema50_15m and ema200_15m:
+                if ema50_15m < ema200_15m:
+                    ema50_below_ema200_15m = True
                 
             if ema9_15m and ema20_15m:
                 if ema9_15m < ema20_15m:
@@ -430,6 +444,8 @@ class StrategyEngine:
             'prev_low_touch_lower56_15m': prev_low_touch_lower56_15m,
             'bb_lower_descending_15m': bb_lower_descending_15m,
             'bb_upper_descending_15m': bb_upper_descending_15m,
+            'ema3_ascending_15m': ema3_ascending_15m,
+            'ema3_descending_15m': ema3_descending_15m,
             'high_above_ema20_15m': high_above_ema20_15m,
             'high_above_ema20_5m': high_above_ema20_5m,
             'ema20_below_ema50_15m': ema20_below_ema50_15m,
