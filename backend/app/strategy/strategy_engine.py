@@ -255,6 +255,8 @@ class StrategyEngine:
         ema50_below_ema200_15m = False
         ema9_below_ema20_15m = False
         ema9_above_ema20_15m = False
+        low_below_ema20_15m = False
+        high_above_ema20_15m = False
 
         if df_15m is not None and len(df_15m) >= 3:
             # BB Lower Ascending / Descending
@@ -302,6 +304,9 @@ class StrategyEngine:
                     ema9_below_ema20_15m = True
                 if ema9_15m > ema20_15m:
                     ema9_above_ema20_15m = True
+                    
+            if low_15m and ema20_15m and low_15m < ema20_15m:
+                low_below_ema20_15m = True
             
             if ema20_15m and high_15m >= ema20_15m:
                 high_above_ema20_15m = True
@@ -431,6 +436,7 @@ class StrategyEngine:
             'ema50_below_ema200_15m': ema50_below_ema200_15m,
             'ema9_below_ema20_15m': ema9_below_ema20_15m,
             'ema9_above_ema20_15m': ema9_above_ema20_15m,
+            'low_below_ema20_15m': low_below_ema20_15m,
 
             # Referencia al DataFrame original para reglas personalizadas avanzadas
             'df_15m': df_15m
