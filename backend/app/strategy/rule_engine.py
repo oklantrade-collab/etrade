@@ -76,7 +76,7 @@ DEFAULT_RULES = [
         "name": "EMA50 cruza basis (macro bajista)",
         "description": "EMA50 supera la VWMA (basis) en mercado macro bajista. Señal de cambio de tendencia local.",
         "direction": "long",
-        "market_type": ["crypto_spot", "crypto_futures"],
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
         "ema50_vs_ema200": "below",
         "enabled": True,
         "regime_allowed": ["riesgo_medio", "bajo_riesgo"],
