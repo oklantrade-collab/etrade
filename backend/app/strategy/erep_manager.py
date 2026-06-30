@@ -1200,7 +1200,7 @@ async def execute_erep_action(
                 supabase.table(table).update({
                     'erep_active':       False,
                     'erep_phase':        0,
-                    'erep_close_reason': close_type,
+                    'erep_close_reason': close_type[:20],
                     'status':            'closed',
                     'closed_at':         datetime.now(timezone.utc).isoformat(),
                     'close_reason':      f'EREP_{close_type.upper()}'[:50]
