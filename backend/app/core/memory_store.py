@@ -7,7 +7,7 @@ WARM Data (Operational State) is mirrored with Supabase.
 import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import pandas as pd
 
@@ -91,9 +91,8 @@ def update_current_candle_close(
             if df is None or df.empty:
                 continue
 
-            # Obtener tiempo actual y tiempo de la última vela
-            now = datetime.utcnow()
             last_idx = df.index[-1]
+            now = datetime.now(timezone.utc) if (isinstance(last_idx, datetime) and last_idx.tzinfo is not None) else datetime.utcnow()
             
             # Determinar duración del TF en minutos
             tf_mins = {

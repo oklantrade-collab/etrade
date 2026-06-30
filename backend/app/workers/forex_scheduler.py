@@ -1297,7 +1297,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
         # ── STATE MACHINE & AMBIGUITY CHECK ──
         from app.core.symbol_state import detect_market_ambiguity
         snap_for_sm = snap.copy()
-        snap_for_sm.update({'sar_trend_4h': int(last_row.get('sar_trend_4h',0)), 'sar_trend_15m': int(last_row.get('sar_trend_15m',0)), 'fibonacci_zone': int(last_row.get('fib_zone', 0))})
+        snap_for_sm.update({'sar_trend_4h': int(last_row.get('sar_trend_4h',0)), 'sar_trend_15m': int(last_row.get('sar_trend_15m',0)), 'fibonacci_zone': int(last_row.get('fibonacci_zone', 0))})
         ambiguity = detect_market_ambiguity(snap_for_sm)
         
         if ambiguity['is_ambiguous']:
