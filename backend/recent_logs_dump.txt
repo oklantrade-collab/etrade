@@ -1,0 +1,170 @@
+2026-06-26T15:23:25.150358+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T15:22:25.078108+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T15:20:33.057197+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:20:32.917847+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para USDJPY (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:18:25.113932+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T15:17:25.088118+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T15:15:33.077324+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:15:32.931447+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para USDJPY (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:10:33.204288+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:10:33.070659+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para USDJPY (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:10:32.927597+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (SHORT): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:10:21.675881+00:00 | SL_MANAGER | Error enviando SL al exchange: API Secret required for private endpoints
+2026-06-26T15:05:33.151938+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:05:33.019234+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para USDJPY (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:05:32.883614+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (SHORT): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:02:25.125416+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T15:00:33.342363+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:00:33.204293+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para USDJPY (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:00:33.068254+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (SHORT): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T15:00:32.931778+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para EURUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:58:25.124043+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:57:25.092875+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:56:25.09177+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:55:33.133652+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:55:32.977895+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:55:32.837561+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para EURUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:55:25.086661+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:54:25.098202+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:53:25.081168+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:52:25.094689+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:51:25.118025+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:50:33.321146+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:50:33.181256+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:50:33.050431+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para EURUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:50:25.354077+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:49:25.103233+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:48:25.083871+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:47:25.092965+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:46:25.101427+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:45:33.143378+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:45:33.007406+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:45:32.867309+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para EURUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:45:25.467088+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:45:17.713959+00:00 | SL_MANAGER | Error enviando SL al exchange: API Secret required for private endpoints
+2026-06-26T14:45:15.519773+00:00 | SL_MANAGER | Error enviando SL al exchange: API Secret required for private endpoints
+2026-06-26T14:44:25.081349+00:00 | forex_worker | Error managing position ID 453f9203-f53b-482d-ac3f-856fc250cf43 (XAUUSD): 'sl_price'
+Traceback (most recent call last):
+  File "/home/etrade/etrade/backend/app/workers/forex_worker_standalone.py", line 899, in _manage_position_5m
+    new_sl = res_trail['sl_price']
+             ~~~~~~~~~^^^^^^^^^^^^
+KeyError: 'sl_price'
+
+2026-06-26T14:40:33.380515+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para XAUUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:40:33.239381+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para USDJPY (SHORT): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:40:33.09147+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para GBPUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.
+2026-06-26T14:40:32.94942+00:00 | forex_worker | ⚠️ ORDEN ABORTADA para EURUSD (LONG): El sistema de validación de seguridad (15-min Safety Checklist) tiene un bloqueo activo para FOREX.

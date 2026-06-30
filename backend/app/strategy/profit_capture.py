@@ -283,12 +283,12 @@ def check_bollinger_breakout(
 
             if is_long and bb_upper > 0:
                 bb_breakout = (
-                    o > bb_upper and
+                    c > bb_upper and
                     c > o and
                     body_pct >= body_min
                 )
                 vela_reason = (
-                    f'Open({o:.5f}) '
+                    f'Close({c:.5f}) '
                     f'{">" if bb_breakout else "<="} '
                     f'BB_upper({bb_upper:.5f}), '
                     f'Close({c:.5f}) '
@@ -299,7 +299,7 @@ def check_bollinger_breakout(
 
             elif not is_long and bb_lower > 0:
                 bb_breakout = (
-                    o < bb_lower and
+                    c < bb_lower and
                     c < o and
                     body_pct >= body_min
                 )
@@ -424,36 +424,32 @@ def evaluate_profit_capture(
         snap, df_15m, side, market_type
     )
     
+    c2_fib = check_fibonacci_extreme(snap, df_15m, side)
+    c3_bb  = check_bollinger_breakout(snap, df_15m, side, market_type)
+    
     if market_type == 'forex_futures':
         c4_struct = check_extreme_structure_fx(snap, df_15m, side)
         conditions = {
             'C1_rsi':        c1_rsi,
+            'C2_fibonacci':  c2_fib,
+            'C3_bollinger':  c3_bb,
             'C4_structure':  c4_struct,
         }
         triggered_list = []
-        if c1_rsi['triggered']:
-            triggered_list.append('rsi_exhaustion')
-        if c4_struct['triggered']:
-            triggered_list.append('extreme_structure')
+        if c1_rsi['triggered']: triggered_list.append('rsi_exhaustion')
+        if c2_fib['triggered']: triggered_list.append('fib_extreme')
+        if c3_bb['triggered']:  triggered_list.append('bb_breakout')
+        if c4_struct['triggered']: triggered_list.append('extreme_structure')
     else:
-        c2_fib = check_fibonacci_extreme(
-            snap, df_15m, side
-        )
-        c3_bb  = check_bollinger_breakout(
-            snap, df_15m, side, market_type
-        )
         conditions = {
             'C1_rsi':        c1_rsi,
             'C2_fibonacci':  c2_fib,
             'C3_bollinger':  c3_bb,
         }
         triggered_list = []
-        if c1_rsi['triggered']:
-            triggered_list.append('rsi_exhaustion')
-        if c2_fib['triggered']:
-            triggered_list.append('fib_extreme')
-        if c3_bb['triggered']:
-            triggered_list.append('bb_breakout')
+        if c1_rsi['triggered']: triggered_list.append('rsi_exhaustion')
+        if c2_fib['triggered']: triggered_list.append('fib_extreme')
+        if c3_bb['triggered']:  triggered_list.append('bb_breakout')
 
     n_triggered = len(triggered_list)
 

@@ -840,7 +840,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
         for position in positions:
             # --- SLVM v2 (Recovery & Hard Stop) ---
             from app.strategy.virtual_sl_recovery import process_symbol_5m_with_slvm_v2
-            await process_symbol_5m_with_slvm_v2(
+            slvm_res = await process_symbol_5m_with_slvm_v2(
                 symbol        = symbol,
                 current_price = current_price,
                 snap          = snap,
@@ -848,6 +848,10 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 market_type   = 'forex_futures',
                 position      = position
             )
+            
+            if slvm_res and slvm_res.get('should_close'):
+                await _execute_paper_close(position, current_price, slvm_res.get('exit_type', 'slvm_close_fx'), sb)
+                continue
             
             # --- MARGIN CALL ALERT (Amenaza al Capital) ---
             entry_p_margin = float(position.get('entry_price') or position.get('avg_entry_price') or 0)
@@ -957,7 +961,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
             tp = float(position.get('tp_price', position.get('tp_partial_price', 0)))
             side = (position.get('side') or '').lower()
 
-            if sl > 0:
+            if sl > 0 and not position.get('recovery_mode'):
                 if (side == 'long' and current_price <= sl) or \
                    (side == 'short' and current_price >= sl):
                     await _execute_paper_close(position, current_price, 'sl_hit_fx', sb)
@@ -1341,8 +1345,8 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                 # -------------------------
                 
                 # We evaluate V1 engine for Long
-                v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m')
-                v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m')
+                v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
+                v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
                 
                 if v1_long:
                     rc_str = v1_long.get("rule", {}).get("rule_code", str(v1_long)) if isinstance(v1_long, dict) else str(v1_long)

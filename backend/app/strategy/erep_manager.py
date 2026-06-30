@@ -774,14 +774,9 @@ def evaluate_erep_phase(
                 'close_type': 'timeout_phase3',
             }
 
-        # Obtener close de la última vela
-        col_close = 'close' if df_15m is not None and 'close' in df_15m.columns else 'c'
-        if df_15m is not None and len(df_15m) >= 2:
-            last_close = float(df_15m.iloc[-2].get(col_close, current_price))
-        else:
-            last_close = current_price
-
-        reached_p3 = (is_long and last_close >= p3_avg) or (not is_long and last_close <= p3_avg)
+        # Garantizar que estamos en ganancia usando el precio actual (current_loss < 0 es ganancia)
+        reached_p3 = current_loss < 0
+        last_close = current_price
 
         if reached_p3:
             if is_ema_fast_above == is_long:

@@ -1,3 +1,4 @@
+from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASymbolByIdRes
 """
 Forex Worker Standalone (Protobuf v3.1)
 
@@ -293,17 +294,49 @@ class StandaloneForexWorker:
             self.log(f"ERROR DE CTRADER: {err.errorCode} - {err.description}", "ERROR")
         elif pt == ProtoOASymbolsListRes().payloadType:
             res = Protobuf.extract(message)
-            count = 0
+            STATE['pending_symbol_ids'] = []
+            STATE['symbol_candidates'] = {}
             for sym in res.symbol:
                 base_name = sym.symbolName.split('.')[0].upper().strip()
-                if base_name in self.symbols: 
-                    STATE['symbol_ids'][base_name] = sym.symbolId
-                    count += 1
+                if base_name in self.symbols:
+                    STATE['pending_symbol_ids'].append(sym.symbolId)
+                    if base_name not in STATE['symbol_candidates']:
+                        STATE['symbol_candidates'][base_name] = []
+                    STATE['symbol_candidates'][base_name].append({'id': sym.symbolId, 'name': sym.symbolName})
+            
+            if STATE['pending_symbol_ids']:
+                from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOASymbolByIdReq
+                req = ProtoOASymbolByIdReq()
+                req.ctidTraderAccountId = ACCOUNT_ID
+                req.symbolId.extend(STATE['pending_symbol_ids'])
+                self.safe_send(req)
+                self.log(f"Consultando detalles de {len(STATE['pending_symbol_ids'])} posibles IDs para validacion estricta...")
+            else:
+                self.log("No se encontraron simbolos candidatos.")
+                
+        elif pt == ProtoOASymbolByIdRes().payloadType:
+            res = Protobuf.extract(message)
+            count = 0
+            for sym in res.symbol:
+                if getattr(sym, 'tradingMode', -1) == 0:  # 0 = ENABLED
+                    base_name = sym.symbolName.split('.')[0].upper().strip()
+                    if base_name in self.symbols:
+                        if base_name in STATE['symbol_ids']:
+                            if '.' in sym.symbolName:
+                                STATE['symbol_ids'][base_name] = sym.symbolId
+                                STATE.setdefault('symbol_names', {})[base_name] = sym.symbolName
+                        else:
+                            STATE['symbol_ids'][base_name] = sym.symbolId
+                            STATE.setdefault('symbol_names', {})[base_name] = sym.symbolName
+                            
+            for bname, sid in STATE.get('symbol_ids', {}).items():
+                sname = STATE.get('symbol_names', {}).get(bname, bname)
+                self.log(f"Vinculado definitivamente: {bname} -> {sname} (ID: {sid}) | TradingMode: ENABLED")
+                count += 1
+                
             if count > 0:
-                self.log(f"Simbolos vinculados: {count} ({', '.join(STATE['symbol_ids'].keys())})")
-            self.subscribe_spots(); self.warmup_all()
-            # Iniciar Execution Service despues de cargar simbolos
-            reactor.callLater(5, self._init_execution_service)
+                self.subscribe_spots(); self.warmup_all()
+                reactor.callLater(5, self._init_execution_service)
         elif pt == ProtoOASpotEvent().payloadType:
             self.handle_spot(Protobuf.extract(message))
         elif pt == ProtoOAGetTrendbarsRes().payloadType:
@@ -523,6 +556,9 @@ class StandaloneForexWorker:
         bid_raw = spot.bid or 0
         ask_raw = spot.ask or 0
 
+        # Actualizar watchdog
+        STATE.setdefault('last_data_ts', {})[name] = time.time()
+        
         # FIX: Preserve previous values for partial spot updates
         # cTrader sometimes sends only bid OR only ask, not both
         prev = STATE['prices'].get(name, {})
@@ -578,6 +614,7 @@ class StandaloneForexWorker:
         if bars:
             self.log(f"Recibidas {len(bars)} velas de {name} ({tf})", "DEBUG")
             STATE['candles'][f"{name}_{tf}"] = bars
+            STATE.setdefault('last_data_ts', {})[name] = time.time()
             threads.deferToThread(self.process_and_save, name, tf, bars)
 
     def safe_db_execute(self, query, retries=3):
@@ -762,6 +799,15 @@ class StandaloneForexWorker:
         cycle = STATE['cycle_count']
         delay = 0
         for sym in self.symbols:
+            # Watchdog Activo: Verificar si hay datos recientes (últimos 5 min)
+            last_ts = STATE.get('last_data_ts', {}).get(sym, 0)
+            if last_ts > 0 and (time.time() - last_ts) > 300:
+                self.log(f"WATCHDOG ALERT: Sin datos para {sym} en >5min. Re-evaluando símbolos...", "ERROR")
+                # Enviar de nuevo la petición de símbolos para auto-recuperar si el ID cambió
+                self.load_symbols()
+                # Reiniciar ts para no inundar los logs
+                STATE['last_data_ts'][sym] = time.time()
+                
             # 5m (NUEVO para Trailing SHORT)
             reactor.callLater(delay, self.request_bars, sym, '5m', 100)
             

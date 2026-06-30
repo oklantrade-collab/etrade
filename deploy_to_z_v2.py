@@ -2,19 +2,8 @@ import shutil
 import os
 
 files_to_copy = [
-    "backend/app/analysis/stocks_indicators.py",
-    "backend/app/stocks/position_monitor.py",
-    "backend/app/strategy/proactive_exit.py",
-    "backend/app/workers/forex_execution_service.py",
     "backend/app/core/position_monitor.py",
-    "backend/app/strategy/swing_orders.py",
-    "backend/app/workers/scheduler.py",
-    "backend/app/workers/stocks_scheduler.py",
-    "backend/app/stocks/apex_score.py",
-    "backend/app/stocks/apex_scheduler.py",
-    "backend/app/stocks/migrations/005_apex_scores_table.sql",
-    "backend/app/api/stocks.py",
-    "backend/app/execution/providers/ctrader_provider.py"
+    "backend/app/data/ib_scanner.py"
 ]
 
 source_base = "C:/Fuentes/eTrade"

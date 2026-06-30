@@ -201,6 +201,12 @@ def check_5m_hard_stop(
     hs_pips = calculate_hard_stop_pips(symbol, market_type, snap)
     pip_size = get_pip_size(symbol)
     
+    # Límite estricto: la pérdida máxima no puede exceder el 0.05% del precio de entrada
+    max_loss_price_diff = entry_price * 0.0005
+    max_loss_pips = max_loss_price_diff / pip_size
+    if hs_pips > max_loss_pips:
+        hs_pips = max_loss_pips
+    
     if side.lower() in ('long', 'buy'):
         hs_price = entry_price - (hs_pips * pip_size)
         violated = current_price < hs_price
@@ -441,6 +447,8 @@ def activate_recovery_mode_sync(position: dict, current_price: float, symbol: st
             'recovery_cycles': 0,
             'recovery_activated_at': datetime.now(timezone.utc).isoformat()
         }, key_name=db_key)
+        # Fix: Actualizar el diccionario en memoria viva para el ciclo actual
+        position['recovery_mode'] = True
     except Exception as e:
         log_error('SLVM', f"Error activating recovery mode on table {table}: {e}")
 

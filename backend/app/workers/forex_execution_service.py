@@ -1670,7 +1670,7 @@ class ForexExecutionService:
 
     def _check_proactive_exit_forex(self, pos: dict, snap: dict) -> bool:
         """
-        Evalua Aa51/Bb51 para posiciones Forex.
+        Evalua AaPX51/BbPX51 para posiciones Forex.
         Retorna True si se cerro la posicion.
         """
         symbol = pos['symbol']

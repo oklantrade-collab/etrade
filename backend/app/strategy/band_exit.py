@@ -55,7 +55,12 @@ def evaluate_band_exit(
         current_price - target_price
     ) / target_price * 100
 
-    at_band = distance_pct <= 0.30  # dentro del 0.3%
+    if side in ['long', 'buy']:
+        passed_band = current_price >= target_price
+    else:
+        passed_band = current_price <= target_price
+
+    at_band = distance_pct <= 0.30 or passed_band
 
     if not at_band:
         return {'action': 'hold',

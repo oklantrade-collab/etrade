@@ -127,7 +127,7 @@ class PositionMonitor:
                 except Exception as age_e:
                     log_debug(MODULE, f"Error calculando age para {ticker}: {age_e}")
 
-            # ── Cierre Proactivo Aa51/Bb51 ──
+            # ── Cierre Proactivo AaPX51/BbPX51 ──
             closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, pnl_pct, sb)
             if closed:
                 return
@@ -358,7 +358,7 @@ class PositionMonitor:
             log_error(MODULE, f"Error monitoring {ticker}: {e}")
 
     async def check_proactive_exit_stocks(self, ticker: str, position: dict, current_price: float, pnl_pct: float, sb) -> bool:
-        """ Evalúa Aa51/Bb51 para posiciones de Stocks. """
+        """ Evalúa AaPX51/BbPX51 para posiciones de Stocks. """
         try:
             import yfinance as yf
             t = yf.Ticker(ticker)

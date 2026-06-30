@@ -1,5 +1,5 @@
 """
-Módulo de Cierre Proactivo — Aa51/Bb51/Aa52/Bb52
+Módulo de Cierre Proactivo — AaPX51/BbPX51/Aa52/Bb52
 
 Detecta reversión de mercado ANTES de que
 el SL se active y cierra posiciones con
@@ -517,7 +517,7 @@ def evaluate_proactive_exit(
     max_preventive_loss_pct  = -0.001 # -0.10%
 
     if triple_confirmed and pnl['has_profit']:
-        rule_code   = 'Aa51' if is_long else 'Bb51'
+        rule_code   = 'AaPX51' if is_long else 'BbPX51'
         should_close = True
         urgency     = 'normal'
         reason      = f'Triple confirmación detectada. P&L: +{pnl["pnl_pct"]:.3f}%'

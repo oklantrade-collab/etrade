@@ -761,7 +761,7 @@ async def check_proactive_exit_crypto(
     sb
 ) -> bool:
     """
-    Evalúa Aa51/Bb51 para posiciones de Crypto.
+    Evalúa AaPX51/BbPX51 para posiciones de Crypto.
     Retorna True si se cerró la posición.
     """
     position = BOT_STATE.positions.get(symbol)
@@ -1082,7 +1082,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                 position['avg_entry_price'] = new_entry
                 position['dca_executed'] = True
 
-            # 3. Fallback Proactivo Aa51 (Legacy)
+            # 3. Fallback Proactivo AaPX51 (Legacy)
             closed = await check_proactive_exit_crypto(symbol, current_price, snap, sb)
             if closed:
                 return # Posición cerrada
@@ -2125,22 +2125,22 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 if allowed_direction:
                     if allowed_direction == 'long' and (cur_mtf_score >= mtf_threshold or mtf_4h_trend == 'long'):
                         direction_checked = 'long'
-                        rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf)
+                        rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf, market_type=market_type)
                     elif allowed_direction == 'short' and (cur_mtf_score <= -mtf_threshold or mtf_4h_trend == 'short'):
                         direction_checked = 'short'
                         bearish_action = get_bearish_action(market_type=market_type, has_long_open=bool(BOT_STATE.get_positions_by_symbol(symbol)))
                         if bearish_action == 'open_short':
-                            rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
+                            rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf, market_type=market_type)
                 else:
                     if cur_mtf_score >= mtf_threshold or mtf_4h_trend == 'long':
                         direction_checked = 'long'
-                        rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf)
+                        rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='long', rules=all_r, source_tf=source_tf, market_type=market_type)
                     
                     if not rule_match and (cur_mtf_score <= -mtf_threshold or mtf_4h_trend == 'short'):
                         direction_checked = 'short'
                         bearish_action = get_bearish_action(market_type=market_type, has_long_open=bool(BOT_STATE.get_positions_by_symbol(symbol)))
                         if bearish_action == 'open_short':
-                            rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf)
+                            rule_match = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=p_signal if p_signal else None, cfg=cfg, direction='short', rules=all_r, source_tf=source_tf, market_type=market_type)
 
             
             if not rule_match:

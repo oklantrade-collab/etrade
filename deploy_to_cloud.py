@@ -45,6 +45,7 @@ files_to_sync = [
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/stocks/stocks_tp_manager.py",
     "app/stocks/position_monitor.py",
+    "app/data/ib_scanner.py",
     "app/strategy/risk_manager.py",
     "app/strategy/signal_generator.py",
     "app/api/stocks.py",

@@ -19,7 +19,7 @@ def test_crypto_proactive_exit():
     result = evaluate_proactive_exit(position, current_price, snap, df_4h, 'crypto_futures')
     
     assert result['should_close'] == True
-    assert result['rule_code'] == 'Aa51'
+    assert result['rule_code'] == 'AaPX51'
     assert result['urgency'] == 'normal'
     assert result['pnl']['has_profit'] == True
     assert result['conditions']['c1_pine']['passed'] == True

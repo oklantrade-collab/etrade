@@ -377,10 +377,9 @@ DEFAULT_RULES = [
             {"indicator": "bb_upper_slope_positive", "operator": "==", "value": True},
             {"indicator": "ema_alignment_long", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -6},
-            {"indicator": "fib_zone", "operator": "<=", "value": 2},
+            {"indicator": "fib_zone", "operator": "<=", "value": 6},
             {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
             {"indicator": "rsi_ok_long", "operator": "==", "value": True},
-            {"indicator": "not_in_ceiling", "operator": "==", "value": True},
             {"indicator": "ema_exhaustion", "operator": "==", "value": False},
         ],
         "logic": "AND",
@@ -405,11 +404,10 @@ DEFAULT_RULES = [
             {"indicator": "bb_expanding_or_mtf_short_or_top", "operator": "==", "value": True},
             {"indicator": "bb_lower_slope_negative", "operator": "==", "value": True},
             {"indicator": "ema_alignment_short", "operator": "==", "value": True},
-            {"indicator": "fib_zone", "operator": ">=", "value": -2},
+            {"indicator": "fib_zone", "operator": ">=", "value": -6},
             {"indicator": "fib_zone", "operator": "<=", "value": 6},
             {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
             {"indicator": "rsi_ok_short", "operator": "==", "value": True},
-            {"indicator": "not_in_floor", "operator": "==", "value": True},
             {"indicator": "ema_exhaustion", "operator": "==", "value": False},
         ],
         "logic": "AND",
@@ -435,10 +433,9 @@ DEFAULT_RULES = [
             {"indicator": "bb_upper_slope_positive", "operator": "==", "value": True},
             {"indicator": "ema_alignment_long", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -6},
-            {"indicator": "fib_zone", "operator": "<=", "value": 2},
+            {"indicator": "fib_zone", "operator": "<=", "value": 6},
             {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
             {"indicator": "rsi_ok_long", "operator": "==", "value": True},
-            {"indicator": "not_in_ceiling", "operator": "==", "value": True},
             {"indicator": "ema_exhaustion", "operator": "==", "value": False},
             {"indicator": "ema9_above_ema20_15m", "operator": "==", "value": True},
         ],
@@ -464,11 +461,10 @@ DEFAULT_RULES = [
             {"indicator": "bb_expanding_or_mtf_short_or_top", "operator": "==", "value": True},
             {"indicator": "bb_lower_slope_negative", "operator": "==", "value": True},
             {"indicator": "ema_alignment_short", "operator": "==", "value": True},
-            {"indicator": "fib_zone", "operator": ">=", "value": -2},
+            {"indicator": "fib_zone", "operator": ">=", "value": -6},
             {"indicator": "fib_zone", "operator": "<=", "value": 6},
             {"indicator": "strong_contratrend_short", "operator": "==", "value": False},
             {"indicator": "rsi_ok_short", "operator": "==", "value": True},
-            {"indicator": "not_in_floor", "operator": "==", "value": True},
             {"indicator": "ema_exhaustion", "operator": "==", "value": False},
             {"indicator": "ema9_below_ema20_15m", "operator": "==", "value": True},
         ],
@@ -1052,6 +1048,7 @@ def evaluate_all_rules(
     cfg: Optional[dict] = None,
     direction: Optional[str] = None,
     source_tf: str = "15m",
+    market_type: Optional[str] = None,
 ) -> Optional[dict]:
     # ...
     market_data = build_market_data_dict(df, fib_levels, regime)
@@ -1133,6 +1130,7 @@ def evaluate_all_rules(
         and r.get("direction") == direction_filter
         and (r.get("ema50_vs_ema200", "any") in [macro, "any"])
         and regime["category"] in r.get("regime_allowed", ["bajo_riesgo", "riesgo_medio", "alto_riesgo"])
+        and (not market_type or not r.get("market_type") or market_type in r.get("market_type"))
     ]
 
     # Sort by priority (lower = higher priority)

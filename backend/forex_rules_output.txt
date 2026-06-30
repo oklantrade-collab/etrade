@@ -1,0 +1,129 @@
+Rule: Aa23 (EMA9+EMA50 ascendentes) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': 0, 'operator': '>=', 'indicator': 'ema9_angle'}
+  - {'value': 0, 'operator': '>=', 'indicator': 'ema50_angle'}
+  - {'value': True, 'operator': '==', 'indicator': 'adx_above_regime_min'}
+  - {'value': 3, 'operator': '<=', 'indicator': 'fib_zone_abs'}
+Rule: Bb21 (SHORT Bollinger lower (bajo riesgo)) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': 0, 'operator': '<=', 'indicator': 'ema20_angle'}
+  - {'value': 'nivel_2_short', 'operator': '==', 'indicator': 'ema20_phase'}
+  - {'value': 10, 'operator': '>', 'indicator': 'di_margin'}
+  - {'value': True, 'operator': '==', 'indicator': 'close_above_lower'}
+Rule: AaReb_5m (Cazador de Extremos LONG) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': -4, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': True, 'operator': '==', 'indicator': 'sipv_buy'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_slope_positive'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_long'}
+Rule: Aa21 (DIP Sniper EMA20 (15m)) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_above_ema20_15m'}
+  - {'value': True, 'operator': '==', 'indicator': 'low_below_ema20_15m'}
+  - {'value': 0, 'operator': '>=', 'indicator': 'ema20_angle'}
+Rule: Bb23 (EMA50 cruza basis↓+EMA20) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_below_ema20'}
+  - {'value': 0, 'operator': '<=', 'indicator': 'ema20_angle'}
+  - {'value': 40, 'operator': '>=', 'indicator': 'rsi_14'}
+  - {'value': True, 'operator': '==', 'indicator': 'high_touched_ema20'}
+Rule: BbPullback (Pullback a EMA3 SHORT) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'pullback_short'}
+  - {'value': -3, 'operator': '>=', 'indicator': 'fib_zone'}
+  - {'value': 6, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_short'}
+Rule: Dd11 (Swing LONG Extremo Banda) - ['crypto_spot', 'crypto_futures', 'forex_futures', 'options']
+  - {'value': ['flat', 'nivel_1_long', 'nivel_1_short'], 'operator': 'in', 'indicator': 'ema20_phase'}
+  - {'value': True, 'operator': '==', 'indicator': 'price_touched_lower_5_6'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema_cross_long'}
+  - {'value': -0.6, 'operator': '>=', 'indicator': 'mtf_score'}
+  - {'value': True, 'operator': '==', 'indicator': 'reversal_confirmation_long'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_long'}
+Rule: Dd12 (Swing SHORT Extremo Banda) - ['crypto_spot', 'crypto_futures', 'forex_futures', 'options']
+  - {'value': ['flat', 'nivel_1_long', 'nivel_1_short'], 'operator': 'in', 'indicator': 'ema20_phase'}
+  - {'value': True, 'operator': '==', 'indicator': 'price_touched_upper_6'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema_cross_short'}
+  - {'value': 0.6, 'operator': '<=', 'indicator': 'mtf_score'}
+  - {'value': True, 'operator': '==', 'indicator': 'reversal_confirmation_short'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_short'}
+Rule: Bb30C (SHORT 5m Crypto Breakout) - ['crypto_spot', 'crypto_futures', 'forex_futures', 'stocks_spot']
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_below_ema9_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_below_ema20_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_below_ema20'}
+  - {'value': 0, 'operator': '<', 'indicator': 'ema9_angle'}
+  - {'value': 0, 'operator': '<', 'indicator': 'ema20_angle'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_below_ema9_1h'}
+  - {'value': True, 'operator': '==', 'indicator': 'di_minus_above_di_plus'}
+Rule: BbHot (HOT Momentum SHORT) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'fresh_cross_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'hot_mtf_ok_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_expanding_or_mtf_short_or_top'}
+  - {'value': -2, 'operator': '>=', 'indicator': 'fib_zone'}
+  - {'value': 6, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': True, 'operator': '==', 'indicator': 'sar_or_signal_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'adx_floor_ok'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'rsi_ok_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'not_in_floor'}
+  - {'value': False, 'operator': '==', 'indicator': 'ema_exhaustion'}
+Rule: AaPullback (Pullback a EMA3 LONG) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'pullback_long'}
+  - {'value': -6, 'operator': '>=', 'indicator': 'fib_zone'}
+  - {'value': 3, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_long'}
+Rule: Bb30 (SHORT 5m Breakout Scalping) - ['crypto_spot', 'crypto_futures', 'forex_futures', 'stocks_spot']
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_below_ema9_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_below_ema20_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_below_ema20'}
+  - {'value': 0, 'operator': '<', 'indicator': 'ema9_angle'}
+  - {'value': 0, 'operator': '<', 'indicator': 'ema20_angle'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_below_ema9_1h'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_lower_slope_negative'}
+Rule: AaHot (HOT Momentum LONG) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'fresh_cross_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'hot_mtf_ok_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_expanding_or_mtf_long_or_bottom'}
+  - {'value': -6, 'operator': '>=', 'indicator': 'fib_zone'}
+  - {'value': 2, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': True, 'operator': '==', 'indicator': 'sar_or_signal_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'adx_floor_ok'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'rsi_ok_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'not_in_ceiling'}
+  - {'value': False, 'operator': '==', 'indicator': 'ema_exhaustion'}
+Rule: Aa30 (LONG 5m Breakout Scalping) - ['crypto_spot', 'crypto_futures', 'forex_futures', 'stocks_spot']
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_above_ema9_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_above_ema20_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_above_ema20'}
+  - {'value': 0, 'operator': '>', 'indicator': 'ema9_angle'}
+  - {'value': 0, 'operator': '>', 'indicator': 'ema20_angle'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_above_ema9_1h'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_upper_slope_positive'}
+Rule: AaHotC (HOT Momentum LONG Cripto) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'fresh_cross_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'hot_mtf_ok_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_expanding_or_mtf_long_or_bottom'}
+  - {'value': -6, 'operator': '>=', 'indicator': 'fib_zone'}
+  - {'value': 2, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': True, 'operator': '==', 'indicator': 'sar_or_signal_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'adx_floor_ok'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'rsi_ok_long'}
+  - {'value': True, 'operator': '==', 'indicator': 'not_in_ceiling'}
+  - {'value': False, 'operator': '==', 'indicator': 'ema_exhaustion'}
+Rule: BbHotC (HOT Momentum SHORT Cripto) - ['crypto_spot', 'crypto_futures', 'forex_futures']
+  - {'value': True, 'operator': '==', 'indicator': 'fresh_cross_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'hot_mtf_ok_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_expanding_or_mtf_short_or_top'}
+  - {'value': -2, 'operator': '>=', 'indicator': 'fib_zone'}
+  - {'value': 6, 'operator': '<=', 'indicator': 'fib_zone'}
+  - {'value': True, 'operator': '==', 'indicator': 'sar_or_signal_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'adx_floor_ok'}
+  - {'value': False, 'operator': '==', 'indicator': 'strong_contratrend_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'rsi_ok_short'}
+  - {'value': True, 'operator': '==', 'indicator': 'not_in_floor'}
+  - {'value': False, 'operator': '==', 'indicator': 'ema_exhaustion'}
+Rule: Aa30C (LONG 5m Crypto Breakout) - ['crypto_spot', 'crypto_futures', 'forex_futures', 'stocks_spot']
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_above_ema9_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_above_ema20_5m'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema9_above_ema20'}
+  - {'value': 0, 'operator': '>', 'indicator': 'ema9_angle'}
+  - {'value': 0, 'operator': '>', 'indicator': 'ema20_angle'}
+  - {'value': True, 'operator': '==', 'indicator': 'ema3_above_ema9_1h'}
+  - {'value': True, 'operator': '==', 'indicator': 'di_plus_above_di_minus'}
+  - {'value': True, 'operator': '==', 'indicator': 'bb_upper_slope_positive'}

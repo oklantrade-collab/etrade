@@ -172,11 +172,15 @@ class WebSocketManager:
                             activated_dt = erep_activated_at
                         elapsed = (datetime.now(timezone.utc) - activated_dt).total_seconds()
                         if elapsed >= 3600:  # 60 minutos
-                            log_warning(MODULE, 
-                                f"EREP TIMEOUT for {symbol}! {elapsed:.0f}s elapsed (>3600s). "
-                                f"PnL={pnl_pct:.2f}%. Forcing closure to limit loss.")
-                            await _execute_paper_close(pos, price, 'erep_timeout_60m', sb)
-                            continue
+                            if pnl_pct > 0:
+                                log_warning(MODULE, 
+                                    f"EREP TIMEOUT for {symbol}! {elapsed:.0f}s elapsed (>3600s). "
+                                    f"PnL={pnl_pct:.2f}%. Forcing closure (PNL>0).")
+                                await _execute_paper_close(pos, price, 'erep_timeout_60m', sb)
+                                continue
+                            else:
+                                # No cerramos en pérdida por timeout si es EREP
+                                pass
                     except Exception as dt_err:
                         log_warning(MODULE, f"Error parsing erep_activated_at for {symbol}: {dt_err}")
 

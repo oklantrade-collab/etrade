@@ -257,15 +257,31 @@ class StrategyEngine:
         ema20_descending_1h = False
         if symbol:
             df_1h = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
-            if df_1h is not None and len(df_1h) >= 2:
+            low_below_bb_lower_1h = False
+            bb_lower_ascending_1h = False
+
+            if df_1h is not None and len(df_1h) >= 3:
                 c1h_col = 'Close' if 'Close' in df_1h.columns else 'close'
                 c1h = pd.to_numeric(df_1h[c1h_col], errors='coerce').dropna()
-                if len(c1h) >= 2:
+                if len(c1h) >= 3:
                     ema20_series_1h = c1h.ewm(span=20, adjust=False).mean()
-                    if float(ema20_series_1h.iloc[-1]) > float(ema20_series_1h.iloc[-2]):
+                    # Anti-repainting: usar solo velas CERRADAS (iloc[-2] vs iloc[-3])
+                    # iloc[-1] es la vela actual sin cerrar, su precio fluctúa en tiempo real
+                    if float(ema20_series_1h.iloc[-2]) > float(ema20_series_1h.iloc[-3]):
                         ema20_ascending_1h = True
-                    if float(ema20_series_1h.iloc[-1]) < float(ema20_series_1h.iloc[-2]):
+                    if float(ema20_series_1h.iloc[-2]) < float(ema20_series_1h.iloc[-3]):
                         ema20_descending_1h = True
+
+                
+                low_1h = safe_float(df_1h['low'].iloc[-1] if 'low' in df_1h.columns else 0)
+                b_l_0_1h = safe_float(df_1h['lower_2'].iloc[-1] if 'lower_2' in df_1h.columns else df_1h.get('bb_lower', pd.Series()).iloc[-1] if 'bb_lower' in df_1h.columns else 0)
+                b_l_1_1h = safe_float(df_1h['lower_2'].iloc[-2] if 'lower_2' in df_1h.columns else df_1h.get('bb_lower', pd.Series()).iloc[-2] if 'bb_lower' in df_1h.columns else 0)
+                
+                if low_1h > 0 and b_l_0_1h > 0 and low_1h < b_l_0_1h:
+                    low_below_bb_lower_1h = True
+                
+                if b_l_0_1h > b_l_1_1h and b_l_1_1h > 0:
+                    bb_lower_ascending_1h = True
 
         # ── Aa13 & Bb13 Custom Variables ──
         bb_lower_ascending_15m = False
@@ -467,6 +483,8 @@ class StrategyEngine:
             'ai_candle_color':   str(MEMORY_STORE.get(snap.get('symbol', ''), {}).get('ai_cache_15m', {}).get('current_candle_color', 'neutral')),
             
             # Custom Aa13/Bb13 variables
+            'low_below_bb_lower_1h': low_below_bb_lower_1h,
+            'bb_lower_ascending_1h': bb_lower_ascending_1h,
             'bb_lower_ascending_15m': bb_lower_ascending_15m,
             'bb_lower_ascending_2c_15m': bb_lower_ascending_2c_15m,
             'prev_low_touch_lower56_15m': prev_low_touch_lower56_15m,
