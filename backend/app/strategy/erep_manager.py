@@ -1203,7 +1203,7 @@ async def execute_erep_action(
                     'erep_close_reason': close_type[:20],
                     'status':            'closed',
                     'closed_at':         datetime.now(timezone.utc).isoformat(),
-                    'close_reason':      f'EREP_{close_type.upper()}'[:50]
+                    'close_reason':      f'EREP_{close_type.upper()}'[:20]
                 }).eq('id', pos_id).execute()
                 break
             except Exception as e:

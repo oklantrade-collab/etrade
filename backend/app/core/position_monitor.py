@@ -294,7 +294,7 @@ async def check_sl_with_erep(
     side     = str(position.get('side', 'long'))
     is_long  = side.lower() in ('long', 'buy')
 
-    if sl_price <= 0:
+    if sl_price <= 0 and not bool(position.get('erep_active')):
         return False
 
     # ¿Tocó el SL?
@@ -1571,7 +1571,7 @@ async def _execute_paper_partial_close(pos, price, supabase):
         'close_reason': 'partial_tp',
         'closed_at':    datetime.now(timezone.utc).isoformat(),
         'mode':         'paper',
-        'rule_code':    p_rule_code
+        'rule_code':    p_rule_code[:10]
     }).execute()
     
     log_info(MODULE, f"✅ PARTIAL CLOSE [{symbol}] at ${price:,.2f} | PnL: ${partial_pnl_usd:.2f}")
@@ -1717,10 +1717,10 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         'exit_price': price,
         'total_pnl_usd': round(total_pnl, 4),
         'total_pnl_pct': round(pnl_pct, 4),
-        'close_reason': detailed_reason,
+        'close_reason': detailed_reason[:30],
         'closed_at': datetime.now(timezone.utc).isoformat(),
         'mode': 'paper',
-        'rule_code': p_rule_code
+        'rule_code': p_rule_code[:10]
     }).execute()
     
     # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
