@@ -586,7 +586,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
 
         apex_result = None
         try:
-            from app.stocks.apex_score import calculate_apex_score
+            from app.stocks.apex_score import calculate_apex_score_v2
             from app.stocks.stocks_adaptive_tp import fetch_macro_data
 
             # Garantizar que sb esté disponible para fetch_macro_data
@@ -595,14 +595,26 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             fund_cache = {
                 'piotroski_score': ind_15m.get('piotroski_score', 4),
                 'margin_of_safety': ind_15m.get('margin_of_safety', 0),
-                'altman_zone': fundamental_res.get('components', {}).get('altman', {}).get('zone', 'grey'),
+                'altman_zone': fundamental_res.get('components', {}).get('altman', {}).get('zone', 'grey') if fundamental_res.get('components') else 'grey',
                 'fundamental_score': ind_15m.get('fundamental_score', 50),
                 'analyst_rating': a_rating or 5,
                 'valuation_status': fundamental_res.get('valuation_status', 'fairly_valued'),
                 'days_to_earnings': f_data.get('days_to_earnings', 30) if f_data else 30,
                 'short_interest_pct': f_data.get('short_interest_pct', 5) if f_data else 5,
+                
+                # Nuevas métricas v2.0
+                'peg_ratio':           fundamental_res.get('peg_ratio', 0),
+                'pe_ratio':            fundamental_res.get('pe_ratio', 0),
+                'forward_pe':          fundamental_res.get('forward_pe', 0),
+                'free_cash_flow':      fundamental_res.get('free_cash_flow', 0),
+                'market_cap':          float(fundamental_res.get('market_cap') or (f_data.get('market_cap_mln', 1000) * 1e6) if f_data else 1e9),
+                'eps_growth_pct':      fundamental_res.get('eps_growth_qoq', 0),
+                'revenue_growth_yoy':  ind_15m.get('revenue_growth_yoy', 0),
+                'revenue_growth_qoq':  fundamental_res.get('revenue_growth_qoq', 0),
+                'fcf_growth_pct':      fundamental_res.get('fcf_growth_pct', 0),
+                'short_percent_float': fundamental_res.get('short_percent_float', 5),
             }
-            apex_result = calculate_apex_score(
+            apex_result = calculate_apex_score_v2(
                 ticker=ticker,
                 snap={**ind_15m, **snap_for_sm, 'price': current_price},
                 fundamental_cache=fund_cache,
@@ -636,6 +648,12 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 'apex_1d': apex_result['apex_score_1d'] if apex_result else None,
                 'apex_signal': apex_result['signal'] if apex_result else None,
                 'apex_conf': apex_result['confidence'] if apex_result else None,
+                
+                # Nuevas columnas v2.0
+                'trade_score':  apex_result.get('trade_score') if apex_result else None,
+                'xg_score':     apex_result.get('xg_score') if apex_result else None,
+                'timing_score': apex_result.get('timing_score') if apex_result else None,
+                'etv':          apex_result.get('etv') if apex_result else None,
             }
 
             try:
@@ -906,7 +924,7 @@ async def run_stocks_cycle(force=False):
             log_info(MODULE, f"Market is {status_text}, but running cycle to monitor {len(open_tickers)} active positions (After-Hours ENABLED)")
 
         # ── CAPA 0: Dynamic Scanner — Refresh universe every cycle ──
-        scanner_max_price = float(config.get("scanner_max_price", 20))
+        scanner_max_price = float(config.get("max_stock_price", config.get("scanner_max_price", 20.0)))
         scanner_min_price = float(config.get("scanner_min_price", 1))
         scanner_min_cap = int(config.get("min_market_cap_usd", 1_000_000_000))
         scanner_min_vol = int(config.get("min_daily_volume", 1_000_000))
