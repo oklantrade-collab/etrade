@@ -24,7 +24,15 @@ export function formatDateInTimezone(
   if (!dateStr) return '—';
   
   try {
-    const date = typeof dateStr === 'string' ? new Date(dateStr) : dateStr;
+    let finalStr = dateStr;
+    if (typeof finalStr === 'string') {
+      // Backend (Python utcnow.isoformat) devuelve algo como "2026-07-07T13:05:21.123456" (sin 'Z')
+      // Para que JS lo interprete como UTC, le agregamos la 'Z' si no tiene offset
+      if (!finalStr.endsWith('Z') && !finalStr.includes('+') && finalStr.split('-').length <= 3) {
+        finalStr += 'Z';
+      }
+    }
+    const date = typeof finalStr === 'string' ? new Date(finalStr) : finalStr;
     if (isNaN(date.getTime())) return '—';
 
     const tz = getAppTimezone();
