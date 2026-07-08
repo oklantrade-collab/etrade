@@ -30,6 +30,11 @@ def execute_trade(
     binance_client
 ) -> dict | None:
 
+    # PASO 0 — Validar Stop Loss
+    if not oco_params.get('stop_loss') or float(oco_params['stop_loss']) <= 0:
+        loguear(logging.CRITICAL, f"Invalid Stop Loss (Zero or None) for {oco_params.get('symbol')}. Orden rechazada.")
+        return None
+
     # PASO 1 — Crear registro de orden en Supabase (status='pending')
     try:
         sym_norm = normalize_crypto_symbol(oco_params['symbol'])
@@ -411,3 +416,99 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
         log_error("ORDER_MANAGER", f"CRITICAL: Failed to close position {position_id}: {e}")
         return False
 
+
+def modify_oco_breakeven(position_id: str, new_tp_price: float) -> bool:
+    """
+    Cancela la orden OCO actual de una posición y lanza una nueva
+    manteniendo el Stop Loss original pero ajustando el Take Profit a Break-Even (+ comisiones).
+    """
+    from app.core.supabase_client import get_supabase
+    from app.execution.binance_connector import get_client
+    from app.core.logger import log_info, log_error, log_warning
+    
+    try:
+        sb = get_supabase()
+        log_info("ORDER_MANAGER", f"Requesting OCO BREAKEVEN mod for position {position_id}")
+        
+        pos_resp = sb.table("positions").select("*, orders(*)").eq("id", position_id).execute()
+        if not pos_resp.data:
+            return False
+            
+        position = pos_resp.data[0]
+        binance_symbol = normalize_crypto_symbol(position["symbol"])
+        qty = resolve_crypto_position_quantity(sb, position)
+        
+        # Obtener orden OCO actual
+        orders_data = position.get('orders') or {}
+        oco_client_id = orders_data.get('oco_list_client_id')
+        original_sl_price = float(orders_data.get('stop_loss_price') or 0)
+        current_tp_price = float(orders_data.get('take_profit_price') or 0)
+        
+        if not oco_client_id or not original_sl_price:
+            log_warning("ORDER_MANAGER", f"Cannot modify OCO - missing oco_list_client_id or SL for {position_id}")
+            return False
+            
+        # SAFETY CHECK: Si ya está modificado, no iterar
+        if current_tp_price > 0 and abs(current_tp_price - new_tp_price) / new_tp_price < 0.001:
+            log_info("ORDER_MANAGER", f"OCO for {binance_symbol} is already at target TP {new_tp_price}. Skipping.")
+            return True
+            
+        side = "SELL" if position["side"] == "LONG" else "BUY"
+        
+        from app.core.memory_store import BOT_STATE
+        is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+        
+        if is_paper:
+            log_info("ORDER_MANAGER", f"PAPER mod OCO breakeven for {binance_symbol} to TP={new_tp_price}")
+            sb.table("orders").update({"take_profit_price": new_tp_price}).eq("id", orders_data["id"]).execute()
+            return True
+            
+        client = get_client()
+        
+        # 1. Cancelar OCO actual
+        try:
+            client.cancel_order_list(symbol=binance_symbol, listClientOrderId=oco_client_id)
+        except Exception as e:
+            log_error("ORDER_MANAGER", f"Failed to cancel OCO {oco_client_id}: {e}")
+            return False
+            
+        # 2. Calcular precision y tick size
+        info = client.get_symbol_info(binance_symbol)
+        tick_size = 0.01
+        for f in info['filters']:
+            if f['filterType'] == 'PRICE_FILTER':
+                tick_size = float(f['tickSize'])
+                
+        tp_price_final = round_price(new_tp_price, tick_size)
+        sl_price_final = round_price(original_sl_price, tick_size)
+        sl_limit_final = round_price(
+            sl_price_final * (0.998 if position['side'] == 'LONG' else 1.002),
+            tick_size
+        )
+        
+        # 3. Lanzar nueva OCO
+        new_oco = client.create_oco_order(
+            symbol=binance_symbol,
+            side=side,
+            quantity=qty,
+            price=str(tp_price_final),
+            stopPrice=str(sl_price_final),
+            stopLimitPrice=str(sl_limit_final),
+            stopLimitTimeInForce='GTC'
+        )
+        
+        new_oco_list_id = str(new_oco.get('orderListId', ''))
+        
+        # 4. Actualizar base de datos
+        sb.table("orders").update({
+            "oco_list_client_id": new_oco_list_id,
+            "take_profit_price": tp_price_final
+        }).eq("id", orders_data["id"]).execute()
+        
+        log_info("ORDER_MANAGER", f"Successfully modified OCO for {binance_symbol} to new TP={tp_price_final}")
+        return True
+        
+    except Exception as e:
+        from app.core.logger import log_error
+        log_error("ORDER_MANAGER", f"Exception modifying OCO breakeven: {e}")
+        return False

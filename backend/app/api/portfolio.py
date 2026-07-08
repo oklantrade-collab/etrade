@@ -381,12 +381,27 @@ async def get_performance_summary():
         try:
             supabase = get_supabase()
             
+            import pytz
+            lima_tz = pytz.timezone('America/Lima')
+            now_lima = datetime.now(lima_tz)
+            
+            # Lunes de la semana actual en Lima -> UTC
+            monday_lima = (now_lima - timedelta(days=now_lima.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            monday_start_utc = monday_lima.astimezone(timezone.utc)
+
+            # Inicio del mes actual en Lima -> UTC
+            month_lima = now_lima.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            month_start_utc = month_lima.astimezone(timezone.utc)
+            
+            # Umbral de fecha más antiguo necesario (Lunes de la semana actual o día 1 del mes)
+            start_date_filter = min(monday_start_utc, month_start_utc).isoformat()
+            
             # Fetch from all markets sequentially to avoid thread-safety issues with httpx connection pool
             def fetch_perf_sync():
                 return (
-                    supabase.table('positions').select('id, realized_pnl, closed_at, rule_code').eq('status', 'closed').execute(),
-                    supabase.table('forex_positions').select('id, pnl_usd, closed_at, rule_code').eq('status', 'closed').execute(),
-                    supabase.table('stocks_positions').select('id, ticker, unrealized_pnl, updated_at').eq('status', 'closed').execute()
+                    supabase.table('positions').select('id, realized_pnl, closed_at, rule_code').eq('status', 'closed').gte('closed_at', start_date_filter).order('closed_at', desc=True).execute(),
+                    supabase.table('forex_positions').select('id, pnl_usd, closed_at, rule_code').eq('status', 'closed').gte('closed_at', start_date_filter).order('closed_at', desc=True).execute(),
+                    supabase.table('stocks_positions').select('id, ticker, unrealized_pnl, updated_at').eq('status', 'closed').gte('updated_at', start_date_filter).order('updated_at', desc=True).execute()
                 )
             
             async with DB_LOCK:
@@ -395,7 +410,7 @@ async def get_performance_summary():
             res_forex  = results_perf[1]
             res_stocks = results_perf[2]
             
-            raw_combined = [] # ... processing ...
+            raw_combined = []
             for t in (res_crypto.data or []):
                 raw_combined.append({**t, 'pnl': t.get('realized_pnl') or 0, 'time': t['closed_at'], 'market': 'crypto'})
             for t in (res_forex.data or []):

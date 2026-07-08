@@ -154,42 +154,40 @@ async def evaluate_crypto_pair(pair: str, detector: CandlePatternDetector) -> li
 
 async def evaluate_forex_pair(pair: str, detector: CandlePatternDetector) -> list[dict]:
     """
-    Evaluate a forex pair using data from market_candles table (stored by forex_worker).
+    Evaluate a forex pair using data from MEMORY_STORE (RAM) instead of Supabase.
+    Fallback to Supabase if memory is empty.
     """
     results = []
-    sb = get_supabase()
+    from app.core.memory_store import get_memory_df
 
     for tf in ["4H", "1D"]:
         tf_key = tf.lower().replace("h", "h").replace("d", "d")  # "4h", "1d"
 
         try:
-            # Fetch the last 10 closed candles for this TF
-            res = sb.table("market_candles") \
-                .select("open, high, low, close, volume") \
-                .eq("symbol", pair) \
-                .eq("timeframe", tf_key) \
-                .eq("is_closed", True) \
-                .order("open_time", desc=True) \
-                .limit(10) \
-                .execute()
+            # FASE 2: Leer desde MEMORY_STORE (RAM) en vez de Supabase
+            df = get_memory_df(pair, tf_key)
+            if df is None or len(df) < 3:
+                # Fallback: intentar con formato alternativo del símbolo
+                alt_pair = pair.replace("/", "")
+                df = get_memory_df(alt_pair, tf_key)
+                if df is None or len(df) < 3:
+                    continue
 
-            rows = res.data or []
-            if len(rows) < 3:
-                continue
+            # Tomar las últimas 10 filas
+            sub_df = df.tail(10)
 
-            # Reverse to chronological order (oldest first)
-            rows.reverse()
-
-            candles = [
-                CandleOHLC(
-                    open=float(r["open"]),
-                    high=float(r["high"]),
-                    low=float(r["low"]),
-                    close=float(r["close"]),
+            candles = []
+            for _, r in sub_df.iterrows():
+                candles.append(CandleOHLC(
+                    open=float(r.get("open", 0)),
+                    high=float(r.get("high", 0)),
+                    low=float(r.get("low", 0)),
+                    close=float(r.get("close", 0)),
                     volume=float(r.get("volume", 0)),
-                )
-                for r in rows
-            ]
+                ))
+
+            if len(candles) < 3:
+                continue
 
             current = candles[-1]
             history = candles[:-1]

@@ -296,10 +296,12 @@ class StandaloneForexWorker:
             res = Protobuf.extract(message)
             STATE['pending_symbol_ids'] = []
             STATE['symbol_candidates'] = {}
+            STATE['id_to_name'] = {}
             for sym in res.symbol:
                 base_name = sym.symbolName.split('.')[0].upper().strip()
                 if base_name in self.symbols:
                     STATE['pending_symbol_ids'].append(sym.symbolId)
+                    STATE['id_to_name'][sym.symbolId] = sym.symbolName
                     if base_name not in STATE['symbol_candidates']:
                         STATE['symbol_candidates'][base_name] = []
                     STATE['symbol_candidates'][base_name].append({'id': sym.symbolId, 'name': sym.symbolName})
@@ -319,15 +321,18 @@ class StandaloneForexWorker:
             count = 0
             for sym in res.symbol:
                 if getattr(sym, 'tradingMode', -1) == 0:  # 0 = ENABLED
-                    base_name = sym.symbolName.split('.')[0].upper().strip()
+                    sym_name = STATE.get('id_to_name', {}).get(sym.symbolId, "")
+                    if not sym_name:
+                        continue
+                    base_name = sym_name.split('.')[0].upper().strip()
                     if base_name in self.symbols:
                         if base_name in STATE['symbol_ids']:
-                            if '.' in sym.symbolName:
+                            if '.' in sym_name:
                                 STATE['symbol_ids'][base_name] = sym.symbolId
-                                STATE.setdefault('symbol_names', {})[base_name] = sym.symbolName
+                                STATE.setdefault('symbol_names', {})[base_name] = sym_name
                         else:
                             STATE['symbol_ids'][base_name] = sym.symbolId
-                            STATE.setdefault('symbol_names', {})[base_name] = sym.symbolName
+                            STATE.setdefault('symbol_names', {})[base_name] = sym_name
                             
             for bname, sid in STATE.get('symbol_ids', {}).items():
                 sname = STATE.get('symbol_names', {}).get(bname, bname)
@@ -683,7 +688,15 @@ class StandaloneForexWorker:
                     'is_closed': True
                 })
             if rows: 
-                self.safe_db_execute(sb.table('market_candles').upsert(rows, on_conflict='symbol,exchange,timeframe,open_time'))
+                # THROTTLE: Solo upsertear a Supabase cada 60 min para reducir egress
+                import time as _time
+                if not hasattr(self, '_upsert_last'):
+                    self._upsert_last = {}
+                _key = f"{sym}_{tf}"
+                _now = _time.time()
+                if _key not in self._upsert_last or (_now - self._upsert_last[_key]) >= 3600:
+                    self._upsert_last[_key] = _now
+                    self.safe_db_execute(sb.table('market_candles').upsert(rows, on_conflict='symbol,exchange,timeframe,open_time'))
             
             # CRITICAL FIX: Sincronizar MEMORY_STORE para que forex_execution_service pueda leer datos
             self._sync_memory_store(sym, tf, df)

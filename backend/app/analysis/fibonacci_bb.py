@@ -110,6 +110,12 @@ def extract_fib_levels(df: pd.DataFrame) -> dict:
     last = df.iloc[-1]
     levels = {}
 
+    # Copy ATR if present in DataFrame to avoid fallback in Stop Loss calculations
+    if 'atr' in last and pd.notna(last['atr']):
+        levels['atr'] = float(last['atr'])
+    elif 'atr_14' in last and pd.notna(last['atr_14']):
+        levels['atr'] = float(last['atr_14'])
+
     for col in ["basis"]:
         levels[col] = float(last[col]) if pd.notna(last[col]) else 0.0
 

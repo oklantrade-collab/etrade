@@ -33,27 +33,27 @@ MODULE = "DB_CLEANUP"
 
 # ── Retención por conteo de velas (por símbolo+exchange+TF) ──
 CANDLE_RETENTION = {
-    "5m":  500,   # ~42 horas
-    "15m": 300,   # ~75 horas
-    "30m": 200,   # ~100 horas
-    "1h":  168,   # ~7 días
+    "5m":  2016,  # 7 días (12 x 24 x 7)
+    "15m": 672,   # 7 días (4 x 24 x 7)
+    "30m": 336,   # 7 días (2 x 24 x 7)
+    "1h":  168,   # 7 días (1 x 24 x 7)
     "4h":  180,   # ~30 días
-    "1d":  365,   # ~1 año
+    "1d":  365,   # 1 año
 }
 
 # ── Retención por tiempo (días) de tablas de logs ──
 TIME_RETENTION = {
     "system_logs":          {"days": 1,  "time_col": "created_at"},
     "pilot_diagnostics":    {"days": 0.25,  "time_col": "timestamp"},
-    "strategy_evaluations": {"days": 3,  "time_col": "created_at"},
+    "strategy_evaluations": {"days": 7,  "time_col": "created_at"},
     "volume_spikes":        {"days": 7, "time_col": "detected_at"},
     "signals_log":          {"days": 7, "time_col": "detected_at"},
-    "db_cleanup_log":       {"days": 30, "time_col": "executed_at"},
+    "db_cleanup_log":       {"days": 7, "time_col": "executed_at"},
 }
 
 # ── Tablas opcionales (pueden no existir aún) ──
 OPTIONAL_TIME_RETENTION = {
-    "market_regime_history": {"days": 90, "time_col": "evaluated_at"},
+    "market_regime_history": {"days": 15, "time_col": "evaluated_at"},
     "market_snapshot_history": {"days": 3, "time_col": "created_at"},
 }
 
@@ -101,46 +101,43 @@ async def cleanup_database() -> dict:
                     .limit(0) \
                     .execute()
 
-                    total_rows = count_res.count or 0
-                    if total_rows <= keep_count:
-                        continue
+                total_rows = count_res.count or 0
+                if total_rows <= keep_count:
+                    continue
 
-                    # Obtener el open_time de la vela N
-                    # (la más antigua que queremos conservar)
-                    cutoff_res = sb.table("market_candles") \
-                        .select("open_time") \
+                # Obtener el open_time de la vela N
+                # (la más antigua que queremos conservar)
+                cutoff_res = sb.table("market_candles") \
+                    .select("open_time") \
+                    .eq("symbol", symbol) \
+                    .eq("exchange", exchange) \
+                    .eq("timeframe", tf) \
+                    .order("open_time", desc=True) \
+                    .range(keep_count - 1, keep_count - 1) \
+                    .execute()
+
+                if cutoff_res.data:
+                    cutoff_time = cutoff_res.data[0]["open_time"]
+
+                    del_res = sb.table("market_candles") \
+                        .delete() \
                         .eq("symbol", symbol) \
                         .eq("exchange", exchange) \
                         .eq("timeframe", tf) \
-                        .order("open_time", desc=True) \
-                        .range(keep_count - 1, keep_count - 1) \
+                        .lt("open_time", cutoff_time) \
                         .execute()
 
-                    if cutoff_res.data:
-                        cutoff_time = cutoff_res.data[0]["open_time"]
+                    deleted = len(del_res.data) if del_res.data else 0
+                    total_candles_deleted += deleted
 
-                        del_res = sb.table("market_candles") \
-                            .delete() \
-                            .eq("symbol", symbol) \
-                            .eq("exchange", exchange) \
-                            .eq("timeframe", tf) \
-                            .lt("open_time", cutoff_time) \
-                            .execute()
+                    if deleted > 0:
+                        log_info(MODULE,
+                            f"Candles: {symbol}/{exchange}/{tf}: "
+                            f"{deleted} eliminadas (conservando {keep_count})")
 
-                        deleted = len(del_res.data) if del_res.data else 0
-                        total_candles_deleted += deleted
-
-                        if deleted > 0:
-                            log_info(MODULE,
-                                f"Candles: {symbol}/{exchange}/{tf}: "
-                                f"{deleted} eliminadas (conservando {keep_count})")
-
-                except Exception as e:
-                    log_error(MODULE,
-                        f"Error limpiando candles {symbol}/{exchange}/{tf}: {e}")
-
-        except Exception as e:
-            log_error(MODULE, f"Error obteniendo símbolos para {tf}: {e}")
+            except Exception as e:
+                log_error(MODULE,
+                    f"Error limpiando candles {symbol}/{exchange}/{tf}: {e}")
 
     results["candles"] = total_candles_deleted
 

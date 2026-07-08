@@ -87,9 +87,9 @@ SLVM_CONFIG = {
         'trailing_pips_step':    5,
     },
     'forex_futures': {
-        'slv_method':            'fixed_pips',   # Cambiado de 'atr' (calculaba 275 pips!)
-        'slv_fixed_pips':        25,              # SLV a maximo 25 pips del entry
-        'slv_atr_mult':          1.5,             # Fallback si se usa ATR
+        'slv_method':            'fibonacci',
+        'slv_fibonacci_band':    'lower_6',
+        'slv_fallback_pct':      0.0015,          # Fallback de ~15 pips en EURUSD
         'recovery_max_cycles':   12,              # 12 minutos maximo en recuperacion
         'recovery_target_pips':  -2,              # Aceptar perdida minima
         'recovery_buffer_pips':  1,
@@ -167,17 +167,11 @@ def evaluate_hard_stop_candle(
     """
     is_long = side.lower() in ('long', 'buy')
     
-    # Case A: Long confirmacion bajista
+    # Solo cerramos si el precio actual rompe el límite máximo de pérdida (Case C)
     if is_long:
-        if v1_open < v2_close_prev:
-            return {'should_close': True, 'reason': 'hard_stop_v1_bearish_open', 'case': 'A'}
         if v3_current_price < hard_stop_price:
             return {'should_close': True, 'reason': 'hard_stop_price_breach', 'case': 'C'}
-    
-    # Case B: Short confirmacion alcista
     else:
-        if v1_open > v2_close_prev:
-            return {'should_close': True, 'reason': 'hard_stop_v1_bullish_open', 'case': 'B'}
         if v3_current_price > hard_stop_price:
             return {'should_close': True, 'reason': 'hard_stop_price_breach', 'case': 'C'}
             
@@ -197,28 +191,51 @@ def check_5m_hard_stop(
     side = position.get('side', 'long')
     entry_price = safe_float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     
-    # Hard Stop dinamico
+    # 1. Obtener precio de activación SLV (si no existe, calcularlo)
+    slv_price = safe_float(position.get('slv_price'))
+    if slv_price <= 0:
+        slv_price = calculate_slv(entry_price, side, symbol, snap, market_type)['slv_price']
+        
+    # 2. Hard Stop dinámico basado en volatilidad (ATR)
     hs_pips = calculate_hard_stop_pips(symbol, market_type, snap)
     pip_size = get_pip_size(symbol)
     
-    # Límite estricto: la pérdida máxima no puede exceder el 0.05% del precio de entrada
-    max_loss_price_diff = entry_price * 0.0005
-    max_loss_pips = max_loss_price_diff / pip_size
-    if hs_pips > max_loss_pips:
-        hs_pips = max_loss_pips
+    # 3. Calcular el precio del Hard Stop relativo al SLV
+    is_long = side.lower() in ('long', 'buy')
+    if is_long:
+        hs_price = slv_price - (hs_pips * pip_size)
+    else:
+        hs_price = slv_price + (hs_pips * pip_size)
+        
+    # 4. CAP de Seguridad Absoluto desde el precio de entrada (max_trade_loss_pct, default 1.0%)
+    try:
+        from app.core.memory_store import BOT_STATE
+        max_pct = float(BOT_STATE.config_cache.get('max_trade_loss_pct') or 1.0)
+    except Exception:
+        max_pct = 1.0
+        
+    max_loss_price_diff = entry_price * (max_pct / 100.0)
     
-    if side.lower() in ('long', 'buy'):
-        hs_price = entry_price - (hs_pips * pip_size)
+    if is_long:
+        absolute_min_price = entry_price - max_loss_price_diff
+        if hs_price < absolute_min_price:
+            hs_price = absolute_min_price
+            hs_pips = abs(slv_price - hs_price) / pip_size
         violated = current_price < hs_price
     else:
-        hs_price = entry_price + (hs_pips * pip_size)
+        absolute_max_price = entry_price + max_loss_price_diff
+        if hs_price > absolute_max_price:
+            hs_price = absolute_max_price
+            hs_pips = abs(slv_price - hs_price) / pip_size
         violated = current_price > hs_price
         
     if violated:
+        # Pips totales de pérdida desde la entrada
+        total_pips_loss = abs(entry_price - hs_price) / pip_size
         return {
             'should_close': True,
             'reason': 'hard_stop_5m_urgent',
-            'hs_pips': hs_pips,
+            'hs_pips': total_pips_loss,
             'hs_price': hs_price
         }
     return {'should_close': False}
@@ -260,22 +277,35 @@ def evaluate_recovery_mode_v2(
             'hs_pips': hs_urgent['hs_pips']
         }
 
-    # 1.5 Verificar Cruce de EMAs en contra (Corte urgente en Modo Recuperacion)
-    ema3 = safe_float(snap.get('ema_3', 0))
-    ema9 = safe_float(snap.get('ema_9', 0))
-    if ema3 > 0 and ema9 > 0:
-        if side.lower() in ('long', 'buy') and ema3 < ema9:
-            return {
-                'should_close': True,
-                'exit_type': 'recovery_ema_contrary_cross',
-                'reason': f'EMA3 ({ema3:.5f}) < EMA9 ({ema9:.5f}) en recuperacion'
-            }
-        elif side.lower() in ('short', 'sell') and ema3 > ema9:
-            return {
-                'should_close': True,
-                'exit_type': 'recovery_ema_contrary_cross',
-                'reason': f'EMA3 ({ema3:.5f}) > EMA9 ({ema9:.5f}) en recuperacion'
-            }
+    # 1.5 Verificar Cruce Micro en contra (Corte urgente en Modo Recuperacion basado en 5m)
+    from app.core.memory_store import get_memory_df
+    df_5m = get_memory_df(symbol, "5m")
+    
+    if df_5m is not None and len(df_5m) > 10:
+        # Calcular EMAs de 5m en el momento (si no vienen pre-calculadas en columnas)
+        ema3_5m = float(df_5m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+        ema9_5m = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+        
+        last_5m = df_5m.iloc[-1]
+        sar_5m = safe_float(last_5m.get('sar', 0))
+        pine_5m = last_5m.get('pinescript_signal', '')
+        
+        if side.lower() in ('long', 'buy'):
+            # Para LONG, cortamos si la micro-tendencia 5m se voltea fuerte a la baja
+            if ema3_5m < ema9_5m or sar_5m > 0 or pine_5m == 'Sell':
+                return {
+                    'should_close': True,
+                    'exit_type': 'recovery_ema_contrary_cross',
+                    'reason': f'Micro-reversion 5m en recuperacion (EMA3<9 o SAR>0 o Pine=Sell)'
+                }
+        elif side.lower() in ('short', 'sell'):
+            # Para SHORT, cortamos si la micro-tendencia 5m se voltea fuerte a la alza
+            if ema3_5m > ema9_5m or sar_5m < 0 or pine_5m == 'Buy':
+                return {
+                    'should_close': True,
+                    'exit_type': 'recovery_ema_contrary_cross',
+                    'reason': f'Micro-reversion 5m en recuperacion (EMA3>9 o SAR<0 o Pine=Buy)'
+                }
         
     # 2. Verificar Lógica de Velas Case A/B
     hs_pips = calculate_hard_stop_pips(symbol, market_type, snap)

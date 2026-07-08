@@ -151,11 +151,51 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     if pending_orders:
         return
 
-    # 6. Evaluar Gatillo de Entrada
-    trigger_long = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200) and (ema200 > ema200_3)
-    trigger_short = (ema3 < ema9) and (ema9 < ema20) and (ema50 < ema200) and (ema200 < ema200_3)
+    # 6. Evaluar Gatillo de Entrada con Filtro de Tendencia Macro 1H (EMA3 vs EMA9 en velas cerradas)
+    from app.core.memory_store import get_memory_df
+    df_1h = get_memory_df(symbol, "1h")
+    
+    macro_long_ok = True
+    macro_short_ok = True
+    
+    if df_1h is not None and len(df_1h) >= 10:
+        ema3_1h = df_1h['close'].ewm(span=3, adjust=False).mean()
+        ema9_1h = df_1h['close'].ewm(span=9, adjust=False).mean()
+        # Evaluamos iloc[-2] (vela de 1H completamente cerrada) para evitar repintado en tiempo real
+        last_ema3_1h = float(ema3_1h.iloc[-2])
+        last_ema9_1h = float(ema9_1h.iloc[-2])
+        
+        macro_long_ok = (last_ema3_1h > last_ema9_1h)
+        macro_short_ok = (last_ema3_1h < last_ema9_1h)
+
+    trigger_long = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200) and (ema200 > ema200_3) and macro_long_ok
+    trigger_short = (ema3 < ema9) and (ema9 < ema20) and (ema50 < ema200) and (ema200 < ema200_3) and macro_short_ok
     
     if not trigger_long and not trigger_short:
+        return
+
+    # 6b. Confirmación SIPV (acción del precio): exigir vela coherente con la dirección
+    sipv_long = bool(
+        last_row.get('is_dragonfly', False) or
+        last_row.get('is_bullish_engulfing', False) or
+        last_row.get('low_higher_than_prev', False) or
+        last_row.get('is_hammer', False) or
+        last_row.get('is_doji', False) or
+        (float(last_row.get('close', 0)) > float(last_row.get('open', 0)))  # Vela verde
+    )
+    sipv_short = bool(
+        last_row.get('is_gravestone', False) or
+        last_row.get('is_bearish_engulfing', False) or
+        last_row.get('high_lower_than_prev', False) or
+        last_row.get('is_doji', False) or
+        (float(last_row.get('close', 0)) < float(last_row.get('open', 0)))  # Vela roja
+    )
+
+    if trigger_long and not sipv_long:
+        log_debug('APEX_EMA', f"[{symbol}] EMA Stack LONG OK pero vela no confirma (SIPV). Esperando.")
+        return
+    if trigger_short and not sipv_short:
+        log_debug('APEX_EMA', f"[{symbol}] EMA Stack SHORT OK pero vela no confirma (SIPV). Esperando.")
         return
 
     direction = 'long' if trigger_long else 'short'

@@ -1,25 +1,20 @@
-import os
 import sys
-import pandas as pd
+import os
+sys.path.append('c:\\Fuentes\\eTrade\\backend')
+from app.core.supabase_client import get_supabase
+from app.stocks.stocks_rule_engine import StocksRuleEngine
 import json
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sb = get_supabase()
+res = sb.table('technical_scores').select('*').in_('ticker', ['STEL', 'AEG', 'SOFI', 'OPEN', 'WEN', 'NU']).execute()
+re = StocksRuleEngine.get_instance()
+output = {}
 
-from app.core.supabase_client import get_supabase
-from app.strategy.strategy_engine import StrategyEngine
+for r in res.data:
+    t = r['ticker']
+    snap = r.get('signals_json', {})
+    ctx = re.build_context(t, snap, pine_signal=snap.get('last_pinescript_signal', ''), rvol=snap.get('rvol', 1.0), fundamental_score=snap.get('fundamental_score',0), bb_expanding=snap.get('bb_expanding', False))
+    res_buy = re.evaluate_all(ctx, direction='buy')
+    output[t] = [{'rule': x['rule_code'], 'triggered': x['triggered'], 'failures': x['failures']} for x in res_buy]
 
-def test_eval():
-    sb = get_supabase()
-    engine = StrategyEngine(sb)
-    
-    # Dump the context for ADAUSDT around 05:30
-    res = sb.table('market_snapshot').select('*').eq('symbol', 'ADAUSDT').execute()
-    snap = res.data[0]
-    
-    # We don't have the exact historical DFs easily, so let's just evaluate based on the snapshot
-    # Or just print why Aa21 failed... 
-    # Let's check rule config again
-    print("Test ready")
-
-if __name__ == "__main__":
-    test_eval()
+print(json.dumps(output, indent=2))

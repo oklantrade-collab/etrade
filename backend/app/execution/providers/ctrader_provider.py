@@ -692,6 +692,9 @@ class CTraderProtobufProvider(BaseMarketProvider):
         if not self._authenticated:
             return {'error': 'No autenticado'}
 
+        if not sl_price or float(sl_price) <= 0:
+            return {'error': 'Invalid Stop Loss (Zero or None). Orden cancelada por seguridad.'}
+
         symbol_id = self._symbol_ids.get(symbol)
         if not symbol_id:
             return {

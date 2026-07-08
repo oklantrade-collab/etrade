@@ -155,21 +155,13 @@ def calculate_position_size(
         except Exception:
             risk_pct = float(c.get('max_trade_loss_pct', 1.0)) / 100
 
-        risk_usd = capital_base * risk_pct
+        # Inversión de margen deseada = capital_base * risk_pct (Inversión %)
+        inversion_margin = capital_base * risk_pct
+        risk_usd = inversion_margin # Para retrocompatibilidad
         
-        # sl_distance como porcentaje (distancia fraccional)
-        sl_distance = abs(entry_price - sl_price) / entry_price if entry_price > 0 else 0
-
-        if sl_distance > 0:
-            # Nocional necesario para que el SL equivalga a risk_usd
-            nocional_por_riesgo = risk_usd / sl_distance
-            # No permitir que el nocional exceda: capital asignado × leverage
-            max_nocional = usd_amount * leverage
-            nocional = min(nocional_por_riesgo, max_nocional)
-        else:
-            # Si no hay SL (spot sin SL), usamos el capital máximo asignado
-            nocional = usd_amount
-
+        # Nocional total usando el apalancamiento
+        nocional = inversion_margin * leverage
+        
         # Cantidad en unidades del activo
         quantity = nocional / entry_price if entry_price > 0 else 0
 

@@ -752,10 +752,13 @@ class StocksRuleEngine:
             if ema20_1d <= 0 or ema20_4h <= 0:
                 failures.append("Missing 1D or 4H EMA data for Macro DIP strategies")
             else:
+                allow_case_a = rule.get("enable_case_a", True)
+                allow_case_b = rule.get("enable_case_b", True)
+                
                 # Casuística A: EMA3 > EMA9 en 4H y 1D (cruce concreto) + Previamente EMA9 > EMA20
                 caso_a_1d = (ema3_1d > ema9_1d) and (ema9_1d > ema20_1d)
                 caso_a_4h = (ema3_4h > ema9_4h) and (ema9_4h > ema20_4h)
-                caso_a_ok = caso_a_1d and caso_a_4h
+                caso_a_ok = caso_a_1d and caso_a_4h and allow_case_a
 
                 # Casuística B: EMA3 > EMA9 > EMA20 (1D) + Pullback del precio actual a EMA9 o EMA20 diaria
                 caso_b_1d = (ema3_1d > ema9_1d and ema9_1d > ema20_1d)
@@ -763,12 +766,12 @@ class StocksRuleEngine:
                 # Safety check: que el precio de cierre no haya destrozado la EMA20 diaria completamente
                 caso_b_safety = (close_price >= ema20_1d * 0.99)
                 
-                caso_b_ok = caso_b_1d and caso_b_pullback and caso_b_safety
+                caso_b_ok = caso_b_1d and caso_b_pullback and caso_b_safety and allow_case_b
 
                 if not (caso_a_ok or caso_b_ok):
                     failures.append(
-                        f"No cumple Casuística A (EMA3>EMA9>EMA20 en 4H y 1D) "
-                        f"ni Casuística B (1D alcista + LOW <= EMA9/20 diaria). "
+                        f"No cumple Casuística A (EMA3>EMA9>EMA20 en 4H y 1D, allowed={allow_case_a}) "
+                        f"ni Casuística B (1D alcista + LOW <= EMA9/20 diaria, allowed={allow_case_b}). "
                         f"1D: {ema3_1d:.2f}|{ema9_1d:.2f}|{ema20_1d:.2f} "
                         f"4H: {ema3_4h:.2f}|{ema9_4h:.2f}|{ema20_4h:.2f}"
                     )

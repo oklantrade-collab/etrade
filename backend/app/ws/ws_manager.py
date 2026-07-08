@@ -155,10 +155,20 @@ class WebSocketManager:
                     
                 # B. Check Hard Cap (-5% from entry as ultimate safety net)
                 pnl_pct = ((price - entry) / entry * 100) if is_long else ((entry - price) / entry * 100)
+                
+                # ── TIME-STOP WITH LOSS TOLERANCE FOR SCALPS (REMOVED) ──
+                # NOTA: Se eliminaron los cortes rústicos de "time_stop_1h" (-0.5%) y "time_stop_4h" (-1.0%)
+                # porque chocaban con la lógica avanzada de recuperación (EREP). Ahora dejamos que 
+                # la estructura del precio (EMA20, SAR 5m, Pinescript) decida el cierre.
+
                 if pnl_pct <= -5.0:
-                    log_warning(MODULE, f"HARD CAP BREACH for {symbol}! PnL {pnl_pct:.2f}% <= -5%. Forced closure.")
-                    await _execute_paper_close(pos, price, 'hard_cap_ws', sb)
-                    continue
+                    # 🛡️ EXCEPCIÓN: Si EREP ya está activo (Fase 1, 2 o 3), dejamos que EREP maneje la recuperación o cierre
+                    if pos.get('erep_phase', 0) >= 1 or pos.get('erep_active'):
+                        pass
+                    else:
+                        log_warning(MODULE, f"HARD CAP BREACH for {symbol}! PnL {pnl_pct:.2f}% <= -5%. Forced closure.")
+                        await _execute_paper_close(pos, price, 'hard_cap_ws', sb)
+                        continue
                     
                 # C. EREP 60-Minute Timeout: force close if recovery is taking too long
                 erep_active = pos.get('erep_active', False)

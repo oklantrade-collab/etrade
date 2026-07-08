@@ -161,6 +161,14 @@ async def write_forex_snapshot(
     try:
         if df is None or df.empty:
             return
+            
+        import math
+        def safe_int_nan(val, default=0):
+            if val is None: return default
+            import pandas as pd
+            if pd.isna(val) or (isinstance(val, float) and math.isnan(val)): return default
+            try: return int(float(val))
+            except: return default
 
         last = df.iloc[-1]
 
@@ -198,7 +206,7 @@ async def write_forex_snapshot(
         if df_4h is not None and not df_4h.empty:
             df_4h_sar = calculate_parabolic_sar(df_4h.copy())
             last_4h = df_4h_sar.iloc[-1]
-            sar_trend = int(last_4h['sar_trend'])
+            sar_trend = safe_int_nan(last_4h.get('sar_trend'))
             sar_value = float(last_4h['sar'])
 
             if sar_trend > 0:
@@ -233,7 +241,7 @@ async def write_forex_snapshot(
             df_15m_sar = calculate_parabolic_sar(df_15m_mem.copy())
             last_15m = df_15m_sar.iloc[-1]
             sar_15m = float(last_15m.get('sar', 0))
-            sar_trend_15m = int(last_15m.get('sar_trend', 0))
+            sar_trend_15m = safe_int_nan(last_15m.get('sar_trend', 0))
             sar_ini_high_15m = bool(last_15m.get('sar_ini_high', False))
             sar_ini_low_15m = bool(last_15m.get('sar_ini_low', False))
             p_signal_15m = str(last_15m.get('last_pinescript_signal', '') or '')
@@ -273,10 +281,14 @@ async def write_forex_snapshot(
                 'reason': 'No 4h data',
             }
 
+        import pandas as pd
+        def _si(val):
+            return 0 if pd.isna(val) else int(float(val))
+
         upsert_data = {
             'symbol':            symbol,
             'price':             float(last['close']),
-            'fibonacci_zone':    int(fib_levels.get('zone', 0)),
+            'fibonacci_zone':    _si(fib_levels.get('zone', 0)),
             'basis':             float(fib_levels.get('basis', 0)),
             'upper_1':           float(fib_levels.get('upper_1', 0)),
             'upper_2':           float(fib_levels.get('upper_2', 0)),
@@ -312,7 +324,7 @@ async def write_forex_snapshot(
             'sar_ini_high_15m':  sar_ini_high_15m,
             'sar_ini_low_15m':   sar_ini_low_15m,
             'pinescript_signal': p_signal_15m,
-            'pinescript_signal_age': int(last_15m.get('signal_age', 0)) if last_15m is not None else 0,
+            'pinescript_signal_age': safe_int_nan(last_15m.get('signal_age', 0)) if last_15m is not None else 0,
             # Estructura
             'structure_15m':         struct_15m['structure'],
             'allow_long_15m':        struct_15m['allow_long'],
@@ -377,9 +389,20 @@ async def write_forex_snapshot(
 # ══════════════════════════════════════════════════
 
 async def upsert_forex_candles(symbol: str, timeframe: str, df: pd.DataFrame, sb):
-    """Sindronizar velas Forex con market_candles."""
+    """Sindronizar velas Forex con market_candles. THROTTLE: cada 60 min."""
     if df is None or df.empty:
         return
+
+    # THROTTLE: Solo upsertear a Supabase cada 60 minutos para reducir egress
+    import time as _time
+    if not hasattr(upsert_forex_candles, '_last'):
+        upsert_forex_candles._last = {}
+    _key = f"{symbol}_{timeframe}"
+    _now = _time.time()
+    if _key in upsert_forex_candles._last and (_now - upsert_forex_candles._last[_key]) < 3600:
+        return  # Skip — datos ya están en MEMORY_STORE (RAM)
+    upsert_forex_candles._last[_key] = _now
+
     try:
         rows = []
         sub_df = df.tail(5)
@@ -519,12 +542,31 @@ def calculate_forex_sl_tp(
         l1 = float(snap.get('lower_1') or 0)
         atr = (u1 - l1) / 3.236 if (u1 > 0 and l1 > 0) else (20 * pip_size)
         
+        # 1. Calcular el SL técnico (zona de invalidación) para el TP y RR
         if direction == 'long':
-            sl = float(snap.get('lower_6') or (entry_price - 50 * pip_size)) - (0.5 * atr)
+            sl_tech = float(snap.get('lower_6') or (entry_price - 50 * pip_size)) - (0.5 * atr)
         else:
-            sl = float(snap.get('upper_6') or (entry_price + 50 * pip_size)) + (0.5 * atr)
+            sl_tech = float(snap.get('upper_6') or (entry_price + 50 * pip_size)) + (0.5 * atr)
         
-        tp = _find_dynamic_tp(symbol, direction, entry_price, sl, snap, pip_size, atr)
+        # 2. Encontrar TP dinámico usando el SL técnico
+        tp = _find_dynamic_tp(symbol, direction, entry_price, sl_tech, snap, pip_size, atr)
+        
+        # 3. Calcular el Hard Stop físico (sl) más amplio para actuar de emergencia
+        if symbol in ('XAUUSD', 'XAU/USD'):
+            min_sl_pips = 600
+        elif symbol in ('USDJPY', 'USD/JPY'):
+            min_sl_pips = 50
+        elif symbol in ('GBPUSD', 'GBP/USD'):
+            min_sl_pips = 35
+        else:
+            min_sl_pips = 30
+            
+        if direction == 'long':
+            sl = float(snap.get('lower_6') or (entry_price - 50 * pip_size)) - (2.0 * atr)
+            sl = min(sl, entry_price - (min_sl_pips * pip_size))
+        else:
+            sl = float(snap.get('upper_6') or (entry_price + 50 * pip_size)) + (2.0 * atr)
+            sl = max(sl, entry_price + (min_sl_pips * pip_size))
     else:
         # Fallback si no hay snapshot
         sl_pips = FOREX_RISK_CONFIG['sl_pips_default']
@@ -881,7 +923,11 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
 
             # 4.5 SMART EXIT DELAYED (Rebote técnico tras SAR)
-            if position.get('pending_sar_close'):
+            pending_sar_closes = MEMORY_STORE.setdefault(symbol, {}).setdefault('pending_sar_closes', {})
+            pos_id = str(position.get('id', ''))
+            is_pending_sar = pending_sar_closes.get(pos_id, False)
+
+            if is_pending_sar:
                 rsi_15m = snap.get('rsi_15m', 50)
                 side = (position.get('side') or '').lower()
                 bounce_triggered = False
@@ -898,16 +944,16 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                         f"Cerrando {side.upper()} tras rebote (RSI 15m: {rsi_15m:.1f})\n"
                         f"Precio: {current_price:.5f}"
                     )
-                    position['pending_sar_close'] = False
+                    pending_sar_closes.pop(pos_id, None)
                     continue # Sigue con la siguiente posicion
 
             # 4. Smart Exit: SAR Phase Change
-            if sar_changed_at and not position.get('pending_sar_close'):
+            if sar_changed_at and not is_pending_sar:
                 side = (position.get('side') or '').lower()
                 if (sar_phase == 'short' and side == 'long') or \
                    (sar_phase == 'long' and side == 'short'):
 
-                    entry = float(position.get('avg_entry_price', 0))
+                    entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
                     pnl_pct = 0.0
                     pnl_pips = 0.0
                     if entry > 0:
@@ -926,9 +972,10 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                             f"Cerrando {side.upper()} (PNL: {pnl_pct:.2f}% | {pnl_pips:+.1f} pips)\n"
                             f"Precio: {current_price:.5f}"
                         )
+                        pending_sar_closes.pop(pos_id, None)
                         continue # Sigue con la siguiente posicion
                     else:
-                        position['pending_sar_close'] = True
+                        pending_sar_closes[pos_id] = True
                         await send_telegram_message(
                             f"⏳ FX SAR REVERSAL (DELAYED) [{symbol}]\n"
                             f"Pérdida actual {pnl_pct:.2f}% < -0.05%.\n"
@@ -956,19 +1003,107 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 )
                 continue
 
-            # 6. SL/TP check (manual for Forex since paper mode)
+            elif reversal.get('should_modify_oco_breakeven'):
+                target_tp = reversal['target_tp_price']
+                current_tp = float(position.get('tp_price') or 0)
+                
+                # Check if already modified
+                if current_tp > 0 and abs(current_tp - target_tp) / target_tp < 0.001:
+                    pass
+                else:
+                    try:
+                        sb.table('forex_positions').update({'tp_price': target_tp}).eq('id', position['id']).execute()
+                        position['tp_price'] = target_tp
+                        
+                        log_info(MODULE, f"Forex Break-Even Modificado para {symbol} a TP={target_tp}")
+                        await send_telegram_message(
+                            f"🛡️ DEFENSA BREAK-EVEN FOREX [{symbol}]\n"
+                            f"Reversión rápida 15m detectada.\n"
+                            f"TP ajustado a {target_tp:.5f}."
+                        )
+                    except Exception as e:
+                        log_error(MODULE, f"Error updating Forex TP to Break-Even for {symbol}: {e}")
+
+            # 6. SL/SLV/Recovery check (integrated virtual stop loss for paper mode)
             sl = float(position.get('sl_price', 0))
             tp = float(position.get('tp_price', position.get('tp_partial_price', 0)))
             side = (position.get('side') or '').lower()
 
+            # 6a. Si ya está en recovery_mode, evaluar el modo recuperación
+            if position.get('recovery_mode'):
+                try:
+                    from app.strategy.virtual_sl_recovery import evaluate_recovery_mode_v2
+                    mr_result = evaluate_recovery_mode_v2(position, current_price, snap, symbol, 'forex_futures')
+                    if mr_result['should_close']:
+                        pip_size = PIP_SIZES.get(symbol, 0.0001)
+                        entry = float(position.get('avg_entry_price', position.get('entry_price', 0)))
+                        if side in ('long', 'buy'):
+                            pnl_pips = (current_price - entry) / pip_size
+                        else:
+                            pnl_pips = (entry - current_price) / pip_size
+                        exit_type = f"slv_v2_{mr_result['exit_type']}"
+                        await _execute_paper_close(position, current_price, exit_type, sb)
+                        await send_telegram_message(
+                            f"🛡️ FOREX RECOVERY EXIT [{symbol}]\n"
+                            f"{mr_result['exit_type']}: {mr_result.get('reason', '')}\n"
+                            f"PnL: {pnl_pips:+.1f} pips"
+                        )
+                        continue
+                except Exception as e:
+                    log_error(MODULE, f"Error evaluating recovery mode for {symbol}: {e}")
+
+            # 6b. Evaluar SL adaptativo / SLV trigger (ANTES del hard stop)
+            if not position.get('recovery_mode'):
+                try:
+                    from app.strategy.forex_adaptive_exit import evaluate_forex_sl
+                    sl_res = evaluate_forex_sl(symbol, [position], current_price, snap)
+
+                    if sl_res.get('should_close'):
+                        pips_est = sl_res.get('pnl_pips', -1.0)
+                        if pips_est < 0:
+                            # P&L negativo: desviar a Modo Recuperación Virtual en lugar de cerrar
+                            log_info(MODULE, f"🛡️ [ANTI-LOSS SLV] {symbol}: SL adaptativo en pérdida ({pips_est:.1f} pips). Activando Recovery Mode.")
+                            from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
+                            activate_recovery_mode_sync(position, current_price, symbol, 'forex_futures', sb, 'forex_positions')
+                            await send_telegram_message(
+                                f"🛡️ FOREX RECOVERY ACTIVATED [{symbol}]\n"
+                                f"SL adaptativo tocado en pérdida ({pips_est:.1f} pips)\n"
+                                f"Modo Recuperación Virtual activado"
+                            )
+                        else:
+                            await _execute_paper_close(position, current_price, sl_res.get('exit_type', 'sl_adaptive_fx'), sb)
+                            await send_telegram_message(
+                                f"📉 FOREX ADAPTIVE SL [{symbol}]\n"
+                                f"Precio: {current_price:.5f}\n"
+                                f"PnL: {pips_est:+.1f} pips"
+                            )
+                            continue
+
+                    elif sl_res.get('slv_triggered'):
+                        # SLV tocado: activar recovery_mode
+                        log_info(MODULE, f"🛡️ [SLV TRIGGERED] {symbol}: Activando Recovery Mode")
+                        from app.strategy.virtual_sl_recovery import activate_recovery_mode_sync
+                        activate_recovery_mode_sync(position, current_price, symbol, 'forex_futures', sb, 'forex_positions')
+                        await send_telegram_message(
+                            f"🛡️ FOREX SLV TRIGGERED [{symbol}]\n"
+                            f"Precio: {current_price:.5f}\n"
+                            f"SLV: {position.get('slv_price', 'N/A')}\n"
+                            f"Modo Recuperación activado"
+                        )
+                        # No cerramos, continuamos monitoreando
+                except Exception as e:
+                    log_error(MODULE, f"Error evaluating SLV for {symbol}: {e}")
+
+            # 6c. Hard Stop de emergencia absoluta (último recurso, solo si no está en recovery)
             if sl > 0 and not position.get('recovery_mode'):
                 if (side == 'long' and current_price <= sl) or \
                    (side == 'short' and current_price >= sl):
-                    await _execute_paper_close(position, current_price, 'sl_hit_fx', sb)
+                    await _execute_paper_close(position, current_price, 'sl_hit_fx_hard', sb)
                     await send_telegram_message(
-                        f"FOREX SL HIT [{symbol}]\n"
+                        f"🚨 FOREX HARD STOP [{symbol}]\n"
                         f"Precio: {current_price:.5f}\n"
-                        f"SL: {sl:.5f}"
+                        f"Hard SL: {sl:.5f}\n"
+                        f"⚠️ Emergencia: SLV no pudo recuperar"
                     )
                     continue
 
@@ -1297,7 +1432,17 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
         # ── STATE MACHINE & AMBIGUITY CHECK ──
         from app.core.symbol_state import detect_market_ambiguity
         snap_for_sm = snap.copy()
-        snap_for_sm.update({'sar_trend_4h': int(last_row.get('sar_trend_4h',0)), 'sar_trend_15m': int(last_row.get('sar_trend_15m',0)), 'fibonacci_zone': int(last_row.get('fibonacci_zone', 0))})
+        
+        def _si(val):
+            import pandas as pd
+            return 0 if pd.isna(val) else int(float(val))
+            
+        snap_for_sm.update({
+            'sar_trend_4h': _si(last_row.get('sar_trend_4h')), 
+            'sar_trend_15m': _si(last_row.get('sar_trend_15m')), 
+            'fibonacci_zone': _si(last_row.get('fibonacci_zone'))
+        })
+        
         ambiguity = detect_market_ambiguity(snap_for_sm)
         
         if ambiguity['is_ambiguous']:

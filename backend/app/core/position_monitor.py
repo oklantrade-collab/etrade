@@ -101,30 +101,64 @@ async def check_signal_reversal(
         elif side == 'short' and ema3 > ema9:
             ema_reversed = True
 
-    if not mtf_reversed and not ema_reversed:
+    # 2.5 ¿Cruce Rápido de EMA en 15m para Break-Even? (EMA3 vs EMA9 vs EMA20)
+    ema_reversed_15m = False
+    if snap:
+        ema3_15m = float(snap.get('ema_3') or 0)
+        ema9_15m = float(snap.get('ema_9') or 0)
+        ema20_15m = float(snap.get('ema_20') or 0)
+        
+        if ema3_15m > 0 and ema9_15m > 0 and ema20_15m > 0:
+            if side == 'long' and ema3_15m < ema9_15m and ema9_15m < ema20_15m:
+                ema_reversed_15m = True
+            elif side == 'short' and ema3_15m > ema9_15m and ema9_15m > ema20_15m:
+                ema_reversed_15m = True
+
+    if not mtf_reversed and not ema_reversed and not ema_reversed_15m:
         return {'should_exit': False}
 
     # Evaluación de P&L para decidir la agresividad
-    # Si tenemos ganancia (pnl > 0.20%), salimos YA para asegurar por cualquiera de los dos motivos.
+    # Si tenemos ganancia (pnl > 0.20%), salimos YA para asegurar por cualquiera de los motivos a mercado.
     if pnl_pct >= 0.20:
         # Validación extra: Si el motivo de salida fue SOLO el MTF lento, 
         # esperamos a que el EMA rápido (5m) también gire para no salir prematuramente de un buen trade.
-        if mtf_reversed and not ema_reversed:
+        if mtf_reversed and not ema_reversed and not ema_reversed_15m:
             if ema3 > 0 and ema9 > 0:
                 if side == 'long' and ema3 > ema9:
                     return {'should_exit': False}
                 if side == 'short' and ema3 < ema9:
                     return {'should_exit': False}
 
-        reason_str = 'early_profit_protection_ema' if ema_reversed else 'early_profit_protection_mtf'
+        reason_str = 'early_profit_protection_ema' if (ema_reversed or ema_reversed_15m) else 'early_profit_protection_mtf'
         return {
             'should_exit': True,
             'reason': reason_str,
             'pnl_pct': round(pnl_pct, 4),
-            'detail': f'Reversión (EMA={ema_reversed}, MTF={mtf_reversed}) con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
+            'detail': f'Reversión (EMA_5m={ema_reversed}, EMA_15m={ema_reversed_15m}, MTF={mtf_reversed}) con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
         }
     
-    # Si estamos en pérdida, no cerramos por esta regla. Esperamos recuperación o SL.
+    # Pero si hubo reversión en 15m, modificamos el TP a Break-Even (+0.10% para comisiones).
+    # VALIDACIÓN DE TIEMPO/MOMENTUM: Para evitar arruinar estrategias que compran "el dip" 
+    # (donde EMA ya está en contra al entrar), solo activamos esta defensa si la posición 
+    # alcanzó un mínimo de ganancia en algún momento (peak_pnl > 0.05%).
+    peak_pnl = float(position.get('peak_pnl_pct', 0))
+    
+    if ema_reversed_15m and peak_pnl >= 0.05:
+        target_pnl = 0.10
+        if side == 'long':
+            target_price = entry * (1 + target_pnl / 100.0)
+        else:
+            target_price = entry * (1 - target_pnl / 100.0)
+            
+        return {
+            'should_exit': False,
+            'should_modify_oco_breakeven': True,
+            'target_tp_price': target_price,
+            'reason': 'ema_reversal_breakeven',
+            'detail': f'Reversión 15m en contra (PNL={pnl_pct:.2f}%). Ajustando TP a Break-Even (+0.10%).'
+        }
+
+    # Esperamos recuperación o SL.
     return {'should_exit': False}
 
 async def check_sl_proximity_alert(
@@ -389,21 +423,8 @@ async def check_sl_with_erep(
             side = str(position.get('side', 'long')).lower()
             pnl_usd = (current_price - entry) if side in ('long', 'buy') else (entry - current_price)
             
-            # Check 1h trend for Crypto EREP bypass
-            trend_1h_favorable = False
-            if market_type in ('crypto_spot', 'crypto_futures'):
-                try:
-                    from app.core.memory_store import get_memory_df
-                    df_1h = get_memory_df(symbol, "1h")
-                    if df_1h is not None and len(df_1h) >= 10:
-                        ema3_1h = float(df_1h.get('ema1', df_1h.get('ema3', df_1h.get('ema_3'))).iloc[-1])
-                        ema9_1h = float(df_1h.get('ema2', df_1h.get('ema9', df_1h.get('ema_9'))).iloc[-1])
-                        trend_1h_favorable = (ema3_1h > ema9_1h) if side in ('long', 'buy') else (ema3_1h < ema9_1h)
-                except Exception as e:
-                    pass
-
-            if pnl_usd <= 0 and trend_1h_favorable:
-                log_info(MODULE, f"Trailing SL hit for {symbol}, but PNL<=0 and 1h trend favorable. Diverting to EREP.")
+            if pnl_usd <= 0:
+                log_info(MODULE, f"Trailing SL hit for {symbol}, but PNL<=0. Diverting to EREP unconditionally.")
                 # Do NOT close here. Let it fall through to EREP setup below.
             else:
                 await close_position(symbol, current_price, 'sl_trailing', supabase)
@@ -1297,6 +1318,17 @@ async def _execute_paper_open_unlocked(
     from datetime import datetime, timezone
     from app.core.position_sizing import calculate_sl_tp
     
+    # ── DETERMINAR EL CICLO DE LA REGLA DE ESTRATEGIA ──
+    is_scalp = True
+    try:
+        from app.strategy.strategy_engine import StrategyEngine
+        engine = StrategyEngine.get_instance()
+        rule = engine.rules.get(rule_code) if engine.loaded else None
+        cycle = rule.get('cycle', '15m') if rule else '15m'
+        is_scalp = cycle in ['5m', '15m', '30m']
+    except Exception as rule_err:
+        log_warning(MODULE, f"Error obteniendo ciclo para {rule_code}: {rule_err}. Asumiendo scalp.")
+
     # Obtener configuración de TP según banda de velocidad
     # tp_band viene como 'lower_2', extraemos el nivel (2)
     try:
@@ -1312,8 +1344,8 @@ async def _execute_paper_open_unlocked(
         partial_num = str(max(1, int(level_num) - 1))
         tp_partial_col = f"{prefix}_{partial_num}"
         
-        tp_full    = float(levels.get(tp_target_col, price * (1.1 if side == 'long' else 0.9)))
-        tp_partial = float(levels.get(tp_partial_col, price * (1.05 if side == 'long' else 0.95)))
+        tp_full    = float(levels.get(tp_target_col, price * (1.015 if side == 'long' else 0.985) if is_scalp else price * (1.1 if side == 'long' else 0.9)))
+        tp_partial = float(levels.get(tp_partial_col, price * (1.010 if side == 'long' else 0.990) if is_scalp else price * (1.05 if side == 'long' else 0.95)))
         
         # ── TP DINÁMICO: Validar que el TP cumpla un RR mínimo vs SL ──
         # Si la banda asignada por velocidad está muy cerca del precio (bandas comprimidas),
@@ -1350,16 +1382,21 @@ async def _execute_paper_open_unlocked(
                         tp_full = price - tp_fallback_dist
                     log_info(MODULE, f"TP DINÁMICO CRYPTO [{symbol}]: Ninguna banda cumple RR. Fallback {tp_fallback_dist:.2f}")
     except:
-        tp_full    = price * (1.08 if side == 'long' else 0.92)
-        tp_partial = price * (1.04 if side == 'long' else 0.96)
+        if is_scalp:
+            tp_full    = price * (1.015 if side == 'long' else 0.985)
+            tp_partial = price * (1.010 if side == 'long' else 0.990)
+        else:
+            tp_full    = price * (1.08 if side == 'long' else 0.92)
+            tp_partial = price * (1.04 if side == 'long' else 0.96)
 
     # Calculamos SL con el multiplicador dinámico de velocidad y buffer extra
     buffer_pct = float(BOT_STATE.config_cache.get('sl_extra_buffer_pct', 0.5))
     
+    atr_fallback_pct = 0.003 if is_scalp else 0.020
     sl_dict = calculate_sl_tp(
         side        = side,
         entry_price = price,
-        atr         = float(levels.get('atr', price * 0.02)), # Fallback approx
+        atr         = float(levels.get('atr', price * atr_fallback_pct)),
         atr_mult    = float(vel_config.get('sl_mult', 1.0)),
         levels      = levels,
         sl_buffer_pct = buffer_pct
@@ -1373,24 +1410,38 @@ async def _execute_paper_open_unlocked(
     is_major = any(x in symbol for x in ['BTC', 'ETH'])
     min_sl_dist_pct = 0.005 if is_major else 0.010
     
+    # 2. Blindaje de Distancia Máxima (1% para scalp, 2% para swing)
+    max_sl_dist_pct = 0.010 if is_scalp else 0.020
+    
     if side.lower() in ['long', 'buy']:
         min_safe_sl = price * (1 - min_sl_dist_pct)
         if sl_final > min_safe_sl:
-            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL activado para LONG. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
+            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Mínimo activado para LONG. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
             sl_final = min_safe_sl
             
         if sl_final >= price and sl_final > 0:
             sl_final = price * (1 - min_sl_dist_pct)
             log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
+            
+        max_safe_sl = price * (1 - max_sl_dist_pct)
+        if sl_final < max_safe_sl:
+            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Máximo activado para LONG. SL original={sl_final:.6f} movido a {max_safe_sl:.6f} (max {max_sl_dist_pct*100}%)")
+            sl_final = max_safe_sl
+            
     elif side.lower() in ['short', 'sell']:
         min_safe_sl = price * (1 + min_sl_dist_pct)
         if sl_final < min_safe_sl:
-            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL activado para SHORT. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
+            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Mínimo activado para SHORT. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
             sl_final = min_safe_sl
             
         if sl_final <= price and sl_final > 0:
             sl_final = price * (1 + min_sl_dist_pct)
             log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
+            
+        max_safe_sl = price * (1 + max_sl_dist_pct)
+        if sl_final > max_safe_sl:
+            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Máximo activado para SHORT. SL original={sl_final:.6f} movido a {max_safe_sl:.6f} (max {max_sl_dist_pct*100}%)")
+            sl_final = max_safe_sl
             
     sl_dict['sl_price'] = sl_final
 

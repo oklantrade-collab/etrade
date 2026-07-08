@@ -98,9 +98,42 @@ class FundamentalAnalyzer:
                     'shares_outstanding': info.get('sharesOutstanding', 1),
                     'shares_outstanding_prev': get_val(bs, 'Ordinary Shares Number', 1) if has_prev else info.get('sharesOutstanding', 1),
                     'sector': info.get('sector', 'Technology'),
-                    'analyst_rating': max(1, min(10, round(-2.25 * (info.get('recommendationMean') or 3) + 12.25, 1)))
+                    'analyst_rating': max(1, min(10, round(-2.25 * (info.get('recommendationMean') or 3) + 12.25, 1))),
+
+                    # ── APEX v2.0 — Nuevas métricas ──────────
+                    'peg_ratio':           info.get('pegRatio', 0),
+                    'pe_ratio':            info.get('trailingPE', 0),
+                    'forward_pe':          info.get('forwardPE', 0),
+                    'free_cash_flow':      info.get('freeCashflow', 0) or get_val(cf, 'Free Cash Flow', 0),
+                    'eps_growth_qoq':      (info.get('earningsQuarterlyGrowth') or 0) * 100,
+                    'short_percent_float': (info.get('shortPercentOfFloat') or 0) * 100,
                 }
-                
+
+                # ── Revenue Growth QoQ (aceleración trimestral) ──
+                rev_qoq = 0
+                try:
+                    q_fin = t.quarterly_financials
+                    if q_fin is not None and len(q_fin.columns) >= 2:
+                        rev_curr = get_val(q_fin, 'Total Revenue', 0)
+                        rev_prev = get_val(q_fin, 'Total Revenue', 1)
+                        if rev_prev > 0:
+                            rev_qoq = ((rev_curr - rev_prev) / rev_prev) * 100
+                except Exception:
+                    pass
+                f_data['revenue_growth_qoq'] = round(rev_qoq, 2)
+
+                # ── FCF Growth (comparación de 2 períodos) ──
+                fcf_growth = 0
+                try:
+                    if cf is not None and len(cf.columns) >= 2:
+                        fcf_curr = get_val(cf, 'Free Cash Flow', 0)
+                        fcf_prev = get_val(cf, 'Free Cash Flow', 1)
+                        if abs(fcf_prev) > 0:
+                            fcf_growth = ((fcf_curr - fcf_prev) / abs(fcf_prev)) * 100
+                except Exception:
+                    pass
+                f_data['fcf_growth_pct'] = round(fcf_growth, 2)
+
                 # Cleanup de NaNs y ceros críticos
                 for k, v in f_data.items():
                     if isinstance(v, float) and np.isnan(v): f_data[k] = 0

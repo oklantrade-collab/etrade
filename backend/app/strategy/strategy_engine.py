@@ -297,6 +297,7 @@ class StrategyEngine:
         ema9_above_ema20_15m = False
         low_below_ema20_15m = False
         high_above_ema20_15m = False
+        close_below_ema20_15m = False
 
         if df_15m is not None and len(df_15m) >= 3:
             # BB Lower Ascending / Descending
@@ -362,8 +363,12 @@ class StrategyEngine:
             if low_15m and ema20_15m and low_15m < ema20_15m:
                 low_below_ema20_15m = True
             
-            if ema20_15m and high_15m >= ema20_15m:
+            if ema20_15m and high_15m > ema20_15m:
                 high_above_ema20_15m = True
+            
+            close_15m = safe_float(last_15m.get('close') if last_15m.get('close') is not None else last_15m.get('Close'))
+            if ema20_15m and close_15m and close_15m < ema20_15m:
+                close_below_ema20_15m = True
 
         if last_5m:
             ema20_5m_val = safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else last_5m.get('ema20'))
@@ -499,6 +504,7 @@ class StrategyEngine:
             'ema9_below_ema20_15m': ema9_below_ema20_15m,
             'ema9_above_ema20_15m': ema9_above_ema20_15m,
             'low_below_ema20_15m': low_below_ema20_15m,
+            'close_below_ema20_15m': close_below_ema20_15m,
 
             # Referencia al DataFrame original para reglas personalizadas avanzadas
             'df_15m': df_15m
@@ -676,7 +682,7 @@ class StrategyEngine:
                              bool(last_row.get('high_lower_than_prev', False)) or
                              bool(last_row.get('is_doji', False)))
             
-            pb_pct = 0.0015  # 0.15% dynamic pullback window suitable for Crypto
+            pb_pct = 0.0005  # 0.05% dynamic pullback window suitable for Forex
             
             if direction == 'long':
                 sar_4h_ok = (sar_4h > 0)
@@ -693,8 +699,7 @@ class StrategyEngine:
                     sar_15m_ok and sar_4h_ok and
                     mtf >= 0.4 and pine_not_opposite and
                     struct_ok and zone_ok and
-                    adx > 25 and pullback_confirmed and
-                    (not bb_exp) and sipv_buy
+                    pullback_confirmed and sipv_buy
                 )
                 
                 min_score = float(rule.get('min_score', 0.70))
@@ -725,8 +730,7 @@ class StrategyEngine:
                     sar_15m_ok and sar_4h_ok and
                     mtf <= -0.4 and pine_not_opposite and
                     struct_ok and zone_ok and
-                    adx > 25 and pullback_confirmed and
-                    (not bb_exp) and sipv_sell
+                    pullback_confirmed and sipv_sell
                 )
                 
                 min_score = float(rule.get('min_score', 0.70))

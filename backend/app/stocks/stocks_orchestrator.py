@@ -16,7 +16,7 @@ Flujo completo:
 from datetime import datetime, timezone
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
-from app.stocks.apex_score import calculate_apex_score
+from app.stocks.apex_score import calculate_apex_score, calculate_apex_score_v2
 
 
 MODULE = "ORCHESTRATOR"
@@ -93,12 +93,21 @@ def calculate_composite_rank(
     confidence: str,
     rvol:       float,
     cfg:        dict,
+    trade_score: float = None,
+    etv:         float = None,
 ) -> float:
     """
     Calcula el Composite Rank — métrica única
     para ordenar la cola de Alta Prioridad.
-    Incluye RVOL con peso 25% (V5.1 Upgrade).
+    Si Trade Score y ETV están disponibles (APEX v2.0), usa:
+       Rank = Trade_Score × 0.70 + ETV_normalized × 0.30
     """
+    if trade_score is not None and etv is not None:
+        # Normalizar ETV a 0-100 (ETV típico: -5% a +15%)
+        etv_norm = min(100, max(0, (etv + 5) / 20 * 100))
+        rank = trade_score * 0.70 + etv_norm * 0.30
+        return round(min(100, max(0, rank)), 2)
+
     w_4h   = 0.30  # Ajustado de 0.40 para dar espacio a RVOL
     w_1d   = 0.25  # Ajustado de 0.30
     w_gain = 0.15  # Ajustado de 0.20
@@ -123,6 +132,7 @@ def calculate_composite_rank(
     )
 
     return round(min(100, max(0, rank)), 2)
+
 
 
 # ════════════════════════════════════════════
@@ -556,15 +566,38 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 .execute()
             fund = fund_res.data[0] if fund_res.data else {}
 
+            try:
+                cache_res = supabase.table('fundamental_cache') \
+                    .select('*') \
+                    .eq('ticker', ticker) \
+                    .limit(1) \
+                    .execute()
+                if cache_res.data:
+                    fund.update(cache_res.data[0])
+            except Exception:
+                pass
+
             fund_cache = {
                 'piotroski_score':    fund.get('piotroski_score', 4),
                 'margin_of_safety':   fund.get('margin_of_safety', 0),
                 'altman_zone':        fund.get('altman_zone', 'grey'),
                 'fundamental_score':  fund.get('fundamental_score', 50),
                 'analyst_rating':     fund.get('analyst_rating', 5),
-                'short_interest_pct': fund.get('short_interest_pct', 5),
+                'short_interest_pct': fund.get('short_interest_pct', fund.get('short_percent_float', 5)),
                 'days_to_earnings':   fund.get('days_to_earnings', 30),
                 'valuation_status':   fund.get('valuation_status', 'fairly_valued'),
+                
+                # Nuevas métricas v2.0
+                'peg_ratio':           fund.get('peg_ratio', 0),
+                'pe_ratio':            fund.get('pe_ratio', 0),
+                'forward_pe':          fund.get('forward_pe', 0),
+                'free_cash_flow':      fund.get('free_cash_flow', 0),
+                'market_cap':          float(fund.get('market_cap') or (fund.get('market_cap_mln', 1000) * 1e6)),
+                'eps_growth_pct':      fund.get('eps_growth_qoq', 0),
+                'revenue_growth_yoy':  fund.get('revenue_growth_yoy', 0),
+                'revenue_growth_qoq':  fund.get('revenue_growth_qoq', 0),
+                'fcf_growth_pct':      fund.get('fcf_growth_pct', 0),
+                'short_percent_float': fund.get('short_percent_float', 5),
             }
 
             df_5m    = await _get_df(ticker, '5m')
@@ -572,8 +605,8 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             df_4h    = await _get_df(ticker, '4h')
             df_daily = await _get_df(ticker, '1d')
 
-            # Calcular APEX Score
-            apex = calculate_apex_score(
+            # Calcular APEX Score v2.0
+            apex = calculate_apex_score_v2(
                 ticker            = ticker,
                 snap              = snap,
                 fundamental_cache = fund_cache,
@@ -582,7 +615,7 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 df_15m            = df_15m,
                 df_4h             = df_4h,
                 df_daily          = df_daily,
-                ia_score          = float(fund_cache.get('fundamental_score', 50)) / 10,
+                ia_score          = float(fund_cache.get('fundamental_score', 50)) / 10.0,
             )
 
             # Priorizar los valores de APEX ya calculados en el market_snapshot (para consistencia UI)
@@ -590,12 +623,17 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             apex_1d = float(snap.get('apex_1d') or apex.get('apex_score_1d') or 50)
             ret_exp = float(apex.get('return_expected_4h') or 0)
             conf    = str(apex.get('confidence') or 'medium')
+            trade_s = float(snap.get('trade_score') or apex.get('trade_score') or 50)
+            etv_val = float(snap.get('etv') or apex.get('etv') or 0.0)
 
             # Verificar señales de reglas
             rule_signal = check_active_rules(ticker, snap, supabase)
 
             # Calcular Composite Rank
-            rank = calculate_composite_rank(apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg)
+            rank = calculate_composite_rank(
+                apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
+                trade_score=trade_s, etv=etv_val
+            )
 
             # ── REGLA 4: Confirmación de Volumen (15m Spike) ──
             # Se ha relajado la regla de volumen estricto por petición del usuario

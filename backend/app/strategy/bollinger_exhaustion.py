@@ -131,24 +131,22 @@ async def execute_market_bollinger_exhaustion(market: str):
                     'volume': hist['Volume']
                 }).dropna()
             else:
-                # Forex y Crypto: market_candles
+                # Forex y Crypto: MEMORY_STORE (RAM) en vez de Supabase
+                from app.core.memory_store import get_memory_df
                 db_symbol = sym.replace("/", "").replace("-", "")
-                mc_res = sb.table("market_candles") \
-                    .select("open, high, low, close") \
-                    .eq("symbol", db_symbol) \
-                    .eq("timeframe", "15m") \
-                    .order("open_time", desc=True) \
-                    .limit(20) \
-                    .execute()
-                if not mc_res.data or len(mc_res.data) < 20:
-                    continue
-                # Ordenar cronológico (el más viejo primero)
-                rows = list(reversed(mc_res.data))
+                df_mem = get_memory_df(db_symbol, "15m")
+                if df_mem is None or len(df_mem) < 20:
+                    # Intentar con símbolo original
+                    df_mem = get_memory_df(sym, "15m")
+                    if df_mem is None or len(df_mem) < 20:
+                        continue
+                # Tomar las últimas 20 filas
+                sub_df = df_mem.tail(20)
                 df_15m = pd.DataFrame({
-                    'open': [float(r['open']) for r in rows],
-                    'high': [float(r['high']) for r in rows],
-                    'low':  [float(r['low']) for r in rows],
-                    'close':[float(r['close']) for r in rows],
+                    'open': [float(v) for v in sub_df['open'].values],
+                    'high': [float(v) for v in sub_df['high'].values],
+                    'low':  [float(v) for v in sub_df['low'].values],
+                    'close':[float(v) for v in sub_df['close'].values],
                 })
                 
             # 3. Evaluar

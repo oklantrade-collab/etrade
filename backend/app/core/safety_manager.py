@@ -288,6 +288,24 @@ def validate_signal(
             )
             send_telegram_sync(alert_msg)
 
+    # CHECK 8: Control de sobrecompra / sobreventa Bollinger para Forex (e.g. Aa52/Bb52)
+    if not errors and snap and market_type == 'forex_futures' and direction and rule_code:
+        rc = str(rule_code).strip().lower()
+        if 'aa52' in rc or 'bb52' in rc:
+            bb_upper = safe_float(snap.get('upper_2'))
+            bb_lower = safe_float(snap.get('lower_2'))
+            
+            if direction.lower() == 'long' and bb_upper > 0:
+                if price >= bb_upper:
+                    errors.append(
+                        f"Filtro sobrecompra Bollinger (Aa52) activo: precio ${price:.5f} >= bb_upper (upper_2) ${bb_upper:.5f}"
+                    )
+            elif direction.lower() == 'short' and bb_lower > 0:
+                if price <= bb_lower:
+                    errors.append(
+                        f"Filtro sobreventa Bollinger (Bb52) activo: precio ${price:.5f} <= bb_lower (lower_2) ${bb_lower:.5f}"
+                    )
+
     if errors:
         log_info('SAFETY',
                  f'⚠️ Señal rechazada [{symbol}]: '
@@ -347,14 +365,17 @@ async def check_circuit_breaker(
 
         cfg_res = supabase \
             .table('trading_config') \
-            .select('value') \
-            .eq('key', f'capital_{market_type}') \
+            .select('*') \
+            .eq('id', 1) \
             .maybe_single() \
             .execute()
 
         capital = 1000.0
         if cfg_res and hasattr(cfg_res, 'data') and cfg_res.data:
-            capital = float(cfg_res.data.get('value', 1000) or 1000)
+            cap_val = cfg_res.data.get(f'capital_{market_type}')
+            if not cap_val:
+                cap_val = cfg_res.data.get('capital_operativo', cfg_res.data.get('capital_total', 1000))
+            capital = float(cap_val or 1000)
         if daily_pnl < 0 and capital > 0:
             drawdown_pct = abs(daily_pnl) / capital * 100
 

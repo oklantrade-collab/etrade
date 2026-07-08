@@ -205,6 +205,43 @@ def evaluate_proactive_exit(
     side = str(position.get('side', 'long')).lower()
     is_long = side in ('long', 'buy')
     
+    # ── NUEVO: Cierre Técnico Preventivo por Tendencia Rota (AaTechnicalExit / BbTechnicalExit) ──
+    # Para Crypto y Forex. Si la tendencia en 15m se cruza en contra, y la pérdida es controlada (menor a la configurada),
+    # cerramos preventivamente para proteger capital antes de caer más y evitar entrar a EREP.
+    try:
+        from app.core.memory_store import BOT_STATE
+        is_forex = market_type == 'forex_futures'
+        max_rev_key = 'max_reversal_loss_pct_forex' if is_forex else 'max_reversal_loss_pct_crypto'
+        
+        # Leemos el límite dinámico de la base de datos (con fallback de -1.0%)
+        # Hacemos -abs(valor) para asegurar que sea una comparación en pérdida (negativa)
+        limit_val = float(BOT_STATE.config_cache.get(max_rev_key) or -1.0)
+        limit_pct = -abs(limit_val)
+        
+        pnl = calculate_position_pnl(position, current_price, market_type)
+        # La pérdida debe estar dentro del límite (pnl_pct >= limit_pct) y no estar en ganancia (pnl_pct <= 0)
+        if limit_pct <= pnl['pnl_pct'] <= 0.0:
+            ema3_15m = safe_float(snap.get('ema_3', snap.get('ema3', 0)))
+            ema9_15m = safe_float(snap.get('ema_9', snap.get('ema9', 0)))
+            
+            if ema3_15m > 0 and ema9_15m > 0:
+                technical_cut = False
+                if is_long and ema3_15m < ema9_15m:
+                    technical_cut = True
+                elif not is_long and ema3_15m > ema9_15m:
+                    technical_cut = True
+                    
+                if technical_cut:
+                    return {
+                        'should_close': True,
+                        'rule_code':    'AaTechnicalExit' if is_long else 'BbTechnicalExit',
+                        'reason':       f'Cierre Técnico Preventivo (15m): Tendencia rota (EMA3 {ema3_15m:.4f} vs EMA9 {ema9_15m:.4f}) con pérdida controlada ({pnl["pnl_pct"]:.2f}% | Límite: {limit_pct}%).',
+                        'pnl':          pnl,
+                        'urgency':      'urgent'
+                    }
+    except Exception as te_e:
+        log_error(MODULE, f"Error en evaluación de salida técnica preventiva: {te_e}")
+
     # ── NUEVO: Protección Fin de Día (EOD) ──
     try:
         nyc_now = get_nyc_now()

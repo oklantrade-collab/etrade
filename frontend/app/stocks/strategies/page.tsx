@@ -402,6 +402,8 @@ function EditRuleModal({ rule, onSave, onClose }: any) {
             base = { ...base, ...extra };
         } catch(e) {}
     }
+    if (base.enable_case_a === undefined) base.enable_case_a = true;
+    if (base.enable_case_b === undefined) base.enable_case_b = true;
     return base;
   })
   const [saving, setSaving] = useState(false)
@@ -410,7 +412,7 @@ function EditRuleModal({ rule, onSave, onClose }: any) {
     setSaving(true)
     try {
       // Re-pack extra fields into notes if they exist
-      const extraKeys = ['sm_min', 'f_score_min', 'description', 'sipv_signal', 'sipv_required', 'sipv_or_pine'];
+      const extraKeys = ['sm_min', 'f_score_min', 'description', 'sipv_signal', 'sipv_required', 'sipv_or_pine', 'enable_case_a', 'enable_case_b'];
       const extra: any = {};
       extraKeys.forEach(k => { if (form[k] !== undefined) extra[k] = form[k]; });
       
@@ -498,6 +500,18 @@ function EditRuleModal({ rule, onSave, onClose }: any) {
                 <input type="checkbox" checked={form.sipv_or_pine} onChange={e => setForm({...form, sipv_or_pine: e.target.checked})} />
                 <label style={{ fontSize: '11px', fontWeight: 800, color: '#FFB74D' }}>Lógica OR (Pine OR SIPV)</label>
              </div>
+             {form.rule_code.includes('DIP') && (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
+                    <input type="checkbox" checked={form.enable_case_a} onChange={e => setForm({...form, enable_case_a: e.target.checked})} />
+                    <label style={{ fontSize: '11px', fontWeight: 800, color: '#00C896' }}>Activar Casuística A (Cruce EMA 1D/4H)</label>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <input type="checkbox" checked={form.enable_case_b} onChange={e => setForm({...form, enable_case_b: e.target.checked})} />
+                    <label style={{ fontSize: '11px', fontWeight: 800, color: '#00C896' }}>Activar Casuística B (Pullback EMA Diario)</label>
+                  </div>
+                </>
+             )}
           </div>
 
           <div style={{ gridColumn: 'span 2' }}>

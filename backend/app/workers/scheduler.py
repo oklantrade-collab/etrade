@@ -387,7 +387,17 @@ async def sync_current_candle_to_db(symbol: str, current_price: float, supabase)
     Sincroniza la vela EN CURSO de cada timeframe con Supabase.
     Esto permite que el gráfico del frontend muestre el precio actual, no el de la última vela cerrada.
     Solo actualiza la última fila (is_closed=False).
+    THROTTLE: Solo cada 60 minutos para reducir egress de Supabase.
     """
+    # THROTTLE: limitar a 1 vez por hora por símbolo
+    import time as _time
+    if not hasattr(sync_current_candle_to_db, '_last'):
+        sync_current_candle_to_db._last = {}
+    _now = _time.time()
+    if symbol in sync_current_candle_to_db._last and (_now - sync_current_candle_to_db._last[symbol]) < 3600:
+        return  # Skip — demasiado pronto
+    sync_current_candle_to_db._last[symbol] = _now
+
     # Solo sincronizar timeframes visibles en gráfico
     timeframes_to_sync = ['15m', '1h', '4h', '1d']
     from app.core.memory_store import MEMORY_STORE
@@ -445,9 +455,21 @@ async def upsert_candles_to_db(symbol: str, timeframe: str, df, sb):
     """
     Sincroniza velas OHLCV con la base de datos para uso en gráficos.
     Mantiene el historial actualizado automáticamente.
+    THROTTLE: Solo cada 60 minutos para reducir egress.
     """
     if df is None or df.empty:
         return
+
+    # THROTTLE: limitar a 1 vez por hora por símbolo/TF
+    import time as _time
+    if not hasattr(upsert_candles_to_db, '_last'):
+        upsert_candles_to_db._last = {}
+    _key = f"{symbol}_{timeframe}"
+    _now = _time.time()
+    if _key in upsert_candles_to_db._last and (_now - upsert_candles_to_db._last[_key]) < 3600:
+        return  # Skip — datos ya están en MEMORY_STORE (RAM)
+    upsert_candles_to_db._last[_key] = _now
+
     try:
         rows = []
         # OPTIMIZACIÓN DISK IO: Upsert solo los últimos 5 en lugar de 300.
@@ -786,7 +808,7 @@ async def check_proactive_exit_crypto(
     if not result['should_close']:
         return False
 
-    # Block if PNL < -1.0%
+    # Block if PNL is too low (keep for EREP)
     entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
     pnl_pct = 0.0
     if entry > 0:
@@ -795,8 +817,17 @@ async def check_proactive_exit_crypto(
         else:
             pnl_pct = (entry - current_price) / entry * 100
             
-    if pnl_pct < -1.0:
-        log_info('PROACTIVE_EXIT', f'[{symbol}] Proactive Exit bloqueado: PNL {pnl_pct:.2f}% < -1.0%. Se retiene para EREP.')
+    # El límite de pérdida es -1.0% para cierres proactivos de ganancia.
+    # Pero si es un Cierre Técnico Preventivo ('TechnicalExit'), usamos el límite de reversión configurado (o -2.0% fallback).
+    is_technical = 'TechnicalExit' in (result.get('rule_code') or '')
+    if is_technical:
+        limit_val = float(BOT_STATE.config_cache.get('max_reversal_loss_pct_crypto') or -1.0)
+        max_allowed_loss = -abs(limit_val)
+    else:
+        max_allowed_loss = -1.0
+
+    if pnl_pct < max_allowed_loss:
+        log_info('PROACTIVE_EXIT', f'[{symbol}] Proactive Exit bloqueado: PNL {pnl_pct:.2f}% < {max_allowed_loss}%. Se retiene para EREP.')
         return False
 
     # ── Cerrar posición ───────────────────────
@@ -1113,10 +1144,26 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                     f"✅ SALIDA INTELIGENTE [{symbol}]\n"
                     f"MTF giró: {current_mtf:.4f}\n"
                     f"P&L: +{reversal['pnl_pct']:.2f}%"
-                    f" (+${reversal['pnl_usd']:.2f})\n"
+                    f" (+${reversal.get('pnl_usd', 0):.2f})\n"
                     f"Ganancia asegurada antes de reversión"
                 )
                 log_info(MODULE, f"SMART EXIT executed for {symbol}: {reversal['detail']}")
+
+            elif reversal.get('should_modify_oco_breakeven'):
+                from app.execution.order_manager import modify_oco_breakeven
+                target_tp = reversal['target_tp_price']
+                
+                success = modify_oco_breakeven(position['id'], target_tp)
+                if success:
+                    log_info(MODULE, f"OCO Break-Even Modificado para {symbol} a TP={target_tp}")
+                    from app.workers.performance_monitor import send_telegram_message
+                    await send_telegram_message(
+                        f"🛡️ DEFENSA BREAK-EVEN [{symbol}]\n"
+                        f"Reversión rápida 15m detectada.\n"
+                        f"Orden OCO modificada: TP asegurado en {target_tp}."
+                    )
+                else:
+                    log_warning(MODULE, f"Fallo al modificar OCO Break-Even para {symbol}")
 
             elif reversal.get('waiting_for_profit'):
                 # Log interno — no Telegram (no spamear)
@@ -1445,6 +1492,12 @@ async def sync_db_config_to_memory():
 
         BOT_STATE.config_cache = current
         log_info(MODULE, f"Config (Trading + Risk) synced from Supabase. Limits: Global={current.get('max_open_trades')}, Symbol={current.get('max_positions_per_symbol')}")
+        
+        # Reload StrategyEngine v1.0 rules dynamically
+        from app.strategy.strategy_engine import StrategyEngine
+        engine = StrategyEngine.get_instance(sb)
+        await engine.reload()
+        log_info(MODULE, "Strategy Engine v1.0 rules reloaded from Supabase.")
     except Exception as e:
         log_error(MODULE, f"Failed to sync config from DB: {e}")
 
@@ -1489,6 +1542,12 @@ async def sync_positions_to_memory():
             norm_target = normalize_crypto_symbol(symbol)
             symbol_pos = [p for p in new_positions.values() if normalize_crypto_symbol(p.get('symbol', '')) == norm_target]
             sm.sync_from_positions(symbol, symbol_pos)
+            
+            # Clean up old pending_sar_closes in MEMORY_STORE
+            p_sar = MEMORY_STORE.setdefault(symbol, {}).setdefault('pending_sar_closes', {})
+            for pid in list(p_sar.keys()):
+                if pid not in new_positions:
+                    p_sar.pop(pid, None)
             
         log_info(MODULE, f"Positions synced: {len(BOT_STATE.positions)} active trades. StateMachine updated for {len(symbols_to_sync)} symbols.")
     except Exception as e:

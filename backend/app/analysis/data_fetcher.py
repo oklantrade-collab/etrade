@@ -16,6 +16,10 @@ MODULE = "data_fetcher"
 
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 
+# ── THROTTLE: Limitar upserts a Supabase a 1 vez por hora por símbolo/TF ──
+_CANDLE_UPSERT_LAST = {}  # {"BTCUSDT_15m": timestamp}
+_CANDLE_UPSERT_INTERVAL = 3600  # 60 minutos en segundos
+
 # Binance kline interval strings
 BINANCE_INTERVALS = {
     "15m": "15m",
@@ -180,6 +184,13 @@ def upsert_candles(
     """Upsert candle data into Supabase market_candles. Returns count upserted."""
     if df is None or df.empty:
         return 0
+
+    # THROTTLE: Solo upsertear a Supabase cada 60 minutos para reducir egress
+    throttle_key = f"{symbol}_{timeframe}"
+    now = time.time()
+    if throttle_key in _CANDLE_UPSERT_LAST and (now - _CANDLE_UPSERT_LAST[throttle_key]) < _CANDLE_UPSERT_INTERVAL:
+        return 0  # Skip — datos ya están en MEMORY_STORE (RAM)
+    _CANDLE_UPSERT_LAST[throttle_key] = now
 
     sb = get_supabase()
     internal_sym = to_internal_symbol(symbol)

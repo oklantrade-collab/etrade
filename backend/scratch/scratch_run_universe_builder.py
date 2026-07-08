@@ -10,14 +10,21 @@ async def test_universe_builder():
     print("Initializing UniverseBuilder...")
     builder = UniverseBuilder()
     
+    from app.workers.stocks_scheduler import get_stocks_config
+    config = get_stocks_config()
+    max_price = float(config.get("max_stock_price", config.get("scanner_max_price", 20.0)))
+    min_cap = int(config.get("min_market_cap_usd", 1_000_000_000))
+    min_vol = int(config.get("min_daily_volume", 1_000_000))
+    watchlist_core_count = int(config.get("watchlist_core_count", 50))
+
     try:
-        print("Starting build_daily_watchlist...")
+        print(f"Starting build_daily_watchlist (DB Limit: ${max_price})...")
         candidates = await builder.build_daily_watchlist(
-            max_price=20.0,
+            max_price=max_price,
             min_price=1.0,
-            min_market_cap=1_000_000_000,
-            min_volume=1_000_000,
-            max_results=50
+            min_market_cap=min_cap,
+            min_volume=min_vol,
+            max_results=watchlist_core_count
         )
         print("\n=== SCAN COMPLETED SUCCESSFULY ===")
         print(f"Total candidates found: {len(candidates)}")

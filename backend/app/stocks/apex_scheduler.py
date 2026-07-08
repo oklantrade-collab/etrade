@@ -9,7 +9,7 @@ from datetime import datetime, timezone, timedelta
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
-from app.stocks.apex_score import calculate_apex_score
+from app.stocks.apex_score import calculate_apex_score, calculate_apex_score_v2
 
 
 MODULE = "APEX_SCHEDULER"
@@ -29,7 +29,8 @@ async def _get_snap(ticker: str, supabase) -> dict:
 
 
 async def _get_fundamental(ticker: str, supabase) -> dict:
-    """Obtiene datos fundamentales del watchlist_daily."""
+    """Obtiene datos fundamentales del watchlist_daily y fundamental_cache."""
+    fund_data = {}
     try:
         today = datetime.now().date().isoformat()
         res = supabase.table('watchlist_daily') \
@@ -38,9 +39,24 @@ async def _get_fundamental(ticker: str, supabase) -> dict:
             .eq('date', today) \
             .limit(1) \
             .execute()
-        return res.data[0] if res.data else {}
-    except Exception:
-        return {}
+        if res.data:
+            fund_data.update(res.data[0])
+    except Exception as e:
+        log_warning("APEX_SCHEDULER", f"Error querying watchlist_daily for {ticker}: {e}")
+
+    try:
+        res_cache = supabase.table('fundamental_cache') \
+            .select('*') \
+            .eq('ticker', ticker) \
+            .limit(1) \
+            .execute()
+        if res_cache.data:
+            fund_data.update(res_cache.data[0])
+    except Exception as e:
+        log_warning("APEX_SCHEDULER", f"Error querying fundamental_cache for {ticker}: {e}")
+
+    return fund_data
+
 
 
 async def _get_df(ticker: str, interval: str):
@@ -123,9 +139,21 @@ async def run_apex_cycle(supabase=None):
                     'altman_zone': fund.get('altman_zone', 'grey'),
                     'fundamental_score': fund.get('fundamental_score', 50),
                     'analyst_rating': fund.get('analyst_rating', 5),
-                    'short_interest_pct': fund.get('short_interest_pct', 5),
+                    'short_interest_pct': fund.get('short_interest_pct', fund.get('short_percent_float', 5)),
                     'days_to_earnings': fund.get('days_to_earnings', 30),
                     'valuation_status': fund.get('valuation_status', 'fairly_valued'),
+                    
+                    # Nuevas métricas v2.0
+                    'peg_ratio':           fund.get('peg_ratio', 0),
+                    'pe_ratio':            fund.get('pe_ratio', 0),
+                    'forward_pe':          fund.get('forward_pe', 0),
+                    'free_cash_flow':      fund.get('free_cash_flow', 0),
+                    'market_cap':          float(fund.get('market_cap') or (fund.get('market_cap_mln', 1000) * 1e6)),
+                    'eps_growth_pct':      fund.get('eps_growth_qoq', 0),
+                    'revenue_growth_yoy':  fund.get('revenue_growth_yoy', 0),
+                    'revenue_growth_qoq':  fund.get('revenue_growth_qoq', 0),
+                    'fcf_growth_pct':      fund.get('fcf_growth_pct', 0),
+                    'short_percent_float': fund.get('short_percent_float', 5),
                 }
 
                 # Get DataFrames (use try/except per tf)
@@ -142,7 +170,7 @@ async def run_apex_cycle(supabase=None):
                     log_warning(MODULE, f"Skipping APEX calculation for {ticker}: missing or insufficient time-series dataframes")
                     continue
 
-                result = calculate_apex_score(
+                result = calculate_apex_score_v2(
                     ticker=ticker,
                     snap=snap,
                     fundamental_cache=fund_cache,
@@ -151,6 +179,7 @@ async def run_apex_cycle(supabase=None):
                     df_15m=df_15m,
                     df_4h=df_4h,
                     df_daily=df_daily,
+                    ia_score=float(fund_cache.get('fundamental_score', 50)) / 10.0,
                 )
 
                 # Guardar en apex_scores
@@ -175,15 +204,33 @@ async def run_apex_cycle(supabase=None):
                     'detail':          result['detail'],
                     'valid_until_4h':  result['valid_until_4h'],
                     'valid_until_1d':  result['valid_until_1d'],
+                    
+                    # Nuevas columnas v2.0
+                    'b6_growth':       result['blocks'].get('b6_growth'),
+                    'xg_score':        result.get('xg_score'),
+                    'xg_detail':       result.get('xg_detail'),
+                    'timing_score':    result.get('timing_score'),
+                    'timing_detail':   result.get('timing_detail'),
+                    'trade_score':     result.get('trade_score'),
+                    'etv':             result.get('etv'),
+                    'upside_expected': result.get('upside_expected'),
+                    'downside_risk':   result.get('downside_risk'),
+                    'peg_ratio':       result.get('peg_ratio'),
+                    'fcf_yield':       result.get('fcf_yield'),
+                    'market_cap_tier': result.get('cap_tier'),
                 }).execute()
 
                 # Actualizar market_snapshot con APEX
                 try:
                     supabase.table('market_snapshot').update({
-                        'apex_4h':     result['apex_score_4h'],
-                        'apex_1d':     result['apex_score_1d'],
-                        'apex_signal': result['signal'],
-                        'apex_conf':   result['confidence'],
+                        'apex_4h':      result['apex_score_4h'],
+                        'apex_1d':      result['apex_score_1d'],
+                        'apex_signal':  result['signal'],
+                        'apex_conf':    result['confidence'],
+                        'trade_score':  result.get('trade_score'),
+                        'xg_score':     result.get('xg_score'),
+                        'timing_score': result.get('timing_score'),
+                        'etv':          result.get('etv'),
                     }).eq('symbol', ticker).execute()
                 except Exception:
                     pass  # Columnas pueden no existir aún

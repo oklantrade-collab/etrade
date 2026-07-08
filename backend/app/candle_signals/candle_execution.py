@@ -418,22 +418,39 @@ def execute_crypto_signal(
     entry_display = price
 
     price = entry_display
-    # ── STEP 2: Calculate quantity based on risk ──
+    
+    # ── GUARDIA ESTRICTA 5 MINUTOS (Aa30 / Bb30) ──
+    if strategy_code in ("Aa30", "Aa30C", "Bb30", "Bb30C"):
+        rsi_5m = float(current_snap.get('rsi_14_5m', 50))
+        sar_5m = float(current_snap.get('sar_trend_5m', 1 if action == "BUY" else -1))
+        
+        if action == "BUY":
+            if rsi_5m > 70 or sar_5m < 0:
+                log_warning(MODULE, f"🚫 Bloqueo estricto 5m para {strategy_code} {binance_symbol}: RSI_5m={rsi_5m:.1f}, SAR_5m={sar_5m}. Evitando compra en techo.")
+                return {"success": False, "reason": "strict_5m_guard_failed"}
+        else:
+            if rsi_5m < 30 or sar_5m > 0:
+                log_warning(MODULE, f"🚫 Bloqueo estricto 5m para {strategy_code} {binance_symbol}: RSI_5m={rsi_5m:.1f}, SAR_5m={sar_5m}. Evitando short en piso.")
+                return {"success": False, "reason": "strict_5m_guard_failed"}
+
+    # ── STEP 2: Calculate quantity based on FIXED MARGIN ──
     from app.core.capital_manager import get_total_operating_capital
     capital_total = get_total_operating_capital('crypto')
     
     # ── LOG: COMPOUNDING CHECK ──
     log_info(MODULE, f"💰 CAPITAL OPERATIVO (CRIPTO): ${capital_total:,.2f}")
 
-    dist_sl = _calculate_sl_distance_crypto(action, price, candle_data)
-    risk_pct = float(risk_config.get('max_risk_per_trade_pct', 5.0)) # Usando el nuevo 5%
-    risk_usd_per_trade = capital_total * (risk_pct / 100.0)
-    quantity_raw = risk_usd_per_trade / dist_sl
-    
-    # Cap by max notional allowed (leverage)
+    risk_pct = float(risk_config.get('max_risk_per_trade_pct', 5.0))
     leverage = float(risk_config.get('leverage_crypto', 15.0))
-    max_notional = capital_total * leverage
-    quantity = min(quantity_raw, max_notional / price)
+    
+    # Capital base allocation (Margen) = Total Capital * (Risk% / 100)
+    margin_allocation = capital_total * (risk_pct / 100.0)
+    
+    # Total notional size (Nocional = Margen * Apalancamiento)
+    notional = margin_allocation * leverage
+    
+    # Quantity in tokens
+    quantity = notional / price if price > 0 else 0
 
     if is_paper:
         paper_size = round(quantity, 4)
@@ -880,19 +897,16 @@ def execute_forex_signal(
     # ── GUARD #0: 15-minute Structural Trend Filter (Aa41) ──
     try:
         import pandas as pd
+        from app.core.memory_store import get_memory_df
         db_symbol = pair.replace("/", "").replace("-", "")
-        mc_res = sb.table("market_candles") \
-            .select("close") \
-            .eq("symbol", db_symbol) \
-            .eq("timeframe", "15m") \
-            .order("open_time", desc=True) \
-            .limit(20) \
-            .execute()
-        if mc_res.data and len(mc_res.data) >= 10:
-            closes = [float(r['close']) for r in reversed(mc_res.data)]
-            df_15m = pd.DataFrame({'close': closes})
-            ema9_15 = float(df_15m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
-            ema20_15 = float(df_15m['close'].ewm(span=20, adjust=False).mean().iloc[-1])
+        df_15m = get_memory_df(db_symbol, "15m")
+        if df_15m is None or len(df_15m) < 10:
+            df_15m = get_memory_df(pair, "15m")
+        if df_15m is not None and len(df_15m) >= 10:
+            closes = [float(v) for v in df_15m['close'].tail(20).values]
+            df_tmp = pd.DataFrame({'close': closes})
+            ema9_15 = float(df_tmp['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+            ema20_15 = float(df_tmp['close'].ewm(span=20, adjust=False).mean().iloc[-1])
             
             if action == "BUY" and ema9_15 <= ema20_15:
                 log_info(MODULE, f"🚫 15m TREND GUARD BLOCKED: BUY {pair} | EMA9({ema9_15:.5f}) <= EMA20({ema20_15:.5f})")

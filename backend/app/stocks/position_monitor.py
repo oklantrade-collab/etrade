@@ -136,8 +136,21 @@ class PositionMonitor:
             # Reutilizamos el motor SIPV adaptado para Stocks
             import yfinance as yf
             t_obj = yf.Ticker(ticker)
-            hist_4h = t_obj.history(period="15d", interval="1h") # 1h como proxy de 4h para Stocks
+            hist_1h = t_obj.history(period="15d", interval="1h")
             hist_1d = t_obj.history(period="30d", interval="1d")
+            hist_4h = None
+            if not hist_1h.empty:
+                try:
+                    hist_4h = hist_1h.resample('4h').agg({
+                        'Open': 'first',
+                        'High': 'max',
+                        'Low': 'min',
+                        'Close': 'last',
+                        'Volume': 'sum'
+                    }).dropna()
+                except Exception as e_resample:
+                    log_error(MODULE, f"Error resampling 1h to 4h for {ticker}: {e_resample}")
+                    hist_4h = hist_1h.copy()
 
             # Mapeo a formato estándar para el evaluador
             pos_std = {
@@ -161,7 +174,7 @@ class PositionMonitor:
                 position=pos_std,
                 current_price=current_price,
                 snap=snap_val,
-                df_4h=hist_4h,
+                df_4h=hist_1h,
                 df_1d=hist_1d,
                 market_type='stocks_spot'
             )
@@ -320,6 +333,7 @@ class PositionMonitor:
                     snap=snap_val,
                     df_15m=hist_15m,
                     df_5m=hist_5m,
+                    df_1h=hist_1h,
                     df_4h=hist_4h,
                     rvol=rvol,
                     sar_15m=snap_val.get('sar_trend_15m', 1)

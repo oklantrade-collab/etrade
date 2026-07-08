@@ -141,17 +141,30 @@ async def analyze_fundamentals(
     # Inyectar la explicación para el UI (Capa 4)
     final_result['ai_rationale'] = final_result.get('explanation', "Cálculo matemático puro.")
 
+    # Copiar nuevas métricas v2.0 al final_result para que estén disponibles en memoria
+    final_result['peg_ratio'] = financials.get('peg_ratio', 0)
+    final_result['pe_ratio'] = financials.get('pe_ratio', 0)
+    final_result['forward_pe'] = financials.get('forward_pe', 0)
+    final_result['free_cash_flow'] = financials.get('free_cash_flow', 0)
+    final_result['eps_growth_qoq'] = financials.get('eps_growth_qoq', 0)
+    final_result['short_percent_float'] = financials.get('short_percent_float', 5)
+    final_result['revenue_growth_qoq'] = financials.get('revenue_growth_qoq', 0)
+    final_result['fcf_growth_pct'] = financials.get('fcf_growth_pct', 0)
+
+
     # 5. Guardar en Supabase (Capa 3 Persistencia)
     if supabase:
         try:
-            _save_to_cache(supabase, ticker, current_price, final_result)
+            _save_to_cache(supabase, ticker, current_price, final_result, financials=financials)
         except Exception as e:
             log_error('VALUATION', f"Error en persistencia Capa 3: {e}")
 
     return final_result
 
-def _save_to_cache(sb, ticker, price, res):
+def _save_to_cache(sb, ticker, price, res, financials=None):
     """Persiste los resultados detallados en fundamental_cache."""
+    if financials is None:
+        financials = {}
     data = {
         'ticker':            ticker,
         'current_price':     price,
@@ -159,21 +172,31 @@ def _save_to_cache(sb, ticker, price, res):
         'intrinsic_value':   res['intrinsic_value'],
         'valuation_status':  res['valuation_status'],
         'margin_of_safety':  res['margin_of_safety'],
-        'piotroski_score':   res['components']['piotroski']['score'],
-        'piotroski_detail':  res['piotroski_detail'],
-        'graham_number':     res['components']['graham']['value'],
-        'graham_margin':     res['components']['graham']['margin'],
-        'dcf_intrinsic':     res['components']['dcf']['value'],
-        'dcf_upside_pct':    res['components']['dcf']['upside'],
-        'altman_z_score':    res['components']['altman']['z_score'],
-        'altman_zone':       res['components']['altman']['zone'],
-        'math_score':        res['math_score'],
+        'piotroski_score':   res['components']['piotroski']['score'] if res.get('components', {}).get('piotroski') else 4,
+        'piotroski_detail':  res.get('piotroski_detail'),
+        'graham_number':     res['components']['graham']['value'] if res.get('components', {}).get('graham') else 0,
+        'graham_margin':     res['components']['graham']['margin'] if res.get('components', {}).get('graham') else 0,
+        'dcf_intrinsic':     res['components']['dcf']['value'] if res.get('components', {}).get('dcf') else 0,
+        'dcf_upside_pct':    res['components']['dcf']['upside'] if res.get('components', {}).get('dcf') else 0,
+        'altman_z_score':    res['components']['altman']['z_score'] if res.get('components', {}).get('altman') else 0,
+        'altman_zone':       res['components']['altman']['zone'] if res.get('components', {}).get('altman') else 'grey',
+        'math_score':        res.get('math_score', 50),
         'ia_score':          res.get('ia_score'),
-        'data_source':       res['data_source'],
+        'data_source':       res.get('data_source', 'yfinance'),
         'composite_intrinsic': res['intrinsic_value'],
         'math_rationale':    res.get('explanation'),
         'qwen_summary':      res.get('qwen_summary'),
         'gemini_summary':    res.get('gemini_summary'),
         'refreshed_at':      'now()',
+        
+        # ── NUEVOS CAMPOS APEX v2.0 ──────────
+        'peg_ratio':           financials.get('peg_ratio', 0),
+        'pe_ratio':            financials.get('pe_ratio', 0),
+        'forward_pe':          financials.get('forward_pe', 0),
+        'free_cash_flow':      financials.get('free_cash_flow', 0),
+        'eps_growth_qoq':      financials.get('eps_growth_qoq', 0),
+        'short_percent_float': financials.get('short_percent_float', 5),
+        'revenue_growth_qoq':  financials.get('revenue_growth_qoq', 0),
+        'fcf_growth_pct':      financials.get('fcf_growth_pct', 0),
     }
     sb.table('fundamental_cache').upsert(data, on_conflict='ticker').execute()

@@ -39,6 +39,7 @@ files_to_sync = [
     "app/strategy/rule_engine.py",
     "app/workers/unified_trading_worker.py",
     "app/execution/oco_builder.py",
+    "app/execution/order_manager.py",
     "app/core/position_sizing.py",
     "app/strategy/dynamic_sl_manager.py",
     "app/stocks/stocks_adaptive_tp.py",
@@ -56,6 +57,8 @@ files_to_sync = [
     "app/api/positions.py",
     "app/analysis/fundamental_scorer.py",
     "app/stocks/universe_builder.py",
+    "app/analysis/capa3_fundamentals.py",
+    "app/stocks/fundamental_analyzer.py",
     "app/workers/performance_monitor.py",
     "app/core/symbol_state.py",
     "app/execution/data_provider.py",
@@ -67,7 +70,9 @@ files_to_sync = [
     "app/strategy/bollinger_exhaustion.py",
     "app/ws/ws_manager.py",
     "app/core/market_hours.py",
-    "app/execution/providers/ctrader_provider.py"
+    "app/execution/providers/ctrader_provider.py",
+    "app/analysis/fibonacci_bb.py",
+    "requirements.txt"
 ]
 
 def check_syntax():
@@ -77,6 +82,8 @@ def check_syntax():
     print("=" * 60)
     all_ok = True
     for f in files_to_sync:
+        if not f.endswith('.py'):
+            continue
         local_file = os.path.join("c:/Fuentes/eTrade/backend", f)
         try:
             py_compile.compile(local_file, doraise=True)
