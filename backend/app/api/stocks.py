@@ -311,9 +311,10 @@ async def get_stocks_journal(limit: int = 100):
     for attempt in range(max_retries):
         try:
             sb = get_supabase()
-            res = sb.table("trades_journal")\
+            res = sb.table("stocks_positions")\
                 .select("*")\
-                .order("exit_date", desc=True)\
+                .eq("status", "closed")\
+                .order("updated_at", desc=True)\
                 .limit(limit)\
                 .execute()
             
@@ -322,21 +323,25 @@ async def get_stocks_journal(limit: int = 100):
             
             for entry in journal:
                 try:
-                    # Priorizar trade_type que es el campo real en la DB
-                    entry["strategy"] = entry.get("trade_type") or entry.get("strategy") or entry.get("rule_code") or "V5_INDUSTRIAL"
-                    entry["exit_strategy"] = entry.get("exit_reason") or "CLOSED"
-                    entry["updated_at"] = entry.get("exit_date")
-                    entry["first_buy_at"] = entry.get("entry_date")
+                    entry["strategy"] = entry.get("strategy") or entry.get("rule_code") or "V5_STOCKS"
+                    entry["exit_strategy"] = entry.get("exit_triggered_by") or entry.get("sl_close_reason") or "CLOSED"
+                    entry["exit_reason"] = entry["exit_strategy"]
+                    entry["first_buy_at"] = entry.get("first_buy_at")
+                    entry["updated_at"] = entry.get("updated_at")
+                    entry["exit_date"] = entry.get("updated_at")
+                    entry["closed_at"] = entry.get("updated_at")
                     
                     # Asegurar valores numéricos con fallbacks seguros
                     def to_f(val):
                         try: return float(val) if val is not None else 0.0
                         except: return 0.0
 
-                    entry["unrealized_pnl"] = to_f(entry.get("pnl_usd"))
-                    entry["unrealized_pnl_pct"] = to_f(entry.get("pnl_pct"))
-                    entry["avg_price"] = to_f(entry.get("entry_price"))
-                    entry["exit_price"] = to_f(entry.get("exit_price"))
+                    entry["unrealized_pnl"] = to_f(entry.get("unrealized_pnl"))
+                    entry["unrealized_pnl_pct"] = to_f(entry.get("unrealized_pnl_pct"))
+                    entry["pnl_usd"] = entry["unrealized_pnl"]
+                    entry["pnl_pct"] = entry["unrealized_pnl_pct"]
+                    entry["avg_price"] = to_f(entry.get("avg_price"))
+                    entry["exit_price"] = to_f(entry.get("current_price"))
                     entry["shares"] = int(to_f(entry.get("shares")))
                     entry["total_cost"] = entry["avg_price"] * entry["shares"]
                     entry["company_name"] = entry.get("ticker", "UNKNOWN")

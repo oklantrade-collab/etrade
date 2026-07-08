@@ -414,7 +414,7 @@ export default function StocksPositions() {
                          📊
                        </button>
                   </div>
-                  <div style={{ textAlign: 'right' }}>
+                  <div style={{ textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end', minWidth: '80px' }}>
                      <button 
                        onClick={() => setSelectedPos(pos)} 
                        style={{ 
@@ -428,10 +428,35 @@ export default function StocksPositions() {
                          display: 'flex', 
                          alignItems: 'center', 
                          justifyContent: 'center',
-                         fontSize: '12px'
+                         fontSize: '12px',
+                         boxShadow: '0 4px 10px rgba(79,195,247,0.3)',
+                         transition: 'transform 0.2s'
                        }}
+                       title="Ver Detalles"
+                       onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
+                       onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
                      >
                        ℹ️
+                     </button>
+                     <button 
+                       onClick={async () => {
+                         if (confirm(`¿ELIMINAR registro de ${pos.ticker} permanentemente?`)) {
+                           try {
+                             const res = await fetch(`/api/v1/stocks/positions/${pos.id}`, { method: 'DELETE' })
+                             if (res.ok) {
+                               fetchData()
+                             } else {
+                               alert("Error al eliminar registro")
+                             }
+                           } catch (err) {
+                             console.error("Delete error:", err)
+                           }
+                         }
+                       }} 
+                       style={{ ...DetailButtonStyle, background: 'rgba(255,71,87,0.05)', color: '#FF4757', border: '1px solid rgba(255,71,87,0.1)' }}
+                       title="ELIMINAR"
+                     >
+                       🗑️
                      </button>
                   </div>
                 </div>

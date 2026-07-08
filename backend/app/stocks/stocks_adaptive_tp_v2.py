@@ -782,6 +782,27 @@ def evaluate_stock_tp_v2(
             ),
         }
 
+    # ── NUEVO: TOMA DE GANANCIAS EN PICOS BOLLINGER (Opción B) ──
+    # Si el precio o high superan la banda de Bollinger y tenemos ganancia > 3%, aseguramos 50%.
+    curr_high_val = current_price
+    if df_15m is not None and len(df_15m) >= 1:
+        curr_high_val = float(df_15m.iloc[-1].get('high', df_15m.iloc[-1].get('High', current_price)))
+        curr_high_val = max(current_price, curr_high_val)
+
+    bb_upper_val = float(snap.get('bb_upper', 999999))
+    if curr_high_val >= bb_upper_val and gain_pct >= 3.0 and not b1_done:
+        calc_b1_shares = b1_shares if b1_shares > 0 else max(1, int(total_shares * 0.5))
+        return {
+            'action':  'close_block1',
+            'shares':  calc_b1_shares,
+            'trigger': 'bollinger_breakout_tp',
+            'debug_indicators': debug_indicators,
+            'reason': (
+                f'PICO BOLLINGER: Precio/High ({curr_high_val:.2f}) superó BB_Upper ({bb_upper_val:.2f}) '
+                f'con ganancia de +{gain_pct:.2f}%. Asegurando el 50% de la posición.'
+            ),
+        }
+
     # ── PASO 1.5: REGLAS DE CIERRE DINÁMICO V5.3 ──
     # Condiciones de cierre solicitadas por el usuario:
     # Cerrar si: (EMA3 < EMA9) OR (CLOSE > UPPER_6) OR (RSI >= 75)
@@ -807,10 +828,10 @@ def evaluate_stock_tp_v2(
     # Condición 3: RSI >= 75 (Sobrecompra extrema intradía)
     rsi_extreme = (rsi_15m >= 75)
 
-    # Condición 4: OPEN > BB_Upper AND CLOSE > OPEN
-    # Vela abriendo por encima de la banda superior de Bollinger y cerrando verde
-    # Esto indica agotamiento inminente (último impulso antes de reversión)
-    candle_above_bb = (curr_open > bb_upper and curr_close > curr_open)
+    # Condición 4: HIGH > BB_Upper AND CLOSE rechaza dejando mecha
+    # Evalúa que rompa la banda de Bollinger y deje mecha de rechazo (>0.5% desde el high)
+    curr_high_15m = float(last_candle.get('high', last_candle.get('High', curr_close))) if df_15m is not None and len(df_15m) >= 1 else curr_close
+    candle_above_bb = (curr_high_15m > bb_upper and curr_close < (curr_high_15m * 0.995))
 
     # Condición extra: EMA3 convergiendo hacia EMA9 (squeeze descendente)
     ema_squeezing_down = ema['is_up'] and (ema['diff_pct'] < 5.0) and ema['ema3_curving_down']
@@ -836,8 +857,8 @@ def evaluate_stock_tp_v2(
             trigger_name = "rsi_gte_75"
             reason_detail = f"RSI = {rsi_15m:.1f} >= 75 (Sobrecompra extrema)"
         elif candle_above_bb:
-            trigger_name = "open_gt_bb_upper"
-            reason_detail = f"OPEN ${curr_open:.2f} > BB_Upper ${bb_upper:.2f} AND CLOSE > OPEN (Agotamiento)"
+            trigger_name = "high_gt_bb_upper_rejection"
+            reason_detail = f"HIGH ${curr_high_15m:.2f} > BB_Upper ${bb_upper:.2f} con mecha de rechazo (C=${curr_close:.2f})"
         else:
             trigger_name = "ema_squeezing_down"
             reason_detail = f"EMA3 convergiendo hacia EMA9 ({ema['diff_pct']:.1f}% separación, curving down)"

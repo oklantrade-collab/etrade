@@ -144,7 +144,7 @@ async def check_signal_reversal(
     peak_pnl = float(position.get('peak_pnl_pct', 0))
     
     if ema_reversed_15m and peak_pnl >= 0.05:
-        target_pnl = 0.10
+        target_pnl = 0.0
         if side == 'long':
             target_price = entry * (1 + target_pnl / 100.0)
         else:
@@ -154,8 +154,8 @@ async def check_signal_reversal(
             'should_exit': False,
             'should_modify_oco_breakeven': True,
             'target_tp_price': target_price,
-            'reason': 'ema_reversal_breakeven',
-            'detail': f'Reversión 15m en contra (PNL={pnl_pct:.2f}%). Ajustando TP a Break-Even (+0.10%).'
+            'reason': 'ema_reversal_exact_be',
+            'detail': f'Reversión 15m en contra (PNL={pnl_pct:.2f}%). Ajustando TP a precio exacto de entrada (Break-Even puro).'
         }
 
     # Esperamos recuperación o SL.

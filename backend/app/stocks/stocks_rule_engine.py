@@ -745,8 +745,31 @@ class StocksRuleEngine:
             ema9_4h   = float(context.get("ema_9_4h") or 0)
             ema20_4h  = float(context.get("ema_20_4h") or 0)
             
+            # EMA 15m (Tendencia local)
+            ema3_15m  = float(context.get("ema_3") or 0)
+            ema9_15m  = float(context.get("ema_9") or 0)
+            ema20_15m = float(context.get("ema_20") or 0)
+            
             low_15m   = float(context.get("low") or 0)
             close_price = float(context.get("close") or 0)
+
+            # ── Filtros de Seguridad Intradía ──
+            rsi_15m = float(context.get("rsi_14") or 50.0)
+            bb_upper = float(context.get("bb_upper") or 99999)
+            high_price = float(context.get("high") or 0)
+
+            if rsi_15m >= 60.0:
+                failures.append(f"DIP_BUY Rechazado: RSI intradía muy alto ({rsi_15m:.1f} >= 60)")
+            if high_price >= bb_upper:
+                failures.append(f"DIP_BUY Rechazado: Precio en la cima de Bollinger ({high_price:.2f} >= {bb_upper:.2f})")
+
+            # Validar alineación alcista en 15 minutos obligatoria
+            if ema3_15m > 0 and ema9_15m > 0 and ema20_15m > 0:
+                if not (ema3_15m > ema9_15m and ema9_15m > ema20_15m):
+                    failures.append(f"DIP_BUY Rechazado: 15m EMA Not Aligned (EMA3={ema3_15m:.2f}, EMA9={ema9_15m:.2f}, EMA20={ema20_15m:.2f})")
+            else:
+                failures.append("DIP_BUY Rechazado: Faltan datos de EMA 15m")
+
 
             # Validar que tengamos datos macro
             if ema20_1d <= 0 or ema20_4h <= 0:
@@ -775,6 +798,12 @@ class StocksRuleEngine:
                         f"1D: {ema3_1d:.2f}|{ema9_1d:.2f}|{ema20_1d:.2f} "
                         f"4H: {ema3_4h:.2f}|{ema9_4h:.2f}|{ema20_4h:.2f}"
                     )
+
+        # ── CHECK 13: BLOQUEO PRO_CANDLE_SELL EN PÉRDIDA ──
+        if normalized_code == "PRO_CANDLE_SELL":
+            pnl_pct = context.get("unrealized_pnl_pct")
+            if pnl_pct is not None and float(pnl_pct) <= 0:
+                failures.append(f"PRO_CANDLE_SELL Bloqueado: Posición en pérdida ({float(pnl_pct):.2f}% <= 0)")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

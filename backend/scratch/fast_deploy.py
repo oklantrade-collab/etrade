@@ -7,7 +7,12 @@ REMOTE_PATH = "/home/etrade/etrade/backend"
 
 files_to_sync = [
     "app/workers/scheduler.py",
-    "app/workers/forex_scheduler.py"
+    "app/workers/forex_scheduler.py",
+    "app/workers/stocks_scheduler.py",
+    "app/core/position_monitor.py",
+    "app/stocks/stocks_adaptive_tp_v2.py",
+    "app/stocks/stocks_rule_engine.py",
+    "app/api/stocks.py"
 ]
 
 def check_syntax():

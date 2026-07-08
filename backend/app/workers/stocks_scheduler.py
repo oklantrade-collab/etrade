@@ -821,6 +821,12 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 except: pass
             
             if age_mins >= 6.0:
+                # Add current PnL to context for sell rules (like PRO_CANDLE_SELL)
+                current_p = float(rule_ctx.get("close", 0))
+                avg_p = float(open_pos.get("avg_price") or open_pos.get("entry_price") or current_p)
+                pnl_pct = ((current_p - avg_p) / avg_p * 100) if avg_p > 0 else 0.0
+                rule_ctx["unrealized_pnl_pct"] = pnl_pct
+
                 selling_results = re.evaluate_all(rule_ctx, direction="sell")
                 for res in selling_results:
                     if res["triggered"]:
