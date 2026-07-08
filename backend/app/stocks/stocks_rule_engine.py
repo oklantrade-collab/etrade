@@ -88,6 +88,9 @@ class StocksRuleEngine:
         bb_expanding: bool = False,
         ema_exhaustion: bool = False,
         ema3_cross_age: int = 999,
+        ema_50: float = None,
+        psar_direction: int = 0,
+        psar_trend_age: int = 0,
     ) -> dict:
         """
         Construye el contexto de evaluación para un ticker.
@@ -131,6 +134,17 @@ class StocksRuleEngine:
             "apex_signal": str(snap.get("apex_signal", "") or ""),
             "volume": float(snap.get("volume", 0) or 0),
             "low": float(snap.get("low", 0) or 0),
+            "ema_50": ema_50 if ema_50 is not None else snap.get("ema_50"),
+            "psar_direction": psar_direction,
+            "psar_trend_age": psar_trend_age,
+            "pine_signal_age": int(snap.get("signal_age", 999)),
+            "ema_3_1d": float(snap.get("ema_3_1d", 0.0)),
+            "ema_9_1d": float(snap.get("ema_9_1d", 0.0)),
+            "ema_20_1d": float(snap.get("ema_20_1d", 0.0)),
+            "ema_50_1d": float(snap.get("ema_50_1d", 0.0)),
+            "ema_3_4h": float(snap.get("ema_3_4h", 0.0)),
+            "ema_9_4h": float(snap.get("ema_9_4h", 0.0)),
+            "ema_20_4h": float(snap.get("ema_20_4h", 0.0)),
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -721,6 +735,43 @@ class StocksRuleEngine:
             # Requisito 5: RSI no sobrecomprado
             if rsi_5m >= 70:
                 failures.append(f"RSI overbought: {rsi_5m:.1f} >= 70")
+
+        # ── CHECK 12: HOT_DIP_BUY / PRO_DIP_BUY (Macro Trend / Daily Dip) ──
+        if normalized_code == "HOT_DIP_BUY" or normalized_code == "PRO_DIP_BUY":
+            ema3_1d   = float(context.get("ema_3_1d") or 0)
+            ema9_1d   = float(context.get("ema_9_1d") or 0)
+            ema20_1d  = float(context.get("ema_20_1d") or 0)
+            ema3_4h   = float(context.get("ema_3_4h") or 0)
+            ema9_4h   = float(context.get("ema_9_4h") or 0)
+            ema20_4h  = float(context.get("ema_20_4h") or 0)
+            
+            low_15m   = float(context.get("low") or 0)
+            close_price = float(context.get("close") or 0)
+
+            # Validar que tengamos datos macro
+            if ema20_1d <= 0 or ema20_4h <= 0:
+                failures.append("Missing 1D or 4H EMA data for Macro DIP strategies")
+            else:
+                # Casuística A: EMA3 > EMA9 en 4H y 1D (cruce concreto) + Previamente EMA9 > EMA20
+                caso_a_1d = (ema3_1d > ema9_1d) and (ema9_1d > ema20_1d)
+                caso_a_4h = (ema3_4h > ema9_4h) and (ema9_4h > ema20_4h)
+                caso_a_ok = caso_a_1d and caso_a_4h
+
+                # Casuística B: EMA3 > EMA9 > EMA20 (1D) + Pullback del precio actual a EMA9 o EMA20 diaria
+                caso_b_1d = (ema3_1d > ema9_1d and ema9_1d > ema20_1d)
+                caso_b_pullback = (low_15m > 0 and (low_15m <= ema9_1d or low_15m <= ema20_1d))
+                # Safety check: que el precio de cierre no haya destrozado la EMA20 diaria completamente
+                caso_b_safety = (close_price >= ema20_1d * 0.99)
+                
+                caso_b_ok = caso_b_1d and caso_b_pullback and caso_b_safety
+
+                if not (caso_a_ok or caso_b_ok):
+                    failures.append(
+                        f"No cumple Casuística A (EMA3>EMA9>EMA20 en 4H y 1D) "
+                        f"ni Casuística B (1D alcista + LOW <= EMA9/20 diaria). "
+                        f"1D: {ema3_1d:.2f}|{ema9_1d:.2f}|{ema20_1d:.2f} "
+                        f"4H: {ema3_4h:.2f}|{ema9_4h:.2f}|{ema20_4h:.2f}"
+                    )
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

@@ -406,6 +406,52 @@ def check_open_vs_close_prev(
 # MÓDULO 5 — FUNCIÓN PRINCIPAL DE DECISIÓN
 # ═══════════════════════════════════════════
 
+def check_sipv_bb_sell_condition(df: pd.DataFrame, timeframe: str) -> tuple[bool, str]:
+    """
+    Checks if df has a SIPV 'sell' signal AND the High of the last completed candle
+    (or current candle if applicable) is greater than the Bollinger Upper Band (20, 2).
+    Returns (triggered, reason_details).
+    """
+    if df is None or len(df) < 20:
+        return False, "Not enough candles"
+    
+    # Determine column names (handle capitalized format)
+    c_col = 'close' if 'close' in df.columns else 'Close'
+    h_col = 'high' if 'high' in df.columns else 'High'
+    
+    # Calculate Bollinger Bands (20 periods, 2 standard deviations)
+    close_series = pd.to_numeric(df[c_col], errors='coerce').dropna()
+    high_series = pd.to_numeric(df[h_col], errors='coerce').dropna()
+    
+    if len(close_series) < 20 or len(high_series) < 20:
+        return False, "Not enough numeric candles"
+        
+    sma20 = close_series.rolling(window=20).mean()
+    std20 = close_series.rolling(window=20).std()
+    bb_upper = sma20 + 2 * std20
+    
+    sipv_res = get_sipv_signal(df, timeframe)
+    is_sipv_sell = sipv_res.get('is_sell', False)
+    
+    last_closed_high = float(high_series.iloc[-2])
+    last_closed_bb_upper = float(bb_upper.iloc[-2])
+    
+    current_high = float(high_series.iloc[-1])
+    current_bb_upper = float(bb_upper.iloc[-1])
+    
+    high_exceeded = (last_closed_high > last_closed_bb_upper) or (current_high > current_bb_upper)
+    
+    if is_sipv_sell and high_exceeded:
+        reason = (
+            f"SIPV Sell ({sipv_res['body_pct']:.1f}% body) AND High exceeded Bollinger Upper. "
+            f"Closed High: {last_closed_high:.2f} vs BB: {last_closed_bb_upper:.2f} | "
+            f"Current High: {current_high:.2f} vs BB: {current_bb_upper:.2f}"
+        )
+        return True, reason
+        
+    return False, f"SIPV Sell={is_sipv_sell}, High Exceeded={high_exceeded}"
+
+
 def evaluate_stock_tp_v2(
     ticker:        str,
     position:      dict,
@@ -413,6 +459,7 @@ def evaluate_stock_tp_v2(
     snap:          dict,
     df_15m:        pd.DataFrame,
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
     df_4h:         pd.DataFrame = None,
     rvol:          float = 1.0,
     sar_15m:       int   = 1,
@@ -556,6 +603,10 @@ def evaluate_stock_tp_v2(
     # ── Calcular indicadores (necesarios para debug_indicators) ──
     ema      = get_ema_trend(df_15m, rvol)
     sipv_15m = get_sipv_signal(df_15m, '15m')
+    sipv_1h  = get_sipv_signal(df_1h, '1h') \
+               if df_1h is not None \
+               else {'signal': 'doji', 'is_buy': True,
+                     'is_sell': False, 'is_doji': True}
     sipv_4h  = get_sipv_signal(df_4h, '4h') \
                if df_4h is not None \
                else {'signal': 'doji', 'is_buy': True,
@@ -612,46 +663,38 @@ def evaluate_stock_tp_v2(
     debug_indicators = {
         'ema': ema,
         'sipv_15m': sipv_15m,
+        'sipv_1h': sipv_1h,
         'sipv_4h': sipv_4h,
         'fib': fib
     }
 
-    # ── PASO 1: SEMÁFORO 4H ───────────────────
-    if sipv_4h['is_sell']:
-        remaining = shares_rem if shares_rem > 0 \
-                    else b2_shares + b3_shares
-        return {
-            'action':  'close_total',
-            'pct':     100,
-            'shares':  remaining,
-            'trigger': 'sipv_4h_sell',
-            'ema':     ema,
-            'sipv_4h': sipv_4h,
-            'debug_indicators': debug_indicators,
-            'reason': (
-                f'SEMÁFORO 4H ROJO: '
-                f'SIPV 4H = SELL → '
-                f'CIERRE TOTAL {remaining} shares. '
-                f'Ganancia: +{gain_pct:.2f}%'
-            ),
-        }
+    # ── PASO 1: SEMÁFORO MULTI-TIMEFRAME (15m, 1h, 4h) + BOLLINGER ──
+    for tf, df_tf in [('15m', df_15m), ('1h', df_1h), ('4h', df_4h)]:
+        if df_tf is not None:
+            triggered, details = check_sipv_bb_sell_condition(df_tf, tf)
+            if triggered:
+                if 0 <= gain_pct < 1.0:
+                    return {
+                        'action': 'hold',
+                        'trigger': f'sipv_bb_sell_blocked_{tf}',
+                        'debug_indicators': debug_indicators,
+                        'reason': f'MULTI-TIMEFRAME EXIT ({tf}) detectado, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
+                    }
+                remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
+                return {
+                    'action':  'close_total',
+                    'pct':     100,
+                    'shares':  remaining,
+                    'trigger': f'sipv_bb_sell_{tf}',
+                    'debug_indicators': debug_indicators,
+                    'reason': (
+                        f'MULTI-TIMEFRAME EXIT ({tf}): {details}. '
+                        f'CIERRE TOTAL {remaining} shares. '
+                        f'Ganancia: +{gain_pct:.2f}%'
+                    ),
+                }
 
-    # ── PASO 2: SIPV 15m SELL (Reemplaza EMA down por solicitud de usuario) ──
-    # Se expande el margen: no cerramos por simple cruce de EMA, sino por vela bajista confirmada.
-    if sipv_15m['is_sell']:
-        remaining = shares_rem if shares_rem > 0 \
-                    else b2_shares + b3_shares
-        return {
-            'action':  'close_total',
-            'pct':     100,
-            'shares':  remaining,
-            'trigger': 'sipv_15m_sell',
-            'debug_indicators': debug_indicators,
-            'reason': (
-                f'SIPV 15m = SELL: '
-                f'CIERRE TOTAL {remaining} shares por señal bajista confirmada.'
-            ),
-        }
+    # ── PASO 2: Removido (integrado en el semáforo con filtro Bollinger en Paso 1) ──
 
     # ── NUEVO PASO SCALPING (HOT GROUP) EN 5M ──
     if is_hot and df_5m is not None and len(df_5m) >= 20:
@@ -680,6 +723,13 @@ def evaluate_stock_tp_v2(
         
         # Escenario 1: Agotamiento Parabólico
         if prev_close > prev_bb_upper and (curr_low < prev_low or curr_high < prev_high):
+            if 0 <= gain_pct < 1.0:
+                return {
+                    'action': 'hold',
+                    'trigger': 'hot_parabolic_exhaustion_blocked',
+                    'debug_indicators': debug_indicators,
+                    'reason': f'HOT SCALPING detectado, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
+                }
             remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
             return {
                 'action':  'close_total',
@@ -696,6 +746,13 @@ def evaluate_stock_tp_v2(
             
         # Escenario 2: Reversión de Tendencia Corta
         if ema3_5m.iloc[-1] < ema9_5m.iloc[-1] and bb_upper_slope <= 0:
+            if 0 <= gain_pct < 1.0:
+                return {
+                    'action': 'hold',
+                    'trigger': 'hot_trend_reversal_blocked',
+                    'debug_indicators': debug_indicators,
+                    'reason': f'HOT SCALPING Reversión detectada, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
+                }
             remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
             return {
                 'action':  'close_total',
@@ -759,6 +816,14 @@ def evaluate_stock_tp_v2(
     ema_squeezing_down = ema['is_up'] and (ema['diff_pct'] < 5.0) and ema['ema3_curving_down']
 
     if ema_crossed_down or close_above_upper6 or rsi_extreme or candle_above_bb or ema_squeezing_down:
+        if 0 <= gain_pct < 1.0:
+            return {
+                'action': 'hold',
+                'trigger': 'exit_rule_v5_blocked',
+                'debug_indicators': debug_indicators,
+                'reason': f'REGLAS DINÁMICAS V5.3 detectaron salida, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
+            }
+            
         remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
         # Determinar qué condición activó el cierre
         if ema_crossed_down:

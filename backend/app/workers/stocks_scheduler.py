@@ -734,16 +734,34 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             ema_20=ind_15m.get("ema_20"),
             bb_expanding=bb_expanding,
             ema_exhaustion=ema_exhaustion,
-            ema3_cross_age=ind_15m.get("ema3_cross_ema9_age", 999)
+            ema3_cross_age=ind_15m.get("ema3_cross_ema9_age", 999),
+            ema_50=ind_15m.get("ema_50")
         )
+        # ── Calculate PSAR Trend Age ──
+        psar_trend_age = 0
+        if "psar_direction" in df_15m.columns:
+            last_dir = df_15m["psar_direction"].iloc[-1]
+            for i in range(len(df_15m) - 2, -1, -1):
+                if df_15m["psar_direction"].iloc[i] == last_dir:
+                    psar_trend_age += 1
+                else:
+                    break
+        rule_ctx['psar_direction'] = ind_15m.get("psar_direction")
+        rule_ctx['psar_trend_age'] = psar_trend_age
+        
         # ── Inyectar indicadores de 5 minutos al contexto ──
         rule_ctx['ema_3_5m'] = ema_3_5m
         rule_ctx['ema_9_5m'] = ema_9_5m
         rule_ctx['ema_20_5m'] = ema_20_5m
         rule_ctx['ema_3_1d'] = float(ind_1d.get("ema_3") or 0.0)
         rule_ctx['ema_9_1d'] = float(ind_1d.get("ema_9") or 0.0)
+        rule_ctx['ema_20_1d'] = float(ind_1d.get("ema_20") or 0.0)
         rule_ctx['ema_50_1d'] = float(ind_1d.get("ema_50") or 0.0)
         rule_ctx['ema_200_1d'] = float(ind_1d.get("ema_200") or 999999.0)
+        
+        rule_ctx['ema_3_4h'] = float(ind_4h.get("ema_3") or 0.0)
+        rule_ctx['ema_9_4h'] = float(ind_4h.get("ema_9") or 0.0)
+        rule_ctx['ema_20_4h'] = float(ind_4h.get("ema_20") or 0.0)
         rule_ctx['bb_expanding_5m'] = bb_expanding_5m
         rule_ctx['rsi_5m'] = rsi_5m
         rule_ctx['gap_up_exhaustion'] = gap_up_exhaustion
@@ -1447,9 +1465,15 @@ async def run_stocks_tp_v2_cycle():
 
             # ── TP Adaptativo v2 ───────────────
             result = evaluate_stock_tp_v2(
-                ticker, pos, price, snap,
-                df_15m, df_5m, df_4h,
-                rvol, sar_15m
+                ticker=ticker, 
+                position=pos, 
+                current_price=price, 
+                snap=snap,
+                df_15m=df_15m, 
+                df_5m=df_5m, 
+                df_4h=df_4h,
+                rvol=rvol, 
+                sar_15m=sar_15m
             )
 
             action = result.get('action', 'hold')
