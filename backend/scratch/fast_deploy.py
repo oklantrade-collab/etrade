@@ -14,7 +14,8 @@ files_to_sync = [
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/stocks/stocks_rule_engine.py",
     "app/api/stocks.py",
-    "app/core/safety_manager.py"
+    "app/core/safety_manager.py",
+    "app/strategy/rule_engine.py"
 ]
 
 def check_syntax():

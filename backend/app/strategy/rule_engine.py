@@ -999,6 +999,60 @@ def build_market_data_dict(
         "ema_alignment_short": (ema3 < ema9) and (ema9 < ema20) and (ema20 < ema50),
     })
 
+    # === NEW LIMIT STRATEGIES LOGIC ===
+    open_px = float(last.get("open", 0))
+    low_px = float(last.get("low", 0))
+    high_px = float(last.get("high", 0))
+    lower_5 = float(last.get("lower_5", 0)) if pd.notna(last.get("lower_5")) else 0.0
+    lower_6 = float(last.get("lower_6", 0)) if pd.notna(last.get("lower_6")) else 0.0
+    upper_5 = float(last.get("upper_5", 0)) if pd.notna(last.get("upper_5")) else 0.0
+    upper_6 = float(last.get("upper_6", 0)) if pd.notna(last.get("upper_6")) else 0.0
+    lower_bb = float(last.get("lower_band", lower_5)) if pd.notna(last.get("lower_band")) else lower_5
+    upper_bb = float(last.get("upper_band", upper_5)) if pd.notna(last.get("upper_band")) else upper_5
+
+    # Dd11 (LONG Limit Extremo)
+    dd11_limit_ok = False
+    if lower_5 > 0 and low_px <= lower_5 and (open_px < lower_bb or rsi_14_val <= 15):
+        dd11_limit_ok = True
+    if lower_6 > 0 and low_px <= lower_6:
+        dd11_limit_ok = True
+
+    # Dd12 (SHORT Limit Extremo)
+    dd12_limit_ok = False
+    if upper_5 > 0 and high_px >= upper_5 and (open_px > upper_bb or rsi_14_val >= 85):
+        dd12_limit_ok = True
+    if upper_6 > 0 and high_px >= upper_6:
+        dd12_limit_ok = True
+
+    # Aa21 (Trend Pullback LONG)
+    aa21_limit_ok = False
+    if ema3 > ema9 and ema9 > ema20 and float(last["close"]) > ema20 * 1.001:
+        aa21_limit_ok = True
+
+    # Bb21 (Trend Pullback SHORT)
+    bb21_limit_ok = False
+    if ema3 < ema9 and ema9 < ema20 and ema20 < ema50 and float(last["close"]) < ema20 * 0.999:
+        bb21_limit_ok = True
+
+    # Aa40 (Flash Crash Capitulation LONG)
+    aa40_limit_ok = False
+    if ema3 < ema9 and ema9 < ema20 and ema20 < ema50 and (bb_exp or rsi_14_val <= 15):
+        aa40_limit_ok = True
+
+    # Bb40 (Flash Crash Euphoria SHORT)
+    bb40_limit_ok = False
+    if ema3 > ema9 and ema9 > ema20 and ema20 > ema50 and (bb_exp or rsi_14_val >= 85):
+        bb40_limit_ok = True
+
+    data.update({
+        "dd11_limit_ok": dd11_limit_ok,
+        "dd12_limit_ok": dd12_limit_ok,
+        "aa21_limit_ok": aa21_limit_ok,
+        "bb21_limit_ok": bb21_limit_ok,
+        "aa40_limit_ok": aa40_limit_ok,
+        "bb40_limit_ok": bb40_limit_ok,
+    })
+
     return data
 
 
@@ -1079,7 +1133,8 @@ def evaluate_all_rules(
     elif source_tf == "30m":
         max_age = 4
         
-    signal_age = int(last.get("signal_age", 0))
+    sa = last.get("signal_age", 0)
+    signal_age = int(sa) if pd.notna(sa) else 0
     if pinescript_signal in ["Buy", "Sell"] and source_tf == "15m" and signal_age > max_age:
         # For 15m, strict age check
         return None
@@ -1155,10 +1210,22 @@ def evaluate_all_rules(
         if direction_filter == "long" and rule.get("rule_code") != "AaHot":
             if "short" in ema20_phase or fib_zone >= 4:
                 continue
+            
+            # Filtro MTF de Caída Libre en 5m (Evitar Cuchillos Cayendo)
+            # Si en 5m la EMA3 < EMA9 < EMA20, bloqueamos la entrada LONG
+            if market_data.get("ema3_below_ema9_5m") and market_data.get("ema9_below_ema20_5m"):
+                log_info(MODULE, f"Bloqueo MTF LONG ({rule.get('rule_code')}): Tendencia 5m en caída libre (EMA3 < EMA9 < EMA20). Esperando estabilización.", None, cycle_id)
+                continue
 
         # 2. Bloqueo para SHORT
         if direction_filter == "short" and rule.get("rule_code") != "BbHot":
             if "long" in ema20_phase or fib_zone <= -4:
+                continue
+            
+            # Filtro MTF de Vuelo Libre en 5m (Evitar shortear cohetes)
+            # Si en 5m la EMA3 > EMA9 > EMA20, bloqueamos la entrada SHORT
+            if market_data.get("ema3_above_ema9_5m") and market_data.get("ema9_above_ema20_5m"):
+                log_info(MODULE, f"Bloqueo MTF SHORT ({rule.get('rule_code')}): Tendencia 5m en vuelo libre (EMA3 > EMA9 > EMA20). Esperando estabilización.", None, cycle_id)
                 continue
         if evaluate_rule_conditions(rule, market_data):
             log_info(
