@@ -306,6 +306,21 @@ def validate_signal(
                         f"Filtro sobreventa Bollinger (Bb52) activo: precio ${price:.5f} <= bb_lower (lower_2) ${bb_lower:.5f}"
                     )
 
+    # CHECK 9: Filtro MTF de Caída Libre en 5m (Evitar Cuchillos Cayendo)
+    if not errors and snap and market_type == 'forex_futures' and direction and rule_code:
+        rc = str(rule_code).strip().lower()
+        if 'hot' not in rc:
+            ema3_5m = safe_float(snap.get('ema3_5m', 0))
+            ema9_5m = safe_float(snap.get('ema9_5m', 0))
+            ema20_5m = safe_float(snap.get('ema20_5m', 0))
+            if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                if direction.lower() == 'long':
+                    if ema3_5m < ema9_5m and ema9_5m < ema20_5m:
+                        errors.append(f"Bloqueo MTF LONG ({rc}): Tendencia 5m en caída libre (EMA3={ema3_5m:.5f} < EMA9={ema9_5m:.5f} < EMA20={ema20_5m:.5f})")
+                elif direction.lower() == 'short':
+                    if ema3_5m > ema9_5m and ema9_5m > ema20_5m:
+                        errors.append(f"Bloqueo MTF SHORT ({rc}): Tendencia 5m en vuelo libre (EMA3={ema3_5m:.5f} > EMA9={ema9_5m:.5f} > EMA20={ema20_5m:.5f})")
+
     if errors:
         log_info('SAFETY',
                  f'⚠️ Señal rechazada [{symbol}]: '

@@ -348,6 +348,14 @@ async def write_forex_snapshot(
         upsert_data['rsi_14'] = float(last.get('rsi_14', last.get('rsi', 50)))
         upsert_data['macd_histogram'] = float(last.get('macd_histogram', last.get('macd', 0)))
         
+        df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+        if df_5m is not None and not df_5m.empty:
+            last_5m = df_5m.iloc[-1]
+            upsert_data['ema3_5m'] = float(last_5m.get('ema1', last_5m.get('ema_3', 0)))
+            upsert_data['ema9_5m'] = float(last_5m.get('ema2', last_5m.get('ema_9', 0)))
+            upsert_data['ema20_5m'] = float(last_5m.get('ema3', last_5m.get('ema_20', 0)))
+
+        
         # Calcular Bollinger Bands estándar (20, 2)
         try:
             rolling_mean = df['close'].rolling(20).mean()
@@ -374,7 +382,15 @@ async def write_forex_snapshot(
         if sar_changed:
             db_data['sar_phase_changed_at'] = changed_at_iso
 
-        sb.table('market_snapshot').upsert(db_data).execute()
+        import math
+        clean_db_data = {}
+        for k, v in db_data.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                clean_db_data[k] = None
+            else:
+                clean_db_data[k] = v
+
+        sb.table('market_snapshot').upsert(clean_db_data).execute()
         
         # Actualizar caché en memoria completo (incluyendo indicadores rápidos)
         MARKET_SNAPSHOT_CACHE[symbol] = upsert_data
@@ -1005,24 +1021,56 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
             elif reversal.get('should_modify_oco_breakeven'):
                 target_tp = reversal['target_tp_price']
-                current_tp = float(position.get('tp_price') or 0)
+                rev_start_str = position.get('sl_activated_at')
+                is_rev_be = position.get('sl_type') == 'reversal_be'
                 
-                # Check if already modified
-                if current_tp > 0 and abs(current_tp - target_tp) / target_tp < 0.001:
-                    pass
-                else:
+                now_utc = datetime.now(timezone.utc)
+                if not rev_start_str or not is_rev_be:
                     try:
-                        sb.table('forex_positions').update({'tp_price': target_tp}).eq('id', position['id']).execute()
+                        sb.table('forex_positions').update({
+                            'tp_price': target_tp,
+                            'sl_type': 'reversal_be',
+                            'sl_activated_at': now_utc.isoformat(),
+                            'sl_activation_reason': 'ema_reversal_exact_be'
+                        }).eq('id', position['id']).execute()
                         position['tp_price'] = target_tp
+                        position['sl_type'] = 'reversal_be'
+                        position['sl_activated_at'] = now_utc.isoformat()
                         
                         log_info(MODULE, f"Forex Break-Even Modificado para {symbol} a TP={target_tp}")
                         await send_telegram_message(
                             f"🛡️ DEFENSA BREAK-EVEN FOREX [{symbol}]\n"
                             f"Reversión rápida 15m detectada.\n"
-                            f"TP ajustado a {target_tp:.5f}."
+                            f"TP ajustado a {target_tp:.5f}.\n"
+                            f"Inicia contador de 45m para cierre de emergencia."
                         )
                     except Exception as e:
                         log_error(MODULE, f"Error updating Forex TP to Break-Even for {symbol}: {e}")
+                else:
+                    try:
+                        rev_dt = datetime.fromisoformat(rev_start_str.replace('Z', '+00:00'))
+                        elapsed_min = (now_utc - rev_dt).total_seconds() / 60
+                        if elapsed_min >= 45:
+                            entry_p_rev = float(position.get('entry_price') or position.get('avg_entry_price') or 0)
+                            loss_pct = 0
+                            if entry_p_rev > 0:
+                                side_check = (position.get('side') or '').lower()
+                                if side_check in ('long', 'buy'):
+                                    loss_pct = (entry_p_rev - current_price) / entry_p_rev * 100
+                                else:
+                                    loss_pct = (current_price - entry_p_rev) / entry_p_rev * 100
+                            
+                            if 0 <= loss_pct <= 0.50:
+                                await _execute_paper_close(position, current_price, 'ema_reversal_timeout_market', sb)
+                                await send_telegram_message(
+                                    f"⏳ CIERRE POR TIMEOUT DE REVERSIÓN FOREX [{symbol}]\n"
+                                    f"Tiempo superado: {elapsed_min:.1f}m\n"
+                                    f"Pérdida aceptada: -{loss_pct:.2f}%\n"
+                                    f"Detalle: Cerrado por Market para evitar mayor caída (límite 0.5%)."
+                                )
+                                continue
+                    except Exception as e:
+                        log_error(MODULE, f"Error checking forex reversal timeout for {symbol}: {e}")
 
             # 6. SL/SLV/Recovery check (integrated virtual stop loss for paper mode)
             sl = float(position.get('sl_price', 0))
