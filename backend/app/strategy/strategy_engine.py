@@ -255,10 +255,10 @@ class StrategyEngine:
 
         ema20_ascending_1h = False
         ema20_descending_1h = False
+        low_below_bb_lower_1h = False
+        bb_lower_ascending_1h = False
         if symbol:
             df_1h = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
-            low_below_bb_lower_1h = False
-            bb_lower_ascending_1h = False
 
             if df_1h is not None and len(df_1h) >= 3:
                 c1h_col = 'Close' if 'Close' in df_1h.columns else 'close'

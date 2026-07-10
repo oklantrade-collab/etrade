@@ -376,7 +376,7 @@ async def write_forex_snapshot(
 
         # Preparar datos para base de datos (excluyendo campos solo de caché)
         db_data = upsert_data.copy()
-        for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower']:
+        for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower', 'ema3_5m', 'ema9_5m', 'ema20_5m']:
             db_data.pop(k, None)
 
         if sar_changed:
