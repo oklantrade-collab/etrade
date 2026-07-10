@@ -811,40 +811,34 @@ class StocksRuleEngine:
             if high_price >= bb_upper:
                 failures.append(f"DIP_BUY Rechazado: Precio en la cima de Bollinger ({high_price:.2f} >= {bb_upper:.2f})")
 
-            # Validar alineación alcista en 15 minutos obligatoria
-            if ema3_15m > 0 and ema9_15m > 0 and ema20_15m > 0:
-                if not (ema3_15m > ema9_15m and ema9_15m > ema20_15m):
-                    failures.append(f"DIP_BUY Rechazado: 15m EMA Not Aligned (EMA3={ema3_15m:.2f}, EMA9={ema9_15m:.2f}, EMA20={ema20_15m:.2f})")
-            else:
-                failures.append("DIP_BUY Rechazado: Faltan datos de EMA 15m")
-
-
-            # Validar que tengamos datos macro
-            if ema20_1d <= 0 or ema20_4h <= 0:
-                failures.append("Missing 1D or 4H EMA data for Macro DIP strategies")
+            # Validar que tengamos datos macro e intradía
+            if ema20_1d <= 0 or ema20_4h <= 0 or ema20_15m <= 0:
+                failures.append("Missing 1D, 4H or 15m EMA data for Macro DIP strategies")
             else:
                 allow_case_a = rule.get("enable_case_a", True)
                 allow_case_b = rule.get("enable_case_b", True)
                 
-                # Casuística A: EMA3 > EMA9 en 4H y 1D (cruce concreto) + Previamente EMA9 > EMA20
+                # Casuística A (Pullback Intradía a EMA20 de 15m): 
+                # Tendencia 1D y 4H alcista, y el precio ha retrocedido tocando la EMA20 de 15m
                 caso_a_1d = (ema3_1d > ema9_1d) and (ema9_1d > ema20_1d)
                 caso_a_4h = (ema3_4h > ema9_4h) and (ema9_4h > ema20_4h)
-                caso_a_ok = caso_a_1d and caso_a_4h and allow_case_a
+                caso_a_pullback = (low_15m > 0 and low_15m <= ema20_15m)
+                caso_a_safety = (close_price >= ema20_15m * 0.995)
+                
+                caso_a_ok = caso_a_1d and caso_a_4h and caso_a_pullback and caso_a_safety and allow_case_a
 
-                # Casuística B: EMA3 > EMA9 > EMA20 (1D) + Pullback del precio actual a EMA9 o EMA20 diaria
+                # Casuística B (Deep Dip Diario a EMA9/20 de 1D):
+                # Tendencia 1D alcista y el precio ha tocado la EMA9 o EMA20 diaria
                 caso_b_1d = (ema3_1d > ema9_1d and ema9_1d > ema20_1d)
                 caso_b_pullback = (low_15m > 0 and (low_15m <= ema9_1d or low_15m <= ema20_1d))
-                # Safety check: que el precio de cierre no haya destrozado la EMA20 diaria completamente
                 caso_b_safety = (close_price >= ema20_1d * 0.99)
                 
                 caso_b_ok = caso_b_1d and caso_b_pullback and caso_b_safety and allow_case_b
 
                 if not (caso_a_ok or caso_b_ok):
                     failures.append(
-                        f"No cumple Casuística A (EMA3>EMA9>EMA20 en 4H y 1D, allowed={allow_case_a}) "
-                        f"ni Casuística B (1D alcista + LOW <= EMA9/20 diaria, allowed={allow_case_b}). "
-                        f"1D: {ema3_1d:.2f}|{ema9_1d:.2f}|{ema20_1d:.2f} "
-                        f"4H: {ema3_4h:.2f}|{ema9_4h:.2f}|{ema20_4h:.2f}"
+                        f"No cumple Casuística A (4H/1D alcista + Pullback a EMA20_15m, allowed={allow_case_a}) "
+                        f"ni Casuística B (1D alcista + Pullback a EMA9/20_1D, allowed={allow_case_b})."
                     )
 
         # ── CHECK 13: BLOQUEO PRO_CANDLE_SELL EN PÉRDIDA ──
