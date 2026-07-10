@@ -200,6 +200,19 @@ class StocksRuleEngine:
                 if ema_3_15m < ema_9_15m and ema_9_15m < ema_20_15m:
                     failures.append(f"15m Bearish Waterfall (No Buy): EMA3 ({ema_3_15m:.2f}) < EMA9 ({ema_9_15m:.2f}) < EMA20 ({ema_20_15m:.2f})")
 
+        # ── CHECK 0.5: Global Intraday Exhaustion Filter ──
+        if direction == "buy":
+            rsi_15m_val = float(context.get("rsi_14") or 50.0)
+            bb_upper_val = float(context.get("bb_upper") or 99999.0)
+            close_px = float(context.get("close") or 0.0)
+            
+            # Bloquear compras si el RSI intradía está en sobrecompra extrema (>= 70)
+            if rsi_15m_val >= 70.0:
+                failures.append(f"Global Exhaustion (No Buy): RSI 15m ({rsi_15m_val:.1f}) >= 70")
+                
+            # Bloquear compras si el precio de cierre está sobre la banda superior de Bollinger
+            if close_px >= bb_upper_val:
+                failures.append(f"Global Exhaustion (No Buy): Close ({close_px:.2f}) >= BB_Upper ({bb_upper_val:.2f})")
 
         # ── CHECK 1: IA Score ─────────────────────────────
         ia_min = float(rule.get("ia_min") or 0)
@@ -735,6 +748,41 @@ class StocksRuleEngine:
             # Requisito 5: RSI no sobrecomprado
             if rsi_5m >= 70:
                 failures.append(f"RSI overbought: {rsi_5m:.1f} >= 70")
+
+        # ── CHECK 11.5: Aa21_STK (Trend Pullback LIMIT) ──
+        if normalized_code == "Aa21_STK":
+            ema20_1d  = float(context.get("ema_20_1d") or 0)
+            ema50_1d  = float(context.get("ema_50_1d") or 0)
+            ema3_15m  = float(context.get("ema_3") or 0)
+            ema9_15m  = float(context.get("ema_9") or 0)
+            ema20_15m = float(context.get("ema_20") or 0)
+            ema50_15m = float(context.get("ema_50") or 0)
+            rsi_15m   = float(context.get("rsi_14") or 50.0)
+            
+            # 1. Macro Trend: EMA20_1d > EMA50_1d
+            if ema20_1d > 0 and ema50_1d > 0:
+                if ema20_1d <= ema50_1d:
+                    failures.append(f"Macro Bearish: EMA20_1D ({ema20_1d:.2f}) <= EMA50_1D ({ema50_1d:.2f})")
+            else:
+                failures.append("Faltan datos diarios de EMA20/EMA50")
+
+            # 2. Micro Trend 15m: EMA3 > EMA9 > EMA20 > EMA50
+            if ema3_15m > 0 and ema9_15m > 0 and ema20_15m > 0 and ema50_15m > 0:
+                if not (ema3_15m > ema9_15m and ema9_15m > ema20_15m and ema20_15m > ema50_15m):
+                    failures.append(
+                        f"Trend 15m not perfectly aligned: EMA3={ema3_15m:.2f} EMA9={ema9_15m:.2f} "
+                        f"EMA20={ema20_15m:.2f} EMA50={ema50_15m:.2f}"
+                    )
+            else:
+                failures.append("Faltan datos de EMA en 15m para Trend Pullback")
+
+            # 3. No overbought
+            if rsi_15m >= 65:
+                failures.append(f"RSI 15m overbought: {rsi_15m:.1f} >= 65")
+
+            # 4. Set Limit Price (EMA20 of 15m)
+            if len(failures) == 0:
+                smart_limit_price = round(ema20_15m, 2)
 
         # ── CHECK 12: HOT_DIP_BUY / PRO_DIP_BUY (Macro Trend / Daily Dip) ──
         if normalized_code == "HOT_DIP_BUY" or normalized_code == "PRO_DIP_BUY":
