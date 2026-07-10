@@ -464,6 +464,40 @@ def evaluate_stock_tp_v2(
     rvol:          float = 1.0,
     sar_15m:       int   = 1,
 ) -> dict:
+    """Wrapper para bloquear salidas (TP) con menos de 1 dolar de ganancia"""
+    res = _evaluate_stock_tp_v2_core(
+        ticker, position, current_price, snap, df_15m, df_5m, df_1h, df_4h, rvol, sar_15m
+    )
+    
+    action = res.get('action', 'hold')
+    if action in ['close_total', 'close_partial', 'close_block1', 'close_block2', 'close_block3', 'close_blocks_2_and_3']:
+        entry_price  = safe_float(position.get('avg_price', position.get('entry_price', 0)))
+        shares_rem   = safe_int(position.get('shares_remaining', position.get('shares', 0)))
+        
+        # Calcular PnL en USD
+        if entry_price > 0 and shares_rem > 0:
+            pnl_usd = (current_price - entry_price) * shares_rem
+            
+            # Si está en ganancia pero es menos de 1 USD (centavos), la retenemos
+            if 0 < pnl_usd < 1.0:
+                res['action'] = 'hold'
+                res['reason'] = f"Bloqueado: Ganancia de ${pnl_usd:.2f} USD es menor a $1.00 USD. " + res.get('reason', '')
+                res['trigger'] = 'min_profit_usd_blocked'
+                
+    return res
+
+def _evaluate_stock_tp_v2_core(
+    ticker:        str,
+    position:      dict,
+    current_price: float,
+    snap:          dict,
+    df_15m:        pd.DataFrame,
+    df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
+    df_4h:         pd.DataFrame = None,
+    rvol:          float = 1.0,
+    sar_15m:       int   = 1,
+) -> dict:
     """
     Función principal de TP Adaptativo v2.
     """
@@ -746,13 +780,6 @@ def evaluate_stock_tp_v2(
             
         # Escenario 2: Reversión de Tendencia Corta
         if ema3_5m.iloc[-1] < ema9_5m.iloc[-1] and bb_upper_slope <= 0:
-            if 0 <= gain_pct < 1.0:
-                return {
-                    'action': 'hold',
-                    'trigger': 'hot_trend_reversal_blocked',
-                    'debug_indicators': debug_indicators,
-                    'reason': f'HOT SCALPING Reversión detectada, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
-                }
             remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
             return {
                 'action':  'close_total',
@@ -837,14 +864,6 @@ def evaluate_stock_tp_v2(
     ema_squeezing_down = ema['is_up'] and (ema['diff_pct'] < 5.0) and ema['ema3_curving_down']
 
     if ema_crossed_down or close_above_upper6 or rsi_extreme or candle_above_bb or ema_squeezing_down:
-        if 0 <= gain_pct < 1.0:
-            return {
-                'action': 'hold',
-                'trigger': 'exit_rule_v5_blocked',
-                'debug_indicators': debug_indicators,
-                'reason': f'REGLAS DINÁMICAS V5.3 detectaron salida, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
-            }
-            
         remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
         # Determinar qué condición activó el cierre
         if ema_crossed_down:
