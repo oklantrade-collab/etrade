@@ -815,30 +815,24 @@ class StocksRuleEngine:
             if ema20_1d <= 0 or ema20_4h <= 0 or ema20_15m <= 0:
                 failures.append("Missing 1D, 4H or 15m EMA data for Macro DIP strategies")
             else:
-                allow_case_a = rule.get("enable_case_a", True)
-                allow_case_b = rule.get("enable_case_b", True)
+                # ── REGLA ESTRICTA DE DIP DIARIO (EMA20 1D) ──
+                # Eliminamos la Casuística A (pullbacks intradía de 15m) porque estaban
+                # ejecutando compras altas. Ahora EXIGIMOS tocar la EMA20 Diaria.
                 
-                # Casuística A (Pullback Intradía a EMA20 de 15m): 
-                # Tendencia 1D y 4H alcista, y el precio ha retrocedido tocando la EMA20 de 15m
-                caso_a_1d = (ema3_1d > ema9_1d) and (ema9_1d > ema20_1d)
-                caso_a_4h = (ema3_4h > ema9_4h) and (ema9_4h > ema20_4h)
-                caso_a_pullback = (low_15m > 0 and low_15m <= ema20_15m)
-                caso_a_safety = (close_price >= ema20_15m * 0.995)
+                # 1. Tendencia 1D alcista estructural
+                caso_b_1d = (ema9_1d > ema20_1d)
                 
-                caso_a_ok = caso_a_1d and caso_a_4h and caso_a_pullback and caso_a_safety and allow_case_a
-
-                # Casuística B (Deep Dip Diario a EMA9/20 de 1D):
-                # Tendencia 1D alcista y el precio ha tocado la EMA9 o EMA20 diaria
-                caso_b_1d = (ema3_1d > ema9_1d and ema9_1d > ema20_1d)
-                caso_b_pullback = (low_15m > 0 and (low_15m <= ema9_1d or low_15m <= ema20_1d))
+                # 2. El precio mínimo debe haber tocado o perforado la EMA20 Diaria
+                caso_b_pullback = (low_15m > 0 and low_15m <= ema20_1d)
+                
+                # 3. El precio de cierre no debe estar hundido muy por debajo de la EMA20 Diaria
                 caso_b_safety = (close_price >= ema20_1d * 0.99)
                 
-                caso_b_ok = caso_b_1d and caso_b_pullback and caso_b_safety and allow_case_b
+                caso_b_ok = caso_b_1d and caso_b_pullback and caso_b_safety
 
-                if not (caso_a_ok or caso_b_ok):
+                if not caso_b_ok:
                     failures.append(
-                        f"No cumple Casuística A (4H/1D alcista + Pullback a EMA20_15m, allowed={allow_case_a}) "
-                        f"ni Casuística B (1D alcista + Pullback a EMA9/20_1D, allowed={allow_case_b})."
+                        f"DIP Diario no cumplido: Tendencia 1D Alcista + Precio Min ({low_15m:.2f}) tocando EMA20_1D ({ema20_1d:.2f})."
                     )
 
         # ── CHECK 13: BLOQUEO PRO_CANDLE_SELL EN PÉRDIDA ──
