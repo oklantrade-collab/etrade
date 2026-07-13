@@ -1662,9 +1662,24 @@ class ForexExecutionService:
         if snap:
             u6 = self._safe_float(snap.get('upper_6'))
             l6 = self._safe_float(snap.get('lower_6'))
+            u5 = self._safe_float(snap.get('upper_5'))
+            l5 = self._safe_float(snap.get('lower_5'))
+            
+            # Cierre total en Banda 6
             if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
                 self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
                 return True
+                
+            # Cierre parcial (Scale Out 50%) en Banda 5
+            if not pos.get('partial_closed_band5'):
+                if (side in ['long', 'buy'] and u5 > 0 and price >= u5) or (side in ['short', 'sell'] and l5 > 0 and price <= l5):
+                    self.log(f"[{symbol}] Tocó Banda 5. Ejecutando Scale-Out (50%).")
+                    self._partial_close_position(pos, price, 0.5, pips_pnl, snap=snap)
+                    # Mover SL a breakeven
+                    entry_price = self._safe_float(pos.get('entry_price'))
+                    self.sb.table('forex_positions').update({'sl_price': entry_price}).eq('id', pos['id']).execute()
+                    pos['sl_price'] = entry_price
+                    return False # No retornamos True porque la posición sigue abierta
         
         return False
 
@@ -1905,6 +1920,17 @@ class ForexExecutionService:
                     'fib_zone_entry': 0
                 }
                 
+                try:
+                    from app.strategy.swing_orders import enforce_global_limit_max
+                    import asyncio
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(enforce_global_limit_max(self.sb, mode_val, 5))
+                    except RuntimeError:
+                        asyncio.run(enforce_global_limit_max(self.sb, mode_val, 5))
+                except Exception:
+                    pass
+                
                 self.sb.table('pending_orders').insert(new_order).execute()
                 self.log(f"🎯 [FOREX TS RE-ENTRY LIMIT] {symbol} {side.upper()}: {op['name']} colocada a {limit_px} | Lots: {qty_val}")
                 
@@ -1972,9 +1998,20 @@ class ForexExecutionService:
         if snap:
             u6 = self._safe_float(snap.get('upper_6'))
             l6 = self._safe_float(snap.get('lower_6'))
+            u5 = self._safe_float(snap.get('upper_5'))
+            l5 = self._safe_float(snap.get('lower_5'))
+            
             if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
                 self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
                 return
+                
+            if not pos.get('partial_closed_band5'):
+                if (side in ['long', 'buy'] and u5 > 0 and price >= u5) or (side in ['short', 'sell'] and l5 > 0 and price <= l5):
+                    self.log(f"[{symbol}] Tocó Banda 5. Ejecutando Scale-Out (50%).")
+                    self._partial_close_position(pos, price, 0.5, pips_pnl, snap=snap)
+                    entry_price = self._safe_float(pos.get('entry_price'))
+                    self.sb.table('forex_positions').update({'sl_price': entry_price}).eq('id', pos['id']).execute()
+                    pos['sl_price'] = entry_price
 
         #    Verificaci n estricta de SL/TP   
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
@@ -2072,6 +2109,46 @@ class ForexExecutionService:
         except Exception as e:
             self.log(f'Error cierre: {e}')
             return False
+
+    def _partial_close_position(self, pos, close_price, pct, pips_pnl, snap=None):
+        try:
+            symbol = pos['symbol']
+            
+            current_lots = self._safe_float(pos.get('lots'))
+            if current_lots == 0: return
+            
+            close_lots = current_lots * pct
+            remaining_lots = current_lots - close_lots
+            
+            pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+            pnl_usd = pips_pnl * pip_val * abs(close_lots)
+            
+            # Cerrar parcial en cTrader si es cuenta real
+            if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
+                lots_abs = abs(close_lots)
+                self.worker.close_position(pos['ctrader_pos_id'], lots_abs * 100000)
+
+            update_data = {
+                'lots': round(remaining_lots, 3), 
+                'partial_closed_band5': True
+            }
+
+            self.sb.table('forex_positions').update(update_data).eq('id', pos['id']).execute()
+            
+            # Update memory
+            pos['lots'] = remaining_lots
+            pos['partial_closed_band5'] = True
+            
+            # Registrar profit
+            try:
+                from app.core.capital_manager import register_realized_pnl
+                register_realized_pnl('forex', round(pnl_usd, 2))
+                self.log(f"[SCALE-OUT] Cierre parcial exitoso para {symbol} | Profit: ${pnl_usd:.2f}")
+            except Exception as cap_e:
+                self.log(f'Error actualizando capital acumulado forex: {cap_e}', 'ERROR')
+                
+        except Exception as e:
+            self.log(f'Error en cierre parcial forex {pos.get("symbol")}: {str(e)}', 'ERROR')
 
     def _send_telegram(self, message):
         try:

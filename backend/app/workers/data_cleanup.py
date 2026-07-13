@@ -33,12 +33,12 @@ MODULE = "DB_CLEANUP"
 
 # ── Retención por conteo de velas (por símbolo+exchange+TF) ──
 CANDLE_RETENTION = {
-    "5m":  2016,  # 7 días (12 x 24 x 7)
-    "15m": 672,   # 7 días (4 x 24 x 7)
-    "30m": 336,   # 7 días (2 x 24 x 7)
-    "1h":  168,   # 7 días (1 x 24 x 7)
-    "4h":  180,   # ~30 días
-    "1d":  365,   # 1 año
+    "5m":  864,   # 3 días (12 x 24 x 3)
+    "15m": 288,   # 3 días (4 x 24 x 3)
+    "30m": 144,   # 3 días (2 x 24 x 3)
+    "1h":  72,    # 3 días (1 x 24 x 3)
+    "4h":  60,    # ~10 días
+    "1d":  200,   # ~200 días
 }
 
 # ── Retención por tiempo (días) de tablas de logs ──
@@ -177,12 +177,15 @@ async def cleanup_database() -> dict:
         "signals_log":          {"days": 7, "time_col": "detected_at"},
         "system_logs":          {"days": 1,  "time_col": "created_at"},
         "pilot_diagnostics":    {"days": 0.25,  "time_col": "timestamp"},
-        "strategy_evaluations": {"days": 3,  "time_col": "created_at"},
+        "strategy_evaluations": {"days": 1,  "time_col": "created_at"},
         "db_cleanup_log":       {"days": 30, "time_col": "executed_at"},
         "technical_indicators": {"days": 1,  "time_col": "timestamp"},
         "market_regime_history":{"days": 14, "time_col": "evaluated_at"},
         "cron_cycles":          {"days": 1,  "time_col": "started_at"},
         "news_sentiment":       {"days": 14, "time_col": "analyzed_at"},
+        "apex_scores":          {"days": 1,  "time_col": "calculated_at"},
+        "candle_patterns":      {"days": 1,  "time_col": "timestamp"},
+        "context_scores":       {"days": 1,  "time_col": "date"},
     }
 
     for table_name, config in parent_tables.items():

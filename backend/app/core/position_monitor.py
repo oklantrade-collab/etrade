@@ -548,6 +548,18 @@ async def trigger_trailing_stop_reentry(symbol, side, size, df_15m, supabase):
                 'fib_zone_entry': 0
             }
             
+            try:
+                from app.strategy.swing_orders import enforce_global_limit_max
+                import asyncio
+                # Try to use current loop, or just run it safely if sync context
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(enforce_global_limit_max(supabase, mode_val, 5))
+                except RuntimeError:
+                    asyncio.run(enforce_global_limit_max(supabase, mode_val, 5))
+            except Exception as e:
+                pass
+            
             supabase.table('pending_orders').insert(new_order).execute()
             log_info('TS_REENTRY', f"🎯 [TS RE-ENTRY LIMIT] {symbol} {side.upper()}: {op['name']} colocada a {limit_px} | Cantidad: {qty_val}")
             
@@ -1066,6 +1078,62 @@ async def check_open_positions_5m(
                 # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
                 # Evalúa si la tendencia giró para salir antes del SL o asegurar TP.
                 rev_res = await check_signal_reversal(pos, mtf_score, price, config, snap=current_snap_obj)
+                
+                if rev_res.get('should_modify_oco_breakeven'):
+                    target_tp = rev_res.get('target_tp_price')
+                    rev_start_str = pos.get('sl_activated_at')
+                    is_rev_be = pos.get('sl_type') == 'reversal_be'
+                    
+                    now_utc = datetime.now(timezone.utc)
+                    if not rev_start_str or not is_rev_be:
+                        try:
+                            supabase.table('positions').update({
+                                'tp_full_price': target_tp,
+                                'take_profit': target_tp,
+                                'sl_type': 'reversal_be',
+                                'sl_activated_at': now_utc.isoformat(),
+                                'sl_activation_reason': 'ema_reversal_exact_be'
+                            }).eq('id', pos['id']).execute()
+                            pos['sl_type'] = 'reversal_be'
+                            pos['sl_activated_at'] = now_utc.isoformat()
+                            
+                            from app.workers.alerts_service import send_telegram_message
+                            await send_telegram_message(
+                                f"🛡️ REVERSIÓN DETECTADA [{norm_symbol}]\n"
+                                f"Ajustando TP a Break-Even: {target_tp:.6f}\n"
+                                f"Inicia contador de 45m para cierre de emergencia."
+                            )
+                        except Exception as e:
+                            log_error(MODULE, f"Error updating reversal_be for {norm_symbol}: {e}")
+                    else:
+                        try:
+                            rev_dt = datetime.fromisoformat(rev_start_str.replace('Z', '+00:00'))
+                            elapsed_min = (now_utc - rev_dt).total_seconds() / 60
+                            if elapsed_min >= 45:
+                                entry_p_rev = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
+                                loss_pct = 0
+                                if entry_p_rev > 0:
+                                    if side == 'long':
+                                        loss_pct = (entry_p_rev - price) / entry_p_rev * 100
+                                    else:
+                                        loss_pct = (price - entry_p_rev) / entry_p_rev * 100
+                                
+                                if 0 <= loss_pct <= 0.50:
+                                    reason = 'ema_reversal_timeout_market'
+                                    await _execute_paper_close(pos, price, reason, supabase)
+                                    events.append({'symbol': norm_symbol, 'event': 'signal_reversal_timeout'})
+                                    
+                                    from app.workers.alerts_service import send_telegram_message
+                                    await send_telegram_message(
+                                        f"⏳ CIERRE POR TIMEOUT DE REVERSIÓN [{norm_symbol}]\n"
+                                        f"Tiempo superado: {elapsed_min:.1f}m\n"
+                                        f"Pérdida aceptada: -{loss_pct:.2f}%\n"
+                                        f"Detalle: Cerrado por Market para evitar mayor caída (límite 0.5%)."
+                                    )
+                                    continue
+                        except Exception as e:
+                            log_error(MODULE, f"Error checking reversal timeout for {norm_symbol}: {e}")
+
                 if rev_res.get('should_exit'):
                     reason = rev_res.get('reason', 'signal_reversal')
                     await _execute_paper_close(pos, price, reason, supabase)

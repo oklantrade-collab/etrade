@@ -175,20 +175,30 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         return
 
     # 6b. Confirmación SIPV (acción del precio): exigir vela coherente con la dirección
+    # Para doji, exigimos que el cierre esté a favor de la tendencia o usamos patrones más fuertes.
+    close_price_candle = float(last_row.get('close', 0))
+    open_price_candle = float(last_row.get('open', 0))
+    high_price_candle = float(last_row.get('high', 0))
+    low_price_candle = float(last_row.get('low', 0))
+    
+    is_doji = last_row.get('is_doji', False)
+    doji_long = is_doji and (close_price_candle >= low_price_candle + (high_price_candle - low_price_candle) * 0.5)
+    doji_short = is_doji and (close_price_candle <= high_price_candle - (high_price_candle - low_price_candle) * 0.5)
+
     sipv_long = bool(
         last_row.get('is_dragonfly', False) or
         last_row.get('is_bullish_engulfing', False) or
         last_row.get('low_higher_than_prev', False) or
         last_row.get('is_hammer', False) or
-        last_row.get('is_doji', False) or
-        (float(last_row.get('close', 0)) > float(last_row.get('open', 0)))  # Vela verde
+        doji_long or
+        (close_price_candle > open_price_candle)  # Vela verde
     )
     sipv_short = bool(
         last_row.get('is_gravestone', False) or
         last_row.get('is_bearish_engulfing', False) or
         last_row.get('high_lower_than_prev', False) or
-        last_row.get('is_doji', False) or
-        (float(last_row.get('close', 0)) < float(last_row.get('open', 0)))  # Vela roja
+        doji_short or
+        (close_price_candle < open_price_candle)  # Vela roja
     )
 
     if trigger_long and not sipv_long:
@@ -218,27 +228,42 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     if total_qty <= 0:
         return
 
-    # 8. Filtro de Distancia Mínima de Soporte (0.4%)
+    # 8. Filtro de Distancia Mínima de Soporte (0.4%) y FOMO Threshold (0.08%)
     dist_pct = abs(ema9 - ema20) / ema20
+    dist_to_ema9 = abs(current_price - ema9) / ema9
     
     orders_to_place = []
+    
+    # Si estamos muy cerca de EMA9 (FOMO), aseguramos 20% inmediato
+    if dist_to_ema9 <= 0.0008:
+        qty_fomo = total_qty * 0.20
+        rem_qty = total_qty * 0.80
+        orders_to_place.append({
+            'limit_price': current_price,
+            'qty': qty_fomo,
+            'name': 'Order FOMO (Market-like)'
+        })
+        log_info('APEX_EMA', f"[{symbol}] FOMO detectado (dist: {dist_to_ema9:.4f}). Separando 20% a precio actual.")
+    else:
+        rem_qty = total_qty
+
     if dist_pct >= 0.004:
-        # Colocar 2 órdenes limitadas (Sizing 40/60)
+        # Colocar 2 órdenes limitadas (Sizing 40/60 del remanente)
         orders_to_place.append({
             'limit_price': ema9,
-            'qty': total_qty * 0.40,
+            'qty': rem_qty * 0.40,
             'name': 'Order 1 (EMA9)'
         })
         orders_to_place.append({
             'limit_price': ema20,
-            'qty': total_qty * 0.60,
+            'qty': rem_qty * 0.60,
             'name': 'Order 2 (EMA20)'
         })
     else:
-        # Colocar 1 sola orden limitada consolidada en EMA9 (Sizing 100%)
+        # Colocar 1 sola orden limitada consolidada en EMA9 (Sizing 100% del remanente)
         orders_to_place.append({
             'limit_price': ema9,
-            'qty': total_qty,
+            'qty': rem_qty,
             'name': 'Order 1 Cons (EMA9)'
         })
 
@@ -279,15 +304,8 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
             sb.table('pending_orders').insert(new_order).execute()
             log_info('APEX_EMA', f"🎯 [PLACED LIMIT] {symbol} {rule_code}: {op['name']} colocada a ${limit_px:.4f} | Cantidad: {size_val}")
             
-            # Alerta Telegram
-            await send_telegram_message(
-                f"🎯 APEX_EMA LIMIT [{symbol}]\n"
-                f"Dirección: {direction.upper()}\n"
-                f"Nivel: {op['name']}\n"
-                f"Precio LIMIT: ${limit_px:.4f}\n"
-                f"Cantidad: {size_val:.4f}\n"
-                f"Modo: {mode_val.upper()}"
-            )
+            # Alerta Telegram (Removida por solicitud del usuario para evitar ruido)
+            pass
         except Exception as ins_e:
             log_error('APEX_EMA', f"Error insertando orden límite {op['name']} en DB: {ins_e}")
 
@@ -432,10 +450,7 @@ async def process_swing_orders(
         )
 
         log_info('SMART_LIMIT', f'{symbol}/{direction}: LIMIT ${entry:.4f} en {limit_result["band_target"]}')
-
-        await send_telegram_message(
-            f'📍 SMART LIMIT [{symbol}]\nDir: {direction.upper()}\nPrecio LIMIT: ${entry:.4f}\nCalidad: {limit_result["signal_quality"]}'
-        )
+        # Telegram log removed to avoid spam, will only alert on execution
 
 async def cancel_swing_orders(symbol: str, timeframe: str = None, reason: str = 'recalculated', sb = None, direction: str = None, trade_type: str = None) -> None:
     data = {
@@ -453,7 +468,28 @@ async def cancel_swing_orders(symbol: str, timeframe: str = None, reason: str = 
 async def cancel_swing_order(symbol: str, direction: str, reason: str, sb):
     await cancel_swing_orders(symbol=symbol, direction=direction, reason=reason, sb=sb)
 
+async def enforce_global_limit_max(supabase, mode, max_limits=5):
+    res = supabase.table('pending_orders').select('*').eq('status', 'pending').eq('mode', mode).execute()
+    pending = res.data or []
+    if len(pending) >= max_limits:
+        q_map = {'high': 3, 'medium': 2, 'low': 1}
+        pending_sorted = sorted(pending, key=lambda x: (q_map.get(x.get('signal_quality', 'low'), 1), x.get('created_at', '')))
+        to_cancel_count = len(pending) - max_limits + 1
+        to_cancel = pending_sorted[:to_cancel_count]
+        for order in to_cancel:
+            supabase.table('pending_orders').update({
+                'status': 'cancelled',
+                'rejection_reason': 'max_limits',
+                'cancelled_at': datetime.now(timezone.utc).isoformat(),
+                'updated_at': datetime.now(timezone.utc).isoformat()
+            }).eq('id', order['id']).execute()
+            log_info('SWING', f"Mata-Zombies: Cancelled {order['symbol']} limit to free margin. (Q: {order.get('signal_quality')})")
+
 async def create_smart_limit_order(symbol, direction, limit_price, sl_price, tp1_price, tp2_price, band_target, sizing_pct, movement_type, signal_quality, fib_zone_entry, ttl_hours, supabase):
+    # Enforce Global Limit Max before creating new one
+    mode = 'paper' if BOT_STATE.config_cache.get("paper_trading", True) else 'real'
+    await enforce_global_limit_max(supabase, mode, max_limits=5)
+
     # Truncate strings to avoid DB length errors (varchar 10)
     safe_trade_type = "smart_lim"  # 9 chars
     safe_movement = (movement_type or "unknown")[:10]
@@ -489,25 +525,53 @@ async def check_limit_order_execution(symbol: str, current_price: float, provide
                 continue
 
         price_hit = (direction == 'long' and current_price <= limit_price) or (direction == 'short' and current_price >= limit_price)
+
+        # --- DYNAMIC CANCELLATION Aa21/Bb21 & SMART Trend Limits ---
+        rule_code = order.get('rule_code', '')
+        mov_type = order.get('movement_type', '')
+        if '21' in rule_code or 'ApexEma' in rule_code or 'trend' in str(mov_type):
+            try:
+                from app.core.memory_store import get_memory_df
+                df_15m_mem = get_memory_df(symbol, "15m")
+                if df_15m_mem is not None and not df_15m_mem.empty and len(df_15m_mem) >= 5:
+                    ema3_15m = df_15m_mem['close'].ewm(span=3, adjust=False).mean()
+                    ema9_15m = df_15m_mem['close'].ewm(span=9, adjust=False).mean()
+                    curr_ema3 = float(ema3_15m.iloc[-1])
+                    curr_ema9 = float(ema9_15m.iloc[-1])
+                    if direction == 'long' and curr_ema3 < curr_ema9:
+                        log_info('SWING', f"[Aa21 CANCELED] Tendencia LONG rota (EMA3 < EMA9 en 15m). Cancelando orden para {symbol}.")
+                        await cancel_swing_orders(symbol, reason='aa21_trend_break', sb=sb, direction=direction)
+                        continue
+                    if direction == 'short' and curr_ema3 > curr_ema9:
+                        log_info('SWING', f"[Bb21 CANCELED] Tendencia SHORT rota (EMA3 > EMA9 en 15m). Cancelando orden para {symbol}.")
+                        await cancel_swing_orders(symbol, reason='bb21_trend_break', sb=sb, direction=direction)
+                        continue
+            except Exception as e:
+                pass
+        # ---------------------------------------
+
         if not price_hit: continue
 
         # --- REAL-TIME MOMENTUM GUARD ---
         try:
-            df_1m = await provider.get_ohlcv(symbol=symbol, timeframe='1m', limit=20)
-            if df_1m is not None and not df_1m.empty and len(df_1m) >= 10:
-                df_1m['ema3'] = df_1m['close'].ewm(span=3, adjust=False).mean()
-                df_1m['ema9'] = df_1m['close'].ewm(span=9, adjust=False).mean()
-                ema3_1m = float(df_1m.iloc[-1]['ema3'])
-                ema9_1m = float(df_1m.iloc[-1]['ema9'])
-                
-                if direction == 'long' and ema3_1m < ema9_1m:
-                    log_warning('SWING', f"[MOMENTUM GUARD] Orden Límite cancelada en tiempo real. {symbol} LONG pero EMA3 ({ema3_1m:.4f}) < EMA9 ({ema9_1m:.4f}) mid-candle.")
-                    await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='realtime_momentum_reversal', sb=sb, direction=direction)
-                    continue
-                if direction == 'short' and ema3_1m > ema9_1m:
-                    log_warning('SWING', f"[MOMENTUM GUARD] Orden Límite cancelada en tiempo real. {symbol} SHORT pero EMA3 ({ema3_1m:.4f}) > EMA9 ({ema9_1m:.4f}) mid-candle.")
-                    await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='realtime_momentum_reversal', sb=sb, direction=direction)
-                    continue
+            # Bypass 1m momentum guard for Trend Pullback strategies (Aa21/Bb21) 
+            # because pullbacks naturally have 1m downtrend when reaching the entry price
+            if '21' not in rule_code:
+                df_1m = await provider.get_ohlcv(symbol=symbol, timeframe='1m', limit=20)
+                if df_1m is not None and not df_1m.empty and len(df_1m) >= 10:
+                    df_1m['ema3'] = df_1m['close'].ewm(span=3, adjust=False).mean()
+                    df_1m['ema9'] = df_1m['close'].ewm(span=9, adjust=False).mean()
+                    ema3_1m = float(df_1m.iloc[-1]['ema3'])
+                    ema9_1m = float(df_1m.iloc[-1]['ema9'])
+                    
+                    if direction == 'long' and ema3_1m < ema9_1m:
+                        log_warning('SWING', f"[MOMENTUM GUARD] Orden Límite cancelada en tiempo real. {symbol} LONG pero EMA3 ({ema3_1m:.4f}) < EMA9 ({ema9_1m:.4f}) mid-candle.")
+                        await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='realtime_momentum_reversal', sb=sb, direction=direction)
+                        continue
+                    if direction == 'short' and ema3_1m > ema9_1m:
+                        log_warning('SWING', f"[MOMENTUM GUARD] Orden Límite cancelada en tiempo real. {symbol} SHORT pero EMA3 ({ema3_1m:.4f}) > EMA9 ({ema9_1m:.4f}) mid-candle.")
+                        await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='realtime_momentum_reversal', sb=sb, direction=direction)
+                        continue
         except Exception as e:
             log_warning('SWING', f"No se pudo verificar momentum en 1m para {symbol}: {e}")
         # ---------------------------------

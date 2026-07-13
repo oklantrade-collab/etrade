@@ -370,7 +370,15 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
         for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower']:
             db_data.pop(k, None)
 
-        supabase.table('market_snapshot').upsert(db_data).execute()
+        import math
+        clean_db_data = {}
+        for k, v in db_data.items():
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                clean_db_data[k] = None
+            else:
+                clean_db_data[k] = v
+
+        supabase.table('market_snapshot').upsert(clean_db_data).execute()
         
         # Actualizar cache local para otros ciclos (ej: 5m)
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
@@ -379,7 +387,6 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
         log_info('SNAPSHOT', f'Snapshot OK para {symbol}: mtf={mtf_score:.4f}')
     except Exception as e:
         log_error('SNAPSHOT', f'FALLO snapshot para {symbol}: {e}')
-        raise
 
 
 async def sync_current_candle_to_db(symbol: str, current_price: float, supabase) -> None:
