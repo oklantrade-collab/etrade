@@ -18,6 +18,7 @@ from app.core.logger import log_info, log_error, log_warning
 EREP_CONFIG = {
     'crypto_futures': {
         # ── User's new config keys ──
+        'early_activation_min_loss_pct': 0.5,
         'max_loss_pct_to_activate': 6.0,
         # Si pérdida > 6% → NO activar EREP
         'p2_size_factor':           1.0,
@@ -26,8 +27,8 @@ EREP_CONFIG = {
         # máximo 4 ciclos de 15m = 1 hora
         'max_drop_4h_pct':          5.0,
         # Si el mercado cayó >5% en 4H → no EREP
-        'rsi_oversold':             10,
-        # RSI <= 10 → comprar P2
+        'rsi_oversold':             25,
+        # RSI <= 25 → comprar P2
         'ema_period_fast':          3,
         # EMA rápida (EMA3)
         'ema_period_slow':          9,
@@ -36,8 +37,8 @@ EREP_CONFIG = {
         # cerrar si pnl >= 0 (ganancia o cero)
 
         # ── Previous config keys ──
-        'rsi_oversold_long':        10,
-        'rsi_overbought_short':     90,
+        'rsi_oversold_long':        25,
+        'rsi_overbought_short':     75,
         'p2_min_factor':            0.5,
         'p2_max_factor':            3.0,
         'round_to_decimals':        1,
@@ -49,6 +50,7 @@ EREP_CONFIG = {
         'ema_slow':                 9,
     },
     'forex_futures': {
+        'early_activation_min_loss_pct': 0.15,
         'max_loss_pct_to_activate': 1.5,
         'p2_size_factor':           1.0,
         'timeout_cycles':           4,
@@ -71,6 +73,7 @@ EREP_CONFIG = {
         'ema_slow':                 9,
     },
     'stocks_spot': {
+        'early_activation_min_loss_pct': 1.5,
         'max_loss_pct_to_activate': 8.0,
         'p2_size_factor':           1.0,
         'timeout_cycles':           6,
@@ -297,6 +300,16 @@ def detect_p2_entry_signal(
             # SIPV helper 5m
             body_5m = c_5m - o_5m
             body_pct_5m = abs(body_5m) / (h_5m - l_5m) if (h_5m > l_5m) else 0
+            
+            # Dynamic Capitulation Settings
+            if market_type == 'forex_futures':
+                capitulation_rsi_low = 25
+                capitulation_rsi_high = 75
+                needs_pin_bar = True
+            else:
+                capitulation_rsi_low = 30
+                capitulation_rsi_high = 70
+                needs_pin_bar = False
 
             if is_long:
                 # Original BB + EMA20
@@ -315,13 +328,28 @@ def detect_p2_entry_signal(
                         'reason':   f'Vela 5m cierra bajo LOWER_6 ({c_5m:.4f} <= {lower_6:.4f})',
                     })
                     
-                # Rule 2: RSI <= 10
+                # Rule 2: RSI <= 10 (Original)
                 if rsi_5m <= 10:
                     signals_found.append({
                         'type':     'rsi_extreme_low_5m',
                         'strength': 0.95,
                         'reason':   f'RSI 5m Extremo Bajo ({rsi_5m:.2f} <= 10)',
                     })
+                    
+                # ── NUEVA REGLA: Capitulación Extrema 5m ──
+                if bb_lower_5m > 0 and c_5m < bb_lower_5m and c_5m < o_5m and rsi_5m <= capitulation_rsi_low:
+                    pin_bar_ok = True
+                    if needs_pin_bar:
+                        lower_wick_pct = (c_5m - l_5m) / (h_5m - l_5m) if (h_5m > l_5m) else 0
+                        pin_bar_ok = lower_wick_pct >= 0.30
+                        
+                    if pin_bar_ok:
+                        extra_reason = " con Mecha de Rechazo (Pin Bar)" if needs_pin_bar else ""
+                        signals_found.append({
+                            'type':     'bollinger_capitulation_5m',
+                            'strength': 1.0, # Fuerza Máxima
+                            'reason':   f'Capitulación 5m: RSI={rsi_5m:.1f} <= {capitulation_rsi_low}, Vela Roja fuera de BB{extra_reason}',
+                        })
                     
                 # Rule 3: Vela Flotante bajo BB_L
                 if bb_lower_5m > 0 and o_5m < bb_lower_5m and c_5m < bb_lower_5m:
@@ -372,6 +400,21 @@ def detect_p2_entry_signal(
                         'strength': 0.95,
                         'reason':   f'RSI 5m Extremo Alto ({rsi_5m:.2f} >= 80)',
                     })
+                    
+                # ── NUEVA REGLA: Capitulación Extrema 5m SHORT ──
+                if bb_upper_5m > 0 and c_5m > bb_upper_5m and c_5m > o_5m and rsi_5m >= capitulation_rsi_high:
+                    pin_bar_ok = True
+                    if needs_pin_bar:
+                        upper_wick_pct = (h_5m - c_5m) / (h_5m - l_5m) if (h_5m > l_5m) else 0
+                        pin_bar_ok = upper_wick_pct >= 0.30
+                        
+                    if pin_bar_ok:
+                        extra_reason = " con Mecha de Rechazo (Pin Bar)" if needs_pin_bar else ""
+                        signals_found.append({
+                            'type':     'bollinger_capitulation_5m_short',
+                            'strength': 1.0, # Fuerza Máxima
+                            'reason':   f'Capitulación SHORT 5m: RSI={rsi_5m:.1f} >= {capitulation_rsi_high}, Vela Verde fuera de BB{extra_reason}',
+                        })
                     
                 # Rule 3: Vela Flotante sobre BB_U
                 if bb_upper_5m > 0 and o_5m > bb_upper_5m and c_5m > bb_upper_5m:
@@ -459,6 +502,7 @@ def check_erep_activation_conditions(
     df_15m:        pd.DataFrame,
     df_4h:         pd.DataFrame = None,
     market_type:   str = 'crypto_futures',
+    df_5m:         pd.DataFrame = None,
 ) -> dict:
     """
     Verifica si el EREP puede activarse.
@@ -507,7 +551,21 @@ def check_erep_activation_conditions(
         'is_above':  ema['is_fast_above'],
     }
     
-    if not ema_confirms:
+    # ── BYPASS DE 5 MINUTOS (Si el colapso es abrupto) ──
+    bypass_15m = False
+    if not ema_confirms and df_5m is not None and len(df_5m) >= 20:
+        c5 = pd.to_numeric(df_5m['close' if 'close' in df_5m.columns else 'Close'], errors='coerce').dropna()
+        if len(c5) >= 20:
+            ema3_5 = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_5 = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
+            ema20_5 = float(c5.ewm(span=20, adjust=False).mean().iloc[-1])
+            
+            if is_long and (ema3_5 < ema9_5 < ema20_5):
+                bypass_15m = True
+            elif not is_long and (ema3_5 > ema9_5 > ema20_5):
+                bypass_15m = True
+                
+    if not ema_confirms and not bypass_15m:
         # EMA favorable: esperar recuperación natural
         return {
             'can_activate': False,
@@ -641,7 +699,7 @@ def evaluate_erep_phase(
     if phase == 1:
         check = check_erep_activation_conditions(
             position, current_price,
-            snap, df_15m, df_4h, market_type
+            snap, df_15m, df_4h, market_type, df_5m
         )
 
         if check.get('wait_natural'):
@@ -751,11 +809,10 @@ def evaluate_erep_phase(
                 'close_type': 'error',
             }
 
-        # Calcular pérdida actual para evitar cierre
-        p1 = float(position.get('erep_p1_price') or position.get('entry_price') or 0)
+        # Calcular pérdida actual usando el promedio de posiciones (p3_avg)
         current_loss = 0.0
-        if p1 > 0:
-            current_loss = (p1 - current_price) / p1 * 100 if is_long else (current_price - p1) / p1 * 100
+        if p3_avg > 0:
+            current_loss = (p3_avg - current_price) / p3_avg * 100 if is_long else (current_price - p3_avg) / p3_avg * 100
 
         if cycles >= timeout_m * 2:
             if current_loss > 0:
@@ -774,8 +831,8 @@ def evaluate_erep_phase(
                 'close_type': 'timeout_phase3',
             }
 
-        # Garantizar que estamos en ganancia usando el precio actual (current_loss < 0 es ganancia)
-        reached_p3 = current_loss < 0
+        # Garantizar que estamos en ganancia respecto al PROMEDIO de posiciones (p3_avg)
+        reached_p3 = current_loss <= 0
         last_close = current_price
 
         if reached_p3:
