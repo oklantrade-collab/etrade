@@ -729,12 +729,13 @@ const SystemSettings = ({ config, onSave, onOpenRules }: any) => {
       </SettingsSection>
 
       <SaveButton onSave={() => {
+          const { erep_max_purchases, ...restForm } = form as any;
           const newRegimeParams = { 
               ...config.regime_params, 
-              erep_max_purchases: Number(form.erep_max_purchases) 
+              erep_max_purchases: Number(erep_max_purchases) 
           };
           onSave({
-              ...form,
+              ...restForm,
               regime_params: newRegimeParams
           });
       }} />
