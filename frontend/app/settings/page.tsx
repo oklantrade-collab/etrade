@@ -124,8 +124,8 @@ export default function SettingsPage() {
     const toUpdateRC: any = {}
 
     Object.keys(data).forEach(key => {
-      // Evitar enviar campos temporales del frontend que no existen en DB
-      if (['forex_symbols_str', 'active_symbols_str', 'max_total_risk_forex_pct', 'max_total_risk_crypto_pct', 'max_risk_per_trade_crypto_pct', 'max_risk_per_trade_forex_pct'].includes(key)) return;
+      // Evitar enviar campos temporales del frontend que no existen en DB como columnas directas
+      if (['forex_symbols_str', 'active_symbols_str', 'max_total_risk_forex_pct', 'max_total_risk_crypto_pct', 'max_risk_per_trade_crypto_pct', 'max_risk_per_trade_forex_pct', 'max_active_symbols_crypto', 'max_active_symbols_forex'].includes(key)) return;
       
       if (tradingFields.includes(key)) toUpdateTC[key] = data[key]
       else if (riskFields.includes(key)) toUpdateRC[key] = data[key]
