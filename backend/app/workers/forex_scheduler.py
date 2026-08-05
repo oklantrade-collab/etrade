@@ -289,7 +289,7 @@ async def write_forex_snapshot(
             'symbol':            symbol,
             'price':             float(last['close']),
             'fibonacci_zone':    _si(fib_levels.get('zone', 0)),
-            'basis':             float(fib_levels.get('basis', 0)),
+            'basis':             float(fib_levels.get('basis') or last.get('close', 0)),
             'upper_1':           float(fib_levels.get('upper_1', 0)),
             'upper_2':           float(fib_levels.get('upper_2', 0)),
             'upper_3':           float(fib_levels.get('upper_3', 0)),
@@ -354,8 +354,22 @@ async def write_forex_snapshot(
             upsert_data['ema3_5m'] = float(last_5m.get('ema1', last_5m.get('ema_3', 0)))
             upsert_data['ema9_5m'] = float(last_5m.get('ema2', last_5m.get('ema_9', 0)))
             upsert_data['ema20_5m'] = float(last_5m.get('ema3', last_5m.get('ema_20', 0)))
+            
+            # Injecting 5m raw metrics for Cooldown Bypass in Forex
+            upsert_data['raw_metrics_5m'] = {
+                'rsi': float(last_5m.get('rsi1', last_5m.get('rsi', 50))),
+                'low': float(last_5m.get('low', 0)),
+                'high': float(last_5m.get('high', 0)),
+                'open': float(last_5m.get('open', 0)),
+                'close': float(last_5m.get('close', 0)),
+                'lower_5': float(last_5m.get('lower_5', 0)),
+                'lower_6': float(last_5m.get('lower_6', 0)),
+                'upper_5': float(last_5m.get('upper_5', 0)),
+                'upper_6': float(last_5m.get('upper_6', 0)),
+                'bb_lower': float(last_5m.get('bb_lower', last_5m.get('lower_2', 0))),
+                'bb_upper': float(last_5m.get('bb_upper', last_5m.get('upper_2', 0)))
+            }
 
-        
         # Calcular Bollinger Bands estándar (20, 2)
         try:
             rolling_mean = df['close'].rolling(20).mean()
@@ -376,7 +390,7 @@ async def write_forex_snapshot(
 
         # Preparar datos para base de datos (excluyendo campos solo de caché)
         db_data = upsert_data.copy()
-        for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower', 'ema3_5m', 'ema9_5m', 'ema20_5m']:
+        for k in ['ema_3', 'ema_9', 'ema_20', 'ema_50', 'rsi_14', 'rsi_14_prev', 'macd_histogram', 'bb_upper', 'bb_lower', 'ema3_5m', 'ema9_5m', 'ema20_5m', 'raw_metrics_5m']:
             db_data.pop(k, None)
 
         if sar_changed:
@@ -954,14 +968,27 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                     bounce_triggered = True
                     
                 if bounce_triggered:
-                    await _execute_paper_close(position, current_price, 'sar_phase_change_fx_delayed', sb)
-                    await send_telegram_message(
-                        f"🎯 FX SAR EXIT DELAYED EJECUTADO [{symbol}]\n"
-                        f"Cerrando {side.upper()} tras rebote (RSI 15m: {rsi_15m:.1f})\n"
-                        f"Precio: {current_price:.5f}"
-                    )
-                    pending_sar_closes.pop(pos_id, None)
-                    continue # Sigue con la siguiente posicion
+                    # 🛡️ Protección de tendencia EMA3/EMA9 (15m)
+                    _ema3 = float(snap.get('ema3', 0))
+                    _ema9 = float(snap.get('ema9', 0))
+                    _trend_protected = False
+                    if _ema3 > 0 and _ema9 > 0:
+                        if side == 'long' and _ema3 > _ema9:
+                            _trend_protected = True
+                        elif side == 'short' and _ema3 < _ema9:
+                            _trend_protected = True
+                    
+                    if _trend_protected:
+                        log_info(MODULE, f"🛡️ SAR_DELAYED evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
+                    else:
+                        await _execute_paper_close(position, current_price, 'sar_phase_change_fx_delayed', sb)
+                        await send_telegram_message(
+                            f"🎯 FX SAR EXIT DELAYED EJECUTADO [{symbol}]\n"
+                            f"Cerrando {side.upper()} tras rebote (RSI 15m: {rsi_15m:.1f})\n"
+                            f"Precio: {current_price:.5f}"
+                        )
+                        pending_sar_closes.pop(pos_id, None)
+                        continue # Sigue con la siguiente posicion
 
             # 4. Smart Exit: SAR Phase Change
             if sar_changed_at and not is_pending_sar:
@@ -981,15 +1008,28 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                             pnl_pips = (entry - current_price) / PIP_SIZES.get(symbol, 0.0001)
 
                     if pnl_pct >= -0.05:
-                        await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
-                        await send_telegram_message(
-                            f"🔄 FOREX SAR REVERSAL [{symbol}]\n"
-                            f"SAR 4h -> {sar_phase.upper()}\n"
-                            f"Cerrando {side.upper()} (PNL: {pnl_pct:.2f}% | {pnl_pips:+.1f} pips)\n"
-                            f"Precio: {current_price:.5f}"
-                        )
-                        pending_sar_closes.pop(pos_id, None)
-                        continue # Sigue con la siguiente posicion
+                        # 🛡️ Protección de tendencia EMA3/EMA9 (15m)
+                        _ema3 = float(snap.get('ema3', 0))
+                        _ema9 = float(snap.get('ema9', 0))
+                        _trend_protected = False
+                        if _ema3 > 0 and _ema9 > 0:
+                            if side == 'long' and _ema3 > _ema9:
+                                _trend_protected = True
+                            elif side == 'short' and _ema3 < _ema9:
+                                _trend_protected = True
+                        
+                        if _trend_protected:
+                            log_info(MODULE, f"🛡️ SAR_PHASE_CHANGE evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
+                        else:
+                            await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
+                            await send_telegram_message(
+                                f"🔄 FOREX SAR REVERSAL [{symbol}]\n"
+                                f"SAR 4h -> {sar_phase.upper()}\n"
+                                f"Cerrando {side.upper()} (PNL: {pnl_pct:.2f}% | {pnl_pips:+.1f} pips)\n"
+                                f"Precio: {current_price:.5f}"
+                            )
+                            pending_sar_closes.pop(pos_id, None)
+                            continue # Sigue con la siguiente posicion
                     else:
                         pending_sar_closes[pos_id] = True
                         await send_telegram_message(
@@ -1011,13 +1051,27 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
             )
 
             if reversal.get('should_exit'):
-                await _execute_paper_close(position, current_price, 'signal_reversal_fx', sb)
-                await send_telegram_message(
-                    f"FOREX SALIDA INTELIGENTE [{symbol}]\n"
-                    f"MTF giro: {current_mtf:.4f}\n"
-                    f"PnL: {reversal.get('pnl_pct', 0):+.2f}%"
-                )
-                continue
+                # 🛡️ Protección de tendencia EMA3/EMA9 (15m)
+                side = (position.get('side') or '').lower()
+                _ema3 = float(snap.get('ema3', 0))
+                _ema9 = float(snap.get('ema9', 0))
+                _trend_protected = False
+                if _ema3 > 0 and _ema9 > 0:
+                    if side == 'long' and _ema3 > _ema9:
+                        _trend_protected = True
+                    elif side == 'short' and _ema3 < _ema9:
+                        _trend_protected = True
+                
+                if _trend_protected:
+                    log_info(MODULE, f"🛡️ SIGNAL_REVERSAL evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
+                else:
+                    await _execute_paper_close(position, current_price, 'signal_reversal_fx', sb)
+                    await send_telegram_message(
+                        f"FOREX SALIDA INTELIGENTE [{symbol}]\n"
+                        f"MTF giro: {current_mtf:.4f}\n"
+                        f"PnL: {reversal.get('pnl_pct', 0):+.2f}%"
+                    )
+                    continue
 
             elif reversal.get('should_modify_oco_breakeven'):
                 target_tp = reversal['target_tp_price']
@@ -1061,14 +1115,27 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                                     loss_pct = (current_price - entry_p_rev) / entry_p_rev * 100
                             
                             if 0 <= loss_pct <= 0.50:
-                                await _execute_paper_close(position, current_price, 'ema_reversal_timeout_market', sb)
-                                await send_telegram_message(
-                                    f"⏳ CIERRE POR TIMEOUT DE REVERSIÓN FOREX [{symbol}]\n"
-                                    f"Tiempo superado: {elapsed_min:.1f}m\n"
-                                    f"Pérdida aceptada: -{loss_pct:.2f}%\n"
-                                    f"Detalle: Cerrado por Market para evitar mayor caída (límite 0.5%)."
-                                )
-                                continue
+                                # 🛡️ Protección de tendencia EMA3/EMA9 (15m)
+                                _ema3 = float(snap.get('ema3', 0))
+                                _ema9 = float(snap.get('ema9', 0))
+                                _trend_protected = False
+                                if _ema3 > 0 and _ema9 > 0:
+                                    if side_check in ('long', 'buy') and _ema3 > _ema9:
+                                        _trend_protected = True
+                                    elif side_check in ('short', 'sell') and _ema3 < _ema9:
+                                        _trend_protected = True
+                                
+                                if _trend_protected:
+                                    log_info(MODULE, f"🛡️ EMA_REVERSAL_TIMEOUT evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
+                                else:
+                                    await _execute_paper_close(position, current_price, 'ema_reversal_timeout_market', sb)
+                                    await send_telegram_message(
+                                        f"⏳ CIERRE POR TIMEOUT DE REVERSIÓN FOREX [{symbol}]\n"
+                                        f"Tiempo superado: {elapsed_min:.1f}m\n"
+                                        f"Pérdida aceptada: -{loss_pct:.2f}%\n"
+                                        f"Detalle: Cerrado por Market para evitar mayor caída (límite 0.5%)."
+                                    )
+                                    continue
                     except Exception as e:
                         log_error(MODULE, f"Error checking forex reversal timeout for {symbol}: {e}")
 
@@ -1142,18 +1209,122 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 except Exception as e:
                     log_error(MODULE, f"Error evaluating SLV for {symbol}: {e}")
 
+            # 6b.5 Cierre Estructural por Cambio de Tendencia (Proactive EMA Exit)
+            if not position.get('recovery_mode'):
+                try:
+                    ema3_15m = float(snap.get('ema3', 0))
+                    ema9_15m = float(snap.get('ema9', 0))
+                    ema3_5m = float(snap.get('ema3_5m', 0))
+                    ema9_5m = float(snap.get('ema9_5m', 0))
+                    ema20_5m = float(snap.get('ema20_5m', 0))
+
+                    if ema3_15m > 0 and ema9_15m > 0 and ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                        is_structural_exit = False
+                        
+                        # Para operaciones LONG: Si la estructura gira a bajista
+                        if side == 'long':
+                            if (ema3_15m < ema9_15m) and (ema3_5m < ema9_5m < ema20_5m):
+                                is_structural_exit = True
+                                
+                        # Para operaciones SHORT: Si la estructura gira a alcista
+                        elif side == 'short':
+                            if (ema3_15m > ema9_15m) and (ema3_5m > ema9_5m > ema20_5m):
+                                is_structural_exit = True
+
+                        if is_structural_exit:
+                            entry_pr = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+                            pip_size = pip_size if 'pip_size' in locals() else 0.0001 # Fallback
+                            pips_est = ((current_price - entry_pr) / pip_size) if side == 'long' else ((entry_pr - current_price) / pip_size)
+                            
+                            await _execute_paper_close(position, current_price, 'structural_ema_exit', sb)
+                            await send_telegram_message(
+                                f"🛑 FOREX STRUCTURAL EXIT [{symbol}]\n"
+                                f"Estructura rota (Cruce EMA3/9 en 15m y 5m).\n"
+                                f"Precio: {current_price:.5f}\n"
+                                f"PnL: {pips_est:+.1f} pips"
+                            )
+                            continue
+                except Exception as e:
+                    log_error(MODULE, f"Error evaluating Structural Exit for {symbol}: {e}")
+
+            # 6b.6 Apretar trailing a EMA3 cuando tendencia 15m se revierte (ganancia > 0)
+            if not position.get('recovery_mode'):
+                try:
+                    ema3_15m = float(snap.get('ema3', 0))
+                    ema9_15m = float(snap.get('ema9', 0))
+                    entry_pr = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+                    
+                    if ema3_15m > 0 and ema9_15m > 0 and entry_pr > 0:
+                        # Calcular si estamos en ganancia
+                        pip_size_local = PIP_SIZES.get(symbol, 0.0001)
+                        pnl_pips_local = ((current_price - entry_pr) / pip_size_local) if side == 'long' else ((entry_pr - current_price) / pip_size_local)
+                        
+                        is_trend_against = False
+                        new_sl_ema3 = 0
+                        if side == 'long' and ema3_15m < ema9_15m:
+                            is_trend_against = True
+                            new_sl_ema3 = ema3_15m
+                        elif side == 'short' and ema3_15m > ema9_15m:
+                            is_trend_against = True
+                            new_sl_ema3 = ema3_15m
+                        
+                        if is_trend_against and pnl_pips_local > 0 and new_sl_ema3 > 0:
+                            current_sl = float(position.get('sl_price', 0))
+                            # Solo apretar si el nuevo SL es mejor que el actual
+                            should_tighten = False
+                            if side == 'long' and (current_sl <= 0 or new_sl_ema3 > current_sl):
+                                should_tighten = True
+                            elif side == 'short' and (current_sl <= 0 or new_sl_ema3 < current_sl):
+                                should_tighten = True
+                            
+                            if should_tighten:
+                                try:
+                                    sb.table('forex_positions').update({
+                                        'sl_price': new_sl_ema3,
+                                        'sl_type': 'ema3_trend_tighten',
+                                        'sl_activation_reason': f'EMA3({ema3_15m:.5f}) < EMA9({ema9_15m:.5f}) con ganancia +{pnl_pips_local:.1f} pips'
+                                    }).eq('id', position['id']).execute()
+                                    position['sl_price'] = new_sl_ema3
+                                    sl = new_sl_ema3
+                                    log_info(MODULE, f"🎯 TRAILING TIGHTENED [{symbol}]: SL movido a EMA3={new_sl_ema3:.5f} (tendencia revertida, ganancia: +{pnl_pips_local:.1f} pips)")
+                                    await send_telegram_message(
+                                        f"🎯 TRAILING APRETADO [{symbol}]\n"
+                                        f"Tendencia 15m revertida (EMA3 < EMA9)\n"
+                                        f"SL movido a EMA3: {new_sl_ema3:.5f}\n"
+                                        f"Ganancia actual: +{pnl_pips_local:.1f} pips"
+                                    )
+                                except Exception as e:
+                                    log_error(MODULE, f"Error tightening trailing for {symbol}: {e}")
+                except Exception as e:
+                    log_error(MODULE, f"Error evaluating trailing tighten for {symbol}: {e}")
+
             # 6c. Hard Stop de emergencia absoluta (último recurso, solo si no está en recovery)
             if sl > 0 and not position.get('recovery_mode'):
                 if (side == 'long' and current_price <= sl) or \
                    (side == 'short' and current_price >= sl):
-                    await _execute_paper_close(position, current_price, 'sl_hit_fx_hard', sb)
-                    await send_telegram_message(
-                        f"🚨 FOREX HARD STOP [{symbol}]\n"
-                        f"Precio: {current_price:.5f}\n"
-                        f"Hard SL: {sl:.5f}\n"
-                        f"⚠️ Emergencia: SLV no pudo recuperar"
-                    )
-                    continue
+                    
+                    # 🛡️ Protección de tendencia: Evitar cierre en pérdida si el momento es favorable
+                    ema3_15m = float(snap.get('ema3', 0))
+                    ema9_15m = float(snap.get('ema9', 0))
+                    
+                    is_protected = False
+                    if ema3_15m > 0 and ema9_15m > 0:
+                        if side == 'long' and ema3_15m > ema9_15m:
+                            is_protected = True
+                        elif side == 'short' and ema3_15m < ema9_15m:
+                            is_protected = True
+
+                    if not is_protected:
+                        await _execute_paper_close(position, current_price, 'sl_hit_fx_hard', sb)
+                        await send_telegram_message(
+                            f"🚨 FOREX HARD STOP [{symbol}]\n"
+                            f"Precio: {current_price:.5f}\n"
+                            f"Hard SL: {sl:.5f}\n"
+                            f"⚠️ Emergencia: SLV no pudo recuperar"
+                        )
+                        continue
+                    else:
+                        log_info(MODULE, f"🛡️ SL_HIT_FX_HARD evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
 
             if tp > 0:
                 if (side == 'long' and current_price >= tp) or \
@@ -1182,6 +1353,13 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
 async def forex_cycle_5m():
     """Ciclo 5m Forex: Gestion de posiciones y smart exits."""
+    from app.core.safety_manager import is_system_paused, check_db_circuit_breaker
+    if check_db_circuit_breaker():
+        return
+    if is_system_paused():
+        log_debug("FOREX_SCHEDULER", "Sistema pausado globalmente. Omitiendo ciclo 5m.")
+        return
+
     from app.core.market_hours import is_forex_market_open
     if not is_forex_market_open():
         log_debug("FOREX_SCHEDULER", "Mercado Forex cerrado. Omitiendo ciclo 5m.")
@@ -1237,7 +1415,7 @@ async def forex_cycle_5m():
 
 from app.strategy.profit_capture import evaluate_profit_capture
 from app.strategy.profit_ladder import evaluate_profit_ladder, check_basis_crossed
-from app.core.position_monitor import _execute_paper_close
+from app.core.position_monitor import _execute_paper_close, _execute_paper_partial_close
 
 async def process_forex_profit_management_15m(
     symbol: str,
@@ -1324,6 +1502,18 @@ async def process_forex_profit_management_15m(
         )
         await send_telegram_message(
             f'📉 PROFIT LADDER [{symbol}]\n'
+            f'{result_b["reason"]}\n'
+            f'Banda: {result_b.get("current_band")}'
+        )
+        return True
+
+    elif result_b['action'] == 'partial_close_50':
+        log_info('PROFIT_FX', f'📉 PROFIT LADDER PARTIAL CLOSE 50% [{symbol}]: {result_b["reason"]}')
+        await _execute_paper_partial_close(
+            position, current_price, sb
+        )
+        await send_telegram_message(
+            f'📉 PROFIT LADDER 50% [{symbol}]\n'
             f'{result_b["reason"]}\n'
             f'Banda: {result_b.get("current_band")}'
         )
@@ -1497,56 +1687,98 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
             log_info('AMBIGUOUS_FX', f"{symbol}: {ambiguity['reason']}")
             sm.set_ambiguous(symbol, ambiguity['reason'])
         else:
-            signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
+            signal = None
+            dca_smart_used = False
             
-            # --- FASE 5.5: V1 Engine Fallback (Crypto Logic para Aa23, Bb23, etc) ---
-            if not signal:
-                from app.strategy.rule_engine import evaluate_all_rules, get_rules_from_memory
-                from app.analysis.fibonacci_bb import extract_fib_levels
+            existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
+            if existing_positions:
+                from app.strategy.smart_dca_5m import evaluate_smart_dca
+
                 
-                # Fetch V1 rules from memory cache
-                all_v1_rules = get_rules_from_memory()
-                fib_levels = extract_fib_levels(df)
+                snap_15m = snap
+                df_5m = get_memory_df(symbol, "5m")
+                snap_5m = df_5m.iloc[-1].to_dict() if df_5m is not None and not df_5m.empty else {}
                 
-                # --- INJECT 5M DATA FOR Aa13 ---
-                ema3_5m = 0
-                ema9_5m = 0
-                ema20_5m = 0
-                bb_upper_5m_opens = False
-                bb_lower_5m_opens = False
+                is_long = existing_positions[0].get('side', '').lower() in ['long', 'buy']
+                last_pos = sorted(existing_positions, key=lambda x: x.get('opened_at', ''), reverse=True)[0]
+                last_entry = float(last_pos.get('entry_price') or last_pos.get('avg_entry_price') or current_price)
                 
-                if df_5m is not None and len(df_5m) >= 2:
-                    c0 = df_5m.iloc[-1]
-                    c1 = df_5m.iloc[-2]
-                    ema3_5m = c0.get('ema1', c0.get('ema_3', 0))
-                    ema9_5m = c0.get('ema2', c0.get('ema_9', 0))
-                    ema20_5m = c0.get('ema3', c0.get('ema_20', 0))
+                price_improvement_pct = 0.002
+                can_dca = False
+                max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                
+                if len(existing_positions) < max_per_pair:
+                    if is_long and current_price <= last_entry * (1 - price_improvement_pct):
+                        can_dca = True
+                    elif not is_long and current_price >= last_entry * (1 + price_improvement_pct):
+                        can_dca = True
+                        
+                if can_dca and snap_5m:
+                    dca_res = evaluate_smart_dca(snap_15m, snap_5m, is_long)
+                    if dca_res.get('should_dca'):
+                        signal = {
+                            'rule_code': dca_res['rule_code'],
+                            'direction': 'long' if is_long else 'short',
+                            'strategy_type': 'scalping',
+                            'cycle': '5m',
+                            'reason': dca_res['reason']
+                        }
+                        dca_smart_used = True
+
+            if not dca_smart_used:
+                normal_signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
+                
+                # --- FASE 5.5: V1 Engine Fallback (Crypto Logic para Aa23, Bb23, etc) ---
+                if not normal_signal:
+                    from app.strategy.rule_engine import evaluate_all_rules, get_rules_from_memory
+                    from app.analysis.fibonacci_bb import extract_fib_levels
                     
-                    u0 = float(c0.get('upper_2', 0))
-                    u1 = float(c1.get('upper_2', 0))
-                    if u0 > 0 and u1 > 0: bb_upper_5m_opens = (u0 > u1)
+                    all_v1_rules = get_rules_from_memory()
+                    fib_levels = extract_fib_levels(df)
                     
-                    l0 = float(c0.get('lower_2', 0))
-                    l1 = float(c1.get('lower_2', 0))
-                    if l0 > 0 and l1 > 0: bb_lower_5m_opens = (l0 < l1)
-                
-                df.loc[df.index[-1], 'ema3_5m'] = ema3_5m
-                df.loc[df.index[-1], 'ema9_5m'] = ema9_5m
-                df.loc[df.index[-1], 'ema20_5m'] = ema20_5m
-                df.loc[df.index[-1], 'bb_upper_5m_opens'] = bb_upper_5m_opens
-                df.loc[df.index[-1], 'bb_lower_5m_opens'] = bb_lower_5m_opens
-                # -------------------------
-                
-                # We evaluate V1 engine for Long
-                v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
-                v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
-                
-                if v1_long:
-                    rc_str = v1_long.get("rule", {}).get("rule_code", str(v1_long)) if isinstance(v1_long, dict) else str(v1_long)
-                    signal = {'rule_code': rc_str, 'direction': 'long', 'strategy_type': 'scalping', 'cycle': '15m'}
-                elif v1_short:
-                    rc_str = v1_short.get("rule", {}).get("rule_code", str(v1_short)) if isinstance(v1_short, dict) else str(v1_short)
-                    signal = {'rule_code': rc_str, 'direction': 'short', 'strategy_type': 'scalping', 'cycle': '15m'}
+                    df_5m = get_memory_df(symbol, "5m")
+                    ema3_5m, ema9_5m, ema20_5m = 0, 0, 0
+                    bb_upper_5m_opens, bb_lower_5m_opens = False, False
+                    
+                    if df_5m is not None and len(df_5m) >= 2:
+                        c0 = df_5m.iloc[-1]
+                        c1 = df_5m.iloc[-2]
+                        ema3_5m = c0.get('ema1', c0.get('ema_3', 0))
+                        ema9_5m = c0.get('ema2', c0.get('ema_9', 0))
+                        ema20_5m = c0.get('ema3', c0.get('ema_20', 0))
+                        
+                        u0 = float(c0.get('upper_2', 0))
+                        u1 = float(c1.get('upper_2', 0))
+                        if u0 > 0 and u1 > 0: bb_upper_5m_opens = (u0 > u1)
+                        
+                        l0 = float(c0.get('lower_2', 0))
+                        l1 = float(c1.get('lower_2', 0))
+                        if l0 > 0 and l1 > 0: bb_lower_5m_opens = (l0 < l1)
+                    
+                    df.loc[df.index[-1], 'ema3_5m'] = ema3_5m
+                    df.loc[df.index[-1], 'ema9_5m'] = ema9_5m
+                    df.loc[df.index[-1], 'ema20_5m'] = ema20_5m
+                    df.loc[df.index[-1], 'bb_upper_5m_opens'] = bb_upper_5m_opens
+                    df.loc[df.index[-1], 'bb_lower_5m_opens'] = bb_lower_5m_opens
+                    
+                    v1_long = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='long', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
+                    v1_short = evaluate_all_rules(df, fib_levels, regime, pinescript_signal=str(last_row.get('last_pinescript_signal', '') or ''), cfg=BOT_STATE.config_cache, direction='short', rules=all_v1_rules, source_tf='15m', market_type='forex_futures')
+                    
+                    if v1_long:
+                        rc_str = v1_long.get("rule", {}).get("rule_code", str(v1_long)) if isinstance(v1_long, dict) else str(v1_long)
+                        normal_signal = {'rule_code': rc_str, 'direction': 'long', 'strategy_type': 'scalping', 'cycle': '15m'}
+                    elif v1_short:
+                        rc_str = v1_short.get("rule", {}).get("rule_code", str(v1_short)) if isinstance(v1_short, dict) else str(v1_short)
+                        normal_signal = {'rule_code': rc_str, 'direction': 'short', 'strategy_type': 'scalping', 'cycle': '15m'}
+
+                if normal_signal:
+                    if not existing_positions:
+                        signal = normal_signal
+                    else:
+                        is_long = existing_positions[0].get('side', '').lower() in ['long', 'buy']
+                        is_signal_long = normal_signal['direction'] == 'long'
+                        if is_long != is_signal_long:
+                            signal = normal_signal # FLIP allowed
 
             if signal:
                 await engine.log_evaluation(symbol, signal, context)
@@ -1691,6 +1923,13 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
 
 async def forex_cycle_15m():
     """Ciclo 15m Forex: Analisis completo + senales."""
+    from app.core.safety_manager import is_system_paused, check_db_circuit_breaker
+    if check_db_circuit_breaker():
+        return
+    if is_system_paused():
+        log_info("FOREX_SCHEDULER", "Sistema pausado globalmente. Omitiendo ciclo 15m.")
+        return
+
     from app.core.market_hours import is_forex_market_open
     if not is_forex_market_open():
         log_info("FOREX_SCHEDULER", "Mercado Forex cerrado. Omitiendo ciclo 15m.")
