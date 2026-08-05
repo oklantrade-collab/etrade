@@ -289,6 +289,7 @@ class StrategyEngine:
         prev_low_touch_lower56_15m = False
         bb_lower_descending_15m = False
         bb_upper_descending_15m = False
+        bb_upper_ascending_15m = False
         high_above_ema20_15m = False
         high_above_ema20_5m = False
         ema20_below_ema50_15m = False
@@ -298,6 +299,12 @@ class StrategyEngine:
         low_below_ema20_15m = False
         high_above_ema20_15m = False
         close_below_ema20_15m = False
+        ema3_ascending_15m = False
+        ema3_descending_15m = False
+        ema20_ascending_15m = False
+        ema20_descending_15m = False
+        low_below_ema9_or_ema20_15m = False
+        high_above_ema9_or_ema20_15m = False
 
         if df_15m is not None and len(df_15m) >= 3:
             # BB Lower Ascending / Descending
@@ -311,12 +318,14 @@ class StrategyEngine:
             if b_l_0 < b_l_1 and b_l_1 < b_l_2 and b_l_0 > 0:
                 bb_lower_descending_15m = True
 
-            # BB Upper Descending
+            # BB Upper Descending & Ascending
             b_u_0 = safe_float(df_15m['upper_2'].iloc[-1] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-1] if 'bb_upper' in df_15m.columns else 0)
             b_u_1 = safe_float(df_15m['upper_2'].iloc[-2] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-2] if 'bb_upper' in df_15m.columns else 0)
             b_u_2 = safe_float(df_15m['upper_2'].iloc[-3] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series()).iloc[-3] if 'bb_upper' in df_15m.columns else 0)
             if b_u_0 < b_u_1 and b_u_1 < b_u_2 and b_u_0 > 0:
                 bb_upper_descending_15m = True
+            if b_u_0 > b_u_1 and b_u_1 > b_u_2 and b_u_2 > 0:
+                bb_upper_ascending_15m = True
 
             # Prev Low Touch Lower 5 or 6
             prev_low = safe_float(df_15m['low'].iloc[-2] if 'low' in df_15m.columns else 0)
@@ -339,6 +348,8 @@ class StrategyEngine:
                 
             ema3_ascending_15m = False
             ema3_descending_15m = False
+            ema20_ascending_15m = False
+            ema20_descending_15m = False
             
             if df_15m is not None and len(df_15m) >= 2:
                 c15_col = 'Close' if 'Close' in df_15m.columns else 'close'
@@ -349,6 +360,12 @@ class StrategyEngine:
                         ema3_ascending_15m = True
                     if float(ema3_series.iloc[-1]) < float(ema3_series.iloc[-2]):
                         ema3_descending_15m = True
+                    
+                    ema20_series = c15.ewm(span=20, adjust=False).mean()
+                    if float(ema20_series.iloc[-1]) > float(ema20_series.iloc[-2]):
+                        ema20_ascending_15m = True
+                    if float(ema20_series.iloc[-1]) < float(ema20_series.iloc[-2]):
+                        ema20_descending_15m = True
 
             if ema50_15m and ema200_15m:
                 if ema50_15m < ema200_15m:
@@ -360,19 +377,63 @@ class StrategyEngine:
                 if ema9_15m > ema20_15m:
                     ema9_above_ema20_15m = True
                     
-            if low_15m and ema20_15m and low_15m < ema20_15m:
-                low_below_ema20_15m = True
+            if df_15m is not None and len(df_15m) >= 2:
+                prev_low = safe_float(df_15m['low'].iloc[-2] if 'low' in df_15m.columns else 0)
+                prev_ema20 = safe_float(df_15m['ema_20'].iloc[-2] if 'ema_20' in df_15m.columns else (df_15m['ema20'].iloc[-2] if 'ema20' in df_15m.columns else 0))
+                if prev_low > 0 and prev_ema20 > 0 and prev_low < prev_ema20:
+                    low_below_ema20_15m = True
             
             if ema20_15m and high_15m > ema20_15m:
                 high_above_ema20_15m = True
+            
+            low_below_ema9_or_ema20_15m = False
+            high_above_ema9_or_ema20_15m = False
+            if ema9_15m and ema20_15m and low_15m:
+                low_below_ema9_or_ema20_15m = (low_15m <= ema9_15m) or (low_15m <= ema20_15m)
+            if ema9_15m and ema20_15m and high_15m:
+                high_above_ema9_or_ema20_15m = (high_15m >= ema9_15m) or (high_15m >= ema20_15m)
             
             close_15m = safe_float(last_15m.get('close') if last_15m.get('close') is not None else last_15m.get('Close'))
             if ema20_15m and close_15m and close_15m < ema20_15m:
                 close_below_ema20_15m = True
 
+        # 15m EMAs for new rules
+        ema3_15m_val = safe_float(last_15m.get('ema_3') if last_15m.get('ema_3') is not None else last_15m.get('ema3'))
+        ema9_15m_val = safe_float(last_15m.get('ema_9') if last_15m.get('ema_9') is not None else last_15m.get('ema9'))
+        ema20_15m_val = safe_float(last_15m.get('ema_20') if last_15m.get('ema_20') is not None else last_15m.get('ema20'))
+        
+        ema3_above_ema9_15m = (ema3_15m_val > ema9_15m_val) if ema3_15m_val and ema9_15m_val else False
+        ema9_above_ema20_15m = (ema9_15m_val > ema20_15m_val) if ema9_15m_val and ema20_15m_val else False
+        ema3_below_ema9_15m = (ema3_15m_val < ema9_15m_val) if ema3_15m_val and ema9_15m_val else False
+        ema9_below_ema20_15m = (ema9_15m_val < ema20_15m_val) if ema9_15m_val and ema20_15m_val else False
+
+        ema3_above_ema9_5m = False
+        ema9_above_ema20_5m = False
+        ema3_below_ema9_5m = False
+        ema9_below_ema20_5m = False
+        low_below_ema9_or_ema20_5m = False
+        high_above_ema9_or_ema20_5m = False
+
         if last_5m:
-            ema20_5m_val = safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else last_5m.get('ema20'))
+            ema3_5m_val = safe_float(last_5m.get('ema_3') if last_5m.get('ema_3') is not None else last_5m.get('ema1'))
+            ema9_5m_val = safe_float(last_5m.get('ema_9') if last_5m.get('ema_9') is not None else last_5m.get('ema2'))
+            ema20_5m_val = safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else last_5m.get('ema3'))
+            
+            if ema3_5m_val and ema9_5m_val:
+                ema3_above_ema9_5m = ema3_5m_val > ema9_5m_val
+                ema3_below_ema9_5m = ema3_5m_val < ema9_5m_val
+            if ema9_5m_val and ema20_5m_val:
+                ema9_above_ema20_5m = ema9_5m_val > ema20_5m_val
+                ema9_below_ema20_5m = ema9_5m_val < ema20_5m_val
+                
+            low_5m_val = safe_float(last_5m.get('low'))
             high_5m_val = safe_float(last_5m.get('high'))
+            
+            if low_5m_val and ema9_5m_val and ema20_5m_val:
+                low_below_ema9_or_ema20_5m = (low_5m_val <= ema9_5m_val) or (low_5m_val <= ema20_5m_val)
+            if high_5m_val and ema9_5m_val and ema20_5m_val:
+                high_above_ema9_or_ema20_5m = (high_5m_val >= ema9_5m_val) or (high_5m_val >= ema20_5m_val)
+            
             if ema20_5m_val and high_5m_val >= ema20_5m_val:
                 high_above_ema20_5m = True
 
@@ -410,6 +471,18 @@ class StrategyEngine:
             'ema20_descending_1h': ema20_descending_1h,
             'ema3_open_up_15m':  ema3_open_up_15m,
             'ema3_open_up_5m':   ema3_open_up_5m,
+            
+            # Nuevas reglas 15m/5m DIP
+            'ema3_above_ema9_15m': ema3_above_ema9_15m,
+            'ema9_above_ema20_15m': ema9_above_ema20_15m,
+            'ema3_below_ema9_15m': ema3_below_ema9_15m,
+            'ema9_below_ema20_15m': ema9_below_ema20_15m,
+            'ema3_above_ema9_5m': ema3_above_ema9_5m,
+            'ema9_above_ema20_5m': ema9_above_ema20_5m,
+            'ema3_below_ema9_5m': ema3_below_ema9_5m,
+            'ema9_below_ema20_5m': ema9_below_ema20_5m,
+            'low_below_ema9_or_ema20_5m': low_below_ema9_or_ema20_5m,
+            'high_above_ema9_or_ema20_5m': high_above_ema9_or_ema20_5m,
             'ema3_cross_ema9_up': safe_bool(last_15m.get('ema3_cross_ema9_up') if last_15m.get('ema3_cross_ema9_up') is not None else (safe_float(last_15m.get('ema_3') or last_15m.get('ema3')) > safe_float(last_15m.get('ema_9') or last_15m.get('ema9')))),
             'ema3_ema9_trend_ok': safe_bool(last_15m.get('ema3_ema9_trend_ok') if last_15m.get('ema3_ema9_trend_ok') is not None else (safe_float(last_15m.get('ema_9') or last_15m.get('ema9')) > safe_float(last_15m.get('ema_20') or last_15m.get('ema20')) or safe_float(last_15m.get('ema_3') or last_15m.get('ema3')) > safe_float(last_15m.get('ema_20') or last_15m.get('ema20')))),
             'close_below_upper':  safe_bool(last_15m.get('close_below_upper') if last_15m.get('close_below_upper') is not None else (safe_float(snap.get('price')) < safe_float(snap.get('upper_2') or 999999))),
@@ -495,8 +568,11 @@ class StrategyEngine:
             'prev_low_touch_lower56_15m': prev_low_touch_lower56_15m,
             'bb_lower_descending_15m': bb_lower_descending_15m,
             'bb_upper_descending_15m': bb_upper_descending_15m,
+            'bb_upper_ascending_15m': bb_upper_ascending_15m,
             'ema3_ascending_15m': ema3_ascending_15m,
             'ema3_descending_15m': ema3_descending_15m,
+            'ema20_ascending_15m': ema20_ascending_15m,
+            'ema20_descending_15m': ema20_descending_15m,
             'high_above_ema20_15m': high_above_ema20_15m,
             'high_above_ema20_5m': high_above_ema20_5m,
             'ema20_below_ema50_15m': ema20_below_ema50_15m,
@@ -505,6 +581,8 @@ class StrategyEngine:
             'ema9_above_ema20_15m': ema9_above_ema20_15m,
             'low_below_ema20_15m': low_below_ema20_15m,
             'close_below_ema20_15m': close_below_ema20_15m,
+            'low_below_ema9_or_ema20_15m': low_below_ema9_or_ema20_15m,
+            'high_above_ema9_or_ema20_15m': high_above_ema9_or_ema20_15m,
 
             # Referencia al DataFrame original para reglas personalizadas avanzadas
             'df_15m': df_15m

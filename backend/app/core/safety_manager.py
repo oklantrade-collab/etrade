@@ -137,6 +137,49 @@ def set_current_worker(name: str):
 
 
 # ════════════════════════════════════════
+# CIRCUIT BREAKER (DB / Supabase)
+# ════════════════════════════════════════
+_db_circuit_breaker_until = None
+
+def check_db_circuit_breaker() -> bool:
+    global _db_circuit_breaker_until
+    if _db_circuit_breaker_until:
+        if datetime.now(timezone.utc) < _db_circuit_breaker_until:
+            return True
+        else:
+            _db_circuit_breaker_until = None
+    return False
+
+def trigger_db_circuit_breaker(exception_str: str):
+    global _db_circuit_breaker_until
+    if _db_circuit_breaker_until and datetime.now(timezone.utc) < _db_circuit_breaker_until:
+        return
+        
+    log_error('SAFETY', f"DB Circuit Breaker Triggered: {exception_str}")
+    _db_circuit_breaker_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+    
+    from app.workers.alerts_service import send_telegram_message
+    asyncio.create_task(send_telegram_message(f"🚨 *DB CIRCUIT BREAKER ACTIVADO*\nSe perdió la conexión a Supabase (posible cuota). Sistema en PAUSA TOTAL por 30 minutos.\nDetalle: {exception_str[:150]}", priority='high'))
+
+def is_system_paused() -> bool:
+    """Verifica el botón de pánico global en Supabase."""
+    if check_db_circuit_breaker():
+        return True
+    try:
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        if res and res.data:
+            params = res.data.get('regime_params') or {}
+            return bool(params.get('is_paused', False))
+    except Exception as e:
+        err_str = str(e).lower()
+        if "402" in err_str or "quota" in err_str or "timeout" in err_str or "fetch" in err_str:
+            trigger_db_circuit_breaker(str(e))
+            return True
+    return False
+
+# ════════════════════════════════════════
 # HEARTBEAT
 # ════════════════════════════════════════
 
@@ -288,8 +331,8 @@ def validate_signal(
             )
             send_telegram_sync(alert_msg)
 
-    # CHECK 8: Control de sobrecompra / sobreventa Bollinger para Forex (e.g. Aa52/Bb52)
-    if not errors and snap and market_type == 'forex_futures' and direction and rule_code:
+    # CHECK 8: Control de sobrecompra / sobreventa Bollinger para Forex y Crypto (e.g. Aa52/Bb52)
+    if not errors and snap and market_type in ('forex_futures', 'crypto_futures') and direction and rule_code:
         rc = str(rule_code).strip().lower()
         if 'aa52' in rc or 'bb52' in rc:
             bb_upper = safe_float(snap.get('upper_2'))
@@ -306,8 +349,8 @@ def validate_signal(
                         f"Filtro sobreventa Bollinger (Bb52) activo: precio ${price:.5f} <= bb_lower (lower_2) ${bb_lower:.5f}"
                     )
 
-    # CHECK 9: Filtro MTF de Caída Libre en 5m (Evitar Cuchillos Cayendo)
-    if not errors and snap and market_type == 'forex_futures' and direction and rule_code:
+    # CHECK 9: Filtro MTF de Caída Libre en 5m (Evitar Cuchillos Cayendo en Forex y Crypto)
+    if not errors and snap and market_type in ('forex_futures', 'crypto_futures') and direction and rule_code:
         rc = str(rule_code).strip().lower()
         if 'hot' not in rc:
             ema3_5m = safe_float(snap.get('ema3_5m', 0))
@@ -320,6 +363,99 @@ def validate_signal(
                 elif direction.lower() == 'short':
                     if ema3_5m > ema9_5m and ema9_5m > ema20_5m:
                         errors.append(f"Bloqueo MTF SHORT ({rc}): Tendencia 5m en vuelo libre (EMA3={ema3_5m:.5f} > EMA9={ema9_5m:.5f} > EMA20={ema20_5m:.5f})")
+
+    # CHECK 10: Filtro de Tendencia Estricta en 5m para Aa52/Bb52
+    if not errors and snap and market_type == 'forex_futures' and direction and rule_code:
+        rc = str(rule_code).strip().lower()
+        if 'aa52' in rc or 'bb52' in rc:
+            ema3_5m = safe_float(snap.get('ema3_5m', 0))
+            ema9_5m = safe_float(snap.get('ema9_5m', 0))
+            ema20_5m = safe_float(snap.get('ema20_5m', 0))
+            
+            if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                if direction.lower() == 'long':
+                    if not (ema3_5m > ema9_5m and ema9_5m > ema20_5m):
+                        errors.append(f"Bloqueo Tendencia LONG ({rc}): Requiere EMA3 > EMA9 > EMA20 en 5m. Actual: EMA3={ema3_5m:.5f}, EMA9={ema9_5m:.5f}, EMA20={ema20_5m:.5f}")
+                elif direction.lower() == 'short':
+                    if not (ema3_5m < ema9_5m and ema9_5m < ema20_5m):
+                        errors.append(f"Bloqueo Tendencia SHORT ({rc}): Requiere EMA3 < EMA9 < EMA20 en 5m. Actual: EMA3={ema3_5m:.5f}, EMA9={ema9_5m:.5f}, EMA20={ema20_5m:.5f}")
+
+    # CHECK 11: Filtro de Pullback (EMA3) para Entradas Market (15m)
+    # Aplica para Aa30, Bb30, Aa52, Bb52 en Crypto y Forex
+    if not errors and snap and direction and rule_code:
+        rc = str(rule_code).strip().lower()
+        if any(x in rc for x in ['aa30', 'bb30', 'aa52', 'bb52']):
+            ema3_15m = safe_float(snap.get('ema_fast', snap.get('ema3', 0)))
+            
+            if ema3_15m > 0:
+                if direction.lower() == 'short':
+                    # Para SHORT, el precio debe estar por encima de la EMA3
+                    if price <= ema3_15m:
+                        errors.append(f"Bloqueo Pullback SHORT ({rc}): Precio {price:.5f} está <= EMA3_15m {ema3_15m:.5f}. Se exige pullback (Precio > EMA3).")
+                elif direction.lower() == 'long':
+                    # Para LONG, el precio debe estar por debajo de la EMA3
+                    if price >= ema3_15m:
+                        errors.append(f"Bloqueo Pullback LONG ({rc}): Precio {price:.5f} está >= EMA3_15m {ema3_15m:.5f}. Se exige pullback (Precio < EMA3).")
+
+    # CHECK 12: Cooldown de 15 min por Estrategia y Símbolo (Forex y Crypto)
+    if not errors and snap and rule_code and market_type == 'forex_futures':
+        rc_str = str(rule_code).strip()
+        try:
+            from datetime import timedelta
+            from app.core.supabase_client import get_supabase
+            sb = get_supabase()
+            fifteen_mins_ago = (datetime.utcnow() - timedelta(minutes=15)).isoformat()
+            
+            recent_positions = sb.table('positions') \
+                .select('id, opened_at') \
+                .eq('symbol', symbol) \
+                .eq('rule_code', rc_str) \
+                .gte('opened_at', fifteen_mins_ago) \
+                .limit(1) \
+                .execute()
+                
+            if recent_positions.data:
+                metrics = snap.get('raw_metrics_5m', {})
+                rsi = float(metrics.get('rsi', 50))
+                low_price = float(metrics.get('low', 0))
+                high_price = float(metrics.get('high', 0))
+                open_price = float(metrics.get('open', 0))
+                close_price = float(metrics.get('close', 0))
+                
+                lower_5 = float(metrics.get('lower_5', 0))
+                lower_6 = float(metrics.get('lower_6', 0))
+                upper_5 = float(metrics.get('upper_5', 0))
+                upper_6 = float(metrics.get('upper_6', 0))
+                bb_lower = float(metrics.get('bb_lower', 0)) 
+                bb_upper = float(metrics.get('bb_upper', 0))
+
+                bypass = False
+                sig_dir = str(direction).lower() if direction else 'long'
+                if 'long' in sig_dir or 'buy' in sig_dir:
+                    if rsi < 15:
+                        bypass = True
+                    elif lower_6 > 0 and low_price <= lower_6:
+                        bypass = True
+                    elif lower_5 > 0 and low_price <= lower_5:
+                        bypass = True
+                    elif bb_lower > 0 and open_price < bb_lower and close_price < open_price:
+                        bypass = True
+                else: # short
+                    if rsi > 85:
+                        bypass = True
+                    elif upper_6 > 0 and high_price >= upper_6:
+                        bypass = True
+                    elif upper_5 > 0 and high_price >= upper_5:
+                        bypass = True
+                    elif bb_upper > 0 and open_price > bb_upper and close_price > open_price:
+                        bypass = True
+                
+                if not bypass:
+                    errors.append(f"COOLDOWN_ACTIVE_STRATEGY ({rc_str} en {symbol})")
+                else:
+                    log_info('SAFETY', f"Bypass cooldown activado para {symbol} ({rc_str}) por extremos (RSI: {rsi:.2f})")
+        except Exception as e:
+            log_error('SAFETY', f"Error checking forex strategy cooldown: {e}")
 
     if errors:
         log_info('SAFETY',
@@ -546,6 +682,10 @@ async def check_subprocesses_safety(supabase) -> dict:
     Stop Loss Adaptativo e indicadores para los mercados de Crypto y Forex.
     Activa bloqueos y alerta a Telegram en caso de fallos.
     """
+    if check_db_circuit_breaker() or is_system_paused():
+        log_info('SAFETY', "Circuit breaker o sistema pausado. Omitiendo control de seguridad de subprocesos.")
+        return {'forex_blocked': False, 'crypto_blocked': False}
+
     global _safety_block_forex, _safety_block_crypto, _last_safety_check_time
     now = datetime.now(timezone.utc)
     _last_safety_check_time = now
@@ -584,7 +724,7 @@ async def check_subprocesses_safety(supabase) -> dict:
                 stale_forex = True
                 
             # Check 2.5: Indicadores Adaptativos (basis)
-            basis_val = float(s_data.get('basis') or 0)
+            basis_val = float(s_data.get('basis') or s_data.get('price') or 0)
             if basis_val <= 0:
                 indicators_crashed_forex = True
         
@@ -614,6 +754,10 @@ async def check_subprocesses_safety(supabase) -> dict:
         forex_checks['slvm_integrity'] = True
         
     except Exception as e:
+        err_str = str(e).lower()
+        if "402" in err_str or "quota" in err_str or "restricted" in err_str or "spend caps" in err_str:
+            trigger_db_circuit_breaker(str(e))
+            return {'forex_blocked': False, 'crypto_blocked': False}
         log_error('SAFETY', f"Error ejecutando checklist de FOREX: {e}")
         forex_checks['system_error'] = False
         
@@ -666,7 +810,7 @@ async def check_subprocesses_safety(supabase) -> dict:
                 stale_count_crypto += 1
                 
             # Check 1.4: Indicadores Adaptativos (basis)
-            basis_val = float(s_data.get('basis') or 0)
+            basis_val = float(s_data.get('basis') or s_data.get('price') or 0)
             if basis_val <= 0:
                 indicators_crashed_crypto = True
         
@@ -696,6 +840,10 @@ async def check_subprocesses_safety(supabase) -> dict:
         crypto_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive
         
     except Exception as e:
+        err_str = str(e).lower()
+        if "402" in err_str or "quota" in err_str or "restricted" in err_str or "spend caps" in err_str:
+            trigger_db_circuit_breaker(str(e))
+            return {'forex_blocked': False, 'crypto_blocked': False}
         log_error('SAFETY', f"Error ejecutando checklist de CRYPTO: {e}")
         crypto_checks['system_error'] = False
         
@@ -868,6 +1016,8 @@ async def check_all_heartbeats() -> list:
 
 
 async def _send_telegram(message: str):
+    if check_db_circuit_breaker():
+        return
     try:
         from app.workers.alerts_service import send_telegram_message
         await send_telegram_message(message)
@@ -876,6 +1026,8 @@ async def _send_telegram(message: str):
 
 def send_telegram_sync(message: str):
     """Envía un mensaje de Telegram desde un contexto síncrono de forma segura."""
+    if check_db_circuit_breaker():
+        return
     try:
         import asyncio
         try:
