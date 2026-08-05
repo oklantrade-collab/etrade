@@ -402,6 +402,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
     max_risk_per_trade_crypto_pct: config.regime_params?.max_risk_per_trade_crypto_pct || config.max_risk_per_trade_pct || 2.0, 
     max_open_trades: config.max_open_trades || 3,
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
+    max_active_symbols_crypto: config.regime_params?.max_active_symbols_crypto || 1,
     max_reversal_loss_pct_crypto: config.max_reversal_loss_pct_crypto ?? -0.05,
     max_total_risk_crypto_pct: config.regime_params?.max_total_risk_crypto_pct || 30,
     active_symbols_str: (config.active_symbols || ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"]).join(', ')
@@ -412,15 +413,16 @@ const CryptoSettings = ({ config, onSave }: any) => {
       ...form,
       active_symbols_str: (config.active_symbols || []).join(', '),
       max_positions_per_symbol: config.max_positions_per_symbol,
+      max_active_symbols_crypto: config.regime_params?.max_active_symbols_crypto || 1,
       max_reversal_loss_pct_crypto: config.max_reversal_loss_pct_crypto ?? -0.05,
       max_risk_per_trade_crypto_pct: config.regime_params?.max_risk_per_trade_crypto_pct || config.max_risk_per_trade_pct || 2.0,
       max_total_risk_crypto_pct: config.regime_params?.max_total_risk_crypto_pct || 30
     })
-  }, [config.active_symbols, config.max_positions_per_symbol, config.max_reversal_loss_pct_crypto, config.max_risk_per_trade_pct, config.regime_params?.max_total_risk_crypto_pct, config.regime_params?.max_risk_per_trade_crypto_pct])
+  }, [config.active_symbols, config.max_positions_per_symbol, config.max_reversal_loss_pct_crypto, config.max_risk_per_trade_pct, config.regime_params?.max_total_risk_crypto_pct, config.regime_params?.max_risk_per_trade_crypto_pct, config.regime_params?.max_active_symbols_crypto])
 
   const handleLocalSave = () => {
     const symbols = form.active_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '')
-    const newRegimeParams = { ...config.regime_params, max_total_risk_crypto_pct: form.max_total_risk_crypto_pct, max_risk_per_trade_crypto_pct: form.max_risk_per_trade_crypto_pct }
+    const newRegimeParams = { ...config.regime_params, max_total_risk_crypto_pct: form.max_total_risk_crypto_pct, max_risk_per_trade_crypto_pct: form.max_risk_per_trade_crypto_pct, max_active_symbols_crypto: Number(form.max_active_symbols_crypto) }
     onSave({
       ...form,
       active_symbols: symbols,
@@ -446,6 +448,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
       <SettingsSection title="🛡️ Gestión de Riesgo (Cripto)">
         <SettingRow label="Límite Pérdida Reversión (%)" value={form.max_reversal_loss_pct_crypto} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_reversal_loss_pct_crypto: v })} />
         <SettingRow label="Max. Tot Riesgo Inv." value={form.max_total_risk_crypto_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_total_risk_crypto_pct: v })} />
+        <SettingRow label="Cant. Monedas Activas" value={form.max_active_symbols_crypto} type="number" onChange={(v: any) => setForm({ ...form, max_active_symbols_crypto: v })} />
         <SettingRow label="Cant. Operación x Cripto" value={form.max_positions_per_symbol} type="number" onChange={(v: any) => setForm({ ...form, max_positions_per_symbol: v })} />
         <SettingRow label="Inversión x Operación (Risk %)" value={form.max_risk_per_trade_crypto_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_risk_per_trade_crypto_pct: v })} />
         <div style={{ padding: '8px 18px', color: 'var(--text-muted)', fontSize: '11px' }}>
@@ -465,6 +468,7 @@ const ForexSettings = ({ config, onSave }: any) => {
 
   const [form, setForm] = useState({ 
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
+    max_active_symbols_forex: config.regime_params?.max_active_symbols_forex || 2,
     max_reversal_loss_pct_forex: config.max_reversal_loss_pct_forex ?? -0.05,
     max_risk_per_trade_forex_pct: config.regime_params?.max_risk_per_trade_forex_pct || config.max_risk_per_trade_pct || 2.0,
     max_total_risk_forex_pct: config.regime_params?.max_total_risk_forex_pct || 30,
@@ -474,16 +478,17 @@ const ForexSettings = ({ config, onSave }: any) => {
   useEffect(() => {
     setForm({
       max_positions_per_symbol: config.max_positions_per_symbol,
+      max_active_symbols_forex: config.regime_params?.max_active_symbols_forex || 2,
       max_reversal_loss_pct_forex: config.max_reversal_loss_pct_forex ?? -0.05,
       max_risk_per_trade_forex_pct: config.regime_params?.max_risk_per_trade_forex_pct || config.max_risk_per_trade_pct || 2.0,
       max_total_risk_forex_pct: config.regime_params?.max_total_risk_forex_pct || 30,
       forex_symbols_str: (config.regime_params?.forex_assets || []).join(', ')
     })
-  }, [config.max_positions_per_symbol, config.max_reversal_loss_pct_forex, config.max_risk_per_trade_pct, config.regime_params?.forex_assets, config.regime_params?.max_total_risk_forex_pct, config.regime_params?.max_risk_per_trade_forex_pct])
+  }, [config.max_positions_per_symbol, config.max_reversal_loss_pct_forex, config.max_risk_per_trade_pct, config.regime_params?.forex_assets, config.regime_params?.max_total_risk_forex_pct, config.regime_params?.max_risk_per_trade_forex_pct, config.regime_params?.max_active_symbols_forex])
 
   const handleLocalSave = () => {
     const symbols = form.forex_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '')
-    const newRegimeParams = { ...config.regime_params, forex_assets: symbols, max_total_risk_forex_pct: form.max_total_risk_forex_pct, max_risk_per_trade_forex_pct: form.max_risk_per_trade_forex_pct }
+    const newRegimeParams = { ...config.regime_params, forex_assets: symbols, max_total_risk_forex_pct: form.max_total_risk_forex_pct, max_risk_per_trade_forex_pct: form.max_risk_per_trade_forex_pct, max_active_symbols_forex: Number(form.max_active_symbols_forex) }
     onSave({
       ...form,
       regime_params: newRegimeParams,
@@ -526,6 +531,7 @@ const ForexSettings = ({ config, onSave }: any) => {
       <SettingsSection title="🛡️ Gestión de Riesgo (Forex)">
         <SettingRow label="Límite Pérdida Reversión (%)" value={form.max_reversal_loss_pct_forex} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_reversal_loss_pct_forex: v })} />
         <SettingRow label="Max. Tot Riesgo Inv." value={form.max_total_risk_forex_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_total_risk_forex_pct: v })} />
+        <SettingRow label="Cant. Monedas Activas" value={form.max_active_symbols_forex} type="number" onChange={(v: any) => setForm({ ...form, max_active_symbols_forex: v })} />
         <SettingRow label="Cant. Operación x Par" value={form.max_positions_per_symbol} type="number" onChange={(v: any) => setForm({ ...form, max_positions_per_symbol: v })} />
         <SettingRow label="Inversión x Operación (Risk %)" value={form.max_risk_per_trade_forex_pct} type="number" suffix="%" onChange={(v: any) => setForm({ ...form, max_risk_per_trade_forex_pct: v })} />
       </SettingsSection>

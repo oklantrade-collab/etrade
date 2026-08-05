@@ -52,17 +52,17 @@ def normalize_forex_price(symbol, price):
 # Si se excede CUALQUIERA de estos limites, se cierra inmediatamente
 # sin esperar confirmaciones tecnicas.
 HARD_CAP_LOSS_PIPS = {
-    'EURUSD': 40,
+    'EURUSD': 80,   # Aumentado de 40 a 80 pips (Disaster stop)
     'GBPUSD': 60,   # Aumentado de 40 a 60 pips por la volatilidad natural de la Libra (Cable)
     'USDJPY': 100, # Aumentado de 40 a 100 pips para dar espacio a la alta volatilidad del Yen
-    'XAUUSD': 1200, # Aumentado de 80 a 1200 pips ($12.00 USD) para dar margen a la volatilidad del Oro
+    'XAUUSD': 3000, # Aumentado de 1200 a 3000 pips ($30.00 USD) (Disaster stop)
 }
 HARD_CAP_LOSS_USD = 25.0  # Pérdida máxima de emergencia en USD por trade
 MAX_SL_PIPS = {
-    'EURUSD': 30,
+    'EURUSD': 80,   # Aumentado de 30 a 80 pips (Disaster stop)
     'GBPUSD': 50,   # Aumentado de 30 a 50 pips para evitar salidas prematuras en la Libra
     'USDJPY': 80,  # Aumentado de 30 a 80 pips para evitar cierres prematuros en el Yen
-    'XAUUSD': 1000, # Aumentado de 60 a 1000 pips ($10.00 USD) para evitar cierres prematuros en Oro
+    'XAUUSD': 3000, # Aumentado de 1000 a 3000 pips ($30.00 USD) (Disaster stop)
 }
 
 class ForexExecutionService:
@@ -138,6 +138,15 @@ class ForexExecutionService:
                 s = p['symbol']
                 pos_count[s] = pos_count.get(s, 0) + 1
 
+            # Obtener max_active_symbols_forex desde trading_config -> regime_params
+            try:
+                tc_res = self.sb.table('trading_config').select('regime_params').eq('id', 1).execute()
+                tc_data = tc_res.data[0] if tc_res.data else {}
+                regime_params = tc_data.get('regime_params', {}) or {}
+                max_active_symbols = int(regime_params.get('max_active_symbols_forex', 2))
+            except Exception as e:
+                max_active_symbols = 2
+
             symbols = list(self.state['symbol_ids'].keys()) or self.symbols
             
             # 3. Obtener snapshots con reintentos por desconexion
@@ -155,7 +164,7 @@ class ForexExecutionService:
                         raise e
             
             summary = ", ".join([f"{s}: {pos_count.get(s,0)}" for s in symbols])
-            self.log(f'Evaluando {len(snaps_data)} simbolos. Total: {open_count} | {summary} (Limite/Simbolo: {limit_per_symbol})')
+            self.log(f'Evaluando {len(snaps_data)} simbolos. Total: {open_count} | {summary} (Limite/Simbolo: {limit_per_symbol}, Max Monedas Activas: {max_active_symbols})')
 
             for snap in snaps_data:
                 symbol = snap['symbol']
@@ -165,6 +174,12 @@ class ForexExecutionService:
                         self.log(f"[EXCESO] Detectado en {symbol}: {count} > {limit_per_symbol}", "WARNING")
                     continue 
                 
+                # Verificar si alcanzamos el límite de monedas activas simultáneas en Forex
+                active_symbols_count = len(pos_count)
+                if count == 0 and active_symbols_count >= max_active_symbols:
+                    self.log(f"[BLOQUEO MONEDAS ACTIVAS] {symbol} omitido: Ya hay {active_symbols_count}/{max_active_symbols} pares activos.")
+                    continue
+
                 self._evaluate_symbol(snap)
 
         except Exception as e:
@@ -814,19 +829,19 @@ class ForexExecutionService:
                 pass
             return
 
-        # 1. Reglas Multi-layer (Misma estrategia)
-        same_strat = [p for p in self._open_positions_list if p['symbol'] == symbol and p['rule_code'] == signal['rule_code']]
+        # 1. Reglas Multi-layer (Misma dirección) - Evita duplicados en la misma vela
+        same_direction = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == direction.lower()]
         
-        if same_strat:
+        if same_direction:
             # Regla 1: 1 compra por vela (usamos 15 min como est ndar solicitado)
-            last_pos = sorted(same_strat, key=lambda x: x['opened_at'], reverse=True)[0]
+            last_pos = sorted(same_direction, key=lambda x: x['opened_at'], reverse=True)[0]
             opened_at_str = str(last_pos['opened_at'])
             if 'Z' in opened_at_str: opened_at_str = opened_at_str.replace('Z', '+00:00')
             opened_at = datetime.fromisoformat(opened_at_str)
             now = datetime.now(timezone.utc)
             
             if (now - opened_at).total_seconds() < 900: # 15 minutos
-                 self.log(f'Omitiendo {symbol} {signal["rule_code"]}: Ya hay una abierta en los ultimos 15 min.')
+                 self.log(f'Omitiendo {symbol} {signal["rule_code"]}: Ya hay una abierta en los ultimos 15 min (Anti-Spam Global).')
                  return
             
             # Regla 2: Mejora de precio (DCA)
@@ -839,16 +854,16 @@ class ForexExecutionService:
                  self.log(f'[WAIT] Omitiendo {symbol} {direction.upper()}: Precio {price} <= {last_entry} (No mejora costo)')
                  return
             
-            self.log(f'Agregando CAPA {len(same_strat)+1} para {symbol} ({signal["rule_code"]})')
+            self.log(f'Agregando CAPA {len(same_direction)+1} para {symbol} ({signal["rule_code"]})')
 
         # 2. Spam Protection: Verificar historial reciente (Cerradas)
         try:
-            # Consultar  ltimas posiciones cerradas del mismo s mbolo y estrategia en los  ltimos 15 min
+            # Consultar últimas posiciones cerradas del mismo símbolo y dirección en los últimos 15 min
             since = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
             hist = self.sb.table('forex_positions')\
                 .select('opened_at')\
                 .eq('symbol', symbol)\
-                .eq('rule_code', signal['rule_code'])\
+                .eq('side', direction)\
                 .gte('opened_at', since)\
                 .order('opened_at', desc=True)\
                 .limit(1).execute()
@@ -1638,6 +1653,32 @@ class ForexExecutionService:
         hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
         
         if hit_hard_cap or hit_sl:
+            # Opción A: Excluir Swing (BbApexEma/AaApexEma) de EREP si la tendencia es super fuerte en contra
+            bypass_erep = False
+            rule_code = pos.get('rule_code', '')
+            if rule_code in ('AaApexEma', 'BbApexEma') and snap:
+                ema3 = self._safe_float(snap.get('ema_3', snap.get('ema3')))
+                ema9 = self._safe_float(snap.get('ema_9', snap.get('ema9')))
+                ema20 = self._safe_float(snap.get('ema_20', snap.get('ema20')))
+                
+                if ema3 > 0 and ema9 > 0 and ema20 > 0:
+                    if rule_code == 'BbApexEma' and (ema3 > ema9 > ema20):
+                        bypass_erep = True
+                    elif rule_code == 'AaApexEma' and (ema3 < ema9 < ema20):
+                        bypass_erep = True
+            
+            if bypass_erep:
+                self.log(f"[HARD CAP EXCEPTION] {symbol}: Tendencia fuerte en contra de {rule_code}. Evitando EREP y cerrando directo.")
+                reason = 'hard_cap_loss' if hit_hard_cap else 'sl_hit'
+                self._close_position(pos, price, reason, pips_pnl, snap=snap)
+                if hit_hard_cap:
+                    self._send_telegram(
+                        f"HARD CAP LOSS (SWING EXCEPTION) [{symbol}]\n"
+                        f"Pips: {pips_pnl:.1f} | USD: ${pnl_usd:.2f}\n"
+                        f"Trend: EMA3 vs EMA9 vs EMA20 en contra"
+                    )
+                return True
+                
             self.log(f"[EREP ROUTE] Stop Loss hit for {symbol}. Routing to EREP Phase 1...")
             self.sb.table('forex_positions').update({
                 'erep_phase': 1,
