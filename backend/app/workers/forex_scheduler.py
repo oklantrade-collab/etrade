@@ -835,7 +835,7 @@ async def open_forex_position(
             'status':           'open',
             'mode':             'paper' if is_paper else 'live',
             'market_type':      'forex_futures',
-            'ctrader_order_id': str(order.get('order_id'))[:50] if order.get('order_id') else None,
+            'ctrader_order_id': int(order.get('order_id')) if (order and order.get('order_id') and str(order.get('order_id')).isdigit()) else None,
             'opened_at':        datetime.now(timezone.utc).isoformat(),
         }).execute()
     except Exception as e:

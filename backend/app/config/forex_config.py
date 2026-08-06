@@ -64,7 +64,7 @@ PIP_SIZES = {
     'EURGBP':  0.0001,
     'EURJPY':  0.01,
     'GBPJPY':  0.01,
-    'XAUUSD':  0.01,
+    'XAUUSD':  0.1,
     'XAGUSD':  0.001,
     'US30':    1.0,
     'US500':   0.1,
