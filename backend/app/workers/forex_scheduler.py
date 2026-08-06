@@ -634,8 +634,18 @@ def calculate_forex_lot_size(
     pip_size = PIP_SIZES.get(symbol, 0.0001)
     risk_usd = capital_usd * (risk_pct / 100.0)
 
-    # Pip value para 1 lote estandar (100,000 unidades)
-    pip_value = pip_size * 100_000
+    # Contract size por instrumento (oz para commodities, unidades para forex)
+    CONTRACT_SIZES = {
+        'XAUUSD': 100,       # 1 lote = 100 onzas troy
+        'XAGUSD': 5_000,     # 1 lote = 5,000 onzas troy
+        'US30':   1,         # 1 lote = 1 contrato
+        'US500':  1,         # 1 lote = 1 contrato
+        'NAS100': 1,         # 1 lote = 1 contrato
+    }
+    contract_size = CONTRACT_SIZES.get(symbol, 100_000)  # Default: 100,000 para pares Forex
+
+    # Pip value para 1 lote estándar
+    pip_value = pip_size * contract_size
 
     if sl_pips > 0 and pip_value > 0:
         lots = risk_usd / (sl_pips * pip_value)
