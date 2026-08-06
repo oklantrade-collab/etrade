@@ -152,7 +152,9 @@ def validate_signal(
         max_active_symbols_forex = int(regime_params.get('max_active_symbols_forex', 2))
         
         sig_symbol = signal.get('symbol', '')
-        if market_type == 'forex_futures' and sig_symbol and sig_symbol not in active_fx_symbols and len(active_fx_symbols) >= max_active_symbols_forex:
+        forex_symbols = set(regime_params.get('forex_assets', ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']))
+        is_forex_signal = sig_symbol in forex_symbols
+        if is_forex_signal and sig_symbol not in active_fx_symbols and len(active_fx_symbols) >= max_active_symbols_forex:
             return { 'approved': False, 'reason': f'MAX_ACTIVE_SYMBOLS_FOREX_REACHED ({len(active_fx_symbols)}/{max_active_symbols_forex})' }
     except Exception as e:
         logging.error(f"Error checking max active symbols forex: {e}")
