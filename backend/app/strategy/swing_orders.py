@@ -241,7 +241,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         orders_to_place.append({
             'limit_price': current_price,
             'qty': qty_fomo,
-            'name': 'Order FOMO (Market-like)'
+            'name': 'Order FOMO'
         })
         log_info('APEX_EMA', f"[{symbol}] FOMO detectado (dist: {dist_to_ema9:.4f}). Separando 20% a precio actual.")
     else:
@@ -289,7 +289,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
             'sl_price': 0,  # Se deja vacío inicialmente, delegación virtual
             'tp1_price': 0,
             'tp2_price': 0,
-            'band_name': op['name'],
+            'band_name': str(op['name'])[:20],
             'status': 'pending',
             'mode': mode_val,
             'expires_at': (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat(),
