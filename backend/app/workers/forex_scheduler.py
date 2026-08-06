@@ -626,10 +626,11 @@ def calculate_forex_lot_size(
     risk_pct: float,
     sl_pips: float,
     leverage: int = 100,
+    price: float = 1.0,
 ) -> dict:
     """
     Calcula tamano de lote Forex basado en riesgo.
-    formula: lots = risk_usd / (sl_pips * pip_value)
+    formula: lots = risk_usd / (sl_pips * pip_value_usd)
     """
     pip_size = PIP_SIZES.get(symbol, 0.0001)
     risk_usd = capital_usd * (risk_pct / 100.0)
@@ -644,11 +645,17 @@ def calculate_forex_lot_size(
     }
     contract_size = CONTRACT_SIZES.get(symbol, 100_000)  # Default: 100,000 para pares Forex
 
-    # Pip value para 1 lote estándar
+    # Pip value base para 1 lote estándar
     pip_value = pip_size * contract_size
+    
+    # Conversión de divisa de cotización a USD si es par JPY
+    if 'JPY' in symbol and price > 0:
+        pip_value_usd = pip_value / price
+    else:
+        pip_value_usd = pip_value
 
-    if sl_pips > 0 and pip_value > 0:
-        lots = risk_usd / (sl_pips * pip_value)
+    if sl_pips > 0 and pip_value_usd > 0:
+        lots = risk_usd / (sl_pips * pip_value_usd)
     else:
         lots = LOT_CONFIG['micro_lot']
 
@@ -659,7 +666,7 @@ def calculate_forex_lot_size(
     return {
         'lotes': round(lots, 2),
         'risk_usd': round(risk_usd, 2),
-        'pip_value': pip_value,
+        'pip_value': pip_value_usd,
         'pip_size': pip_size,
     }
 
@@ -808,6 +815,7 @@ async def open_forex_position(
         capital_usd=capital,
         risk_pct=risk_pct,
         sl_pips=sl_pips,
+        price=price,
     )
 
     # Paper trading check
