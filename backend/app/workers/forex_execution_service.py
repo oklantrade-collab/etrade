@@ -1063,7 +1063,7 @@ class ForexExecutionService:
             req = ProtoOANewOrderReq()
             req.ctidTraderAccountId = ACCOUNT_ID
             req.symbolId, req.orderType, req.tradeSide = sid, 1, (1 if direction=='long' else 2)
-            req.volume = int(lots * 100000)
+            req.volume = int(round(lots * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots * 10_000))
             
             # Para permitir que el escalamiento EREP funcione, no enviamos el stop loss dinámico ajustado (tight SL)
             # a cTrader. En su lugar, enviamos un stop loss de desastre (Disaster SL) basado en HARD_CAP_LOSS_PIPS

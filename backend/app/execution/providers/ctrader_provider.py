@@ -702,9 +702,13 @@ class CTraderProtobufProvider(BaseMarketProvider):
                          f'no encontrado'
             }
 
-        # Convertir lotes a unidades cTrader
-        # 1 lote = 100,000 unidades
-        volume = int(quantity * 100000)
+        # Convertir lotes a volumen cTrader (en centésimas de unidades)
+        # Forex: 1 lote = 100,000 unidades = 10,000,000 volumen en cTrader API
+        # XAUUSD: 1 lote = 100 oz = 10,000 volumen en cTrader API
+        if symbol == 'XAUUSD':
+            volume = int(round(quantity * 10_000))
+        else:
+            volume = int(round(quantity * 10_000_000))
 
         request = ProtoOANewOrderReq()
         request.ctidTraderAccountId = \
