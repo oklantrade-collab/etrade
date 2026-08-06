@@ -1081,7 +1081,10 @@ class ForexExecutionService:
             if disaster_sl > 0: req.stopLoss = int(round(disaster_sl * divisor))
             if tp > 0: req.takeProfit = int(round(tp * divisor))
             
-            self.worker.client.send(req)
+            if hasattr(self.worker, 'safe_send'):
+                self.worker.safe_send(req)
+            else:
+                self.worker.client.send(req)
             self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='live')
         except Exception as e: self.log(f'Error live: {e}')
 
