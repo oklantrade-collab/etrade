@@ -291,14 +291,18 @@ def validate_signal(
     if snap:
         critical_keys = ['price']
         if market_type == 'forex_futures':
-            critical_keys.extend(['ema_3', 'ema_9', 'ema_20', 'atr', 'adx'])
+            critical_keys.extend(['ema3', 'ema9', 'ema20', 'atr', 'adx'])
         elif market_type == 'crypto_futures':
-            critical_keys.extend(['ema_3', 'ema_9'])
+            critical_keys.extend(['ema3', 'ema9'])
             
         had_check7_error = False
         check7_errors = []
         for key in critical_keys:
             val = snap.get(key)
+            if val is None and '_' in key:
+                val = snap.get(key.replace('_', ''))
+            elif val is None and key.startswith('ema'):
+                val = snap.get(key[:3] + '_' + key[3:])
             if val is None:
                 err_msg = f"Indicador crítico ausente/nulo: '{key}'"
                 errors.append(err_msg)
