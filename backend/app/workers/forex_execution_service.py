@@ -168,16 +168,23 @@ class ForexExecutionService:
 
             for snap in snaps_data:
                 symbol = snap['symbol']
-                count = pos_count.get(symbol, 0)
+                
+                # Recalcular posiciones activas en tiempo real dentro del bucle
+                current_pos_count = {}
+                for p in self._open_positions_list:
+                    s = p['symbol']
+                    current_pos_count[s] = current_pos_count.get(s, 0) + 1
+                
+                count = current_pos_count.get(symbol, 0)
                 if count >= limit_per_symbol:
                     if count > limit_per_symbol:
                         self.log(f"[EXCESO] Detectado en {symbol}: {count} > {limit_per_symbol}", "WARNING")
                     continue 
                 
                 # Verificar si alcanzamos el límite de monedas activas simultáneas en Forex
-                active_symbols_count = len(pos_count)
-                if count == 0 and active_symbols_count >= max_active_symbols:
-                    self.log(f"[BLOQUEO MONEDAS ACTIVAS] {symbol} omitido: Ya hay {active_symbols_count}/{max_active_symbols} pares activos.")
+                active_symbols = set(current_pos_count.keys())
+                if count == 0 and len(active_symbols) >= max_active_symbols:
+                    self.log(f"[BLOQUEO MONEDAS ACTIVAS] {symbol} omitido: Ya hay {len(active_symbols)}/{max_active_symbols} pares activos ({list(active_symbols)}).")
                     continue
 
                 self._evaluate_symbol(snap)
