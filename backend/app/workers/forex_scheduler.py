@@ -341,10 +341,17 @@ async def write_forex_snapshot(
         }
 
         # Extraer indicadores para el caché en memoria (no están en la tabla DB)
-        upsert_data['ema_3'] = float(last.get('ema1', last.get('ema_3', 0)))
-        upsert_data['ema_9'] = float(last.get('ema2', last.get('ema_9', 0)))
-        upsert_data['ema_20'] = float(last.get('ema3', last.get('ema_20', 0)))
-        upsert_data['ema_50'] = float(last.get('ema4', last.get('ema_50', 0)))
+        close_p = float(last.get('close', 0))
+        e3 = float(last.get('ema1') or last.get('ema3') or last.get('ema_3') or close_p)
+        e9 = float(last.get('ema2') or last.get('ema9') or last.get('ema_9') or close_p)
+        e20 = float(last.get('ema3') or last.get('ema20') or last.get('ema_20') or close_p)
+        upsert_data['ema3'] = e3
+        upsert_data['ema9'] = e9
+        upsert_data['ema20'] = e20
+        upsert_data['ema_3'] = e3
+        upsert_data['ema_9'] = e9
+        upsert_data['ema_20'] = e20
+        upsert_data['ema_50'] = float(last.get('ema4', last.get('ema_50', close_p)))
         upsert_data['rsi_14'] = float(last.get('rsi_14', last.get('rsi', 50)))
         upsert_data['macd_histogram'] = float(last.get('macd_histogram', last.get('macd', 0)))
         

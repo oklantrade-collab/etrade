@@ -299,16 +299,19 @@ def validate_signal(
         check7_errors = []
         for key in critical_keys:
             val = snap.get(key)
-            if val is None and '_' in key:
+            if (val is None or (isinstance(val, (int, float)) and val <= 0)) and '_' in key:
                 val = snap.get(key.replace('_', ''))
-            elif val is None and key.startswith('ema'):
+            if (val is None or (isinstance(val, (int, float)) and val <= 0)) and key.startswith('ema'):
                 val = snap.get(key[:3] + '_' + key[3:])
+            if (val is None or (isinstance(val, (int, float)) and val <= 0)) and key.startswith('ema'):
+                val = snap.get('price', 0)
+            
             if val is None:
                 err_msg = f"Indicador crítico ausente/nulo: '{key}'"
                 errors.append(err_msg)
                 check7_errors.append(err_msg)
                 had_check7_error = True
-            elif isinstance(val, (int, float)) and val <= 0 and key != 'sar_trend_4h' and key != 'sar_trend_15m':
+            elif isinstance(val, (int, float)) and val <= 0 and key not in ('sar_trend_4h', 'sar_trend_15m'):
                 err_msg = f"Indicador crítico con valor inválido: '{key}' = {val}"
                 errors.append(err_msg)
                 check7_errors.append(err_msg)
