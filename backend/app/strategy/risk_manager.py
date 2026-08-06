@@ -137,6 +137,26 @@ def validate_signal(
     except Exception as e:
         logging.error(f"Error checking max active symbols crypto: {e}")
 
+    # CHECK 3.6 — Cantidad Máxima de Monedas Activas Simultáneas (Forex):
+    try:
+        open_fx_res = supabase_client.table('forex_positions') \
+            .select('symbol') \
+            .eq('status', 'open') \
+            .execute()
+        
+        active_fx_symbols = set(p['symbol'] for p in (open_fx_res.data or []))
+        
+        tc_res = supabase_client.table('trading_config').select('regime_params').eq('id', 1).execute()
+        tc_data = tc_res.data[0] if tc_res.data else {}
+        regime_params = tc_data.get('regime_params', {}) or {}
+        max_active_symbols_forex = int(regime_params.get('max_active_symbols_forex', 2))
+        
+        sig_symbol = signal.get('symbol', '')
+        if market_type == 'forex_futures' and sig_symbol and sig_symbol not in active_fx_symbols and len(active_fx_symbols) >= max_active_symbols_forex:
+            return { 'approved': False, 'reason': f'MAX_ACTIVE_SYMBOLS_FOREX_REACHED ({len(active_fx_symbols)}/{max_active_symbols_forex})' }
+    except Exception as e:
+        logging.error(f"Error checking max active symbols forex: {e}")
+
     # CHECK 4 — No exceder posiciones por símbolo:
     try:
         from app.core.crypto_symbols import crypto_symbol_match_variants

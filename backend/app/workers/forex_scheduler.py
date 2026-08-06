@@ -686,7 +686,21 @@ async def open_forex_position(
     if not v_signal['valid']:
         log_warning(MODULE, f"❌ BLOQUEO DE SEGURIDAD [{symbol}]: Posición abortada. Motivo: {v_signal['reason']}")
         return
-    # ====================================
+    # === CHECK CANTIDAD MÁXIMA DE MONEDAS ACTIVAS (FOREX) ===
+    try:
+        open_fx = sb.table('forex_positions').select('symbol').eq('status', 'open').execute().data or []
+        active_fx_symbols = set(p['symbol'] for p in open_fx)
+        
+        tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
+        tc_params = (tc_res.data[0].get('regime_params') if tc_res.data else {}) or {}
+        max_active_symbols_forex = int(tc_params.get('max_active_symbols_forex', 2))
+        
+        if symbol not in active_fx_symbols and len(active_fx_symbols) >= max_active_symbols_forex:
+            log_warning(MODULE, f"⛔ SEÑAL RECHAZADA para {symbol}: Máximo de monedas activas en Forex alcanzado ({len(active_fx_symbols)}/{max_active_symbols_forex})")
+            return
+    except Exception as e:
+        log_error(MODULE, f"Error en validación max_active_symbols_forex: {e}")
+    # ========================================================
 
     # ═══════════════════════════════════════════════════
     # PASO 1.5 — Reversión de posiciones opuestas (Netting Forex)
