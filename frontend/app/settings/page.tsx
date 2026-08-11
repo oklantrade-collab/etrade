@@ -525,7 +525,14 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
                     onClick={async () => {
                         const newVal = !forexEnabled;
                         setForexEnabled(newVal);
-                        await supabase.from('system_config').upsert({ key: 'forex_enabled', value: newVal });
+                        
+                        // Verificar si existe primero
+                        const { data: exist } = await supabase.from('system_config').select('id').eq('key', 'forex_enabled').maybeSingle();
+                        if (exist) {
+                            await supabase.from('system_config').update({ value: newVal }).eq('key', 'forex_enabled');
+                        } else {
+                            await supabase.from('system_config').insert({ key: 'forex_enabled', value: newVal });
+                        }
                     }} 
                     style={{ width: '40px', height: '20px', borderRadius: '10px', background: forexEnabled ? '#00C896' : '#222', position: 'relative', cursor: 'pointer' }}
                 >
