@@ -848,13 +848,18 @@ async def open_forex_position(
                 ema20_5m = float(last_5m.get('ema3') or last_5m.get('ema_20') or c_series_5m.ewm(span=20, adjust=False).mean().iloc[-1])
 
             ema3_15m, ema9_15m, ema20_15m = price, price, price
+            ema20_15m_prev = price
+            rsi_15m = 50.0
             bb_upper, bb_lower, basis = 0, 0, price
             if df_15m is not None and len(df_15m) >= 2:
                 last_15m = df_15m.iloc[-1]
+                prev_15m = df_15m.iloc[-2]
                 c_series_15m = df_15m['close']
                 ema3_15m = float(last_15m.get('ema1') or last_15m.get('ema_3') or c_series_15m.ewm(span=3, adjust=False).mean().iloc[-1])
                 ema9_15m = float(last_15m.get('ema2') or last_15m.get('ema_9') or c_series_15m.ewm(span=9, adjust=False).mean().iloc[-1])
                 ema20_15m = float(last_15m.get('ema3') or last_15m.get('ema_20') or c_series_15m.ewm(span=20, adjust=False).mean().iloc[-1])
+                ema20_15m_prev = float(prev_15m.get('ema3') or prev_15m.get('ema_20') or c_series_15m.ewm(span=20, adjust=False).mean().iloc[-2])
+                rsi_15m = float(last_15m.get('rsi') or last_15m.get('rsi_14') or 50.0)
                 bb_upper = float(last_15m.get('upper_2', 0) or 0)
                 bb_lower = float(last_15m.get('lower_2', 0) or 0)
                 basis = ema20_15m if ema20_15m > 0 else float(last_15m.get('basis', price) or price)
@@ -863,13 +868,46 @@ async def open_forex_position(
             ema3_is_ascending = (ema3_5m > ema3_5m_prev)
             ema3_is_descending = (ema3_5m < ema3_5m_prev)
             
+            bars_since_cross_up = 999
+            bars_since_cross_down = 999
+            if df_15m is not None and len(df_15m) > 1:
+                try:
+                    e3_s = df_15m.get('ema1')
+                    if e3_s is None or e3_s.isnull().all(): e3_s = df_15m.get('ema_3')
+                    e9_s = df_15m.get('ema2')
+                    if e9_s is None or e9_s.isnull().all(): e9_s = df_15m.get('ema_9')
+                    
+                    if e3_s is not None and e9_s is not None:
+                        cross_up = (e3_s > e9_s) & (e3_s.shift(1) <= e9_s.shift(1))
+                        cross_down = (e3_s < e9_s) & (e3_s.shift(1) >= e9_s.shift(1))
+                        
+                        if cross_up.any():
+                            last_up_idx = cross_up[::-1].idxmax()
+                            bars_since_cross_up = len(df_15m) - df_15m.index.get_loc(last_up_idx) - 1
+                            
+                        if cross_down.any():
+                            last_down_idx = cross_down[::-1].idxmax()
+                            bars_since_cross_down = len(df_15m) - df_15m.index.get_loc(last_down_idx) - 1
+                except Exception as ex:
+                    log_error(MODULE, f"Error calculando cross_bars: {ex}")
+            
             if is_long:
                 if not ema3_is_ascending:
                     log_warning(MODULE, f"⛔ [EMA3 SLOPE REJECT] {symbol} LONG abortado: EMA3 de 5m NO está en modo ascendente (curr={ema3_5m:.5f} <= prev={ema3_5m_prev:.5f})")
                     return
-                if ema3_5m > ema9_5m > ema20_5m:
-                    limit_prices = [min(price, ema9_5m) if ema9_5m > 0 else price, ema20_5m]
-                    regime_name = "Impulso Alcista 5m (Dual LIMIT EMA9+EMA20)"
+                
+                dist_ema9 = abs(price - ema9_15m) / ema9_15m if ema9_15m > 0 else 0
+                is_valid_pullback_long = (
+                    bars_since_cross_up <= 3 and
+                    price > ema9_15m and
+                    dist_ema9 <= 0.0015 and
+                    rsi_15m <= 75 and
+                    ema20_15m > ema20_15m_prev
+                )
+                
+                if ema3_15m > ema9_15m > ema20_15m and is_valid_pullback_long:
+                    limit_prices = [min(price, ema9_15m) if ema9_15m > 0 else price, ema20_15m]
+                    regime_name = "Impulso Alcista 15m (Dual LIMIT) [Max 3, Close>EMA9, Dist<0.15%, RSI<=75, EMA20+]"
                 elif ema3_15m > ema9_15m:
                     ma_candidates = [m for m in (ema9_15m, ema20_15m) if 0 < m < price]
                     limit_prices = [max(ma_candidates) if ma_candidates else price]
@@ -884,9 +922,19 @@ async def open_forex_position(
                 if not ema3_is_descending:
                     log_warning(MODULE, f"⛔ [EMA3 SLOPE REJECT] {symbol} SHORT abortado: EMA3 de 5m NO está en modo descendente (curr={ema3_5m:.5f} >= prev={ema3_5m_prev:.5f})")
                     return
-                if ema3_5m < ema9_5m < ema20_5m:
-                    limit_prices = [max(price, ema9_5m) if ema9_5m > 0 else price, ema20_5m]
-                    regime_name = "Impulso Bajista 5m (Dual LIMIT EMA9+EMA20)"
+                    
+                dist_ema9 = abs(price - ema9_15m) / ema9_15m if ema9_15m > 0 else 0
+                is_valid_pullback_short = (
+                    bars_since_cross_down <= 3 and
+                    price < ema9_15m and
+                    dist_ema9 <= 0.0015 and
+                    rsi_15m >= 25 and
+                    ema20_15m < ema20_15m_prev
+                )
+                
+                if ema3_15m < ema9_15m < ema20_15m and is_valid_pullback_short:
+                    limit_prices = [max(price, ema9_15m) if ema9_15m > 0 else price, ema20_15m]
+                    regime_name = "Impulso Bajista 15m (Dual LIMIT) [Max 3, Close<EMA9, Dist<0.15%, RSI>=25, EMA20-]"
                 elif ema3_15m < ema9_15m:
                     ma_candidates = [m for m in (ema9_15m, ema20_15m) if m > price]
                     limit_prices = [min(ma_candidates) if ma_candidates else price]
@@ -1009,25 +1057,26 @@ async def open_forex_position(
     # Telegram
     side_emoji = 'LONG' if direction == 'long' else 'SHORT'
     pip_size = PIP_SIZES.get(symbol, 0.0001)
-    entry_target = limit_price if (is_primary_entry and limit_price) else price
+    entry_target = limit_px if (is_primary_entry and limit_px) else price
     sl_pips = abs(entry_target - levels['sl_price']) / pip_size
     tp_pips = abs(levels['tp_price'] - entry_target) / pip_size
     rr_ratio = tp_pips / sl_pips if sl_pips > 0 else 0
     
     if order_status == 'pending_limit':
         msg_header = f"🎯 ORDEN LÍMITE PENDIENTE — FOREX {side_emoji} [{symbol}]"
-        entry_lbl = f"Precio Límite: {limit_price:.5f} (Pendiente de ejecución en cTrader)"
+        entry_lbl = f"Precio Límite: {limit_px:.5f} (Pendiente de ejecución en cTrader)"
     else:
         msg_header = f"⚡ POSICIÓN ABIERTA — FOREX {side_emoji} [{symbol}]"
         entry_lbl = f"Entrada: {price:.5f}"
 
+    risk_per_order = sizing['risk_usd'] / num_orders if num_orders > 0 else sizing['risk_usd']
     await send_telegram_message(
         f"{msg_header}\n"
         f"Regla: {rule_code} | Score: {signal.get('score', 0):.2f}\n"
         f"{entry_lbl}\n"
         f"SL: {levels['sl_price']:.5f} (-{sl_pips:.0f} pips)\n"
         f"TP: {levels['tp_price']:.5f} (+{tp_pips:.0f} pips) RR 1:{rr_ratio:.1f}\n"
-        f"Lotes: {sizing['lotes']} | Riesgo: ${sizing['risk_usd']:.2f}"
+        f"Lotes: {order_lots} | Riesgo: ${risk_per_order:.2f}"
     )
 
 
