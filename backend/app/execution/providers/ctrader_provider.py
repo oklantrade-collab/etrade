@@ -727,28 +727,16 @@ class CTraderProtobufProvider(BaseMarketProvider):
         request.volume      = volume
 
         if order_type == 'limit' and price:
-            divisor = self.PRICE_DIVISOR.get(
-                symbol, 100000
-            )
-            request.limitPrice = int(
-                price * divisor
-            )
+            request.limitPrice = float(round(price, 5 if symbol != 'XAUUSD' else 2))
+            # TTL ampliado a 45 minutos (2700s) para dar holgura a retests de 5m/15m
+            import time as _time
+            request.expirationTimestamp = int((_time.time() + 2700) * 1000)
 
         if sl_price:
-            divisor = self.PRICE_DIVISOR.get(
-                symbol, 100000
-            )
-            request.stopLoss = int(
-                sl_price * divisor
-            )
+            request.stopLoss = float(round(sl_price, 5 if symbol != 'XAUUSD' else 2))
 
         if tp_price:
-            divisor = self.PRICE_DIVISOR.get(
-                symbol, 100000
-            )
-            request.takeProfit = int(
-                tp_price * divisor
-            )
+            request.takeProfit = float(round(tp_price, 5 if symbol != 'XAUUSD' else 2))
 
         await self._send_request(request)
 
@@ -812,7 +800,7 @@ class CTraderProtobufProvider(BaseMarketProvider):
                 'balance':     bal,
                 'equity':      bal,
                 'margin_free': bal,
-                'currency':    trader.depositCurrency,
+                'currency':    getattr(trader, 'depositCurrency', 'USD'),
             }
         return {}
 

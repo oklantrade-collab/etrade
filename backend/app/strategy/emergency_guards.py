@@ -77,7 +77,7 @@ async def trigger_emergency_protection(market_type: str):
                 if 'crypto' in market_type:
                     try:
                         from app.core.memory_store import BOT_STATE
-                        is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+                        is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
                         if not is_paper:
                             # Cancelar OCO anterior y crear nueva
                             from app.execution.binance_connector import get_client

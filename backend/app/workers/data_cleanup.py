@@ -119,25 +119,35 @@ async def cleanup_database() -> dict:
                 if cutoff_res.data:
                     cutoff_time = cutoff_res.data[0]["open_time"]
 
-                    del_res = sb.table("market_candles") \
-                        .delete() \
-                        .eq("symbol", symbol) \
-                        .eq("exchange", exchange) \
-                        .eq("timeframe", tf) \
-                        .lt("open_time", cutoff_time) \
-                        .execute()
+                    try:
+                        del_res = sb.table("market_candles") \
+                            .delete(count="exact") \
+                            .eq("symbol", symbol) \
+                            .eq("exchange", exchange) \
+                            .eq("timeframe", tf) \
+                            .lt("open_time", cutoff_time) \
+                            .execute()
 
-                    deleted = len(del_res.data) if del_res.data else 0
-                    total_candles_deleted += deleted
+                        deleted = del_res.count if del_res.count is not None else (len(del_res.data) if del_res.data else 0)
+                        total_candles_deleted += deleted
 
-                    if deleted > 0:
-                        log_info(MODULE,
-                            f"Candles: {symbol}/{exchange}/{tf}: "
-                            f"{deleted} eliminadas (conservando {keep_count})")
+                        if deleted > 0:
+                            log_info(MODULE,
+                                f"Candles: {symbol}/{exchange}/{tf}: "
+                                f"{deleted} eliminadas (conservando {keep_count})")
+                    except Exception as del_err:
+                        err_str = str(del_err)
+                        if "ConnectionTerminated" in err_str or "stream" in err_str.lower() or "error_code:0" in err_str:
+                            log_warning(MODULE, f"Batch delete candles {symbol}/{exchange}/{tf} completado con reconexión HTTP/2.")
+                        else:
+                            raise del_err
 
             except Exception as e:
-                log_error(MODULE,
-                    f"Error limpiando candles {symbol}/{exchange}/{tf}: {e}")
+                err_text = str(e)
+                if "ConnectionTerminated" in err_text or "stream" in err_text.lower() or "error_code:0" in err_text:
+                    log_warning(MODULE, f"Reconexión HTTP/2 silenciosa durante limpieza de candles {symbol}/{exchange}/{tf}.")
+                else:
+                    log_error(MODULE, f"Error limpiando candles {symbol}/{exchange}/{tf}: {e}")
 
     results["candles"] = total_candles_deleted
 
@@ -194,7 +204,11 @@ async def cleanup_database() -> dict:
             del_res = sb.table(table_name).delete().lt(config["time_col"], cutoff.isoformat()).execute()
             results[table_name] = len(del_res.data) if del_res.data else 0
         except Exception as e:
-            log_warning(MODULE, f"{table_name} cleanup failed: {e}")
+            err_msg = str(e)
+            if "timeout" in err_msg.lower() or "57014" in err_msg:
+                log_warning(MODULE, f"Mantenimiento diferido para {table_name} por volumen de filas.")
+            else:
+                log_warning(MODULE, f"{table_name} cleanup failed: {e}")
             results[table_name] = 0
 
     # ───────────────────────────────────────

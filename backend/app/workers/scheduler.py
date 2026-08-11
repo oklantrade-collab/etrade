@@ -1345,7 +1345,7 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                     effective_sizing = vel_config.get('sizing_pct', 1.0)
                     qty = max(18.0, cap_op * 0.1 * effective_sizing) / current_price
                     
-                    is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+                    is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
                     if is_paper:
                          # Use levels from snapshot for TP calculation
                          await _execute_paper_open(
@@ -1562,19 +1562,44 @@ async def sync_positions_to_memory():
 
 # Load Pilot Config (Requirement 2: Ensure fail-safe to Paper)
 def load_config_to_memory():
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config_btc_pilot.json")
+    # 1. Cargar desde Supabase trading_config (ID 1)
     try:
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        res = sb.table("trading_config").select("*").eq("id", 1).maybe_single().execute()
+        if res and res.data:
+            tc = res.data
+            is_paper = bool(tc.get("paper_trading", False))
+            BOT_STATE.config_cache = {
+                "paper_trading": is_paper,
+                "observe_only": False,
+                "mode": tc.get("mode", "live"),
+                "regime_params": tc.get("regime_params", {})
+            }
+            log_info(MODULE, f"Configuración de Crypto sincronizada desde Supabase trading_config (paper_trading={is_paper}).")
+            return
+    except Exception as sb_err:
+        log_error(MODULE, f"Error sincronizando trading_config desde Supabase: {sb_err}")
+
+    # 2. Fallback a archivo local config_btc_pilot.json
+    paths_to_try = [
+        os.path.join(os.path.dirname(__file__), "config_btc_pilot.json"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "config_btc_pilot.json"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config_btc_pilot.json"),
+        "/home/etrade/etrade/config_btc_pilot.json",
+        "/home/etrade/etrade/backend/config_btc_pilot.json",
+    ]
+    for path in paths_to_try:
         if os.path.exists(path):
-            with open(path, "r") as f:
-                BOT_STATE.config_cache = json.load(f)
-            log_info(MODULE, f"Pilot config loaded from file: {path}")
-        else:
-            log_warning(MODULE, "config_btc_pilot.json not found. Falling back to default (PAPER).")
-            # Fail-safe: secure default
-            BOT_STATE.config_cache = {"paper_trading": True, "observe_only": True}
-    except Exception as e:
-        log_error(MODULE, f"Error loading config file: {e}. Failing safe to PAPER.")
-        BOT_STATE.config_cache = {"paper_trading": True, "observe_only": True}
+            try:
+                with open(path, "r") as f:
+                    BOT_STATE.config_cache = json.load(f)
+                log_info(MODULE, f"Pilot config loaded from file: {path}")
+                return
+            except Exception:
+                pass
+    log_warning(MODULE, "config_btc_pilot.json not found. Defaulting to REAL trading per DB config.")
+    BOT_STATE.config_cache = {"paper_trading": False, "observe_only": False}
 
 from app.strategy.profit_capture import evaluate_profit_capture
 from app.strategy.profit_ladder import (
@@ -2341,16 +2366,28 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                             log_info('POSITION_LIMIT_CRYPTO', f"[{symbol}] Flip abortado u open excedido: {current_pair_count}/{max_per_symbol} alcanzado.")
                             blocked_by = f"max_positions_per_symbol_reached ({current_pair_count}/{max_per_symbol})"
                         else:
-                            # Filtro de correlación
-                            corr_result = check_correlation_filter(
-                                symbol_new     = symbol,
-                                direction_new  = rule_match['direction'],
-                                open_positions = list(BOT_STATE.positions.values()),
-                                df_dict        = {s: MEMORY_STORE[s]['15m']['df'] for s in MEMORY_STORE if '15m' in MEMORY_STORE[s]},
-                                regime         = regime['category']
+                            # ── VALIDACIÓN ATÓMICA DE CANT. MONEDAS ACTIVAS Y GUARDS DE POSICIÓN ──
+                            from app.strategy.position_guards import can_open_position
+                            guard_check = can_open_position(
+                                symbol=symbol,
+                                direction=rule_match['direction'],
+                                market_type='crypto_futures',
+                                open_positions=list(BOT_STATE.positions.values())
                             )
-                            if corr_result['blocked']:
-                                blocked_by = f"correlation_limit ({corr_result['reason']})"
+                            if not guard_check['allowed']:
+                                log_info('POSITION_LIMIT_CRYPTO', f"⛔ [{symbol}] Bloqueado por PositionGuard: {guard_check['reason']}")
+                                blocked_by = f"position_guard ({guard_check['reason']})"
+                            else:
+                                # Filtro de correlación
+                                corr_result = check_correlation_filter(
+                                    symbol_new     = symbol,
+                                    direction_new  = rule_match['direction'],
+                                    open_positions = list(BOT_STATE.positions.values()),
+                                    df_dict        = {s: MEMORY_STORE[s]['15m']['df'] for s in MEMORY_STORE if '15m' in MEMORY_STORE[s]},
+                                    regime         = regime['category']
+                                )
+                                if corr_result['blocked']:
+                                    blocked_by = f"correlation_limit ({corr_result['reason']})"
 
         t4 = time.time()
         
@@ -2504,7 +2541,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                  if not blocked_by:
                      for trade in proposed_sizes:
                          qty = trade['usd'] / current_price
-                         is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+                         is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
                          if is_paper:
                              await _execute_paper_open(
                                  symbol=symbol, side=rule_match['direction'], price=current_price,
@@ -2512,9 +2549,15 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                  vel_config=vel_config, supabase=sb
                              )
                          else:
+                             # --- SMART LIMIT ORDER FOR CRYPTO ENTRANCE (Maker Fee 0.020%) ---
+                             entry_side = rule_match['direction'].lower()
+                             offset_mult = 0.9998 if entry_side in ('long', 'buy') else 1.0002
+                             limit_entry_px = round(current_price * offset_mult, 4 if ('ADA' in symbol or 'SOL' in symbol) else 2)
+                             
+                             log_info(MODULE, f"Placing Smart LIMIT entry order for {symbol} ({entry_side.upper()}) at price {limit_entry_px:.4f} (Maker Fee 0.020%)")
                              await provider.place_order(
                                  symbol=symbol, side=rule_match['direction'],
-                                 size=qty, order_type="MARKET",
+                                 size=qty, price=limit_entry_px, order_type="LIMIT",
                                  positionSide=rule_match['direction'].upper()
                              )
         # --- 2) SWING (LIMIT ORDERS V5.0) ---
@@ -2628,7 +2671,7 @@ async def cycle_15m():
     # Create LOCAL provider for this cycle
     provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret, testnet=settings.binance_testnet)
     # Check paper mode
-    is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+    is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
     if is_paper:
         provider = PaperTradingProvider(provider)
 

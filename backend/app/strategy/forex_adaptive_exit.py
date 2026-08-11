@@ -99,6 +99,12 @@ def evaluate_forex_tp(
     )
 
     if tp['action'] == 'close_all':
+        min_required_pips = 15.0 if 'XAU' in symbol else 3.0
+        if pnl_pips < min_required_pips:
+            return {
+                'should_close': False,
+                'reason': f'PnL {pnl_pips:.1f} pips por debajo del mínimo de comisión IC Markets ({min_required_pips:.1f} pips)'
+            }
         return {
             'should_close':     True,
             'pnl_pips':         round(pnl_pips, 1),

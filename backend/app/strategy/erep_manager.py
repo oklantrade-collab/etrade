@@ -677,6 +677,8 @@ def evaluate_erep_phase(
     Función principal del EREP.
     Evalúa qué hacer según la fase actual.
     """
+    if position.get('status') == 'closed':
+        return {'action': 'none', 'reason': 'Posicion ya cerrada'}
     phase      = int(position.get('erep_phase', 0))
     side       = str(position.get('side', 'long'))
     is_long    = side.lower() in ('long', 'buy')
@@ -1077,12 +1079,14 @@ async def execute_erep_action(
     symbol:        str,
     market_type:   str,
     supabase,
-    open_func,
-    close_func,
+    open_func = None,
+    close_func = None,
 ) -> dict:
     """
     Ejecuta la acción determinada por evaluate_erep_phase().
     """
+    if position.get('status') == 'closed':
+        return {'executed': 'ignored_closed_position'}
     act      = action['action']
     pos_id   = position.get('id')
     side     = str(position.get('side', 'long'))
@@ -1130,6 +1134,7 @@ async def execute_erep_action(
             update_fields['sl_price'] = 0
 
         supabase.table(table).update(update_fields).eq('id', pos_id).execute()
+        position.update(update_fields)
 
         log_info('EREP', f'🟢 EREP ACTIVADO [{symbol}] ({side.upper()}): Fase 1→2. P1={p1_price:.4f} size={p1_size}. Esperando señal para P2...')
 

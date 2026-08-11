@@ -29,6 +29,18 @@ def safe_int(val, default=0) -> int:
     except (ValueError, TypeError):
         return default
 
+def _safe_parse_iso(ts_str: str) -> datetime:
+    if not ts_str:
+        return datetime.now(timezone.utc)
+    try:
+        return datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
+    except Exception:
+        try:
+            clean = str(ts_str).split('+')[0].split('Z')[0]
+            return datetime.strptime(clean[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+        except Exception:
+            return datetime.now(timezone.utc)
+
 def get_rule_expected_direction(rule_code: str) -> str:
     if not rule_code:
         return None
@@ -51,7 +63,7 @@ def get_rule_expected_direction(rule_code: str) -> str:
 # ── Configuración ─────────────────────────────
 SAFETY_CONFIG = {
     'signal_max_age_minutes':   30,
-    'worker_heartbeat_minutes': 10,
+    'worker_heartbeat_minutes': 25,
     'price_zero_threshold':     0.001,
     'daily_drawdown_pct':       5.0,
     'circuit_breaker_enabled':  True,
@@ -130,10 +142,17 @@ def update_db_safety_block(market_type: str, blocked: bool):
     except Exception as e:
         log_error('SAFETY', f"Error actualizando bloqueo en DB: {e}")
 
-def set_current_worker(name: str):
-    global _current_worker
+_worker_instances: dict = {}
+
+def set_current_worker(name: str, instance=None):
+    global _current_worker, _worker_instances
     _current_worker = name
+    if instance:
+        _worker_instances[name] = instance
     register_heartbeat(name)
+
+def get_worker(name: str):
+    return _worker_instances.get(name)
 
 
 # ════════════════════════════════════════
@@ -464,6 +483,29 @@ def validate_signal(
         except Exception as e:
             log_error('SAFETY', f"Error checking forex strategy cooldown: {e}")
 
+    # CHECK 12: Cantidad Máxima de Monedas Activas Simultáneas (Crypto / Forex)
+    if not errors and market_type in ('crypto_futures', 'crypto_spot', 'forex_futures') and symbol:
+        try:
+            from app.core.supabase_client import get_supabase
+            sb = get_supabase()
+            tbl = 'forex_positions' if market_type == 'forex_futures' else 'positions'
+            open_res = sb.table(tbl).select('symbol').eq('status', 'open').execute()
+            open_symbols = set(p['symbol'] for p in (open_res.data or []))
+            
+            tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+            tc_data = tc_res.data if tc_res and tc_res.data else {}
+            reg_params = tc_data.get('regime_params', {}) or {}
+            
+            if market_type in ('crypto_futures', 'crypto_spot'):
+                max_active = int(reg_params.get('max_active_symbols_crypto', 1))
+            else:
+                max_active = int(reg_params.get('max_active_symbols_forex', 1))
+                
+            if symbol not in open_symbols and len(open_symbols) >= max_active:
+                errors.append(f"Cant. Monedas Activas alcanzado ({len(open_symbols)}/{max_active} activas: {list(open_symbols)})")
+        except Exception as max_sym_e:
+            log_error('SAFETY', f"Error checking max_active_symbols: {max_sym_e}")
+
     if errors:
         log_info('SAFETY',
                  f'⚠️ Señal rechazada [{symbol}]: '
@@ -724,7 +766,7 @@ async def check_subprocesses_safety(supabase) -> dict:
             
             ts_str = s_data.get('updated_at')
             if ts_str:
-                ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                ts = _safe_parse_iso(ts_str)
                 if (now - ts).total_seconds() > 900: # 15 minutos
                     stale_forex = True
             else:
@@ -810,7 +852,7 @@ async def check_subprocesses_safety(supabase) -> dict:
             
             ts_str = s_data.get('updated_at')
             if ts_str:
-                ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                ts = _safe_parse_iso(ts_str)
                 if (now - ts).total_seconds() > 1800: # V6: 30 minutos (antes: 15 min) - tolerancia para ciclos crypto
                     stale_count_crypto += 1
             else:
@@ -939,7 +981,6 @@ async def check_all_heartbeats() -> list:
     workers_map = {
         'crypto_scheduler': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
         'forex_worker':     ['EURUSD', 'GBPUSD', 'XAUUSD'],
-        'position_monitor': [],
         'stocks_scheduler': []
     }
     
@@ -948,8 +989,8 @@ async def check_all_heartbeats() -> list:
     max_age = SAFETY_CONFIG['worker_heartbeat_minutes']
     
     for w_name, symbols in workers_map.items():
-        # 1. Si es el worker actual o un worker de memoria crítica, chequear memoria
-        if w_name == _current_worker or w_name in ['position_monitor', 'crypto_scheduler']:
+        # 1. Si es el worker actual en este proceso, chequear memoria local
+        if w_name == _current_worker:
             if not check_worker_alive(w_name):
                 dead.append(w_name)
             continue

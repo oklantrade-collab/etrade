@@ -51,15 +51,19 @@ def calculate_sl_tp(
         l6 = float(levels.get('lower_6', entry_price * 0.95))
         sl_price = l6 * (1 - (sl_buffer_pct / 100))
         
-        tp_partial = float(levels.get('upper_5', basis * 1.05))
-        tp_full    = float(levels.get('upper_6', basis * 1.08))
+        u4 = float(levels.get('upper_4') or 0)
+        u5 = float(levels.get('upper_5') or 0)
+        tp_partial = u4 if u4 > entry_price else float(levels.get('basis', entry_price * 1.02))
+        tp_full    = u5 if u5 > tp_partial else (u4 * 1.03 if u4 > 0 else entry_price * 1.05)
     else:  # short / Sell / sell
         # SL = nivel_upper_6 + buffer%
         u6 = float(levels.get('upper_6', entry_price * 1.05))
         sl_price = u6 * (1 + (sl_buffer_pct / 100))
         
-        tp_partial = float(levels.get('lower_5', basis * 0.95))
-        tp_full    = float(levels.get('lower_6', basis * 0.92))
+        l4 = float(levels.get('lower_4') or 0)
+        l5 = float(levels.get('lower_5') or 0)
+        tp_partial = l4 if (l4 > 0 and l4 < entry_price) else float(levels.get('basis', entry_price * 0.98))
+        tp_full    = l5 if (l5 > 0 and l5 < tp_partial) else (l4 * 0.97 if l4 > 0 else entry_price * 0.95)
 
     return {
         'sl_price':         round(sl_price, 8),

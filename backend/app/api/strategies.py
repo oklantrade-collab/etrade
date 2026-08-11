@@ -226,7 +226,8 @@ async def update_rule(
         'name', 'condition_ids',
         'condition_weights', 'min_score',
         'enabled', 'priority', 'notes',
-        'market_types', 'confidence'
+        'market_types', 'confidence',
+        'applicable_cycles', 'cycle'
     }
     update_data = {
         k: v for k, v in payload.items()

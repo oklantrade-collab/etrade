@@ -56,17 +56,11 @@ class WebSocketManager:
                                 await self._process_message(res)
                         except Exception as recv_err:
                             err_str = str(recv_err)
-                            if "Read loop has been closed" in err_str or "disconnect" in err_str.lower():
-                                log_warning(MODULE, f"WebSocket read error (will reconnect): {recv_err}")
-                            else:
-                                log_error(MODULE, f"WebSocket read error (will reconnect): {recv_err}")
+                            log_warning(MODULE, f"WebSocket read error (reconnecting): {recv_err}")
                             break  # Break inner loop to exit context manager and reconnect
             except Exception as e:
                 err_str = str(e)
-                if "502" in err_str or "503" in err_str or "504" in err_str or "Gateway" in err_str or "disconnect" in err_str or "timed out" in err_str:
-                    log_warning(MODULE, f"Transient WebSocket error (Bad Gateway/Disconnect/Timeout): {e}. Retrying gracefully.")
-                else:
-                    log_error(MODULE, f"WebSocket connection/manager error: {e}")
+                log_warning(MODULE, f"WebSocket connection/manager error (reconnecting): {e}")
             
             if client:
                 try:

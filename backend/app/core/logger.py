@@ -97,8 +97,8 @@ def _should_notify(module: str, message: str) -> bool:
     
     now = time.time()
     
-    # Generic fingerprint for Binance ban or rate-limiting errors to prevent Telegram spam
-    if "BinanceAPIException" in message or "APIError(code=-1003)" in message or "IP banned" in message or "IP is banned" in message or "418 I'm a teapot" in message or "baneada" in message.lower():
+    # Generic fingerprint for Binance ban, rate-limiting or HTTP/2 stream disconnects to prevent Telegram spam
+    if "BinanceAPIException" in message or "APIError(code=-1003)" in message or "IP banned" in message or "IP is banned" in message or "418 I'm a teapot" in message or "baneada" in message.lower() or "ConnectionTerminated" in message or "last_stream_id" in message:
         return False
         
     if module == "CTRADER" and not is_forex_market_open():

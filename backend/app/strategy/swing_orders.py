@@ -168,7 +168,18 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         macro_long_ok = (last_ema3_1h > last_ema9_1h)
         macro_short_ok = (last_ema3_1h < last_ema9_1h)
 
-    trigger_long = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200) and (ema200 > ema200_3) and macro_long_ok
+    # Validar que la Banda Superior de Bollinger en 15m esté ascendente (Upper Slope 15m > 0)
+    upper_col = 'upper_1' if 'upper_1' in df_15m.columns else ('upper_bollinger' if 'upper_bollinger' in df_15m.columns else None)
+    if upper_col and upper_col in df_15m.columns:
+        bb_upper_series = df_15m[upper_col]
+    else:
+        bb_basis = df_15m['close'].rolling(20).mean()
+        bb_std = df_15m['close'].rolling(20).std()
+        bb_upper_series = bb_basis + (2.0 * bb_std)
+
+    upper_slope_15m = float(bb_upper_series.iloc[-1] - bb_upper_series.iloc[-2]) if len(bb_upper_series) >= 2 else 1.0
+
+    trigger_long = (ema3 > ema9) and (ema9 > ema20) and (ema50 > ema200) and (ema200 > ema200_3) and (upper_slope_15m > 0) and macro_long_ok
     trigger_short = (ema3 < ema9) and (ema9 < ema20) and (ema50 < ema200) and (ema200 < ema200_3) and macro_short_ok
     
     if not trigger_long and not trigger_short:
@@ -247,28 +258,48 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     else:
         rem_qty = total_qty
 
-    if dist_pct >= 0.004:
-        # Colocar 2 órdenes limitadas (Sizing 40/60 del remanente)
-        orders_to_place.append({
-            'limit_price': ema9,
-            'qty': rem_qty * 0.40,
-            'name': 'Order 1 (EMA9)'
-        })
-        orders_to_place.append({
-            'limit_price': ema20,
-            'qty': rem_qty * 0.60,
-            'name': 'Order 2 (EMA20)'
-        })
+    # Extraer o calcular niveles Lower_5 y Lower_6 en 5m
+    lower_5_5m = float(last_row.get('lower_5', 0)) if pd.notna(last_row.get('lower_5')) else 0.0
+    lower_6_5m = float(last_row.get('lower_6', 0)) if pd.notna(last_row.get('lower_6')) else 0.0
+    
+    if lower_5_5m <= 0:
+        bb_basis = float(last_row.get('basis', current_price))
+        bb_std = float(last_row.get('std', current_price * 0.005))
+        lower_5_5m = bb_basis - (2.5 * bb_std)
+        lower_6_5m = bb_basis - (3.0 * bb_std)
+
+    if trigger_long:
+        px_order1 = lower_5_5m
+        px_order2 = lower_6_5m
+        name_1 = 'Order 1 (Lower_5 5m)'
+        name_2 = 'Order 2 (Lower_6 5m)'
     else:
-        # Colocar 1 sola orden limitada consolidada en EMA9 (Sizing 100% del remanente)
-        orders_to_place.append({
-            'limit_price': ema9,
-            'qty': rem_qty,
-            'name': 'Order 1 Cons (EMA9)'
-        })
+        upper_5_5m = float(last_row.get('upper_5', 0)) if pd.notna(last_row.get('upper_5')) else 0.0
+        upper_6_5m = float(last_row.get('upper_6', 0)) if pd.notna(last_row.get('upper_6')) else 0.0
+        if upper_5_5m <= 0:
+            bb_basis = float(last_row.get('basis', current_price))
+            bb_std = float(last_row.get('std', current_price * 0.005))
+            upper_5_5m = bb_basis + (2.5 * bb_std)
+            upper_6_5m = bb_basis + (3.0 * bb_std)
+        px_order1 = upper_5_5m
+        px_order2 = upper_6_5m
+        name_1 = 'Order 1 (Upper_5 5m)'
+        name_2 = 'Order 2 (Upper_6 5m)'
+
+    # Colocar 2 órdenes limitadas (Sizing 40/60 del remanente en Lower_5 y Lower_6 de 5m)
+    orders_to_place.append({
+        'limit_price': px_order1,
+        'qty': rem_qty * 0.40,
+        'name': name_1
+    })
+    orders_to_place.append({
+        'limit_price': px_order2,
+        'qty': rem_qty * 0.60,
+        'name': name_2
+    })
 
     # 9. Insertar Órdenes Límite en la base de datos
-    is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+    is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
     mode_val = 'paper' if is_paper else 'real'
     ttl_hours = 4  # 4 horas de expiración estándar para Swing
     
@@ -339,6 +370,19 @@ async def process_swing_orders_15m(symbol: str, df_15m: pd.DataFrame, df_4h: pd.
             if num_pending == 0:
                 log_debug('SWING_LIMITS', f"{symbol}: Límite alcanzado ({num_open}/{max_per_symbol}).")
                 return
+
+        # Validar límite de monedas activas simultáneas (Cant. Monedas Activas)
+        all_open_res = sb.table(table_name).select('symbol').eq('status', 'open').execute()
+        active_symbols_set = set(p['symbol'] for p in (all_open_res.data or []))
+        
+        tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        tc_data = tc_res.data if tc_res and tc_res.data else {}
+        reg_params = tc_data.get('regime_params', {}) or {}
+        max_active_syms = int(reg_params.get('max_active_symbols_forex' if is_forex else 'max_active_symbols_crypto', 1))
+
+        if symbol not in active_symbols_set and len(active_symbols_set) >= max_active_syms:
+            log_debug('SWING_LIMITS', f"⛔ [MONEDAS ACTIVAS] {symbol} omitido. Ya hay {len(active_symbols_set)}/{max_active_syms} activos: {list(active_symbols_set)}")
+            return
     except Exception as e:
         log_error('SWING_LIMITS', f"Error validando límites para {symbol}: {e}")
 
@@ -469,6 +513,49 @@ async def cancel_swing_order(symbol: str, direction: str, reason: str, sb):
     await cancel_swing_orders(symbol=symbol, direction=direction, reason=reason, sb=sb)
 
 async def enforce_global_limit_max(supabase, mode, max_limits=5):
+    # ── 1. LIMPIEZA AUTOMÁTICA DE ÓRDENES PENDIENTES OBSOLETAS POR CANT. MONEDAS ACTIVAS ──
+    try:
+        open_fx_res = supabase.table('forex_positions').select('symbol').eq('status', 'open').execute()
+        active_fx_symbols = set(p['symbol'] for p in (open_fx_res.data or []))
+        
+        open_crypto_res = supabase.table('positions').select('symbol').eq('status', 'open').execute()
+        active_crypto_symbols = set(p['symbol'] for p in (open_crypto_res.data or []))
+        
+        tc_res = supabase.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        tc_data = tc_res.data if tc_res and tc_res.data else {}
+        reg_params = tc_data.get('regime_params', {}) or {}
+        max_fx = int(reg_params.get('max_active_symbols_forex', 1))
+        max_crypto = int(reg_params.get('max_active_symbols_crypto', 1))
+
+        # Si Forex ya alcanzó el límite de monedas activas, cancelar órdenes pendientes para otros pares de Forex
+        if len(active_fx_symbols) >= max_fx:
+            other_fx = [s for s in ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD'] if s not in active_fx_symbols]
+            if other_fx:
+                supabase.table('pending_orders').update({
+                    'status': 'cancelled',
+                    'rejection_reason': 'max_active_symbols',
+                    'cancelled_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }).in_('symbol', other_fx).eq('status', 'pending').execute()
+                log_info('SWING', f"🧹 [MATA-ZOMBIES FOREX] Canceladas órdenes pendientes obsoletas de pares no permitidos: {other_fx}")
+
+        # Si Crypto ya alcanzó el límite de monedas activas, cancelar órdenes pendientes para otras cryptos
+        if len(active_crypto_symbols) >= max_crypto:
+            all_pend = supabase.table('pending_orders').select('id, symbol').eq('status', 'pending').execute()
+            forex_list = {'EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD'}
+            other_crypto_ids = [p['id'] for p in (all_pend.data or []) if p['symbol'] not in forex_list and p['symbol'] not in active_crypto_symbols]
+            if other_crypto_ids:
+                supabase.table('pending_orders').update({
+                    'status': 'cancelled',
+                    'rejection_reason': 'max_active_symbols',
+                    'cancelled_at': datetime.now(timezone.utc).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }).in_('id', other_crypto_ids).execute()
+                log_info('SWING', f"🧹 [MATA-ZOMBIES CRYPTO] Canceladas {len(other_crypto_ids)} órdenes pendientes de cryptos inactivas.")
+    except Exception as cleanup_err:
+        log_error('SWING', f"Error en limpia-zombies de monedas activas: {cleanup_err}")
+
+    # ── 2. CONTROL DE MÁXIMO GLOBAL DE LÍMITES POR MODO ──
     res = supabase.table('pending_orders').select('*').eq('status', 'pending').eq('mode', mode).execute()
     pending = res.data or []
     if len(pending) >= max_limits:
@@ -487,7 +574,7 @@ async def enforce_global_limit_max(supabase, mode, max_limits=5):
 
 async def create_smart_limit_order(symbol, direction, limit_price, sl_price, tp1_price, tp2_price, band_target, sizing_pct, movement_type, signal_quality, fib_zone_entry, ttl_hours, supabase):
     # Enforce Global Limit Max before creating new one
-    mode = 'paper' if BOT_STATE.config_cache.get("paper_trading", True) else 'real'
+    mode = 'paper' if BOT_STATE.config_cache.get("paper_trading", False) else 'real'
     await enforce_global_limit_max(supabase, mode, max_limits=5)
 
     # Truncate strings to avoid DB length errors (varchar 10)
@@ -499,7 +586,7 @@ async def create_smart_limit_order(symbol, direction, limit_price, sl_price, tp1
         'rule_code': 'SMART' if direction == 'long' else 'SMART_S',
         'limit_price': limit_price, 'sl_price': sl_price, 'tp1_price': tp1_price, 'tp2_price': tp2_price,
         'band_name': band_target, 'status': 'pending',
-        'mode': 'paper' if BOT_STATE.config_cache.get("paper_trading", True) else 'real',
+        'mode': 'paper' if BOT_STATE.config_cache.get("paper_trading", False) else 'real',
         'expires_at': (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat(),
         'sizing_pct': sizing_pct, 'timeframe': '15m',
         'movement_type': safe_movement, 'signal_quality': signal_quality, 'fib_zone_entry': fib_zone_entry
@@ -507,7 +594,7 @@ async def create_smart_limit_order(symbol, direction, limit_price, sl_price, tp1
     supabase.table('pending_orders').insert(new_order).execute()
 
 async def check_limit_order_execution(symbol: str, current_price: float, provider, sb) -> None:
-    is_paper = BOT_STATE.config_cache.get("paper_trading", True)
+    is_paper = BOT_STATE.config_cache.get("paper_trading", False)
     mode_filter = 'paper' if is_paper else 'real'
     
     pending = sb.table('pending_orders').select('*').eq('symbol', symbol).eq('status', 'pending').eq('mode', mode_filter).execute()
@@ -704,6 +791,19 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
             final_count = final_count_res.count if final_count_res.count is not None else 999
             if final_count >= max_symbol:
                 log_warning('SWING', f"🚫 ATOMIC BLOCK: {symbol} has {final_count} open (max {max_symbol}). Swing INSERT rejected.")
+                return
+
+            # Validar de forma atómica el límite de monedas activas simultáneas (Cant. Monedas Activas)
+            all_active_res = sb.table(table_name).select('symbol').eq('status', 'open').execute()
+            active_unique_syms = set(p['symbol'] for p in (all_active_res.data or []))
+            
+            tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+            tc_data = tc_res.data if tc_res and tc_res.data else {}
+            reg_params = tc_data.get('regime_params', {}) or {}
+            max_active_syms = int(reg_params.get('max_active_symbols_forex' if is_forex else 'max_active_symbols_crypto', 1))
+
+            if symbol not in active_unique_syms and len(active_unique_syms) >= max_active_syms:
+                log_warning('SWING', f"🚫 ATOMIC BLOCK MONEDAS ACTIVAS: {symbol} omitido. Ya hay {len(active_unique_syms)}/{max_active_syms} monedas activas ({list(active_unique_syms)}). Swing INSERT rechazado.")
                 return
             # ═══════════════════════════════════════════════════════════
 

@@ -178,6 +178,41 @@ def can_open_position(
                 )
             }
 
+    # ── REGLA 1B: Límite de Monedas Activas Simultáneas (Cant. Monedas Activas) ──
+    try:
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        
+        if open_positions is not None:
+            active_symbols = set(p.get('symbol') for p in open_positions if p.get('status', 'open') == 'open' and p.get('symbol'))
+        else:
+            tbl = 'forex_positions' if market_type == 'forex_futures' else 'positions'
+            open_res = sb.table(tbl).select('symbol').eq('status', 'open').execute()
+            active_symbols = set(p['symbol'] for p in (open_res.data or []))
+        
+        tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        tc_data = tc_res.data if tc_res and tc_res.data else {}
+        reg_params = tc_data.get('regime_params', {}) or {}
+        
+        if market_type in ('crypto_futures', 'crypto_spot'):
+            max_active = int(reg_params.get('max_active_symbols_crypto', 1))
+        else:
+            max_active = int(reg_params.get('max_active_symbols_forex', 1))
+            
+        if symbol not in active_symbols and len(active_symbols) >= max_active:
+            return {
+                'allowed': False,
+                'reason': f"Cant. Monedas Activas alcanzado ({len(active_symbols)}/{max_active} activas: {list(active_symbols)})"
+            }
+
+        if len(active_symbols) > max_active:
+            return {
+                'allowed': False,
+                'reason': f"Cant. Monedas Activas excedido ({len(active_symbols)}/{max_active} activas: {list(active_symbols)})"
+            }
+    except Exception as max_sym_err:
+        pass
+
     # ── REGLA 2: Cooldown general del símbolo post-SL ──
     now = datetime.now(timezone.utc)
     cfg = POST_SL_COOLDOWN.get(market_type, {})

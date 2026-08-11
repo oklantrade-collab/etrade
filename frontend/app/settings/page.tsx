@@ -25,6 +25,7 @@ export default function SettingsPage() {
   const [stocksConfig, setStocksConfig] = useState<any>(null)
   const [isRuleModalOpen, setIsRuleModalOpen] = useState(false)
   const [isSweeping, setIsSweeping] = useState(false)
+  const [forexEnabled, setForexEnabled] = useState(true)
 
   useEffect(() => {
     loadConfig()
@@ -34,6 +35,12 @@ export default function SettingsPage() {
     const { data: tc } = await supabase.from('trading_config').select('*').eq('id', 1).single()
     const { data: rc } = await supabase.from('risk_config').select('*').single()
     const { data: us_res } = await supabase.from('universe_settings').select('*').eq('id', 1).limit(1)
+    const { data: sysConf } = await supabase.from('system_config').select('*').eq('key', 'forex_enabled').maybeSingle()
+    
+    if (sysConf) {
+        setForexEnabled(sysConf.value === 'true' || sysConf.value === true);
+    }
+
     const us = us_res && us_res.length > 0 ? us_res[0] : null
     
     if (tc && rc) setConfig({ ...tc, ...rc, tc_id: tc.id, rc_id: rc.id })
@@ -194,7 +201,7 @@ export default function SettingsPage() {
       </div>
 
       {activeTab === 'crypto' && config && <CryptoSettings config={config} onSave={(data: any) => handleSave('crypto', data)} />}
-      {activeTab === 'forex' && config && <ForexSettings config={config} onSave={(data: any) => handleSave('forex', data)} />}
+      {activeTab === 'forex' && config && <ForexSettings config={config} onSave={(data: any) => handleSave('forex', data)} forexEnabled={forexEnabled} setForexEnabled={setForexEnabled} />}
       {activeTab === 'stocks' && uSettings && stocksConfig && (
         <StocksSettings 
             settings={uSettings} 
@@ -461,7 +468,7 @@ const CryptoSettings = ({ config, onSave }: any) => {
   )
 }
 
-const ForexSettings = ({ config, onSave }: any) => {
+const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) => {
   const isConnected = config.capital_forex_futures > 0
   const [isLevModalOpen, setIsLevModalOpen] = useState(false)
   const [levMap, setLevMap] = useState<any>(config.leverage_map_forex || { XAU: 100, JPY: 200, DEFAULT: 500 })
@@ -503,7 +510,33 @@ const ForexSettings = ({ config, onSave }: any) => {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
-      <StatusBadge label="IC Markets / cTrader" status={isConnected ? 'ACTIVO' : 'PENDIENTE'} color={isConnected ? '#00C896' : '#555'} detail="Conexión API" />
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px 18px', background: `rgba(${isConnected ? (forexEnabled ? '0,200,150' : '200,200,0') : '85,85,85'}, 0.05)`, borderRadius: '10px', border: `1px solid ${isConnected ? (forexEnabled ? '#00C896' : '#C8C800') : '#555'}22` }}>
+        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: isConnected ? (forexEnabled ? '#00C896' : '#C8C800') : '#555', boxShadow: `0 0 8px ${isConnected ? (forexEnabled ? '#00C896' : '#C8C800') : '#555'}` }} />
+        <div style={{ flex:1 }}>
+            <span style={{ color: '#FFF', fontWeight:700, fontSize: '14px' }}>IC Markets / cTrader</span>
+            <div style={{ color: '#555', fontSize: '11px' }}>Conexión API {isConnected ? (forexEnabled ? '(Operando)' : '(Pausado)') : '(Pendiente)'}</div>
+        </div>
+        
+        {/* Toggle Switch */}
+        {isConnected && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '11px', color: forexEnabled ? '#00C896' : '#C8C800', fontWeight: 'bold' }}>{forexEnabled ? 'ACTIVO' : 'SUSPENDIDO'}</span>
+                <div 
+                    onClick={async () => {
+                        const newVal = !forexEnabled;
+                        setForexEnabled(newVal);
+                        await supabase.from('system_config').upsert({ key: 'forex_enabled', value: newVal });
+                    }} 
+                    style={{ width: '40px', height: '20px', borderRadius: '10px', background: forexEnabled ? '#00C896' : '#222', position: 'relative', cursor: 'pointer' }}
+                >
+                    <div style={{ position: 'absolute', top: '2px', left: forexEnabled ? '22px' : '2px', width: '16px', height: '16px', borderRadius:'50%', background: '#FFF', transition: 'all 0.2s' }} />
+                </div>
+            </div>
+        )}
+        {!isConnected && (
+            <div style={{ padding: '4px 12px', borderRadius: '20px', background: '#55522', border: '1px solid #55544', color: '#555', fontSize: '10px', fontWeight: 900, letterSpacing:'1px' }}>PENDIENTE</div>
+        )}
+      </div>
       <SettingsSection title="💰 Gestión Forex">
         <SettingRow label="Capital asignado (Base)" value={config.capital_forex_futures} type="number" prefix="$" disabled={!isConnected} onChange={(v: any) => onSave({ capital_forex_futures: v })} />
         <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_forex || 0} type="number" prefix="$" onChange={(v: any) => onSave({ accumulated_profit_forex: v })} />

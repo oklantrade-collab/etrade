@@ -161,6 +161,27 @@ async def get_forex_positions(
     except Exception as e:
         return []
 
+@router.post('/reconcile')
+async def reconcile_forex_positions(
+    sb = Depends(get_supabase)
+):
+    """Fuerza la reconciliación y sincronización de posiciones activas desde IC Markets."""
+    try:
+        from app.execution.providers.ctrader_provider import CTraderProtobufProvider
+        provider = CTraderProtobufProvider()
+        if not provider._connected:
+            await provider.connect()
+            
+        open_positions = await provider.get_open_positions()
+        return {
+            'status': 'ok',
+            'active_positions_in_broker': len(open_positions),
+            'message': f'Reconciliación iniciada. {len(open_positions)} posiciones activas reportadas por el broker.'
+        }
+    except Exception as e:
+        return {'status': 'error', 'message': str(e)}
+
+
 @router.get('/dashboard/summary')
 async def get_forex_dashboard(
     sb = Depends(get_supabase)

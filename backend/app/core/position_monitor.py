@@ -35,11 +35,11 @@ async def check_signal_reversal(
     snap:         dict = None
 ) -> dict:
     """
-    Cierra la posición cuando el MTF gira en contra
-    SOLO si hay una ganancia mínima asegurada.
+    Cierra la posición cuando la EMA3/EMA9 en 5 minutos gira en contra
+    ÚNICAMENTE si hay ganancia positiva (pnl_pct > 0).
 
-    Nunca cierra con pérdida por esta regla.
-    Para pérdidas → el SL es el mecanismo correcto.
+    Nunca cierra con pérdida por esta regla (para pérdidas -> SL).
+    No cierra por titubeos de MTF o 15M si la EMA3 en 5m sigue a favor.
     """
     if not config.get('exit_on_signal_reversal', True):
         return {'should_exit': False}
@@ -47,39 +47,24 @@ async def check_signal_reversal(
     if not position:
         return {'should_exit': False}
 
-    # Exclusión de estrategias Swing (Dd11/Dd12) SOLO para reversiones de MTF, pero permitiendo salidas rápidas de EMA.
-    rule_code = (position.get('rule_code') or '').lower()
-    is_swing_excluded = ('dd11' in rule_code or 'dd12' in rule_code)
-
-    side      = (position.get('side') or '').lower()
-    entry     = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
+    side  = (position.get('side') or '').lower()
+    entry = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
     
     if entry == 0:
         return {'should_exit': False}
 
-    # Calcular P&L actual
-    if side == 'long':
+    # Calcular P&L actual (%)
+    if side in ('long', 'buy'):
         pnl_pct = (current_price - entry) / entry * 100
     else:
         pnl_pct = (entry - current_price) / entry * 100
 
-    # 1. ¿MTF o SARS giró en contra?
-    mtf_reversed = (
-        (side == 'long'  and current_mtf < -0.1) or
-        (side == 'short' and current_mtf > 0.1)
-    )
-    
-    if is_swing_excluded:
-        mtf_reversed = False
-
-    # 2. ¿Cruce Rápido de EMA (EMA3 vs EMA9) en contra? (Versión 5 minutos)
-    ema_reversed = False
-    
+    # 1. Obtener EMAs rápidas de 5M (EMA3 y EMA9)
     from app.core.memory_store import MEMORY_STORE
     symbol = position.get('symbol')
     df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df') if symbol else None
     
-    ema3 = ema9 = 0
+    ema3 = ema9 = 0.0
     if df_5m is not None and not df_5m.empty:
         if 'ema_3' in df_5m.columns:
             ema3 = float(df_5m['ema_3'].iloc[-1])
@@ -91,74 +76,29 @@ async def check_signal_reversal(
         else:
             ema9 = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
     elif snap:
-        # Fallback al snapshot de 15m
+        # Fallback si no hay df_5m
         ema3 = float(snap.get('ema_3') or 0)
         ema9 = float(snap.get('ema_9') or 0)
 
+    # 2. Verificar cruce en contra en 5M
+    ema_reversed_5m = False
     if ema3 > 0 and ema9 > 0:
-        if side == 'long' and ema3 < ema9:
-            ema_reversed = True
-        elif side == 'short' and ema3 > ema9:
-            ema_reversed = True
+        if side in ('long', 'buy') and ema3 < ema9:
+            ema_reversed_5m = True
+        elif side in ('short', 'sell') and ema3 > ema9:
+            ema_reversed_5m = True
 
-    # 2.5 ¿Cruce Rápido de EMA en 15m para Break-Even? (EMA3 vs EMA9 vs EMA20)
-    ema_reversed_15m = False
-    if snap:
-        ema3_15m = float(snap.get('ema_3') or 0)
-        ema9_15m = float(snap.get('ema_9') or 0)
-        ema20_15m = float(snap.get('ema_20') or 0)
-        
-        if ema3_15m > 0 and ema9_15m > 0 and ema20_15m > 0:
-            if side == 'long' and ema3_15m < ema9_15m and ema9_15m < ema20_15m:
-                ema_reversed_15m = True
-            elif side == 'short' and ema3_15m > ema9_15m and ema9_15m > ema20_15m:
-                ema_reversed_15m = True
-
-    if not mtf_reversed and not ema_reversed and not ema_reversed_15m:
-        return {'should_exit': False}
-
-    # Evaluación de P&L para decidir la agresividad
-    # Si tenemos ganancia (pnl > 0.20%), salimos YA para asegurar por cualquiera de los motivos a mercado.
-    if pnl_pct >= 0.20:
-        # Validación extra: Si el motivo de salida fue SOLO el MTF lento, 
-        # esperamos a que el EMA rápido (5m) también gire para no salir prematuramente de un buen trade.
-        if mtf_reversed and not ema_reversed and not ema_reversed_15m:
-            if ema3 > 0 and ema9 > 0:
-                if side == 'long' and ema3 > ema9:
-                    return {'should_exit': False}
-                if side == 'short' and ema3 < ema9:
-                    return {'should_exit': False}
-
-        reason_str = 'early_profit_protection_ema' if (ema_reversed or ema_reversed_15m) else 'early_profit_protection_mtf'
+    # 3. Regla estricta con Fee-Net Guard: Solo salir si PnL >= min_profit_pct (cobertura de comisión Binance)
+    min_profit_pct = float(config.get('min_profit_exit_pct', 0.25))
+    if pnl_pct >= min_profit_pct and ema_reversed_5m:
         return {
             'should_exit': True,
-            'reason': reason_str,
+            'reason': 'early_profit_protect_ema_5m',
+            'exit_execution_type': 'MARKET_URGENT',
             'pnl_pct': round(pnl_pct, 4),
-            'detail': f'Reversión (EMA_5m={ema_reversed}, EMA_15m={ema_reversed_15m}, MTF={mtf_reversed}) con P&L positivo ({pnl_pct:.2f}%). Asegurando ganancia.'
-        }
-    
-    # Pero si hubo reversión en 15m, modificamos el TP a Break-Even (+0.10% para comisiones).
-    # VALIDACIÓN DE TIEMPO/MOMENTUM: Para evitar arruinar estrategias que compran "el dip" 
-    # (donde EMA ya está en contra al entrar), solo activamos esta defensa si la posición 
-    # alcanzó un mínimo de ganancia en algún momento (peak_pnl > 0.05%).
-    peak_pnl = float(position.get('peak_pnl_pct', 0))
-    
-    if ema_reversed_15m and peak_pnl >= 0.05:
-        target_pnl = 0.0
-        if side == 'long':
-            target_price = entry * (1 + target_pnl / 100.0)
-        else:
-            target_price = entry * (1 - target_pnl / 100.0)
-            
-        return {
-            'should_exit': False,
-            'should_modify_oco_breakeven': True,
-            'target_tp_price': target_price,
-            'reason': 'ema_reversal_exact_be',
-            'detail': f'Reversión 15m en contra (PNL={pnl_pct:.2f}%). Ajustando TP a precio exacto de entrada (Break-Even puro).'
+            'detail': f'Early Profit Protect (MARKET URGENTE): Cruce EMA3/EMA9 5M en contra (EMA3={ema3:.5f}, EMA9={ema9:.5f}) con P&L neto positivo (+{pnl_pct:.2f}% >= {min_profit_pct:.2f}%). Ejecutando cierre a mercado urgente.'
         }
 
-    # Esperamos recuperación o SL.
     return {'should_exit': False}
 
 async def check_sl_proximity_alert(
@@ -1807,6 +1747,21 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         }
 
     log_info(MODULE, f"Cerrando {symbol} ({reason}) en tabla {table_name}: PnL=${total_pnl:.4f} ({pnl_pct:.2f}%)")
+    
+    # 🛡️ Si es una posición de Forex LIVE con ID cTrader, enviar orden de cierre real a IC Markets / cTrader
+    if is_forex and pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
+        try:
+            lots_clean = round(abs(float(pos.get('lots') or pos.get('size') or 0.01)), 2)
+            close_vol = int(round(lots_clean * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots_clean * 10_000))
+            
+            from app.core.safety_manager import get_worker
+            fw = get_worker('forex_worker')
+            if fw and hasattr(fw, 'close_position'):
+                fw.close_position(ctrader_pid, close_vol)
+                log_info(MODULE, f"[CTRADER LIVE CLOSE] Enviada orden de cierre a cTrader para {symbol} (posId {ctrader_pid}) volumen {close_vol}")
+        except Exception as live_close_e:
+            log_error(MODULE, f"Error enviando cierre cTrader para {symbol}: {live_close_e}")
+
     supabase.table(table_name).update(close_update).eq(db_key_name, db_record_id).execute()
     
     # Check if there are other open positions for this symbol

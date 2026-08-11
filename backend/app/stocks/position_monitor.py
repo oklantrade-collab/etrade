@@ -460,6 +460,26 @@ class PositionMonitor:
         pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
         result = "win" if pnl_usd > 0 else "loss"
 
+        # 🛡️ GUARDA MAESTRA ABSOLUTA ANTI-PÉRDIDAS EN STOCKS (PnL < $1.00 USD) 🛡️
+        # En Mercado de Stocks Spot (sin liquidación), NUNCA cerrar una posición si pnl_usd < 1.00 USD
+        if pnl_usd < 1.0:
+            log_warning(MODULE, f"🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando cierre de {ticker} ({exit_reason}) con PnL de ${pnl_usd:.2f} USD < $1.00 USD. La posición se mantiene ABIERTA para recuperación.")
+            try:
+                sb.table('stocks_positions').update({
+                    'sl_type': 'suspended_anti_loss_protection',
+                    'stop_loss': 0,
+                    'sl_dynamic_price': 0,
+                    'sl_price': 0,
+                    'erep_active': True,
+                    'erep_phase': 1,
+                    'erep_p1_price': entry_price,
+                    'erep_q1': shares,
+                    'erep_market_type': 'stocks_spot'
+                }).eq('id', trade['id']).execute()
+            except Exception as upd_e:
+                log_error(MODULE, f"Error actualizando estado anti-loss para {ticker}: {upd_e}")
+            return
+
         try:
             # 1. Insert into trades_journal
             journal_entry = {

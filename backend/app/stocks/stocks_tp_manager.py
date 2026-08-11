@@ -425,11 +425,11 @@ async def execute_partial_sell(
     shares: int,
     price: float,
     action: str,
-    new_sl: float,
-    new_trail_high: float,
-    b3_trail_sl: float,
-    supabase,
-    ib_provider=None,
+    new_sl: float = 0.0,
+    new_trail_high: float = 0.0,
+    b3_trail_sl: float = 0.0,
+    supabase = None,
+    ib_provider = None,
 ) -> dict:
     """Ejecuta la venta parcial de un bloque y actualiza la posición en Supabase."""
     pos_id = position.get('id')
@@ -460,10 +460,26 @@ async def execute_partial_sell(
 
     # Actualizar posición en Supabase
     new_shares_rem = shares_rem - shares
+    
+    # Determinar columnas válidas y código de regla
+    b_str = str(block).lower().replace('tp_', '')
+    if b_str in ('1', 'b1'):
+        col_exec, col_sh, col_pnl = 'tp_block1_executed', 'tp_block1_shares', 'tp_block1_pnl'
+        rule_code_val = 'TP_B1'
+    elif b_str in ('2', 'b2'):
+        col_exec, col_sh, col_pnl = 'tp_block2_executed', 'tp_block2_shares', 'tp_block2_pnl'
+        rule_code_val = 'TP_B2'
+    elif b_str in ('3', 'b3'):
+        col_exec, col_sh, col_pnl = 'tp_block3_executed', 'tp_block3_shares', 'tp_block3_pnl'
+        rule_code_val = 'TP_B3'
+    else:
+        col_exec, col_sh, col_pnl = 'tp_block1_executed', 'tp_block1_shares', 'tp_block1_pnl'
+        rule_code_val = 'TP_B1'
+
     update_data = {
-        f'tp_block{block}_executed': True,
-        f'tp_block{block}_shares': shares,
-        f'tp_block{block}_pnl': round(pnl_total, 4),
+        col_exec: True,
+        col_sh: shares,
+        col_pnl: round(pnl_total, 4),
         'shares_remaining': new_shares_rem,
         'tp_trailing_high': new_trail_high,
         'tp_trailing_sl': b3_trail_sl,
@@ -517,7 +533,7 @@ async def execute_partial_sell(
 
         update_data['status'] = 'closed'
         update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
-        update_data['sl_close_reason'] = f'tp_b{block}_full'
+        update_data['sl_close_reason'] = f'tp_{b_str}_full'
 
     try:
         supabase.table('stocks_positions') \
@@ -535,7 +551,7 @@ async def execute_partial_sell(
             'direction': 'sell',
             'shares': shares,
             'market_price': price,
-            'rule_code': f'TP_B{block}',
+            'rule_code': position.get('rule_code') or 'S07',
             'status': 'filled',
             'filled_price': price,
             'filled_at': datetime.now(timezone.utc).isoformat(),

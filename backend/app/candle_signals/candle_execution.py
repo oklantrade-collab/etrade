@@ -273,7 +273,7 @@ def execute_crypto_signal(
 
     # ── STEP 1: Execute pre-requisites ──
     from app.core.memory_store import BOT_STATE
-    is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+    is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
     binance_symbol = normalize_crypto_symbol(pair)
 
     # ── GUARD #3: Anti-spam de señales (Corrección #3) ──
@@ -579,7 +579,7 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
 
         from app.core.memory_store import BOT_STATE
 
-        is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+        is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
         min_usd = float(BOT_STATE.config_cache.get("min_profit_exit_usd", 1.0))
         min_pct = float(BOT_STATE.config_cache.get("min_profit_exit_pct", 0.30))
 
@@ -1242,8 +1242,6 @@ def execute_stocks_signal(
             return {"success": False, "reason": "price_improvement"}
             
         log_info(MODULE, f"💎 Agregando capa Stock {len(existing_same)+1} para {ticker}")
-    else:
-        _close_all_stocks_positions(ticker, price, strategy_code)
 
     # ── CHECK 1: Limit per symbol (Stocks) ──
     from app.core.supabase_client import get_risk_config
@@ -1367,10 +1365,10 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
                 pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
 
                 # 🛡️ PROTECCIÓN ANTI-PÉRDIDAS & EREP PARA STOCKS 🛡️
-                # Si el cierre sugerido por vela genera pérdida, no cerramos la posición.
+                # Si el cierre sugerido por vela genera menos de $1.00 USD de ganancia, no cerramos la posición.
                 # En su lugar, la enviamos a EREP Fase 1 para intentar recuperación.
-                if pnl < 0:
-                    log_warning(MODULE, f"🛡️ [ANTI-LOSS CANDLE EXIT] Intento de cierre de vela para {ticker} con pérdida: ${pnl:.2f} ({pnl_pct:.2f}%). Enrutando a EREP Fase 1.")
+                if pnl < 1.0:
+                    log_warning(MODULE, f"🛡️ [ANTI-LOSS CANDLE EXIT] Intento de cierre de vela para {ticker} con ganancia insuficiente/pérdida: ${pnl:.2f} ({pnl_pct:.2f}%). Enrutando a EREP Fase 1.")
                     sb.table("stocks_positions").update({
                         "erep_phase": 1,
                         "erep_p1_price": avg,

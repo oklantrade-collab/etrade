@@ -8,6 +8,7 @@ REMOTE_PATH = "/home/etrade/etrade/backend"
 
 # Archivos críticos para sincronizar
 files_to_sync = [
+    "app/strategy/quantum_squeeze_hedge.py",
     "app/strategy/smart_loss_guard.py",
     "app/strategy/dca_manager.py",
     "app/strategy/profit_capture.py",
@@ -72,7 +73,11 @@ files_to_sync = [
     "app/core/market_hours.py",
     "app/execution/providers/ctrader_provider.py",
     "app/analysis/fibonacci_bb.py",
-    "requirements.txt"
+    "app/strategy/emergency_guards.py",
+    "app/api/strategies.py",
+    "config_btc_pilot.json",
+    "requirements.txt",
+    ".env"
 ]
 
 def check_syntax():

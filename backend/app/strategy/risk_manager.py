@@ -146,10 +146,10 @@ def validate_signal(
         
         active_fx_symbols = set(p['symbol'] for p in (open_fx_res.data or []))
         
-        tc_res = supabase_client.table('trading_config').select('regime_params').eq('id', 1).execute()
-        tc_data = tc_res.data[0] if tc_res.data else {}
+        tc_res = supabase_client.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        tc_data = tc_res.data if tc_res and tc_res.data else {}
         regime_params = tc_data.get('regime_params', {}) or {}
-        max_active_symbols_forex = int(regime_params.get('max_active_symbols_forex', 2))
+        max_active_symbols_forex = int(regime_params.get('max_active_symbols_forex', 1))
         
         sig_symbol = signal.get('symbol', '')
         forex_symbols = set(regime_params.get('forex_assets', ['EURUSD', 'GBPUSD', 'USDJPY', 'XAUUSD']))

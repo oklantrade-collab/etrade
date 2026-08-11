@@ -582,7 +582,15 @@ def evaluate_proactive_exit(
         should_close = False
         rule_code   = None
         urgency     = 'none'
-        reason      = f'Condiciones insuficientes. P&L: {pnl["pnl_pct"]:.3f}%'
+        reason      = f'Condiciones insuficientes. P&L: {pnl.get("pnl_pct", 0):.3f}%'
+    # 🛡️ PROTECCIÓN ESTRICTA STOCKS: Nunca cerrar en pérdida o con menos de $1.00 USD de ganancia
+    if market_type == 'stocks_spot' and should_close:
+        pnl_usd = safe_float(pnl.get('pnl_usd', 0))
+        if pnl_usd < 1.0:
+            should_close = False
+            reason = f'Bloqueado: PnL de ${pnl_usd:.2f} USD es menor a $1.00 USD en Stocks. Reteniendo posición.'
+            rule_code = None
+            urgency = 'none'
 
     return {
         'should_close': should_close,

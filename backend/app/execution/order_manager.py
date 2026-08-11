@@ -326,7 +326,7 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
 
         # --- SOPORTE PAPER TRADING (v4.0) ---
         from app.core.memory_store import BOT_STATE
-        is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+        is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
 
         if is_paper:
             # En PAPER simplemente simulamos el cierre con el precio actual
@@ -456,7 +456,7 @@ def modify_oco_breakeven(position_id: str, new_tp_price: float) -> bool:
         side = "SELL" if position["side"] == "LONG" else "BUY"
         
         from app.core.memory_store import BOT_STATE
-        is_paper = BOT_STATE.config_cache.get("paper_trading", True) is not False
+        is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
         
         if is_paper:
             log_info("ORDER_MANAGER", f"PAPER mod OCO breakeven for {binance_symbol} to TP={new_tp_price}")

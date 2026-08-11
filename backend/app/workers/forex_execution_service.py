@@ -140,12 +140,12 @@ class ForexExecutionService:
 
             # Obtener max_active_symbols_forex desde trading_config -> regime_params
             try:
-                tc_res = self.sb.table('trading_config').select('regime_params').eq('id', 1).execute()
-                tc_data = tc_res.data[0] if tc_res.data else {}
+                tc_res = self.sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+                tc_data = tc_res.data if tc_res and tc_res.data else {}
                 regime_params = tc_data.get('regime_params', {}) or {}
-                max_active_symbols = int(regime_params.get('max_active_symbols_forex', 2))
+                max_active_symbols = int(regime_params.get('max_active_symbols_forex', 1))
             except Exception as e:
-                max_active_symbols = 2
+                max_active_symbols = 1
 
             symbols = list(self.state['symbol_ids'].keys()) or self.symbols
             
@@ -214,6 +214,91 @@ class ForexExecutionService:
             for direction in ['long', 'short']:
                 signal = self._check_rules(context, direction)
                 if signal and signal['triggered']:
+                    # ── FILTRO MODELO DUAL DE RE-ENTRADA EN 5m (2ª, 3ª+ Posiciones) ──
+                    existing_positions = [p for p in self._open_positions_list if p['symbol'] == snap['symbol']]
+                    if len(existing_positions) >= 1:
+                        reentry_allowed = False
+                        try:
+                            from app.core.memory_store import MEMORY_STORE
+                            df_5m = MEMORY_STORE.get(snap['symbol'], {}).get('5m', {}).get('df')
+                            basis_15m = self._safe_float(snap.get('basis'))
+                            price = context.get('price', 0)
+                            
+                            # Calcular precio promedio ponderado de posiciones existentes
+                            total_lots = sum(abs(float(p.get('lots') or p.get('size') or 0.01)) for p in existing_positions)
+                            if total_lots > 0:
+                                avg_entry_price = sum(float(p.get('entry_price', 0)) * abs(float(p.get('lots') or p.get('size') or 0.01)) for p in existing_positions) / total_lots
+                            else:
+                                avg_entry_price = min(float(p.get('entry_price', 0)) for p in existing_positions) if direction == 'long' else max(float(p.get('entry_price', 0)) for p in existing_positions)
+
+                            if df_5m is not None and len(df_5m) >= 2:
+                                last_5m = df_5m.iloc[-1]
+                                close_5m = float(last_5m['close'])
+                                low_5m = float(last_5m['low'])
+                                high_5m = float(last_5m['high'])
+                                
+                                # Extraer EMAs 5m
+                                c_series = df_5m['close']
+                                ema3_5m = float(last_5m.get('ema1') or last_5m.get('ema_3') or c_series.ewm(span=3, adjust=False).mean().iloc[-1])
+                                ema9_5m = float(last_5m.get('ema2') or last_5m.get('ema_9') or c_series.ewm(span=9, adjust=False).mean().iloc[-1])
+                                ema20_5m = float(last_5m.get('ema3') or last_5m.get('ema_20') or last_5m.get('basis') or c_series.ewm(span=20, adjust=False).mean().iloc[-1])
+                                
+                                lower_5_5m = float(last_5m.get('lower_5', 0) or 0)
+                                upper_5_5m = float(last_5m.get('upper_5', 0) or 0)
+                                bb_lower_5m = float(last_5m.get('lower_1', 0) or last_5m.get('bb_low', 0) or 0)
+                                bb_upper_5m = float(last_5m.get('upper_1', 0) or last_5m.get('bb_up', 0) or 0)
+
+                                if bb_lower_5m == 0 or bb_upper_5m == 0:
+                                    basis_5m = float(c_series.rolling(20, min_periods=1).mean().iloc[-1])
+                                    std_5m = float(c_series.rolling(20, min_periods=1).std().iloc[-1])
+                                    if bb_lower_5m == 0:
+                                        bb_lower_5m = basis_5m - (2.0 * std_5m)
+                                    if bb_upper_5m == 0:
+                                        bb_upper_5m = basis_5m + (2.0 * std_5m)
+
+                                if direction == 'long':
+                                    if ema3_5m < ema9_5m:
+                                        # Escenario 1: Capitulación bajista 5m -> Exigir Lower_5/Lower_6 + Close < BB_Lower
+                                        at_lower_extreme = (lower_5_5m > 0 and price <= lower_5_5m) or (context.get('fibonacci_zone', 0) <= -5)
+                                        close_below_bb = (close_5m < bb_lower_5m) if bb_lower_5m > 0 else False
+                                        below_avg = (price < avg_entry_price) if avg_entry_price > 0 else True
+                                        reentry_allowed = at_lower_extreme and close_below_bb and below_avg
+                                        scenario_str = f"Escenario 1 (Capitulación EMA3<9: lower5={lower_5_5m:.5f}, close5m={close_5m:.5f}, bb_low5m={bb_lower_5m:.5f})"
+                                    else:
+                                        # Escenario 2: Tendencia alcista 5m -> Exigir Low < EMA20 y Close < avg_entry_price
+                                        low_below_ema20 = (low_5m < ema20_5m) if ema20_5m > 0 else False
+                                        close_below_avg = (close_5m < avg_entry_price) if avg_entry_price > 0 else True
+                                        reentry_allowed = low_below_ema20 and close_below_avg
+                                        scenario_str = f"Escenario 2 (Pullback EMA3>9: low5m={low_5m:.5f}, ema20_5m={ema20_5m:.5f}, close5m={close_5m:.5f}, avg_entry={avg_entry_price:.5f})"
+
+                                    if not reentry_allowed:
+                                        self.log(f"🚫 [RE-ENTRY FILTER] {snap['symbol']} LONG 2ª+ bloqueado: {scenario_str} | price={price:.5f}, avg_entry={avg_entry_price:.5f}")
+
+                                else: # direction == 'short'
+                                    if ema3_5m > ema9_5m:
+                                        # Escenario 1: Repunte alcista 5m en contra -> Exigir Upper_5/Upper_6 + Close > BB_Upper
+                                        at_upper_extreme = (upper_5_5m > 0 and price >= upper_5_5m) or (context.get('fibonacci_zone', 0) >= 5)
+                                        close_above_bb = (close_5m > bb_upper_5m) if bb_upper_5m > 0 else False
+                                        above_avg = (price > avg_entry_price) if avg_entry_price > 0 else True
+                                        reentry_allowed = at_upper_extreme and close_above_bb and above_avg
+                                        scenario_str = f"Escenario 1 (Repunte EMA3>9: upper5={upper_5_5m:.5f}, close5m={close_5m:.5f}, bb_up5m={bb_upper_5m:.5f})"
+                                    else:
+                                        # Escenario 2: Tendencia bajista 5m -> Exigir High > EMA20 y Close > avg_entry_price
+                                        high_above_ema20 = (high_5m > ema20_5m) if ema20_5m > 0 else False
+                                        close_above_avg = (close_5m > avg_entry_price) if avg_entry_price > 0 else True
+                                        reentry_allowed = high_above_ema20 and close_above_avg
+                                        scenario_str = f"Escenario 2 (Pullback EMA3<9: high5m={high_5m:.5f}, ema20_5m={ema20_5m:.5f}, close5m={close_5m:.5f}, avg_entry={avg_entry_price:.5f})"
+
+                                    if not reentry_allowed:
+                                        self.log(f"🚫 [RE-ENTRY FILTER] {snap['symbol']} SHORT 2ª+ bloqueado: {scenario_str} | price={price:.5f}, avg_entry={avg_entry_price:.5f}")
+
+                        except Exception as re_err:
+                            self.log(f"Error evaluando filtro dual de re-entrada 5m para {snap['symbol']}: {re_err}", "WARNING")
+                            reentry_allowed = False
+
+                        if not reentry_allowed:
+                            continue
+                    
                     self.log(f'[SIGNAL] {direction.upper()} {snap["symbol"]}: {signal["rule_code"]}')
                     self._execute_signal(snap['symbol'], direction, signal, snap)
                     break
@@ -567,10 +652,24 @@ class ForexExecutionService:
                     (not ema_exhaustion)
                 )
             else:
-                # Short
-                fresh_cross_short_by_age = (cross_age <= 3) and (ema3 < ema9)
-                slope_entry_short = (slope < 0) and (slope < slope_prev) and (ema3 < ema9)
-                fresh_cross = fresh_cross_short_by_age or slope_entry_short
+                # Short (BbHot)
+                ema3_below_ema9 = (ema3 < ema9)
+                prev_price = context.get('prev_price', price)
+                prev_ema20 = context.get('prev_ema20', ema20)
+                high_price = context.get('high', price)
+                
+                # Cruce de precio con EMA20 mientras EMA3 < EMA9
+                price_cross_ema20_short = (
+                    ema3_below_ema9 and (
+                        (price <= ema20 and (high_price >= ema20 or prev_price >= prev_ema20)) or
+                        (abs(price - ema20) / (ema20 if ema20 > 0 else 1) <= 0.0015) or
+                        (price <= ema20)
+                    )
+                )
+
+                fresh_cross_short_by_age = (cross_age <= 3) and ema3_below_ema9
+                slope_entry_short = (slope < 0) and (slope < slope_prev) and ema3_below_ema9
+                fresh_cross = fresh_cross_short_by_age or slope_entry_short or price_cross_ema20_short
                 
                 rsi_ok = rsi >= 35
                 not_in_floor = price >= bb_lower if bb_lower > 0 else True
@@ -581,6 +680,7 @@ class ForexExecutionService:
                 bb_expanding_or_mtf_short_or_top = bb_exp or (mtf <= -0.5) or from_top
                 
                 hot_triggered = (
+                    ema3_below_ema9 and
                     fresh_cross and
                     relaxed_mtf_ok and
                     bb_expanding_or_mtf_short_or_top and
@@ -599,21 +699,21 @@ class ForexExecutionService:
             'score': 0.95 # Alta prioridad
         })
 
-        # REGLA: Aa21 / Bb21 (Homologada con Crypto V2)
+        # REGLA: Aa21 / Bb21 (DIP Sniper Lower5/Lower6 en 5m)
         bb21_rule_triggered = False
         if direction == 'long':
-            if ema3 and ema9 and ema20:
-                ema20_angle = context.get('ema20_angle', 0.0)
-                ema_50 = context.get('ema_50', 0.0)
-                ema_200 = context.get('ema_200', 0.0)
-                bb_upper = context.get('bb_upper', 99999)
-                
-                bb21_rule_triggered = (
-                    ema_50 > ema_200
-                    and ema20_angle >= 0
-                    and (-2 <= fib_zone <= 2)
-                    and (price < bb_upper if bb_upper > 0 else True)
-                )
+            ema_50 = context.get('ema_50', 0.0)
+            ema_200 = context.get('ema_200', 0.0)
+            bb_upper_slope = float(context.get('bb_upper_slope_15m') or context.get('upper_slope') or 1.0)
+            lower_5_val = float(context.get('lower_5', 0.0) or 0.0)
+            
+            is_lower5_touch = (price <= lower_5_val) if lower_5_val > 0 else (fib_zone <= -5)
+            
+            bb21_rule_triggered = (
+                (ema_50 > ema_200 if (ema_50 > 0 and ema_200 > 0) else True)
+                and bb_upper_slope > 0
+                and is_lower5_touch
+            )
         else:
             if ema3 and ema9 and ema20:
                 ema20_angle = context.get('ema20_angle', 0.0)
@@ -885,7 +985,7 @@ class ForexExecutionService:
         except Exception as e:
             self.log(f"Error checking position history: {e}", "WARNING")
 
-        # 3. Guardian final: Limite TOTAL por simbolo (Para todas las estrategias)
+        # 3. Guardian final: Limite TOTAL por simbolo y Cant. Monedas Activas
         total_symbol = len([p for p in self._open_positions_list if p['symbol'] == symbol])
         from app.core.supabase_client import get_risk_config
         max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
@@ -893,10 +993,32 @@ class ForexExecutionService:
             self.log(f'LIMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
 
+        from app.strategy.position_guards import can_open_position
+        guard_res = can_open_position(
+            symbol=symbol,
+            direction=direction,
+            market_type='forex_futures',
+            open_positions=self._open_positions_list
+        )
+        if not guard_res['allowed']:
+            self.log(f"⛔ [MONEDAS ACTIVAS REJECT] {symbol}: {guard_res['reason']}", 'WARNING')
+            return
+
         # 4. Calcular parámetros e idoneidad de la nueva orden ANTES de revertir
         price = self._safe_float(snap.get('price'))
         sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal["rule_code"])
-        lots = self._calculate_lot_size(symbol, sl_pips)
+        lots = self._calculate_lot_size(symbol, sl_pips, snap, direction)
+
+        # Si es la 1ª posición del símbolo, convertir la entrada MARKET a una Orden LIMIT inteligente
+        existing_positions = [p for p in self._open_positions_list if p['symbol'] == symbol]
+        is_primary_entry = (len(existing_positions) == 0)
+        
+        limit_price = None
+        if is_primary_entry:
+            limit_price = self._calculate_primary_limit_price(symbol, direction, snap)
+            if limit_price is None:
+                self.log(f'⛔ [ABORT] 1ª Entrada {symbol} {direction.upper()} abortada por filtro de pendiente EMA3.', 'WARNING')
+                return
 
         f_config = get_forex_config()
         riesgo_limite = f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100
@@ -932,14 +1054,13 @@ class ForexExecutionService:
 
         # 5. Reversion forzada condicional con exclusión estricta de Swing (Hedge OFF) - MANDATORIO
         opposite = 'short' if direction == 'long' else 'long'
-        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == opposite]
+        opp_positions = [p for p in self._open_positions_list if p['symbol'] == symbol and p.get('side', '').lower() == opposite]
         
         opp_to_close = []
         for p in opp_positions:
-            p_rule = (p.get('rule_code') or '').lower()
-            if 'dd11' in p_rule or 'dd12' in p_rule:
-                self.log(f"[SWING SAFE] Omitiendo cierre por reversión para la posición Swing {p['id']} ({p_rule})")
-                continue
+            p_entry = self._safe_float(p.get('entry_price'))
+            p_pip = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
+            p_pips = (price - p_entry)/p_pip if opposite == 'long' else (p_entry - price)/p_pip
             opp_to_close.append(p)
 
         if opp_to_close:
@@ -955,36 +1076,160 @@ class ForexExecutionService:
             # Recargar posiciones tras cerrar opuestas
             self._load_open_positions()
 
-        # 6. Ejecutar nueva señal
-        self.log(f'[ORDEN] {direction.upper()} {symbol} ({signal["rule_code"]}): lots={lots} risk=${riesgo_real:.2f}')
-        if self.mode == 'live': self._execute_live_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
-        else: self._execute_paper_order(symbol, direction, lots, price, sl, tp, signal['rule_code'])
+        # 6. Ejecutar nueva señal (LIMIT para 1ª entrada, MARKET para re-entradas)
+        limit_list = limit_price if isinstance(limit_price, list) else ([limit_price] if limit_price else [None])
+        num_orders = len(limit_list)
+        
+        # Opción A (Riesgo Dividido): Dividir el lotaje base entre las órdenes
+        base_lots = [round(lots / num_orders, 2) for _ in range(num_orders)]
+        diff = round(lots - sum(base_lots), 2)
+        if diff != 0 and num_orders > 0:
+            base_lots[0] = round(base_lots[0] + diff, 2)
+            
+        for idx, limit_px in enumerate(limit_list):
+            order_lots = base_lots[idx]
+            if order_lots < 0.01:
+                order_lots = 0.01
+                
+            exec_type = 'limit' if limit_px else 'market'
+            exec_px = limit_px if exec_type == 'limit' else price
+            
+            self.log(f'[ORDEN {idx+1}/{num_orders}] {direction.upper()} {symbol} ({signal["rule_code"]} - {exec_type.upper()} @ {exec_px:.5f}): lots={order_lots} risk=${riesgo_real/num_orders:.2f}')
+            
+            if self.mode == 'live': 
+                self._execute_live_order(symbol, direction, order_lots, price, sl, tp, signal['rule_code'], order_type=exec_type, limit_price=limit_px)
 
-    def _calculate_lot_size(self, symbol, sl_pips):
+    def _calculate_primary_limit_price(self, symbol, direction, snap):
         """
-        Calcula el lotaje basado en RIESGO REAL EN USD.
-        Riesgo USD = Capital * %Riesgo
-        Lotes = Riesgo USD / (SL Pips * Valor del Pip por Lote Estándar)
+        Calcula el precio límite inteligente para entradas primarias (1ª posición):
+        - Impulso Fuerte (5m): Red Dual [EMA9_5m, EMA20_5m]
+        - Retroceso / Consolidación: Usar EMA9_15m / EMA20_15m o 95% BB Exterior (15m).
+        - Filtro de Pendiente EMA3: Obligatorio EMA3_5m ascendente para LONG y descendente para SHORT.
         """
         try:
-            f_config = get_forex_config()
-            # Calcular riesgo base, pero limitarlo a un maximo de $15 USD por trade 
-            # para asegurar que NUNCA toque el Hard Cap de $25 por error.
-            riesgo_usd = min(f_config['capital_usd'] * f_config['risk_per_trade_pct'] / 100, 15.0)
+            price = self._safe_float(snap.get('price'))
+            from app.core.memory_store import MEMORY_STORE
+            df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+            df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
             
-            # Valor estándar de 1 pip por 1 lote (100,000 unidades)
-            pip_val_std = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+            ema3_5m, ema9_5m, ema20_5m = price, price, price
+            ema3_5m_prev = price
+            if df_5m is not None and len(df_5m) >= 2:
+                last_5m = df_5m.iloc[-1]
+                prev_5m = df_5m.iloc[-2] if len(df_5m) >= 3 else last_5m
+                c_series_5m = df_5m['close']
+                ema3_series = c_series_5m.ewm(span=3, adjust=False).mean()
+                ema3_5m = float(last_5m.get('ema1') or last_5m.get('ema_3') or ema3_series.iloc[-1])
+                ema3_5m_prev = float(prev_5m.get('ema1') or prev_5m.get('ema_3') or ema3_series.iloc[-2])
+                ema9_5m = float(last_5m.get('ema2') or last_5m.get('ema_9') or c_series_5m.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_5m = float(last_5m.get('ema3') or last_5m.get('ema_20') or c_series_5m.ewm(span=20, adjust=False).mean().iloc[-1])
+
+            ema3_15m, ema9_15m, ema20_15m = price, price, price
+            bb_upper_15m, bb_lower_15m, basis_15m = 0, 0, price
+            if df_15m is not None and len(df_15m) >= 2:
+                last_15m = df_15m.iloc[-1]
+                c_series_15m = df_15m['close']
+                ema3_15m = float(last_15m.get('ema1') or last_15m.get('ema_3') or c_series_15m.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15m = float(last_15m.get('ema2') or last_15m.get('ema_9') or c_series_15m.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_15m = float(last_15m.get('ema3') or last_15m.get('ema_20') or c_series_15m.ewm(span=20, adjust=False).mean().iloc[-1])
+                bb_upper_15m = float(last_15m.get('upper_2', 0) or 0)
+                bb_lower_15m = float(last_15m.get('lower_2', 0) or 0)
+                basis_15m = ema20_15m if ema20_15m > 0 else float(last_15m.get('basis', price) or price)
+
+            is_long = str(direction).lower() in ('long', 'buy')
+            ema3_is_ascending = (ema3_5m > ema3_5m_prev)
+            ema3_is_descending = (ema3_5m < ema3_5m_prev)
             
-            # Piso seguro para el SL para no generar lotajes gigantes
-            safe_sl_pips = max(sl_pips, 10.0) 
+            limit_prices = []
             
-            lots = riesgo_usd / (safe_sl_pips * pip_val_std)
-                
-            self.log(f"[LOTS] Capital: ${f_config['capital_usd']} | Riesgo Cap: ${riesgo_usd} | SL Pips: {safe_sl_pips:.1f} | Lots: {lots:.2f}")
-            return min(max(round(lots, 2), 0.01), 1.0)
+            if is_long:
+                if not ema3_is_ascending:
+                    self.log(f"⛔ [EMA3 SLOPE REJECT] {symbol} LONG abortado: EMA3 de 5m NO está en modo ascendente (curr={ema3_5m:.5f} <= prev={ema3_5m_prev:.5f})", "WARNING")
+                    return None
+                if ema3_5m > ema9_5m > ema20_5m:
+                    limit_prices = [min(price, ema9_5m) if ema9_5m > 0 else price, ema20_5m]
+                    regime_name = "Impulso Alcista 5m (Dual LIMIT EMA9+EMA20)"
+                elif ema3_15m > ema9_15m:
+                    ma_candidates = [m for m in (ema9_15m, ema20_15m) if 0 < m < price]
+                    limit_prices = [max(ma_candidates) if ma_candidates else price]
+                    regime_name = "Tendencia Alcista 15m (EMA9/20_15m)"
+                else:
+                    if bb_lower_15m > 0 and basis_15m > bb_lower_15m:
+                        limit_prices = [bb_lower_15m + (0.05 * (basis_15m - bb_lower_15m))]
+                    else:
+                        limit_prices = [price * 0.998]
+                    regime_name = "Pullback/Squeeze (95% BB Inferior 15m)"
+            else:
+                if not ema3_is_descending:
+                    self.log(f"⛔ [EMA3 SLOPE REJECT] {symbol} SHORT abortado: EMA3 de 5m NO está en modo descendente (curr={ema3_5m:.5f} >= prev={ema3_5m_prev:.5f})", "WARNING")
+                    return None
+                if ema3_5m < ema9_5m < ema20_5m:
+                    limit_prices = [max(price, ema9_5m) if ema9_5m > 0 else price, ema20_5m]
+                    regime_name = "Impulso Bajista 5m (Dual LIMIT EMA9+EMA20)"
+                elif ema3_15m < ema9_15m:
+                    ma_candidates = [m for m in (ema9_15m, ema20_15m) if m > price]
+                    limit_prices = [min(ma_candidates) if ma_candidates else price]
+                    regime_name = "Tendencia Bajista 15m (EMA9/20_15m)"
+                else:
+                    if bb_upper_15m > 0 and bb_upper_15m > basis_15m:
+                        limit_prices = [bb_upper_15m - (0.05 * (bb_upper_15m - basis_15m))]
+                    else:
+                        limit_prices = [price * 1.002]
+                    regime_name = "Repunte/Squeeze (95% BB Superior 15m)"
+                    
+            from app.workers.forex_worker_standalone import format_ctrader_price
+            limit_prices_formatted = [format_ctrader_price(symbol, lp) for lp in limit_prices]
+            
+            if len(limit_prices_formatted) > 1:
+                self.log(f"🎯 [PRIMARY LIMIT DUAL] {symbol} {direction.upper()} | Régimen: {regime_name} | Price={price:.5f} -> Limit1={limit_prices_formatted[0]:.5f}, Limit2={limit_prices_formatted[1]:.5f}")
+                return limit_prices_formatted
+            else:
+                self.log(f"🎯 [PRIMARY LIMIT CALC] {symbol} {direction.upper()} | Régimen: {regime_name} | Price={price:.5f} -> LimitPrice={limit_prices_formatted[0]:.5f}")
+                return limit_prices_formatted[0]
         except Exception as e:
-            self.log(f"Error calculando lotes: {e}", "ERROR")
-            return 0.01
+            self.log(f"Error calculando precio límite primario para {symbol}: {e}", "WARNING")
+            return snap.get('price', 0)
+
+    def _calculate_lot_size(self, symbol, sl_pips, snap=None, direction='long'):
+        """
+        Calcula el lotaje basado en LOTAJE BASE FIJO + MULTIPLICADOR 2X EXTREMO.
+        - Lotaje Base Fijo: 0.05 lotes para divisas Forex (EURUSD/GBPUSD/USDJPY), 0.10 lotes para XAUUSD/Oro.
+        - Multiplicador 2x: Se duplica a 0.10 lotes si el precio rompe la banda de Bollinger.
+        """
+        try:
+            sym_upper = (symbol or '').upper()
+            # 1. Definir lotaje base fijo por instrumento
+            if 'XAU' in sym_upper or 'GOLD' in sym_upper:
+                base_lots = 0.10
+            else:
+                base_lots = 0.05
+            
+            multiplier = 1.0
+            if snap:
+                price = self._safe_float(snap.get('price'))
+                bb_lower = self._safe_float(snap.get('lower_2') or snap.get('lower_1'))
+                bb_upper = self._safe_float(snap.get('upper_2') or snap.get('upper_1'))
+                rsi = self._safe_float(snap.get('rsi_14'), 50.0)
+                
+                dir_str = str(direction).lower()
+                if dir_str in ('long', 'buy'):
+                    is_bb_break = (bb_lower > 0 and price < bb_lower)
+                    is_rsi_extreme = (rsi < 20)
+                    if is_bb_break or is_rsi_extreme:
+                        multiplier = 2.0
+                        self.log(f"🔥 [EXTREME 2X MULTIPLIER] {symbol} LONG: Cap. Extrema detectada (bb_break={is_bb_break}, rsi={rsi:.1f}). Lotaje duplicado de {base_lots} -> {base_lots * 2:.2f}")
+                else:
+                    is_bb_break = (bb_upper > 0 and price > bb_upper)
+                    is_rsi_extreme = (rsi > 80)
+                    if is_bb_break or is_rsi_extreme:
+                        multiplier = 2.0
+                        self.log(f"🔥 [EXTREME 2X MULTIPLIER] {symbol} SHORT: Euforia Extrema detectada (bb_break={is_bb_break}, rsi={rsi:.1f}). Lotaje duplicado de {base_lots} -> {base_lots * 2:.2f}")
+
+            final_lots = base_lots * multiplier
+            return round(final_lots, 2)
+        except Exception as e:
+            self.log(f"Error calculando lotes fijos: {e}", "ERROR")
+            return 0.05 if 'XAU' not in (symbol or '').upper() else 0.01
 
 
     def _calculate_sl_tp(self, symbol, direction, entry, snap, rule_code):
@@ -1052,40 +1297,39 @@ class ForexExecutionService:
         
         return round(sl, 6), round(tp, 6), abs(entry-sl)/pip_size
 
-    def _execute_live_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
+    def _execute_live_order(self, symbol, direction, lots, entry, sl, tp, rule_code, order_type='limit', limit_price=None):
         try:
-            from app.workers.forex_worker_standalone import ACCOUNT_ID, get_divisor
+            from app.workers.forex_worker_standalone import ACCOUNT_ID, get_divisor, format_ctrader_price
             sid = self.state['symbol_ids'].get(symbol)
             if not sid: return
             
-            divisor = get_divisor(symbol)
-            
             req = ProtoOANewOrderReq()
             req.ctidTraderAccountId = ACCOUNT_ID
-            req.symbolId, req.orderType, req.tradeSide = sid, 1, (1 if direction=='long' else 2)
-            req.volume = int(round(lots * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots * 10_000))
+            req.symbolId = sid
+            req.tradeSide = 1 if str(direction).lower() in ('long', 'buy') else 2
             
-            # Para permitir que el escalamiento EREP funcione, no enviamos el stop loss dinámico ajustado (tight SL)
-            # a cTrader. En su lugar, enviamos un stop loss de desastre (Disaster SL) basado en HARD_CAP_LOSS_PIPS
-            # que actúa como red de seguridad física en el servidor del broker, mientras el bot gestiona
-            # el Stop Loss ajustado virtualmente en memoria, permitiendo suspenderlo y activar EREP.
-            disaster_sl = 0.0
-            if sl > 0:
-                pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
-                max_loss_pips = HARD_CAP_LOSS_PIPS.get(symbol, 60)
-                if str(direction).lower() in ('long', 'buy'):
-                    disaster_sl = entry - (max_loss_pips * pip_size)
-                else:
-                    disaster_sl = entry + (max_loss_pips * pip_size)
-            
-            if disaster_sl > 0: req.stopLoss = int(round(disaster_sl * divisor))
-            if tp > 0: req.takeProfit = int(round(tp * divisor))
+            is_limit = (order_type == 'limit' and limit_price and limit_price > 0)
+            if is_limit:
+                req.orderType = 2 # 2 = LIMIT order in cTrader Open API
+                req.limitPrice = format_ctrader_price(symbol, limit_price)
+                req.expirationTimestamp = int((time.time() + 2700) * 1000) # TTL ampliado a 45 minutos (2700s)
+                order_price = limit_price
+            else:
+                req.orderType = 1 # 1 = MARKET order
+                order_price = entry
+
+            lots_clean = round(abs(float(lots)), 2)
+            if symbol == 'XAUUSD':
+                vol_val = int(round(lots_clean * 10_000))
+                req.volume = max(vol_val, 1_000)
+            else:
+                req.volume = int(round(lots_clean * 10_000_000))
             
             if hasattr(self.worker, 'safe_send'):
                 self.worker.safe_send(req)
             else:
                 self.worker.client.send(req)
-            self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='live')
+            self._save_position(symbol, direction, lots, order_price, sl, tp, rule_code, mode='live')
         except Exception as e: self.log(f'Error live: {e}')
 
     def _execute_paper_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
@@ -1504,9 +1748,12 @@ class ForexExecutionService:
                             req = ProtoOANewOrderReq()
                             req.ctidTraderAccountId = ACCOUNT_ID
                             req.symbolId, req.orderType, req.tradeSide = sid, 1, (1 if str(side).lower() in ('long', 'buy') else 2)
-                            req.volume = int(size * 100000)
-                            self.worker.client.send(req)
-                            self.log(f"[EREP P2 LIVE] Sent order for {symbol} volume {int(size * 100000)}")
+                            req.volume = int(round(size * 10_000_000)) if symbol != 'XAUUSD' else int(round(size * 10_000))
+                            if hasattr(self.worker, 'safe_send'):
+                                self.worker.safe_send(req)
+                            else:
+                                self.worker.client.send(req)
+                            self.log(f"[EREP P2 LIVE] Sent order for {symbol} volume {req.volume}")
                     except Exception as live_err:
                         self.log(f"[EREP P2 LIVE ERROR] {live_err}", "ERROR")
                 else:
@@ -1716,13 +1963,13 @@ class ForexExecutionService:
             u5 = self._safe_float(snap.get('upper_5'))
             l5 = self._safe_float(snap.get('lower_5'))
             
-            # Cierre total en Banda 6
-            if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
+            # Cierre total en Banda 6 (Solo si hay ganancia real)
+            if pips_pnl > 0 and ((side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6)):
                 self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
                 return True
                 
             # Cierre parcial (Scale Out 50%) en Banda 5
-            if not pos.get('partial_closed_band5'):
+            if not pos.get('partial_closed_band5') and pips_pnl > 0:
                 if (side in ['long', 'buy'] and u5 > 0 and price >= u5) or (side in ['short', 'sell'] and l5 > 0 and price <= l5):
                     self.log(f"[{symbol}] Tocó Banda 5. Ejecutando Scale-Out (50%).")
                     self._partial_close_position(pos, price, 0.5, pips_pnl, snap=snap)
@@ -1885,11 +2132,7 @@ class ForexExecutionService:
                 if new_tp:
                     self.log(f"[PROTECTION] {symbol}: Actualizando TP a {new_tp}")
                 
-                # Sincronizar con cTrader si es cuenta real
-                if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
-                    self.worker.amend_position(pos['ctrader_pos_id'], sl_price=new_sl, tp_price=new_tp, symbol=symbol)
- 
-                # Actualizar en DB
+                # Actualizar en DB (Gestión Virtual 100% por eTrade)
                 update_fields = {'sl_price': new_sl}
                 if new_tp:
                     update_fields['tp_price'] = new_tp
@@ -1935,7 +2178,7 @@ class ForexExecutionService:
             ema9 = float(last_row['ema9'])
             ema20 = float(last_row['ema20'])
             
-            mode_val = 'paper'
+            mode_val = self.mode
             
             orders = [
                 {'limit_price': ema9, 'pct': 40, 'name': 'Order 1 (EMA9)'},
@@ -2052,11 +2295,11 @@ class ForexExecutionService:
             u5 = self._safe_float(snap.get('upper_5'))
             l5 = self._safe_float(snap.get('lower_5'))
             
-            if (side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6):
+            if pips_pnl > 0 and ((side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6)):
                 self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
                 return
                 
-            if not pos.get('partial_closed_band5'):
+            if not pos.get('partial_closed_band5') and pips_pnl > 0:
                 if (side in ['long', 'buy'] and u5 > 0 and price >= u5) or (side in ['short', 'sell'] and l5 > 0 and price <= l5):
                     self.log(f"[{symbol}] Tocó Banda 5. Ejecutando Scale-Out (50%).")
                     self._partial_close_position(pos, price, 0.5, pips_pnl, snap=snap)
@@ -2124,7 +2367,8 @@ class ForexExecutionService:
             # Cerrar en cTrader si es cuenta real
             if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
                 lots_abs = abs(self._safe_float(pos.get('lots')))
-                self.worker.close_position(pos['ctrader_pos_id'], lots_abs * 100000)
+                close_vol = int(round(lots_abs * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots_abs * 10_000))
+                self.worker.close_position(pos['ctrader_pos_id'], close_vol)
 
             update_data = {
                 'status': 'closed', 
@@ -2177,7 +2421,8 @@ class ForexExecutionService:
             # Cerrar parcial en cTrader si es cuenta real
             if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
                 lots_abs = abs(close_lots)
-                self.worker.close_position(pos['ctrader_pos_id'], lots_abs * 100000)
+                close_vol = int(round(lots_abs * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots_abs * 10_000))
+                self.worker.close_position(pos['ctrader_pos_id'], close_vol)
 
             update_data = {
                 'lots': round(remaining_lots, 3), 

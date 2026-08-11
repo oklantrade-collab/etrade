@@ -535,6 +535,22 @@ def _close_all_positions(ticker: str, price: float):
         pnl = (price - avg) * shares
         pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
 
+        # 🛡️ GUARDA MAESTRA ABSOLUTA ANTI-PÉRDIDAS EN STOCKS (PnL < $1.00 USD) 🛡️
+        if pnl < 1.0:
+            log_warning(MODULE, f"🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando _close_all_positions para {ticker} con PnL de ${pnl:.2f} USD < $1.00 USD.")
+            sb.table('stocks_positions').update({
+                'sl_type': 'suspended_anti_loss_protection',
+                'stop_loss': 0,
+                'sl_dynamic_price': 0,
+                'sl_price': 0,
+                'erep_active': True,
+                'erep_phase': 1,
+                'erep_p1_price': avg,
+                'erep_q1': shares,
+                'erep_market_type': 'stocks_spot'
+            }).eq('id', pos['id']).execute()
+            return
+
         sb.table("stocks_positions") \
             .update({
                 "status": "closed",

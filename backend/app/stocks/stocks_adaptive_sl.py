@@ -847,6 +847,24 @@ async def execute_adaptive_sl_close(
         'close_reason', 'adaptive_sl'
     )
 
+    if pnl_usd < 1.0:
+        log_warning('ADAPTIVE_SL', f'🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando _close_stocks_position para {ticker} con PnL de ${pnl_usd:.2f} USD < $1.00 USD.')
+        try:
+            await supabase.table('stocks_positions').update({
+                'sl_type': 'suspended_anti_loss_protection',
+                'stop_loss': 0,
+                'sl_dynamic_price': 0,
+                'sl_price': 0,
+                'erep_active': True,
+                'erep_phase': 1,
+                'erep_p1_price': entry_price,
+                'erep_q1': shares,
+                'erep_market_type': 'stocks_spot'
+            }).eq('id', pos_id).execute()
+        except Exception as upd_e:
+            log_error('ADAPTIVE_SL', f"Error registrando suspensión anti-loss: {upd_e}")
+        return
+
     log_info('ADAPTIVE_SL',
         f'🔴 SL ADAPTATIVO [{ticker}]: '
         f'vendiendo {shares} shares '

@@ -434,8 +434,16 @@ class StrategyEngine:
             if high_5m_val and ema9_5m_val and ema20_5m_val:
                 high_above_ema9_or_ema20_5m = (high_5m_val >= ema9_5m_val) or (high_5m_val >= ema20_5m_val)
             
-            if ema20_5m_val and high_5m_val >= ema20_5m_val:
-                high_above_ema20_5m = True
+        close_below_bb_lower_5m = False
+        close_above_bb_upper_5m = False
+        if df_5m is not None and not df_5m.empty:
+            c5 = safe_float(last_5m.get('close'))
+            lower_5m = safe_float(last_5m.get('lower_2', last_5m.get('lower_5', last_5m.get('lower_band', 0))))
+            upper_5m = safe_float(last_5m.get('upper_2', last_5m.get('upper_5', last_5m.get('upper_band', 0))))
+            if c5 > 0 and lower_5m > 0 and c5 < lower_5m:
+                close_below_bb_lower_5m = True
+            if c5 > 0 and upper_5m > 0 and c5 > upper_5m:
+                close_above_bb_upper_5m = True
 
         return {
             # Precio
@@ -448,6 +456,8 @@ class StrategyEngine:
             'minus_di':          safe_float(last_15m.get('minus_di')),
             'adx_velocity':      velocity,
             'bb_expanding':      safe_bool(last_15m.get('bb_expanding')),
+            'close_below_bb_lower_5m': close_below_bb_lower_5m,
+            'close_above_bb_upper_5m': close_above_bb_upper_5m,
             # EMAs
             'ema3':              safe_float(last_15m.get('ema_3') if last_15m.get('ema_3') is not None else last_15m.get('ema3')),
             'ema9':              safe_float(last_15m.get('ema_9') if last_15m.get('ema_9') is not None else last_15m.get('ema9')),

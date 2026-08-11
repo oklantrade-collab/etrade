@@ -471,15 +471,15 @@ def evaluate_stock_tp_v2(
     
     action = res.get('action', 'hold')
     if action in ['close_total', 'close_partial', 'close_block1', 'close_block2', 'close_block3', 'close_blocks_2_and_3']:
-        entry_price  = safe_float(position.get('avg_price', position.get('entry_price', 0)))
-        shares_rem   = safe_int(position.get('shares_remaining', position.get('shares', 0)))
+        entry_price  = safe_float(position.get('avg_price') or position.get('entry_price') or 0)
+        shares_rem   = safe_int(position.get('shares_remaining') or position.get('shares') or 0)
         
         # Calcular PnL en USD
         if entry_price > 0 and shares_rem > 0:
             pnl_usd = (current_price - entry_price) * shares_rem
             
-            # Si está en ganancia pero es menos de 1 USD (centavos), la retenemos
-            if 0 < pnl_usd < 1.0:
+            # Si la ganancia es menor a 1 USD (centavos, $0.00 o en pérdida), la retenemos en vez de TP
+            if pnl_usd < 1.0:
                 res['action'] = 'hold'
                 res['reason'] = f"Bloqueado: Ganancia de ${pnl_usd:.2f} USD es menor a $1.00 USD. " + res.get('reason', '')
                 res['trigger'] = 'min_profit_usd_blocked'
@@ -501,14 +501,9 @@ def _evaluate_stock_tp_v2_core(
     """
     Función principal de TP Adaptativo v2.
     """
-    entry_price  = safe_float(position.get(
-        'avg_price',
-        position.get('entry_price', 0)
-    ))
+    entry_price  = safe_float(position.get('avg_price') or position.get('entry_price') or 0)
     total_shares = safe_int(position.get('shares', 0))
-    shares_rem   = safe_int(position.get(
-        'shares_remaining', total_shares
-    ))
+    shares_rem   = safe_int(position.get('shares_remaining') or total_shares)
     b1_done      = bool(position.get(
         'tp_block1_executed', False
     ))

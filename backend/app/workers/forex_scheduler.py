@@ -627,46 +627,41 @@ def calculate_forex_lot_size(
     sl_pips: float,
     leverage: int = 100,
     price: float = 1.0,
+    rsi: float = 50.0,
+    bb_lower: float = 0.0,
+    bb_upper: float = 0.0,
+    side: str = 'long'
 ) -> dict:
     """
-    Calcula tamano de lote Forex basado en riesgo.
-    formula: lots = risk_usd / (sl_pips * pip_value_usd)
+    Calcula tamano de lote Forex basado en LOTAJE BASE FIJO + MULTIPLICADOR 2X EXTREMO.
+    - Lotaje Base Fijo: 0.05 lotes para divisas Forex, 0.01 lotes para XAUUSD/Oro.
+    - Multiplicador 2x: 2.0 si price < bb_lower o rsi < 20 en LONG (o price > bb_upper o rsi > 80 en SHORT).
     """
     pip_size = PIP_SIZES.get(symbol, 0.0001)
-    risk_usd = capital_usd * (risk_pct / 100.0)
+    sym_upper = (symbol or '').upper()
 
-    # Contract size por instrumento (oz para commodities, unidades para forex)
-    CONTRACT_SIZES = {
-        'XAUUSD': 100,       # 1 lote = 100 onzas troy
-        'XAGUSD': 5_000,     # 1 lote = 5,000 onzas troy
-        'US30':   1,         # 1 lote = 1 contrato
-        'US500':  1,         # 1 lote = 1 contrato
-        'NAS100': 1,         # 1 lote = 1 contrato
-    }
-    contract_size = CONTRACT_SIZES.get(symbol, 100_000)  # Default: 100,000 para pares Forex
-
-    # Pip value base para 1 lote estándar
-    pip_value = pip_size * contract_size
-    
-    # Conversión de divisa de cotización a USD si es par JPY
-    if 'JPY' in symbol and price > 0:
-        pip_value_usd = pip_value / price
+    if 'XAU' in sym_upper or 'GOLD' in sym_upper:
+        base_lots = 0.01
     else:
-        pip_value_usd = pip_value
+        base_lots = 0.05
 
-    if sl_pips > 0 and pip_value_usd > 0:
-        lots = risk_usd / (sl_pips * pip_value_usd)
+    multiplier = 1.0
+    dir_str = str(side).lower()
+    if dir_str in ('long', 'buy'):
+        if (bb_lower > 0 and price < bb_lower) or (rsi < 20):
+            multiplier = 2.0
     else:
-        lots = LOT_CONFIG['micro_lot']
+        if (bb_upper > 0 and price > bb_upper) or (rsi > 80):
+            multiplier = 2.0
 
-    # Redondear al step mas cercano
-    step = LOT_CONFIG['lot_step']
-    lots = max(LOT_CONFIG['min_lot'], round(lots / step) * step)
+    lots = round(base_lots * multiplier, 2)
+    pip_val_usd = 10.0 if 'JPY' not in sym_upper else (10.0 / (price if price > 0 else 1.0))
+    risk_usd = lots * max(sl_pips, 10.0) * pip_val_usd
 
     return {
-        'lotes': round(lots, 2),
+        'lotes': lots,
         'risk_usd': round(risk_usd, 2),
-        'pip_value': pip_value_usd,
+        'pip_value': pip_val_usd,
         'pip_size': pip_size,
     }
 
@@ -689,6 +684,17 @@ async def open_forex_position(
     else:
         rule_code = str(rc_raw)
 
+    # === GUARD: Servicio Forex suspendido desde Settings ===
+    try:
+        fx_enabled_res = sb.table('system_config').select('value').eq('key', 'forex_enabled').maybe_single().execute()
+        if fx_enabled_res and fx_enabled_res.data:
+            val = fx_enabled_res.data.get('value')
+            if val is False or val == 'false' or val == False:
+                log_warning(MODULE, f"⏸️ [FOREX SUSPENDIDO] {symbol} {direction.upper()} rechazado: Servicio Forex desactivado desde Settings.")
+                return
+    except Exception:
+        pass  # Si falla la consulta, permitir operar por seguridad
+
     # === ESCUDO DE SEGURIDAD ESTRICTO ===
     from app.core.safety_manager import validate_signal
     snap = MARKET_SNAPSHOT_CACHE.get(symbol, {})
@@ -708,9 +714,9 @@ async def open_forex_position(
         open_fx = sb.table('forex_positions').select('symbol').eq('status', 'open').execute().data or []
         active_fx_symbols = set(p['symbol'] for p in open_fx)
         
-        tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
-        tc_params = (tc_res.data[0].get('regime_params') if tc_res.data else {}) or {}
-        max_active_symbols_forex = int(tc_params.get('max_active_symbols_forex', 2))
+        tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+        tc_params = (tc_res.data.get('regime_params') if tc_res and tc_res.data else {}) or {}
+        max_active_symbols_forex = int(tc_params.get('max_active_symbols_forex', 1))
         
         if symbol not in active_fx_symbols and len(active_fx_symbols) >= max_active_symbols_forex:
             log_warning(MODULE, f"⛔ SEÑAL RECHAZADA para {symbol}: Máximo de monedas activas en Forex alcanzado ({len(active_fx_symbols)}/{max_active_symbols_forex})")
@@ -818,82 +824,184 @@ async def open_forex_position(
         price=price,
     )
 
-    # Paper trading check
-    is_paper = cfg.get('paper_trading', True) is not False
+    # ── NUEVO: Calcular precio LIMIT inteligente para 1ª Entrada ──
+    existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
+    is_primary_entry = (len(existing_positions) == 0)
+    
+    limit_price = None
+    if is_primary_entry:
+        try:
+            snap_data = MARKET_SNAPSHOT_CACHE.get(symbol, {})
+            df_5m = get_memory_df(symbol, '5m')
+            df_15m = get_memory_df(symbol, '15m')
+            
+            ema3_5m, ema9_5m, ema20_5m = price, price, price
+            ema3_5m_prev = price
+            if df_5m is not None and len(df_5m) >= 2:
+                last_5m = df_5m.iloc[-1]
+                prev_5m = df_5m.iloc[-2] if len(df_5m) >= 3 else last_5m
+                c_series_5m = df_5m['close']
+                ema3_series = c_series_5m.ewm(span=3, adjust=False).mean()
+                ema3_5m = float(last_5m.get('ema1') or last_5m.get('ema_3') or ema3_series.iloc[-1])
+                ema3_5m_prev = float(prev_5m.get('ema1') or prev_5m.get('ema_3') or ema3_series.iloc[-2])
+                ema9_5m = float(last_5m.get('ema2') or last_5m.get('ema_9') or c_series_5m.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_5m = float(last_5m.get('ema3') or last_5m.get('ema_20') or c_series_5m.ewm(span=20, adjust=False).mean().iloc[-1])
 
-    if is_paper:
-        # Paper trading: simular orden
-        order = {
-            'order_id': int(time.time()),
+            ema3_15m, ema9_15m, ema20_15m = price, price, price
+            bb_upper, bb_lower, basis = 0, 0, price
+            if df_15m is not None and len(df_15m) >= 2:
+                last_15m = df_15m.iloc[-1]
+                c_series_15m = df_15m['close']
+                ema3_15m = float(last_15m.get('ema1') or last_15m.get('ema_3') or c_series_15m.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15m = float(last_15m.get('ema2') or last_15m.get('ema_9') or c_series_15m.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_15m = float(last_15m.get('ema3') or last_15m.get('ema_20') or c_series_15m.ewm(span=20, adjust=False).mean().iloc[-1])
+                bb_upper = float(last_15m.get('upper_2', 0) or 0)
+                bb_lower = float(last_15m.get('lower_2', 0) or 0)
+                basis = ema20_15m if ema20_15m > 0 else float(last_15m.get('basis', price) or price)
+            
+            is_long = direction.lower() in ('long', 'buy')
+            ema3_is_ascending = (ema3_5m > ema3_5m_prev)
+            ema3_is_descending = (ema3_5m < ema3_5m_prev)
+            
+            if is_long:
+                if not ema3_is_ascending:
+                    log_warning(MODULE, f"⛔ [EMA3 SLOPE REJECT] {symbol} LONG abortado: EMA3 de 5m NO está en modo ascendente (curr={ema3_5m:.5f} <= prev={ema3_5m_prev:.5f})")
+                    return
+                if ema3_5m > ema9_5m > ema20_5m:
+                    limit_prices = [min(price, ema9_5m) if ema9_5m > 0 else price, ema20_5m]
+                    regime_name = "Impulso Alcista 5m (Dual LIMIT EMA9+EMA20)"
+                elif ema3_15m > ema9_15m:
+                    ma_candidates = [m for m in (ema9_15m, ema20_15m) if 0 < m < price]
+                    limit_prices = [max(ma_candidates) if ma_candidates else price]
+                    regime_name = "Tendencia Alcista 15m (EMA9/20_15m)"
+                else:
+                    if bb_lower > 0 and basis > bb_lower:
+                        limit_prices = [bb_lower + (0.05 * (basis - bb_lower))]
+                    else:
+                        limit_prices = [price * 0.998]
+                    regime_name = "Pullback/Squeeze (95% BB Inferior 15m)"
+            else:
+                if not ema3_is_descending:
+                    log_warning(MODULE, f"⛔ [EMA3 SLOPE REJECT] {symbol} SHORT abortado: EMA3 de 5m NO está en modo descendente (curr={ema3_5m:.5f} >= prev={ema3_5m_prev:.5f})")
+                    return
+                if ema3_5m < ema9_5m < ema20_5m:
+                    limit_prices = [max(price, ema9_5m) if ema9_5m > 0 else price, ema20_5m]
+                    regime_name = "Impulso Bajista 5m (Dual LIMIT EMA9+EMA20)"
+                elif ema3_15m < ema9_15m:
+                    ma_candidates = [m for m in (ema9_15m, ema20_15m) if m > price]
+                    limit_prices = [min(ma_candidates) if ma_candidates else price]
+                    regime_name = "Tendencia Bajista 15m (EMA9/20_15m)"
+                else:
+                    if bb_upper > 0 and bb_upper > basis:
+                        limit_prices = [bb_upper - (0.05 * (bb_upper - basis))]
+                    else:
+                        limit_prices = [price * 1.002]
+                    regime_name = "Repunte/Squeeze (95% BB Superior 15m)"
+            
+            if len(limit_prices) > 1:
+                log_info(MODULE, f"🎯 [PRIMARY LIMIT DUAL] {symbol} {direction.upper()} | Régimen: {regime_name} | Price={price:.5f} -> Limit1={limit_prices[0]:.5f}, Limit2={limit_prices[1]:.5f}")
+                limit_price = limit_prices # Pass list
+            else:
+                limit_price = limit_prices[0]
+                log_info(MODULE, f"🎯 [PRIMARY LIMIT CALC 5M/15M] {symbol} {direction.upper()} | Régimen: {regime_name} | Price={price:.5f} -> LimitPrice={limit_price:.5f}")
+        except Exception as lp_err:
+            log_error(MODULE, f"Error calculando limit_price para {symbol}: {lp_err}")
+            limit_price = None
+
+    # Paper trading check
+    is_paper = cfg.get('paper_trading', False) is not False
+
+    limit_list = limit_price if isinstance(limit_price, list) else ([limit_price] if limit_price else [None])
+    num_orders = len(limit_list)
+    lots = sizing['lotes']
+    
+    # Opción A (Riesgo Dividido): Dividir el lotaje base entre las órdenes
+    base_lots = [round(lots / num_orders, 2) for _ in range(num_orders)]
+    diff = round(lots - sum(base_lots), 2)
+    if diff != 0 and num_orders > 0:
+        base_lots[0] = round(base_lots[0] + diff, 2)
+        
+    for idx, limit_px in enumerate(limit_list):
+        order_lots = base_lots[idx]
+        if order_lots < 0.01:
+            order_lots = 0.01
+            
+        exec_px = limit_px if (is_primary_entry and limit_px) else price
+        exec_type = 'LIMIT' if (is_primary_entry and limit_px) else 'MARKET'
+        
+        if is_paper:
+            # Paper trading: simular orden
+            order = {
+                'order_id': int(time.time()) + idx,
+                'symbol': symbol,
+                'side': direction,
+                'quantity': order_lots,
+                'price': exec_px,
+                'status': 'filled',
+            }
+            log_info(MODULE, f"[PAPER] Orden Forex {exec_type} ({idx+1}/{num_orders}): {direction.upper()} {order_lots} lotes {symbol} @ {exec_px:.5f}")
+        else:
+            # Live trading: enviar a cTrader
+            order = await provider.place_order(
+                symbol=symbol,
+                side='buy' if direction == 'long' else 'sell',
+                order_type=exec_type.lower(),
+                quantity=order_lots,
+                price=exec_px if exec_type == 'LIMIT' else None,
+                sl_price=levels['sl_price'],
+                tp_price=levels['tp_price'],
+            )
+            log_info(MODULE, f"[LIVE {exec_type}] ({idx+1}/{num_orders}) {direction.upper()} {order_lots} lotes {symbol} @ {exec_px:.5f}")
+            
+        if 'error' in order:
+            log_error(MODULE, f"Error abriendo posicion ({idx+1}/{num_orders}): {order['error']}")
+            return
+
+        # 3. Calcular SLV y Hard Stop inicial
+        from app.strategy.virtual_sl_recovery import calculate_slv, calculate_hard_stop_pips
+        slv_data = calculate_slv(
+            entry_price = exec_px,
+            side        = direction,
+            symbol      = symbol,
+            snap        = MARKET_SNAPSHOT_CACHE.get(symbol, {}),
+            market_type = 'forex_futures'
+        )
+        slv_price = slv_data['slv_price']
+        slv_hs_pips = calculate_hard_stop_pips(symbol, 'forex_futures', MARKET_SNAPSHOT_CACHE.get(symbol, {}))
+
+        # Registrar en Supabase
+        order_status = 'pending_limit' if (is_primary_entry and limit_px and not is_paper) else 'open'
+        try:
+            sb.table('forex_positions').insert({
+                'symbol':           str(symbol)[:20],
+                'side':             str(direction)[:20],
+                'entry_price':      exec_px,
+                'lots':             order_lots,
+                'sl_price':         levels['sl_price'],
+                'slv_price':        slv_price,
+                'slv_hard_stop_pips': slv_hs_pips,
+                'tp_price':         levels['tp_price'],
+                'rule_code':        str(rule_code)[:20],
+                'status':           order_status,
+                'mode':             'paper' if is_paper else 'live',
+                'market_type':      'forex_futures',
+                'ctrader_order_id': int(order.get('order_id')) if (order and order.get('order_id') and str(order.get('order_id')).isdigit()) else None,
+                'opened_at':        datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except Exception as e:
+            log_error(MODULE, f"Error registrando posicion en DB: {e}")
+
+        # Registrar en BOT_STATE
+        pos_id = str(order.get('order_id', f'FX-{int(time.time()) + idx}'))
+        BOT_STATE.positions[pos_id] = {
+            'id': pos_id,
             'symbol': symbol,
             'side': direction,
-            'quantity': sizing['lotes'],
-            'price': price,
-            'status': 'filled',
-        }
-        log_info(MODULE, f"[PAPER] Orden Forex: {direction.upper()} {sizing['lotes']} lotes {symbol} @ {price:.5f}")
-    else:
-        # Live trading: enviar a cTrader
-        order = await provider.place_order(
-            symbol=symbol,
-            side='buy' if direction == 'long' else 'sell',
-            order_type='market',
-            quantity=sizing['lotes'],
-            sl_price=levels['sl_price'],
-            tp_price=levels['tp_price'],
-        )
-
-    if 'error' in order:
-        log_error(MODULE, f"Error abriendo posicion: {order['error']}")
-        return
-
-    # 3. Calcular SLV y Hard Stop inicial
-    from app.strategy.virtual_sl_recovery import calculate_slv, calculate_hard_stop_pips
-    slv_data = calculate_slv(
-        entry_price = price,
-        side        = direction,
-        symbol      = symbol,
-        snap        = MARKET_SNAPSHOT_CACHE.get(symbol, {}),
-        market_type = 'forex_futures'
-    )
-    slv_price = slv_data['slv_price']
-    slv_hs_pips = calculate_hard_stop_pips(symbol, 'forex_futures', MARKET_SNAPSHOT_CACHE.get(symbol, {}))
-
-    # Registrar en Supabase
-    try:
-        sb.table('forex_positions').insert({
-            'symbol':           str(symbol)[:20],
-            'side':             str(direction)[:20],
-            'entry_price':      price,
-            'lots':             sizing['lotes'],
-            'sl_price':         levels['sl_price'],
-            'slv_price':        slv_price,
+            'avg_entry_price': exec_px,
+            'size': order_lots,
+            'sl_price': levels['sl_price'],
+            'slv_price': slv_price,
             'slv_hard_stop_pips': slv_hs_pips,
-            'tp_price':         levels['tp_price'],
-            'rule_code':        str(rule_code)[:20],
-            'status':           'open',
-            'mode':             'paper' if is_paper else 'live',
-            'market_type':      'forex_futures',
-            'ctrader_order_id': int(order.get('order_id')) if (order and order.get('order_id') and str(order.get('order_id')).isdigit()) else None,
-            'opened_at':        datetime.now(timezone.utc).isoformat(),
-        }).execute()
-    except Exception as e:
-        log_error(MODULE, f"Error registrando posicion en DB: {e}")
-
-    # Registrar en BOT_STATE
-    pos_id = order.get('order_id', f'FX-{int(time.time())}')
-    BOT_STATE.positions[pos_id] = {
-        'id': pos_id,
-        'symbol': symbol,
-        'side': direction,
-        'avg_entry_price': price,
-        'size': sizing['lotes'],
-        'sl_price': levels['sl_price'],
-        'slv_price': slv_price,
-        'slv_hard_stop_pips': slv_hs_pips,
-        'tp_price': levels['tp_price'],
-        'rule_code': rule_code,
-        'status': 'open',
         'market_type': 'forex_futures',
     }
     sm.on_position_opened(symbol, direction, BOT_STATE.positions[pos_id])
@@ -901,14 +1009,22 @@ async def open_forex_position(
     # Telegram
     side_emoji = 'LONG' if direction == 'long' else 'SHORT'
     pip_size = PIP_SIZES.get(symbol, 0.0001)
-    sl_pips = abs(price - levels['sl_price']) / pip_size
-    tp_pips = abs(levels['tp_price'] - price) / pip_size
+    entry_target = limit_price if (is_primary_entry and limit_price) else price
+    sl_pips = abs(entry_target - levels['sl_price']) / pip_size
+    tp_pips = abs(levels['tp_price'] - entry_target) / pip_size
     rr_ratio = tp_pips / sl_pips if sl_pips > 0 else 0
     
+    if order_status == 'pending_limit':
+        msg_header = f"🎯 ORDEN LÍMITE PENDIENTE — FOREX {side_emoji} [{symbol}]"
+        entry_lbl = f"Precio Límite: {limit_price:.5f} (Pendiente de ejecución en cTrader)"
+    else:
+        msg_header = f"⚡ POSICIÓN ABIERTA — FOREX {side_emoji} [{symbol}]"
+        entry_lbl = f"Entrada: {price:.5f}"
+
     await send_telegram_message(
-        f"FOREX {side_emoji} [{symbol}]\n"
+        f"{msg_header}\n"
         f"Regla: {rule_code} | Score: {signal.get('score', 0):.2f}\n"
-        f"Entrada: {price:.5f}\n"
+        f"{entry_lbl}\n"
         f"SL: {levels['sl_price']:.5f} (-{sl_pips:.0f} pips)\n"
         f"TP: {levels['tp_price']:.5f} (+{tp_pips:.0f} pips) RR 1:{rr_ratio:.1f}\n"
         f"Lotes: {sizing['lotes']} | Riesgo: ${sizing['risk_usd']:.2f}"
@@ -990,6 +1106,24 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 )
 
 
+
+            # 4.3 Guardia de Posición Fantasma cTrader (Live orders sin cTrader ID después de 300s / 5 min)
+            if position.get('mode') == 'live' and not position.get('ctrader_pos_id'):
+                opened_at_str = position.get('opened_at')
+                if opened_at_str:
+                    try:
+                        opened_dt = datetime.fromisoformat(str(opened_at_str).replace('Z', '+00:00'))
+                        elapsed_s = (datetime.now(timezone.utc) - opened_dt).total_seconds()
+                        if elapsed_s > 300:
+                            log_warning(MODULE, f"👻 [GHOST POSITION GUARD] Cierre automático de posición fantasma no confirmada en cTrader para {symbol} (id={position['id']}) tras {elapsed_s:.0f}s")
+                            sb.table('forex_positions').update({
+                                'status': 'closed',
+                                'closed_at': datetime.now(timezone.utc).isoformat(),
+                                'close_reason': 'ctrader_unconfirmed_ghost'
+                            }).eq('id', position['id']).execute()
+                            continue
+                    except Exception as g_e:
+                        log_error(MODULE, f"Error en Ghost Position Guard para {symbol}: {g_e}")
 
             # 4.5 SMART EXIT DELAYED (Rebote técnico tras SAR)
             pending_sar_closes = MEMORY_STORE.setdefault(symbol, {}).setdefault('pending_sar_closes', {})
@@ -1248,41 +1382,58 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 except Exception as e:
                     log_error(MODULE, f"Error evaluating SLV for {symbol}: {e}")
 
-            # 6b.5 Cierre Estructural por Cambio de Tendencia (Proactive EMA Exit)
-            if not position.get('recovery_mode'):
+            # 6b.5 Cierre Estructural por Cambio de Tendencia (Proactive EMA Exit v2.0 con Guardia Anti-Pérdidas y EREP)
+            if not position.get('recovery_mode') and not position.get('erep_active'):
                 try:
                     ema3_15m = float(snap.get('ema3', 0))
                     ema9_15m = float(snap.get('ema9', 0))
                     ema3_5m = float(snap.get('ema3_5m', 0))
                     ema9_5m = float(snap.get('ema9_5m', 0))
-                    ema20_5m = float(snap.get('ema20_5m', 0))
 
-                    if ema3_15m > 0 and ema9_15m > 0 and ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
+                    if ema3_15m > 0 and ema9_15m > 0 and ema3_5m > 0 and ema9_5m > 0:
                         is_structural_exit = False
                         
-                        # Para operaciones LONG: Si la estructura gira a bajista
+                        # Para operaciones LONG: Si la estructura 15m y 5m giran a bajista
                         if side == 'long':
-                            if (ema3_15m < ema9_15m) and (ema3_5m < ema9_5m < ema20_5m):
+                            if (ema3_15m < ema9_15m) and (ema3_5m < ema9_5m):
                                 is_structural_exit = True
                                 
-                        # Para operaciones SHORT: Si la estructura gira a alcista
+                        # Para operaciones SHORT: Si la estructura 15m y 5m giran a alcista
                         elif side == 'short':
-                            if (ema3_15m > ema9_15m) and (ema3_5m > ema9_5m > ema20_5m):
+                            if (ema3_15m > ema9_15m) and (ema3_5m > ema9_5m):
                                 is_structural_exit = True
 
                         if is_structural_exit:
                             entry_pr = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
-                            pip_size = pip_size if 'pip_size' in locals() else 0.0001 # Fallback
-                            pips_est = ((current_price - entry_pr) / pip_size) if side == 'long' else ((entry_pr - current_price) / pip_size)
+                            pip_sz = PIP_SIZES.get(symbol, 0.0001)
+                            pips_est = ((current_price - entry_pr) / pip_sz) if side == 'long' else ((entry_pr - current_price) / pip_sz)
                             
-                            await _execute_paper_close(position, current_price, 'structural_ema_exit', sb)
-                            await send_telegram_message(
-                                f"🛑 FOREX STRUCTURAL EXIT [{symbol}]\n"
-                                f"Estructura rota (Cruce EMA3/9 en 15m y 5m).\n"
-                                f"Precio: {current_price:.5f}\n"
-                                f"PnL: {pips_est:+.1f} pips"
-                            )
-                            continue
+                            # 🛡️ REGLA 1: Si la operación está en GANANCIA REAL (pips_est > 0), asegurar ganancia
+                            if pips_est > 0:
+                                await _execute_paper_close(position, current_price, 'structural_ema_exit', sb)
+                                await send_telegram_message(
+                                    f"🟢 FOREX STRUCTURAL PROFIT EXIT [{symbol}]\n"
+                                    f"Giro de estructura capturando ganancia.\n"
+                                    f"Precio: {current_price:.5f}\n"
+                                    f"PnL: {pips_est:+.1f} pips"
+                                )
+                                continue
+                            # 🛡️ REGLA 2: Si está en pérdida (pips_est <= 0), NO cerrar en pérdida. Enrutar a EREP Fase 1
+                            else:
+                                log_info(MODULE, f"🛡️ [STRUCTURAL EXIT GUARD] {symbol} cambió estructura pero está en pérdida ({pips_est:.1f} pips). Enrutando a EREP Fase 1...")
+                                try:
+                                    from app.strategy.erep_manager import execute_erep_action
+                                    await execute_erep_action(
+                                        action={'action': 'activate_erep', 'reason': 'structural_break_loss'},
+                                        position=position,
+                                        current_price=current_price,
+                                        symbol=symbol,
+                                        market_type='forex_futures',
+                                        supabase=sb
+                                    )
+                                except Exception as erep_e:
+                                    log_error(MODULE, f"Error enrutando {symbol} a EREP desde structural exit: {erep_e}")
+                                continue
                 except Exception as e:
                     log_error(MODULE, f"Error evaluating Structural Exit for {symbol}: {e}")
 
@@ -1386,8 +1537,84 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
         except:
             pass
 
+        # 8. Evaluación de Entradas Primarias en Ciclo de 5m (Cruces de Momentum)
+        await _evaluate_5m_primary_signals(symbol, provider, sb)
+
     except Exception as e:
         log_error(MODULE, f"5m cycle error {symbol}: {e}")
+
+
+async def _evaluate_5m_primary_signals(symbol: str, provider: CTraderProtobufProvider, sb):
+    """
+    Evaluación de Entradas Primarias en el Ciclo de 5 Minutos.
+    Garantiza que cruces de momentum (ej. EMA3 < EMA9 < EMA20 en 5m para SHORT a las 20:50)
+    activen inmediatamente las órdenes LIMIT en EMA9_5m en la cima del movimiento.
+    """
+    try:
+        # Guard: Servicio Forex suspendido desde Settings
+        try:
+            fx_en = sb.table('system_config').select('value').eq('key', 'forex_enabled').maybe_single().execute()
+            if fx_en and fx_en.data:
+                val = fx_en.data.get('value')
+                if val is False or val == 'false' or val == False:
+                    return
+        except:
+            pass
+
+        df_5m = get_memory_df(symbol, '5m')
+        if df_5m is None or len(df_5m) < 3:
+            return
+            
+        last_5m = df_5m.iloc[-1]
+        prev_5m = df_5m.iloc[-2]
+        c_series_5m = df_5m['close']
+        
+        current_price = float(last_5m['close'])
+        ema3_series = c_series_5m.ewm(span=3, adjust=False).mean()
+        ema9_series = c_series_5m.ewm(span=9, adjust=False).mean()
+        ema20_series = c_series_5m.ewm(span=20, adjust=False).mean()
+
+        ema3_5m = float(last_5m.get('ema1') or last_5m.get('ema_3') or ema3_series.iloc[-1])
+        ema9_5m = float(last_5m.get('ema2') or last_5m.get('ema_9') or ema9_series.iloc[-1])
+        ema20_5m = float(last_5m.get('ema3') or last_5m.get('ema_20') or ema20_series.iloc[-1])
+
+        ema3_prev = float(prev_5m.get('ema1') or prev_5m.get('ema_3') or ema3_series.iloc[-2])
+        ema9_prev = float(prev_5m.get('ema2') or prev_5m.get('ema_9') or ema9_series.iloc[-2])
+
+        # Verificar cruce fresco de momentum en 5m
+        is_fresh_long = (ema3_5m > ema9_5m > ema20_5m) and (ema3_prev <= ema9_prev or ema3_5m > ema3_prev)
+        is_fresh_short = (ema3_5m < ema9_5m < ema20_5m) and (ema3_prev >= ema9_prev or ema3_5m < ema3_prev)
+
+        if not (is_fresh_long or is_fresh_short):
+            return
+
+        direction = 'long' if is_fresh_long else 'short'
+        rule_code = 'BbHot' if direction == 'short' else 'AaHot'
+
+        # Verificar si ya existe posición abierta para este símbolo
+        existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
+        if existing_positions:
+            return
+
+        signal = {
+            'rule_code': rule_code,
+            'direction': direction,
+            'strategy_type': 'scalping',
+            'cycle': '5m',
+            'score': 0.85,
+            'reason': f'5m Crossover {direction.upper()} (EMA3={ema3_5m:.5f}, EMA9={ema9_5m:.5f}, EMA20={ema20_5m:.5f})'
+        }
+
+        log_info(MODULE, f"⚡ [5M CROSSOVER TRIGGER] {symbol} {direction.upper()} en candle close 5m (EMA9_5m={ema9_5m:.5f})")
+        await open_forex_position(
+            symbol=symbol,
+            signal=signal,
+            price=current_price,
+            provider=provider,
+            sb=sb
+        )
+    except Exception as e:
+        log_error(MODULE, f"Error en _evaluate_5m_primary_signals para {symbol}: {e}")
 
 
 async def forex_cycle_5m():
@@ -1818,6 +2045,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                         is_signal_long = normal_signal['direction'] == 'long'
                         if is_long != is_signal_long:
                             signal = normal_signal # FLIP allowed
+
 
             if signal:
                 await engine.log_evaluation(symbol, signal, context)

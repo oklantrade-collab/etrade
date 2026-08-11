@@ -100,8 +100,8 @@ DEFAULT_RULES = [
     {
         "id": 1007,
         "rule_code": "Aa21",
-        "name": "DIP Sniper EMA20 (15m)",
-        "description": "Compra el retroceso exacto (LOW < EMA20 en 15m) mientras la tendencia corta sigue viva (EMA9 > EMA20).",
+        "name": "DIP Sniper Lower5/Lower6 (5m)",
+        "description": "Compra el retroceso exacto (LOW <= Lower_5 en 5m) mientras la tendencia macro 15m sigue viva (EMA50 > EMA200 y Upper BB 15m asc).",
         "direction": "long",
         "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
         "ema50_vs_ema200": "above",
@@ -111,12 +111,12 @@ DEFAULT_RULES = [
         "confidence": "high",
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema9_above_ema20_15m", "operator": "==", "value": True},
-            {"indicator": "low_below_ema20_15m", "operator": "==", "value": True},
-            {"indicator": "ema20_angle", "operator": ">=", "value": 0},
+            {"indicator": "low_below_lower5_5m", "operator": "==", "value": True},
+            {"indicator": "ema50_above_ema200_15m", "operator": "==", "value": True},
+            {"indicator": "bb_upper_slope_15m", "operator": ">", "value": 0},
         ],
         "logic": "AND",
-        "notes": "Estrategia Mean-Reversion de alta precisión. (v2 forced)",
+        "notes": "Estrategia DIP Sniper Lower5/Lower6 de alta precisión. (v4.0 forced)",
     },
     {
         "id": 1005,
@@ -141,24 +141,28 @@ DEFAULT_RULES = [
     {
         "id": 1006,
         "rule_code": "Aa23",
-        "name": "EMA9+EMA50 ascendentes",
-        "description": "EMA9 y EMA50 ambas ascendentes, ADX >= mínimo del régimen y precio no sobre-extendido (Zona Fib <= 3).",
+        "name": "LONG scalp SAR 15m cambió + Pine Buy",
+        "description": "SAR 15m cambió a alcista + PineScript Buy | Modificado para evitar retroceso (agregado EMA20)",
         "direction": "long",
         "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
         "ema50_vs_ema200": "above",
         "enabled": True,
         "regime_allowed": ["riesgo_medio", "bajo_riesgo"],
-        "priority": 3,
-        "confidence": "medium",
+        "priority": 1,
+        "confidence": "low",
+        "min_score": 0.9,
+        "applicable_cycles": ["5m", "15m"],
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "ema9_angle", "operator": ">=", "value": 0},
-            {"indicator": "ema50_angle", "operator": ">=", "value": 0},
-            {"indicator": "adx_above_regime_min", "operator": "==", "value": True},
-            {"indicator": "fib_zone_abs", "operator": "<=", "value": 3},
+            {"indicator": "ema20_above_ema50", "operator": "==", "value": True, "weight": 0.2},
+            {"indicator": "ema9_above_ema20", "operator": "==", "value": True, "weight": 0.2},
+            {"indicator": "close_below_bb_lower_5m", "operator": "==", "value": True, "weight": 0.3},
+            {"indicator": "rsi_below_35_5m", "operator": "==", "value": True, "weight": 0.1},
+            {"indicator": "prev_low_touch_lower56_15m", "operator": "==", "value": True, "weight": 0.1},
+            {"indicator": "ema20_angle_positive", "operator": "==", "value": True, "weight": 0.1},
         ],
         "logic": "AND",
-        "notes": "Sizing: T1. (v2 forced) Protegido contra sobre-extensión.",
+        "notes": "SAR 15m cambió a alcista + PineScript Buy | Modificado para evitar retroceso (agregado EMA20)",
     },
     {
         "id": 1004,
@@ -183,7 +187,7 @@ DEFAULT_RULES = [
     {
         "id": 1011,
         "rule_code": "Aa25",
-        "name": "Cruce EMA3 > EMA9 en Tendencia",
+        "name": "LONG Cruce EMA3 > EMA9 en Tendencia",
         "description": "Primer cruce al alza de EMA3 sobre EMA9 con filtro de tendencia (EMA9 > EMA20 o EMA3 > EMA20).",
         "direction": "long",
         "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
@@ -191,15 +195,18 @@ DEFAULT_RULES = [
         "enabled": True,
         "regime_allowed": ["riesgo_medio", "bajo_riesgo"],
         "priority": 1,
-        "confidence": "high",
+        "confidence": "low",
+        "min_score": 0.8,
+        "applicable_cycles": ["5m"],
         "entry_trades": [1, 2, 3],
         "conditions": [
-            {"indicator": "ema3_cross_ema9_up", "operator": "==", "value": True},
-            {"indicator": "ema3_ema9_trend_ok", "operator": "==", "value": True},
-            {"indicator": "ema3_above_ema9", "operator": "==", "value": True},
+            {"indicator": "ema3_cross_ema9_up", "operator": "==", "value": True, "weight": 0.3},
+            {"indicator": "ema3_ema9_trend_ok", "operator": "==", "value": True, "weight": 0.1},
+            {"indicator": "bb_expanding", "operator": "==", "value": True, "weight": 0.4},
+            {"indicator": "low_under_ema20_15m", "operator": "==", "value": True, "weight": 0.2},
         ],
         "logic": "AND",
-        "notes": "Nueva regla experimental de continuación.",
+        "notes": "Cruce EMA3>EMA9 validando tendencia con EMA20",
     },
     # ═══ SHORT RULES — RAMA B1 (EMA50 < EMA200, macro bajista) ═══
     {
@@ -419,32 +426,27 @@ DEFAULT_RULES = [
     {
         "id": 1040,
         "rule_code": "AaHotC",
-        "name": "HOT Momentum LONG Cripto",
-        "description": "Entrada quirúrgica agresiva LONG con EMA ultra-cerca y ADX>22",
+        "name": "LONG HOT Momentum",
+        "description": "HOT Momentum alcista C: Cruce EMA3>EMA9 (30%) + EMA20 Ascendiendo 1h (20%) + PineScript Buy (10%) + BB Expanding (30%) + Low < EMA20 (10%)",
         "direction": "long",
         "market_type": ["crypto_spot", "crypto_futures"],
         "ema50_vs_ema200": "above",
         "enabled": True,
         "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
         "priority": 10,
-        "confidence": "high",
+        "confidence": "low",
+        "min_score": 0.9,
+        "applicable_cycles": ["5m", "15m"],
         "entry_trades": [1],
         "conditions": [
-            {"indicator": "fresh_cross_long", "operator": "==", "value": True},
-            {"indicator": "hot_mtf_ok_long", "operator": "==", "value": True},
-            {"indicator": "bb_expanding_or_mtf_long_or_bottom", "operator": "==", "value": True},
-            {"indicator": "bb_upper_slope_positive", "operator": "==", "value": True},
-            {"indicator": "ema_alignment_long", "operator": "==", "value": True},
-            {"indicator": "fib_zone", "operator": ">=", "value": -6},
-            {"indicator": "fib_zone", "operator": "<=", "value": 6},
-            {"indicator": "strong_contratrend_long", "operator": "==", "value": False},
-            {"indicator": "rsi_ok_long", "operator": "==", "value": True},
-            {"indicator": "ema_exhaustion", "operator": "==", "value": False},
-            {"indicator": "ema9_above_ema20_15m", "operator": "==", "value": True},
-            {"indicator": "reversal_confirmation_long", "operator": "==", "value": True},
+            {"indicator": "ema20_ascending_1h", "operator": "==", "value": True, "weight": 0.2},
+            {"indicator": "ema3_cross_ema9_up", "operator": "==", "value": True, "weight": 0.3},
+            {"indicator": "pinescript_signal", "operator": "==", "value": "Buy", "weight": 0.1},
+            {"indicator": "bb_expanding", "operator": "==", "value": True, "weight": 0.3},
+            {"indicator": "low_below_ema20_15m", "operator": "==", "value": True, "weight": 0.1},
         ],
         "logic": "AND",
-        "notes": "Estrategia quirúrgica adaptada para Cripto con filtro EMA 15m.",
+        "notes": "HOT Momentum alcista C: Cruce EMA3>EMA9 (40%) + EMA20 Ascendiendo 1h (20%) + PineScript Buy (40%)",
     },
     {
         "id": 1041,
@@ -862,6 +864,7 @@ def build_market_data_dict(
     bb_exp = bool(last.get("bb_expanding", False))
     ema_exhaustion = (ema_dist_pct > 0.15) and not bb_exp
 
+    price = float(last.get("close", 0)) if pd.notna(last.get("close")) else 0.0
     high_price = float(last.get("high", 0)) if pd.notna(last.get("high")) else 0.0
     low_price = float(last.get("low", 0)) if pd.notna(last.get("low")) else 0.0
     upper_2 = float(last.get("upper_2", 99999)) if pd.notna(last.get("upper_2")) else 99999.0
@@ -903,8 +906,9 @@ def build_market_data_dict(
     fresh_cross_short_by_age = (ema3_cross_age <= 3) and (ema3 < ema9)
     slope_entry_short = (ema3_slope < 0) and (ema3_slope < ema3_slope_prev) and (ema3 < ema9)
 
-    ema20 = float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema3")) or pd.notna(last.get("ema_20")) else 0.0
+    ema20 = float(last.get("ema20", last.get("ema_20", last.get("ema3", 0)))) if pd.notna(last.get("ema20")) or pd.notna(last.get("ema_20")) or pd.notna(last.get("ema3")) else 0.0
     ema50 = float(last.get("ema4", last.get("ema_50", 0))) if pd.notna(last.get("ema4")) or pd.notna(last.get("ema_50")) else 0.0
+    ema200 = float(last.get("ema5", last.get("ema_200", last.get("ema200", 0)))) if pd.notna(last.get("ema5")) or pd.notna(last.get("ema_200")) or pd.notna(last.get("ema200")) else 0.0
     
     bb_upper_slope_positive = False
     bb_lower_slope_negative = False
@@ -943,7 +947,8 @@ def build_market_data_dict(
         "ema_cross_short_hot": (ema3 < ema9) or ema_close_enough_03,
         "ema_cross_long_hot": (ema3 > ema9) or ema_close_enough_03,
         "fresh_cross_long": fresh_cross_long_by_age or slope_entry_long,
-        "fresh_cross_short": fresh_cross_short_by_age or slope_entry_short,
+        "fresh_cross_short": (ema3 < ema9) and (fresh_cross_short_by_age or slope_entry_short or (price <= ema20 * 1.0015)),
+        "price_cross_ema20_short": (ema3 < ema9) and (price <= ema20 * 1.0015),
         "ema3_slope_positive": ema3_slope >= 0,
         
         "sipv_buy": bool(
@@ -997,6 +1002,8 @@ def build_market_data_dict(
         "bb_lower_slope_positive": bb_lower_slope_positive,
         "ema_alignment_long": (ema3 > ema9) and (ema9 > ema20),
         "ema_alignment_short": (ema3 < ema9) and (ema9 < ema20) and (ema20 < ema50),
+        "close_below_bb_lower_5m": float(last.get("close", 0)) < float(last.get("lower_2", last.get("lower_5", last.get("lower_band", 0)))) if (pd.notna(last.get("lower_2")) or pd.notna(last.get("lower_5")) or pd.notna(last.get("lower_band"))) else False,
+        "close_above_bb_upper_5m": float(last.get("close", 0)) > float(last.get("upper_2", last.get("upper_5", last.get("upper_band", 0)))) if (pd.notna(last.get("upper_2")) or pd.notna(last.get("upper_5")) or pd.notna(last.get("upper_band"))) else False,
     })
 
     # === NEW LIMIT STRATEGIES LOGIC ===
@@ -1024,9 +1031,11 @@ def build_market_data_dict(
     if upper_6 > 0 and high_px >= upper_6:
         dd12_limit_ok = True
 
-    # Aa21 (Trend Pullback LONG)
+    # Aa21 (DIP Sniper LONG Lower_5 / Lower_6 5m)
     aa21_limit_ok = False
-    if ema3 > ema9 and ema9 > ema20 and float(last["close"]) > ema20 * 1.001:
+    lower_5_trigger = (low_px <= lower_5) if lower_5 > 0 else (low_px <= lower_2 if lower_2 > 0 else False)
+    macro_ema_ok = (ema50 > ema200) if (ema50 > 0 and ema200 > 0) else True
+    if lower_5_trigger and bb_upper_slope_positive and macro_ema_ok:
         aa21_limit_ok = True
 
     # Bb21 (Trend Pullback SHORT)
