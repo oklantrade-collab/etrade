@@ -306,7 +306,13 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     import math
     for op in orders_to_place:
         limit_px = round(op['limit_price'], 4)
-        size_val = round(op['qty'], 4)
+        
+        if 'BTC' in symbol.upper():
+            size_val = max(0.001, round(op['qty'], 3))
+        elif 'ETH' in symbol.upper():
+            size_val = max(0.01, round(op['qty'], 3))
+        else:
+            size_val = round(op['qty'], 4)
         
         if math.isnan(limit_px) or math.isnan(size_val) or math.isinf(limit_px) or math.isinf(size_val):
             log_error('APEX_EMA', f"[{symbol}] Orden ignorada por valor NaN/Inf: limit={limit_px}, qty={size_val}")
