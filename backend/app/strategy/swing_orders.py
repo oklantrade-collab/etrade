@@ -303,11 +303,17 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     mode_val = 'paper' if is_paper else 'real'
     ttl_hours = 4  # 4 horas de expiración estándar para Swing
     
+    import math
     for op in orders_to_place:
         limit_px = round(op['limit_price'], 4)
         size_val = round(op['qty'], 4)
         
+        if math.isnan(limit_px) or math.isnan(size_val) or math.isinf(limit_px) or math.isinf(size_val):
+            log_error('APEX_EMA', f"[{symbol}] Orden ignorada por valor NaN/Inf: limit={limit_px}, qty={size_val}")
+            continue
+            
         if size_val <= 0:
+            log_warning('APEX_EMA', f"[{symbol}] Orden ignorada: Cantidad calculada ({size_val}) es cero o insuficiente. Verifica tu capital asignado y riesgo.")
             continue
             
         new_order = {
