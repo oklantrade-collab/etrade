@@ -471,7 +471,9 @@ const CryptoSettings = ({ config, onSave }: any) => {
 const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) => {
   const isConnected = config.capital_forex_futures > 0
   const [isLevModalOpen, setIsLevModalOpen] = useState(false)
+  const [isLotModalOpen, setIsLotModalOpen] = useState(false)
   const [levMap, setLevMap] = useState<any>(config.leverage_map_forex || { XAU: 100, JPY: 200, DEFAULT: 500 })
+  const [lotMap, setLotMap] = useState<any>(config.custom_lots_forex || {})
 
   const [form, setForm] = useState({ 
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
@@ -499,7 +501,8 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
     onSave({
       ...form,
       regime_params: newRegimeParams,
-      leverage_map_forex: levMap
+      leverage_map_forex: levMap,
+      custom_lots_forex: lotMap
     })
   }
 
@@ -507,6 +510,14 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
     setIsLevModalOpen(false)
     onSave({ leverage_map_forex: levMap })
   }
+
+  const handleSaveLotMap = () => {
+    setIsLotModalOpen(false)
+    onSave({ custom_lots_forex: lotMap })
+  }
+  
+  const getActiveSymbols = () => form.forex_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '');
+
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
@@ -562,6 +573,34 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
             }}
           >
             Configurar por Moneda
+          </button>
+        </div>
+        
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingRight: '20px' }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 16px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', alignItems: 'center' }}>
+              <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Lotes Fijos por Símbolo</span>
+              <span style={{ fontSize: '13px', color: 'var(--text-color)', fontWeight: 600 }}>Personalizado</span>
+            </div>
+          </div>
+          <button 
+            onClick={() => {
+              const activeSyms = getActiveSymbols();
+              const newLotMap = { ...lotMap };
+              activeSyms.forEach(sym => {
+                if (!newLotMap[sym]) {
+                  newLotMap[sym] = sym.includes('XAU') || sym.includes('GOLD') ? 0.10 : 0.05;
+                }
+              });
+              setLotMap(newLotMap);
+              setIsLotModalOpen(true);
+            }}
+            style={{ 
+              padding: '6px 12px', background: 'var(--bg-card-hover)', border: '1px solid var(--border-color)', 
+              borderRadius: '6px', color: 'var(--text-color)', cursor: 'pointer', fontSize: '12px' 
+            }}
+          >
+            Editar Lotes
           </button>
         </div>
         <SettingRow label="% Inversión (Global Portion)" value={config.pct_for_trading || 20} type="number" suffix="%" onChange={(v: any) => onSave({ pct_for_trading: v })} />
@@ -627,7 +666,50 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '24px' }}>
               <button onClick={() => setIsLevModalOpen(false)} style={{ padding: '8px 16px', background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-color)', borderRadius: '4px', cursor: 'pointer' }}>Cancelar</button>
-              <button onClick={handleSaveLevMap} style={{ padding: '8px 16px', background: 'var(--primary-color)', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Guardar</button>
+              <button onClick={handleSaveLevMap} style={{ padding: '8px', background: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>Guardar Apalancamiento</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isLotModalOpen && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'var(--bg-card)', padding: '24px', borderRadius: '12px', width: '320px', border: '1px solid var(--border-color)' }}>
+            <h3 style={{ marginTop: 0, color: 'var(--text-color)', fontSize: '16px' }}>Lotes Fijos por Símbolo</h3>
+            <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '16px' }}>
+              Define la cantidad estricta (lote) para cada entrada. Mínimo 0.01. <br/>
+              <span style={{ color: '#E09F3E' }}>Nota: Al configurar esto se anula el multiplicador por volatilidad extrema.</span>
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '300px', overflowY: 'auto', marginBottom: '16px', paddingRight: '4px' }}>
+              {getActiveSymbols().map(sym => (
+                <div key={sym} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: 'var(--text-color)', fontSize: '14px', fontWeight: 'bold' }}>{sym}</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <input 
+                      type="number" 
+                      step="0.01"
+                      min="0.01"
+                      value={lotMap[sym] || (sym.includes('XAU') || sym.includes('GOLD') ? 0.10 : 0.05)} 
+                      onChange={(e) => {
+                        const val = Math.max(0.01, Number(e.target.value));
+                        setLotMap({ ...lotMap, [sym]: val });
+                      }}
+                      style={{ 
+                        width: '70px', padding: '4px 8px', background: 'var(--bg-input)', border: '1px solid var(--border-color)', 
+                        color: 'var(--text-color)', borderRadius: '4px', textAlign: 'right'
+                      }}
+                    />
+                    <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>lots</span>
+                  </div>
+                </div>
+              ))}
+              {getActiveSymbols().length === 0 && (
+                <div style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Agrega símbolos en la configuración primero.</div>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '16px' }}>
+              <button onClick={() => setIsLotModalOpen(false)} style={{ padding: '8px 12px', background: 'transparent', color: 'var(--text-muted)', border: '1px solid var(--border-color)', borderRadius: '6px', cursor: 'pointer' }}>Cancelar</button>
+              <button onClick={handleSaveLotMap} style={{ padding: '8px', background: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>Guardar Lotes</button>
             </div>
           </div>
         </div>

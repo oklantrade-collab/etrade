@@ -1214,13 +1214,21 @@ class ForexExecutionService:
 
     def _calculate_lot_size(self, symbol, sl_pips, snap=None, direction='long'):
         """
-        Calcula el lotaje basado en LOTAJE BASE FIJO + MULTIPLICADOR 2X EXTREMO.
-        - Lotaje Base Fijo: 0.05 lotes para divisas Forex (EURUSD/GBPUSD/USDJPY), 0.10 lotes para XAUUSD/Oro.
-        - Multiplicador 2x: Se duplica a 0.10 lotes si el precio rompe la banda de Bollinger.
+        Calcula el lotaje basado en LOTAJE BASE FIJO + MULTIPLICADOR 2X EXTREMO,
+        o usa el lotaje personalizado estricto configurado en la base de datos.
         """
         try:
             sym_upper = (symbol or '').upper()
-            # 1. Definir lotaje base fijo por instrumento
+            
+            # Revisar si hay un lote personalizado estricto configurado
+            from app.core.memory_store import BOT_STATE
+            custom_lots = BOT_STATE.config_cache.get('custom_lots_forex') or {}
+            if sym_upper in custom_lots and custom_lots[sym_upper] > 0:
+                custom_val = float(custom_lots[sym_upper])
+                self.log(f"🔧 [CUSTOM LOT] {symbol}: Usando lote personalizado estricto = {custom_val}")
+                return round(custom_val, 2)
+            
+            # Lógica Base si no hay personalizado
             if 'XAU' in sym_upper or 'GOLD' in sym_upper:
                 base_lots = 0.10
             else:
