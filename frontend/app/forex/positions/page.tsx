@@ -221,6 +221,8 @@ export default function ForexPositions() {
                  </div>
                  <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
             </div>
+        </div>
+
         <div className="glass-card !p-0 overflow-hidden border-white/10 shadow-3xl bg-white/[0.01] backdrop-blur-3xl rounded-[32px]">
            <div className="flex border-b border-white/5 bg-white/[0.02]">
               <button 
@@ -561,6 +563,132 @@ export default function ForexPositions() {
         {selectedPosition && <TransactionModal position={selectedPosition} onClose={() => setSelectedPosition(null)} />}
       </div>
 
+      {/* MODAL DE TRADING MANUAL */}
+      {showManualModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+          <div className="bg-[#05050a] border border-white/10 shadow-2xl rounded-3xl w-full max-w-md overflow-hidden relative">
+            <div className={`h-1 w-full ${manualDirection === 'long' ? 'bg-emerald-500 shadow-[0_0_20px_#10b981]' : 'bg-rose-500 shadow-[0_0_20px_#f43f5e]'}`} />
+            <div className="p-6">
+               <div className="flex justify-between items-start mb-6">
+                  <div>
+                    <h2 className="text-xl font-black italic text-white uppercase tracking-wider">Nueva Orden</h2>
+                    <p className={`text-[0.65rem] font-black uppercase tracking-[0.2em] mt-1 ${manualDirection === 'long' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {manualDirection === 'long' ? 'BUY LONG' : 'SELL SHORT'}
+                    </p>
+                  </div>
+                  <button onClick={() => setShowManualModal(false)} className="text-slate-500 hover:text-white transition-colors">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+               </div>
+               
+               <div className="space-y-5">
+                  <div className="flex gap-4">
+                     <div className="flex-1">
+                        <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">Símbolo</label>
+                        <select 
+                           value={manualSymbol}
+                           onChange={(e) => setManualSymbol(e.target.value)}
+                           className="w-full bg-[#0a0a0f] text-white text-sm font-black italic rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
+                        >
+                           {Object.keys(snapshots).length > 0 ? (
+                               Object.keys(snapshots).map(sym => (
+                                   <option key={sym} value={sym}>{sym}</option>
+                               ))
+                           ) : (
+                               <option value="EURUSD">EURUSD</option>
+                           )}
+                        </select>
+                     </div>
+                     <div className="w-1/3">
+                        <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1.5 block">Lotaje</label>
+                        <input 
+                           type="number"
+                           step="0.01"
+                           value={manualLots}
+                           onChange={(e) => setManualLots(e.target.value)}
+                           className="w-full bg-[#0a0a0f] text-white text-sm font-mono rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all text-center"
+                        />
+                     </div>
+                  </div>
+                  
+                  <div className="pt-4 border-t border-white/5">
+                     <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-3 block">Protección de Capital</label>
+                     <div className="grid grid-cols-3 gap-2 mb-4">
+                        <button 
+                           onClick={() => setManualProtectionMode('none')}
+                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualProtectionMode === 'none' ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
+                        >
+                           Ninguno
+                        </button>
+                        <button 
+                           onClick={() => setManualProtectionMode('tp')}
+                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualProtectionMode === 'tp' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
+                        >
+                           Solo TP
+                        </button>
+                        <button 
+                           onClick={() => setManualProtectionMode('sl')}
+                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualProtectionMode === 'sl' ? 'bg-rose-500/10 border-rose-500/50 text-rose-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
+                        >
+                           Solo SL
+                        </button>
+                     </div>
+                     
+                     {manualProtectionMode === 'tp' && (
+                        <div className="animate-in fade-in slide-in-from-top-2 duration-300">
+                           <label className="text-[0.55rem] font-black text-emerald-400 uppercase tracking-widest mb-1.5 block">Take Profit (Auto: BB Sup)</label>
+                           <input 
+                              type="number"
+                              step="0.00001"
+                              value={manualTP}
+                              onChange={(e) => setManualTP(e.target.value)}
+                              className="w-full bg-[#0a0a0f] text-emerald-400 text-sm font-mono rounded-xl px-4 py-3 border border-emerald-500/20 outline-none focus:border-emerald-500 transition-all"
+                           />
+                        </div>
+                     )}
+                     
+                     {manualProtectionMode === 'sl' && (
+                        <div className="animate-in fade-in slide-in-from-top-2 duration-300">
+                           <label className="text-[0.55rem] font-black text-rose-400 uppercase tracking-widest mb-1.5 block">Stop Loss (Auto: BB Inf)</label>
+                           <input 
+                              type="number"
+                              step="0.00001"
+                              value={manualSL}
+                              onChange={(e) => setManualSL(e.target.value)}
+                              className="w-full bg-[#0a0a0f] text-rose-400 text-sm font-mono rounded-xl px-4 py-3 border border-rose-500/20 outline-none focus:border-rose-500 transition-all"
+                           />
+                        </div>
+                     )}
+                  </div>
+               </div>
+               
+               <div className="mt-8">
+                  <button 
+                     disabled={manualLoading}
+                     onClick={handleManualTrade}
+                     className={`w-full py-4 rounded-xl text-white font-black uppercase tracking-widest text-xs transition-all disabled:opacity-50 flex items-center justify-center gap-2 ${
+                        manualDirection === 'long' 
+                           ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-[0_0_20px_rgba(16,185,129,0.2)]' 
+                           : 'bg-rose-500 hover:bg-rose-400 text-white shadow-[0_0_20px_rgba(244,63,94,0.2)]'
+                     }`}
+                  >
+                     {manualLoading ? (
+                        <>
+                           <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-current" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                           </svg>
+                           Enviando al Broker...
+                        </>
+                     ) : (
+                        `ENVIAR ORDEN ${manualDirection.toUpperCase()}`
+                     )}
+                  </button>
+               </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style jsx>{`
         .glass-card {
@@ -603,7 +731,7 @@ function TradingViewWidget({ symbol }: { symbol: string }) {
       "autosize": true,
       "symbol": getFxtvSymbol(symbol),
       "interval": "15",
-      "timezone": tvTimezone,
+      "timezone": Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York",
       "theme": "dark",
       "style": "1",
       "locale": "en",
