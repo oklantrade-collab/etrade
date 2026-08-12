@@ -54,11 +54,15 @@ export default function ForexPositions() {
   
   const [manualLoading, setManualLoading] = useState<boolean>(false)
 
-  // Autocompletar SL y TP desde Bollinger Bands
+  const [defaultsLoadedFor, setDefaultsLoadedFor] = useState<string>('')
+
+  // Autocompletar SL y TP desde Bollinger Bands solo la primera vez que se carga el simbolo
   useEffect(() => {
-    if (snapshots && snapshots[manualSymbol]) {
+    const key = `${manualSymbol}-${manualDirection}`
+    if (snapshots && snapshots[manualSymbol] && defaultsLoadedFor !== key) {
       const snap = snapshots[manualSymbol]
       const decimals = manualSymbol.includes('JPY') || manualSymbol.includes('XAU') ? 3 : 5
+      
       if (snap.lower_1) setManualSL(Number(snap.lower_1).toFixed(decimals))
       if (snap.upper_1) setManualTP(Number(snap.upper_1).toFixed(decimals))
       
@@ -67,8 +71,10 @@ export default function ForexPositions() {
       } else if (manualDirection === 'short' && snap.upper_1) {
         setManualLimitPrice(Number(snap.upper_1).toFixed(decimals))
       }
+      
+      setDefaultsLoadedFor(key)
     }
-  }, [manualSymbol, manualDirection, snapshots])
+  }, [manualSymbol, manualDirection, snapshots, defaultsLoadedFor])
 
   const openManualModal = (direction: 'long' | 'short') => {
     setManualDirection(direction)
@@ -641,7 +647,7 @@ export default function ForexPositions() {
                      
                      {manualOrderType === 'limit' && (
                         <div className="animate-in fade-in slide-in-from-top-2 duration-300 mb-4">
-                           <label className="text-[0.55rem] font-black text-purple-400 uppercase tracking-widest mb-1.5 block">Precio Limit (Auto: Fibo {manualDirection === 'long' ? '-1' : '+1'})</label>
+                           <label className="text-[0.55rem] font-black text-purple-400 uppercase tracking-widest mb-1.5 block">Precio Limit</label>
                            <input 
                               type="number"
                               step="0.00001"
