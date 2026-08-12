@@ -40,12 +40,18 @@ export default function ForexPositions() {
   const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
   
   // Manual Trading States
+  const [showManualModal, setShowManualModal] = useState<boolean>(false)
+  const [manualDirection, setManualDirection] = useState<'long' | 'short'>('long')
   const [manualSymbol, setManualSymbol] = useState<string>('EURUSD')
+  const [manualLots, setManualLots] = useState<string>('0.05')
+  
+  const [manualProtectionMode, setManualProtectionMode] = useState<'none' | 'tp' | 'sl'>('none')
   const [manualSL, setManualSL] = useState<string>('')
   const [manualTP, setManualTP] = useState<string>('')
+  
   const [manualLoading, setManualLoading] = useState<boolean>(false)
 
-  // Actualizar SL y TP cuando cambia el símbolo
+  // Autocompletar SL y TP desde Bollinger Bands
   useEffect(() => {
     if (snapshots && snapshots[manualSymbol]) {
       const snap = snapshots[manualSymbol]
@@ -55,25 +61,36 @@ export default function ForexPositions() {
     }
   }, [manualSymbol, snapshots])
 
-  const handleManualTrade = async (direction: 'long' | 'short') => {
+  const openManualModal = (direction: 'long' | 'short') => {
+    setManualDirection(direction)
+    setShowManualModal(true)
+  }
+
+  const handleManualTrade = async () => {
     if (!manualSymbol) return alert("Selecciona un símbolo")
+    if (!manualLots || parseFloat(manualLots) <= 0) return alert("Lotaje inválido")
     
     setManualLoading(true)
     try {
+      const payload = {
+        symbol: manualSymbol,
+        direction: manualDirection,
+        lots: parseFloat(manualLots),
+        tp_price: manualProtectionMode === 'tp' ? parseFloat(manualTP || '0') : 0,
+        sl_price: manualProtectionMode === 'sl' ? parseFloat(manualSL || '0') : 0
+      }
+      
       const res = await fetch('/api/v1/positions/forex/open_manual', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: manualSymbol,
-          direction: direction,
-          tp_price: parseFloat(manualTP || '0'),
-          sl_price: parseFloat(manualSL || '0')
-        })
+        body: JSON.stringify(payload)
       })
       if (res.ok) {
-        alert(`Comando manual de ${direction.toUpperCase()} enviado para ${manualSymbol}`)
+        alert(`Comando de ${manualDirection.toUpperCase()} enviado exitosamente para ${manualSymbol}`)
+        setShowManualModal(false)
       } else {
-        alert("Error enviando comando manual.")
+        const err = await res.json()
+        alert(`Error: ${err.error || 'Fallo enviando comando'}`)
       }
     } catch (e) {
       console.error(e)
@@ -171,15 +188,24 @@ export default function ForexPositions() {
       
       <div className="max-w-7xl mx-auto px-6 pt-12 space-y-12 relative z-10">
         
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8">
-           <div className="space-y-4">
-              <div className="flex items-center gap-3">
-                 <div className="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_10px_#3b82f6] animate-pulse" />
-                 <span className="text-[0.6rem] font-black text-blue-400 uppercase tracking-[0.4em]">Configuración Forex activa</span>
-              </div>
-              <h1 className="text-4xl font-black italic tracking-tighter text-white uppercase leading-none">Positions</h1>
-              <p className="text-slate-500 text-sm max-w-xl">Live trailing positions with cTrader API integration</p>
-           </div>
+        <div className="flex justify-between items-center mb-8">
+            <h1 className="text-3xl font-black italic tracking-tighter bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
+                Live Positions
+            </h1>
+            <div className="flex gap-3">
+                <button 
+                   onClick={() => openManualModal('long')}
+                   className="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black uppercase tracking-widest text-[0.65rem] transition-all shadow-[0_0_20px_rgba(16,185,129,0.2)]"
+                >
+                   BUY LONG
+                </button>
+                <button 
+                   onClick={() => openManualModal('short')}
+                   className="px-6 py-2.5 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-black uppercase tracking-widest text-[0.65rem] transition-all shadow-[0_0_20px_rgba(244,63,94,0.2)]"
+                >
+                   SELL SHORT
+                </button>
+            </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
@@ -195,74 +221,6 @@ export default function ForexPositions() {
                  </div>
                  <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
             </div>
-        </div>
-
-        {/* --- PANEL DE TRADING MANUAL --- */}
-        <div className="glass-card !p-6 border-white/5 shadow-xl mb-8 flex flex-col md:flex-row items-end gap-6 relative overflow-hidden">
-           <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none">
-              <span className="text-8xl font-black italic">⚡</span>
-           </div>
-           
-           <div className="flex-1 w-full z-10">
-              <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-3">Trading Manual Rápido</div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                 <div>
-                    <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1 block">Moneda</label>
-                    <select 
-                       value={manualSymbol}
-                       onChange={(e) => setManualSymbol(e.target.value)}
-                       className="w-full bg-[#020205] text-white text-sm font-black italic rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
-                    >
-                       {Object.keys(snapshots).length > 0 ? (
-                           Object.keys(snapshots).map(sym => (
-                               <option key={sym} value={sym}>{sym}</option>
-                           ))
-                       ) : (
-                           <option value="EURUSD">EURUSD</option>
-                       )}
-                    </select>
-                 </div>
-                 <div>
-                    <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1 block">Stop Loss (BB Inf)</label>
-                    <input 
-                       type="number"
-                       step="0.00001"
-                       value={manualSL}
-                       onChange={(e) => setManualSL(e.target.value)}
-                       className="w-full bg-[#020205] text-white text-sm font-mono rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
-                    />
-                 </div>
-                 <div>
-                    <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1 block">Take Profit (BB Sup)</label>
-                    <input 
-                       type="number"
-                       step="0.00001"
-                       value={manualTP}
-                       onChange={(e) => setManualTP(e.target.value)}
-                       className="w-full bg-[#020205] text-white text-sm font-mono rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
-                    />
-                 </div>
-              </div>
-           </div>
-
-           <div className="flex items-center gap-3 w-full md:w-auto z-10">
-              <button 
-                 disabled={manualLoading}
-                 onClick={() => handleManualTrade('long')}
-                 className="flex-1 md:flex-none px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black uppercase tracking-widest text-[0.65rem] transition-all shadow-[0_0_20px_rgba(16,185,129,0.2)] disabled:opacity-50"
-              >
-                 {manualLoading ? 'Enviando...' : 'BUY LONG'}
-              </button>
-              <button 
-                 disabled={manualLoading}
-                 onClick={() => handleManualTrade('short')}
-                 className="flex-1 md:flex-none px-6 py-3 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-black uppercase tracking-widest text-[0.65rem] transition-all shadow-[0_0_20px_rgba(244,63,94,0.2)] disabled:opacity-50"
-              >
-                 {manualLoading ? 'Enviando...' : 'SELL SHORT'}
-              </button>
-           </div>
-        </div>
-
         <div className="glass-card !p-0 overflow-hidden border-white/10 shadow-3xl bg-white/[0.01] backdrop-blur-3xl rounded-[32px]">
            <div className="flex border-b border-white/5 bg-white/[0.02]">
               <button 

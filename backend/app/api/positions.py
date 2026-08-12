@@ -204,6 +204,7 @@ def manual_close_position(market: str, position_id: str):
 class ManualForexTradeReq(BaseModel):
     symbol: str
     direction: str
+    lots: float
     tp_price: float
     sl_price: float
 
@@ -211,20 +212,11 @@ class ManualForexTradeReq(BaseModel):
 def manual_open_forex_position(req: ManualForexTradeReq):
     """Saves a manual trade command for the standalone worker to pick up and execute."""
     try:
-        sb = get_supabase()
-        
-        # Obtener lotaje de config
-        config_res = sb.table("trading_config").select("regime_params").eq("id", 1).execute()
-        config = config_res.data[0] if config_res.data else {}
-        regime = config.get("regime_params") or {}
-        
-        lots = float(regime.get("forex_base_lots", 0.05))
-        
         cmd = {
             "action": "open",
             "symbol": req.symbol,
             "direction": req.direction.lower(),
-            "lots": lots,
+            "lots": float(req.lots),
             "tp": float(req.tp_price),
             "sl": float(req.sl_price),
             "timestamp": datetime.now(timezone.utc).isoformat()

@@ -20,7 +20,8 @@ files_to_sync = [
     "app/strategy/quantum_squeeze_hedge.py",
     "app/strategy/erep_manager.py",
     "app/workers/forex_worker_standalone.py",
-    "app/workers/forex_execution_service.py"
+    "app/workers/forex_execution_service.py",
+    "app/api/positions.py"
 ]
 
 def check_syntax():
