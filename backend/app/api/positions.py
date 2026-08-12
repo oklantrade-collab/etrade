@@ -207,6 +207,8 @@ class ManualForexTradeReq(BaseModel):
     lots: float
     tp_price: float
     sl_price: float
+    order_type: str = "market"
+    limit_price: float = 0.0
 
 @router.post("/forex/open_manual")
 def manual_open_forex_position(req: ManualForexTradeReq):
@@ -219,6 +221,8 @@ def manual_open_forex_position(req: ManualForexTradeReq):
             "lots": float(req.lots),
             "tp": float(req.tp_price),
             "sl": float(req.sl_price),
+            "order_type": req.order_type,
+            "limit_price": float(req.limit_price),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
         

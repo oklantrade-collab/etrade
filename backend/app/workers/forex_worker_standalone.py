@@ -325,7 +325,7 @@ class StandaloneForexWorker:
         """Lee el archivo de comandos IPC y ejecuta ordenes manuales."""
         import os
         import json
-        cmd_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scratch", "forex_commands.json")
+        cmd_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scratch", "forex_commands.json")
         if not os.path.exists(cmd_file):
             return
             
@@ -349,10 +349,12 @@ class StandaloneForexWorker:
                         symbol=symbol,
                         direction=cmd.get("direction"),
                         lots=cmd.get("lots"),
-                        entry=0, # Market order
+                        entry=0, # Market order o base para Limit si se deja as 
                         sl=cmd.get("sl", 0),
                         tp=cmd.get("tp", 0),
-                        rule_code="MANUAL"
+                        rule_code="MANUAL",
+                        order_type=cmd.get("order_type", "market"),
+                        limit_price=cmd.get("limit_price", 0)
                     )
                 elif action == "close":
                     pos_id = cmd.get("pos_id")

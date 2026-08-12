@@ -45,6 +45,9 @@ export default function ForexPositions() {
   const [manualSymbol, setManualSymbol] = useState<string>('EURUSD')
   const [manualLots, setManualLots] = useState<string>('0.05')
   
+  const [manualOrderType, setManualOrderType] = useState<'market' | 'limit'>('market')
+  const [manualLimitPrice, setManualLimitPrice] = useState<string>('')
+  
   const [manualProtectionMode, setManualProtectionMode] = useState<'none' | 'tp' | 'sl'>('none')
   const [manualSL, setManualSL] = useState<string>('')
   const [manualTP, setManualTP] = useState<string>('')
@@ -58,8 +61,14 @@ export default function ForexPositions() {
       const decimals = manualSymbol.includes('JPY') || manualSymbol.includes('XAU') ? 3 : 5
       if (snap.lower_1) setManualSL(Number(snap.lower_1).toFixed(decimals))
       if (snap.upper_1) setManualTP(Number(snap.upper_1).toFixed(decimals))
+      
+      if (manualDirection === 'long' && snap.lower_1) {
+        setManualLimitPrice(Number(snap.lower_1).toFixed(decimals))
+      } else if (manualDirection === 'short' && snap.upper_1) {
+        setManualLimitPrice(Number(snap.upper_1).toFixed(decimals))
+      }
     }
-  }, [manualSymbol, snapshots])
+  }, [manualSymbol, manualDirection, snapshots])
 
   const openManualModal = (direction: 'long' | 'short') => {
     setManualDirection(direction)
@@ -77,7 +86,9 @@ export default function ForexPositions() {
         direction: manualDirection,
         lots: parseFloat(manualLots),
         tp_price: manualProtectionMode === 'tp' ? parseFloat(manualTP || '0') : 0,
-        sl_price: manualProtectionMode === 'sl' ? parseFloat(manualSL || '0') : 0
+        sl_price: manualProtectionMode === 'sl' ? parseFloat(manualSL || '0') : 0,
+        order_type: manualOrderType,
+        limit_price: manualOrderType === 'limit' ? parseFloat(manualLimitPrice || '0') : 0
       }
       
       const res = await fetch('/api/v1/positions/forex/open_manual', {
@@ -611,6 +622,37 @@ export default function ForexPositions() {
                      </div>
                   </div>
                   
+                  <div className="pt-4 border-t border-white/5">
+                     <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-3 block">Tipo de Orden</label>
+                     <div className="grid grid-cols-2 gap-2 mb-4">
+                        <button 
+                           onClick={() => setManualOrderType('market')}
+                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualOrderType === 'market' ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
+                        >
+                           Market
+                        </button>
+                        <button 
+                           onClick={() => setManualOrderType('limit')}
+                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualOrderType === 'limit' ? 'bg-purple-500/10 border-purple-500/50 text-purple-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
+                        >
+                           Limit
+                        </button>
+                     </div>
+                     
+                     {manualOrderType === 'limit' && (
+                        <div className="animate-in fade-in slide-in-from-top-2 duration-300 mb-4">
+                           <label className="text-[0.55rem] font-black text-purple-400 uppercase tracking-widest mb-1.5 block">Precio Limit (Auto: Fibo {manualDirection === 'long' ? '-1' : '+1'})</label>
+                           <input 
+                              type="number"
+                              step="0.00001"
+                              value={manualLimitPrice}
+                              onChange={(e) => setManualLimitPrice(e.target.value)}
+                              className="w-full bg-[#0a0a0f] text-purple-400 text-sm font-mono rounded-xl px-4 py-3 border border-purple-500/20 outline-none focus:border-purple-500 transition-all"
+                           />
+                        </div>
+                     )}
+                  </div>
+
                   <div className="pt-4 border-t border-white/5">
                      <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-3 block">Protección de Capital</label>
                      <div className="grid grid-cols-3 gap-2 mb-4">
