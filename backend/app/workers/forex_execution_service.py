@@ -1222,7 +1222,8 @@ class ForexExecutionService:
             
             # Revisar si hay un lote personalizado estricto configurado
             from app.core.memory_store import BOT_STATE
-            custom_lots = BOT_STATE.config_cache.get('custom_lots_forex') or {}
+            regime_params = BOT_STATE.config_cache.get('regime_params') or {}
+            custom_lots = regime_params.get('custom_lots_forex') or {}
             if sym_upper in custom_lots and custom_lots[sym_upper] > 0:
                 custom_val = float(custom_lots[sym_upper])
                 self.log(f"🔧 [CUSTOM LOT] {symbol}: Usando lote personalizado estricto = {custom_val}")

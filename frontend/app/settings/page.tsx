@@ -473,7 +473,7 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
   const [isLevModalOpen, setIsLevModalOpen] = useState(false)
   const [isLotModalOpen, setIsLotModalOpen] = useState(false)
   const [levMap, setLevMap] = useState<any>(config.leverage_map_forex || { XAU: 100, JPY: 200, DEFAULT: 500 })
-  const [lotMap, setLotMap] = useState<any>(config.custom_lots_forex || {})
+  const [lotMap, setLotMap] = useState<any>(config.regime_params?.custom_lots_forex || {})
 
   const [form, setForm] = useState({ 
     max_positions_per_symbol: config.max_positions_per_symbol || 3,
@@ -497,12 +497,18 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
 
   const handleLocalSave = () => {
     const symbols = form.forex_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '')
-    const newRegimeParams = { ...config.regime_params, forex_assets: symbols, max_total_risk_forex_pct: form.max_total_risk_forex_pct, max_risk_per_trade_forex_pct: form.max_risk_per_trade_forex_pct, max_active_symbols_forex: Number(form.max_active_symbols_forex) }
+    const newRegimeParams = { 
+        ...config.regime_params, 
+        forex_assets: symbols, 
+        max_total_risk_forex_pct: form.max_total_risk_forex_pct, 
+        max_risk_per_trade_forex_pct: form.max_risk_per_trade_forex_pct, 
+        max_active_symbols_forex: Number(form.max_active_symbols_forex),
+        custom_lots_forex: lotMap
+    }
     onSave({
       ...form,
       regime_params: newRegimeParams,
-      leverage_map_forex: levMap,
-      custom_lots_forex: lotMap
+      leverage_map_forex: levMap
     })
   }
 
@@ -513,7 +519,7 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
 
   const handleSaveLotMap = () => {
     setIsLotModalOpen(false)
-    onSave({ custom_lots_forex: lotMap })
+    handleLocalSave()
   }
   
   const getActiveSymbols = () => form.forex_symbols_str.split(',').map(s => s.trim().toUpperCase()).filter(s => s !== '');
