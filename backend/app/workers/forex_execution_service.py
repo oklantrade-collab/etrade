@@ -332,6 +332,8 @@ class ForexExecutionService:
         # Aa61 Optimization: 5m crossover triggers
         ema3_cross_up_5m = False
         ema3_cross_dn_5m = False
+        ema3_bounce_up_5m = False
+        ema3_bounce_dn_5m = False
         ema9_gt_ema20_5m = False
         ema9_lt_ema20_5m = False
 
@@ -398,6 +400,23 @@ class ForexExecutionService:
                     # 5m Cross and Trend Alignment
                     ema3_cross_up_5m = (ema3_5m_prev <= ema9_5m_prev) and (ema3_5m > ema9_5m)
                     ema3_cross_dn_5m = (ema3_5m_prev >= ema9_5m_prev) and (ema3_5m < ema9_5m)
+                    
+                    # 5m Bounce (Pullback without cross)
+                    if len(df_5m) >= 3:
+                        ema3_5m_prev2 = self._safe_float(df_5m.iloc[-3].get('ema1'))
+                        ema9_5m_prev2 = self._safe_float(df_5m.iloc[-3].get('ema2'))
+                        slope_prev = ema3_5m_prev - ema3_5m_prev2
+                        slope_curr = ema3_5m - ema3_5m_prev
+                        
+                        # Bounce UP
+                        if ema3_5m > ema9_5m and ema3_5m_prev > ema9_5m_prev:
+                            if slope_prev <= 0 and slope_curr > 0:
+                                ema3_bounce_up_5m = True
+                        
+                        # Bounce DOWN
+                        if ema3_5m < ema9_5m and ema3_5m_prev < ema9_5m_prev:
+                            if slope_prev >= 0 and slope_curr < 0:
+                                ema3_bounce_dn_5m = True
                     
                 if ema9_5m > 0 and ema20_5m > 0:
                     ema9_gt_ema20_5m = ema9_5m > ema20_5m
@@ -496,6 +515,8 @@ class ForexExecutionService:
             'ema_5m_aligned_short': ema_5m_aligned_short,
             'ema3_cross_up_5m': ema3_cross_up_5m,
             'ema3_cross_dn_5m': ema3_cross_dn_5m,
+            'ema3_bounce_up_5m': ema3_bounce_up_5m,
+            'ema3_bounce_dn_5m': ema3_bounce_dn_5m,
             'ema9_gt_ema20_5m': ema9_gt_ema20_5m,
             'ema9_lt_ema20_5m': ema9_lt_ema20_5m,
             'ema_50': ema_50,
@@ -789,10 +810,10 @@ class ForexExecutionService:
         explosion_triggered = False
         if ema3 and ema9 and ema20:
             if direction == 'long':
-                # LONG Aa61: Gatillo cruz 5m + Expansión Bollinger + ADX > 20
+                # LONG Aa61: Gatillo cruz 5m o Rebote + Expansión Bollinger + ADX > 20
                 explosion_triggered = (
                     context.get('ema9_gt_ema20_5m', False) and
-                    context.get('ema3_cross_up_5m', False) and
+                    (context.get('ema3_cross_up_5m', False) or context.get('ema3_bounce_up_5m', False)) and
                     price > ema20 and
                     bb_exp and
                     adx > 20 and
@@ -800,10 +821,10 @@ class ForexExecutionService:
                     pine_not_opposite
                 )
             else:
-                # SHORT Aa61_short: Gatillo cruz 5m + Expansión Bollinger + ADX > 20
+                # SHORT Aa61_short: Gatillo cruz 5m o Rebote + Expansión Bollinger + ADX > 20
                 explosion_triggered = (
                     context.get('ema9_lt_ema20_5m', False) and
-                    context.get('ema3_cross_dn_5m', False) and
+                    (context.get('ema3_cross_dn_5m', False) or context.get('ema3_bounce_dn_5m', False)) and
                     price < ema20 and
                     bb_exp and
                     adx > 20 and
