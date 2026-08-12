@@ -259,10 +259,11 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         rem_qty = total_qty
 
     # Extraer o calcular niveles Lower_5 y Lower_6 en 5m
+    import math
     lower_5_5m = float(last_row.get('lower_5', 0)) if pd.notna(last_row.get('lower_5')) else 0.0
     lower_6_5m = float(last_row.get('lower_6', 0)) if pd.notna(last_row.get('lower_6')) else 0.0
     
-    if lower_5_5m <= 0:
+    if math.isnan(lower_5_5m) or lower_5_5m <= 0:
         bb_basis = float(last_row.get('basis', current_price))
         bb_std = float(last_row.get('std', current_price * 0.005))
         lower_5_5m = bb_basis - (2.5 * bb_std)
@@ -276,7 +277,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     else:
         upper_5_5m = float(last_row.get('upper_5', 0)) if pd.notna(last_row.get('upper_5')) else 0.0
         upper_6_5m = float(last_row.get('upper_6', 0)) if pd.notna(last_row.get('upper_6')) else 0.0
-        if upper_5_5m <= 0:
+        if math.isnan(upper_5_5m) or upper_5_5m <= 0:
             bb_basis = float(last_row.get('basis', current_price))
             bb_std = float(last_row.get('std', current_price * 0.005))
             upper_5_5m = bb_basis + (2.5 * bb_std)
