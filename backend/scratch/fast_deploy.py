@@ -16,7 +16,11 @@ files_to_sync = [
     "app/api/stocks.py",
     "app/core/safety_manager.py",
     "app/strategy/rule_engine.py",
-    "app/strategy/strategy_engine.py"
+    "app/strategy/strategy_engine.py",
+    "app/strategy/quantum_squeeze_hedge.py",
+    "app/strategy/erep_manager.py",
+    "app/workers/forex_worker_standalone.py",
+    "app/workers/forex_execution_service.py"
 ]
 
 def check_syntax():

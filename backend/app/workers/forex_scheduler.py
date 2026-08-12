@@ -1306,8 +1306,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                         sb.table('forex_positions').update({
                             'tp_price': target_tp,
                             'sl_type': 'reversal_be',
-                            'sl_activated_at': now_utc.isoformat(),
-                            'sl_activation_reason': 'ema_reversal_exact_be'
+                            'sl_activated_at': now_utc.isoformat()
                         }).eq('id', position['id']).execute()
                         position['tp_price'] = target_tp
                         position['sl_type'] = 'reversal_be'
@@ -1507,7 +1506,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                             is_trend_against = True
                             new_sl_ema3 = ema3_15m
                         
-                        if is_trend_against and pnl_pips_local > 0 and new_sl_ema3 > 0:
+                        if is_trend_against and pnl_pips_local > 1.0 and new_sl_ema3 > 0:
                             current_sl = float(position.get('sl_price', 0))
                             # Solo apretar si el nuevo SL es mejor que el actual
                             should_tighten = False
@@ -1520,8 +1519,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                                 try:
                                     sb.table('forex_positions').update({
                                         'sl_price': new_sl_ema3,
-                                        'sl_type': 'ema3_trend_tighten',
-                                        'sl_activation_reason': f'EMA3({ema3_15m:.5f}) < EMA9({ema9_15m:.5f}) con ganancia +{pnl_pips_local:.1f} pips'
+                                        'sl_type': 'ema3_trend_tighten'
                                     }).eq('id', position['id']).execute()
                                     position['sl_price'] = new_sl_ema3
                                     sl = new_sl_ema3
@@ -1555,12 +1553,20 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
                     if not is_protected:
                         await _execute_paper_close(position, current_price, 'sl_hit_fx_hard', sb)
-                        await send_telegram_message(
-                            f"🚨 FOREX HARD STOP [{symbol}]\n"
-                            f"Precio: {current_price:.5f}\n"
-                            f"Hard SL: {sl:.5f}\n"
-                            f"⚠️ Emergencia: SLV no pudo recuperar"
-                        )
+                        
+                        sl_type = position.get('sl_type', '')
+                        if sl_type == 'ema3_trend_tighten':
+                            msg = (f"🎯 TRAILING STOP ALCANZADO [{symbol}]\n"
+                                   f"Precio: {current_price:.5f}\n"
+                                   f"Trailing SL: {sl:.5f}\n"
+                                   f"✅ Ganancia Asegurada")
+                        else:
+                            msg = (f"🚨 FOREX HARD STOP [{symbol}]\n"
+                                   f"Precio: {current_price:.5f}\n"
+                                   f"Hard SL: {sl:.5f}\n"
+                                   f"⚠️ Emergencia: Stop Loss de emergencia ejecutado")
+                        
+                        await send_telegram_message(msg)
                         continue
                     else:
                         log_info(MODULE, f"🛡️ SL_HIT_FX_HARD evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")

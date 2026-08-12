@@ -3,6 +3,10 @@ eTrader v2 — Positions API endpoints
 """
 from fastapi import APIRouter, Query, status
 from fastapi.responses import JSONResponse
+import json
+import os
+from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime, timezone
 from app.core.supabase_client import get_supabase
 
@@ -145,22 +149,46 @@ def manual_close_position(market: str, position_id: str):
             diff = (current_price - entry_price) if side in ("long", "buy") else (entry_price - current_price)
             pnl_usd = diff * size
 
-        # 4. Update with real data
-        update_data = {
-            "status": "closed",
-            "closed_at": now,
-            "close_reason": "MANUAL_CLOSE",
-            "current_price": current_price,
-            "pnl_usd": round(pnl_usd, 2)
-        }
-        
         if market_l == "forex":
-            update_data["pnl_pips"] = round(pips, 1)
-        if market_l == "stocks":
+            # For forex, we don't update status to closed yet. We let the execution service do it.
+            # We just append a command to the IPC file.
+            cmd = {
+                "action": "close",
+                "pos_id": position_id,
+                "symbol": symbol,
+                "timestamp": now
+            }
+            cmd_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scratch", "forex_commands.json")
+            cmds = []
+            if os.path.exists(cmd_file):
+                try:
+                    with open(cmd_file, "r") as f:
+                        cmds = json.load(f)
+                except:
+                    pass
+            cmds.append(cmd)
+            with open(cmd_file, "w") as f:
+                json.dump(cmds, f)
+            
+            # Optionally mark as closing in DB so UI knows
+            update_data = {
+                "close_reason": "MANUAL_CLOSE_REQUESTED"
+            }
+            sb.table(table_name).update(update_data).eq("id", position_id).execute()
+            
+            return {"status": "closing_requested"}
+            
+        else: # stocks
+            update_data = {
+                "status": "closed",
+                "closed_at": now,
+                "close_reason": "MANUAL_CLOSE",
+                "current_price": current_price,
+                "pnl_usd": round(pnl_usd, 2)
+            }
             update_data["updated_at"] = now
             update_data["unrealized_pnl"] = round(pnl_usd, 2) # used in stocks history
-
-        sb.table(table_name).update(update_data).eq("id", position_id).execute()
+            sb.table(table_name).update(update_data).eq("id", position_id).execute()
         
         # ── REGISTRAR PN EN CAPITAL ACUMULADO (Interés Compuesto) ──
         try:
@@ -170,5 +198,52 @@ def manual_close_position(market: str, position_id: str):
             print(f"Error updating accumulated capital: {cap_e}")
 
         return {"status": "closed", "pnl_usd": pnl_usd, "exit_price": current_price}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+class ManualForexTradeReq(BaseModel):
+    symbol: str
+    direction: str
+    tp_price: float
+    sl_price: float
+
+@router.post("/forex/open_manual")
+def manual_open_forex_position(req: ManualForexTradeReq):
+    """Saves a manual trade command for the standalone worker to pick up and execute."""
+    try:
+        sb = get_supabase()
+        
+        # Obtener lotaje de config
+        config_res = sb.table("trading_config").select("regime_params").eq("id", 1).execute()
+        config = config_res.data[0] if config_res.data else {}
+        regime = config.get("regime_params") or {}
+        
+        lots = float(regime.get("forex_base_lots", 0.05))
+        
+        cmd = {
+            "action": "open",
+            "symbol": req.symbol,
+            "direction": req.direction.lower(),
+            "lots": lots,
+            "tp": float(req.tp_price),
+            "sl": float(req.sl_price),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        cmd_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scratch", "forex_commands.json")
+        cmds = []
+        if os.path.exists(cmd_file):
+            try:
+                with open(cmd_file, "r") as f:
+                    cmds = json.load(f)
+            except:
+                pass
+        
+        cmds.append(cmd)
+        
+        with open(cmd_file, "w") as f:
+            json.dump(cmds, f)
+            
+        return {"status": "ok", "message": "Manual trade command queued"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})

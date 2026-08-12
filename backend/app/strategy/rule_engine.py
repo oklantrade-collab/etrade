@@ -44,6 +44,7 @@ DEFAULT_RULES = [
             {"indicator": "adx", "operator": "<", "value": 20},
             {"indicator": "ema20_phase", "operator": "==", "value": "nivel_1_long"},
             {"indicator": "di_cross_bullish", "operator": "==", "value": True},
+            {"indicator": "ema3_slope_positive", "operator": "==", "value": True},
         ],
         "logic": "AND",
         "notes": "Solo en régimen riesgo_medio o bajo_riesgo. Sizing: solo T1. (v2 forced)",
@@ -156,10 +157,9 @@ DEFAULT_RULES = [
         "conditions": [
             {"indicator": "ema20_above_ema50", "operator": "==", "value": True, "weight": 0.2},
             {"indicator": "ema9_above_ema20", "operator": "==", "value": True, "weight": 0.2},
-            {"indicator": "close_below_bb_lower_5m", "operator": "==", "value": True, "weight": 0.3},
+            {"indicator": "close_below_bb_lower_5m", "operator": "==", "value": True, "weight": 0.2},
             {"indicator": "rsi_below_35_5m", "operator": "==", "value": True, "weight": 0.1},
-            {"indicator": "prev_low_touch_lower56_15m", "operator": "==", "value": True, "weight": 0.1},
-            {"indicator": "ema20_angle_positive", "operator": "==", "value": True, "weight": 0.1},
+            {"indicator": "ema3_slope_positive", "operator": "==", "value": True, "weight": 0.3},
         ],
         "logic": "AND",
         "notes": "SAR 15m cambió a alcista + PineScript Buy | Modificado para evitar retroceso (agregado EMA20)",
@@ -380,6 +380,7 @@ DEFAULT_RULES = [
         "entry_trades": [1],
         "conditions": [
             {"indicator": "fresh_cross_long", "operator": "==", "value": True},
+            {"indicator": "low_touched_ema9", "operator": "==", "value": True},
             {"indicator": "hot_mtf_ok_long", "operator": "==", "value": True},
             {"indicator": "bb_expanding_or_mtf_long_or_bottom", "operator": "==", "value": True},
             {"indicator": "bb_upper_slope_positive", "operator": "==", "value": True},
@@ -409,6 +410,7 @@ DEFAULT_RULES = [
         "entry_trades": [1],
         "conditions": [
             {"indicator": "fresh_cross_short", "operator": "==", "value": True},
+            {"indicator": "high_touched_ema9", "operator": "==", "value": True},
             {"indicator": "hot_mtf_ok_short", "operator": "==", "value": True},
             {"indicator": "bb_expanding_or_mtf_short_or_top", "operator": "==", "value": True},
             {"indicator": "bb_lower_slope_negative", "operator": "==", "value": True},
@@ -784,6 +786,8 @@ def build_market_data_dict(
         # Nuevos controles PULLBACK (Agregados vía UI conditions)
         "rsi_14": float(last.get("rsi1", last.get("rsi_14", 50.0))) if pd.notna(last.get("rsi1", last.get("rsi_14"))) else 50.0,
         "high_touched_ema20": float(last.get("high", 0)) >= float(last.get("ema3", last.get("ema_20", 999999))) if pd.notna(last.get("high")) else False,
+        "high_touched_ema9": float(last.get("high", 0)) >= float(last.get("ema2", last.get("ema_9", 999999))) if pd.notna(last.get("high")) else False,
+        "low_touched_ema9": float(last.get("low", 0)) <= float(last.get("ema2", last.get("ema_9", 0))) if pd.notna(last.get("low")) else False,
         "ema9_below_ema20": float(last.get("ema2", last.get("ema_9", 0))) < float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema2")) else False,
         "ema3_above_ema9": float(last.get("ema1", last.get("ema_3", 0))) > float(last.get("ema2", last.get("ema_9", 0))) if pd.notna(last.get("ema1", last.get("ema_3"))) else False,
         "ema9_above_ema20": float(last.get("ema2", last.get("ema_9", 0))) > float(last.get("ema3", last.get("ema_20", 0))) if pd.notna(last.get("ema2", last.get("ema_9"))) else False,

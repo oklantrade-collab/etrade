@@ -33,8 +33,8 @@ EREP_CONFIG = {
         # EMA rápida (EMA3)
         'ema_period_slow':          9,
         # EMA lenta (EMA9)
-        'min_pips_recovery':        0,
-        # cerrar si pnl >= 0 (ganancia o cero)
+        'min_pips_recovery':        0.15,
+        # cerrar si ganancia > 0.15% (cubre fees)
 
         # ── Previous config keys ──
         'rsi_oversold_long':        25,
@@ -58,7 +58,7 @@ EREP_CONFIG = {
         'rsi_oversold':             15,
         'ema_period_fast':          3,
         'ema_period_slow':          9,
-        'min_pips_recovery':        0,
+        'min_pips_recovery':        2,
 
         'rsi_oversold_long':        15,
         'rsi_overbought_short':     85,
@@ -81,7 +81,7 @@ EREP_CONFIG = {
         'rsi_oversold':             20,
         'ema_period_fast':          3,
         'ema_period_slow':          9,
-        'min_pips_recovery':        0,
+        'min_pips_recovery':        0.15,
 
         'rsi_oversold_long':        20,
         'rsi_overbought_short':     80,
@@ -707,11 +707,24 @@ def evaluate_erep_phase(
         if check.get('wait_natural'):
             p1 = float(position.get('erep_p1_price') or 0)
             if p1 > 0:
-                recovered = (is_long and current_price >= p1) or (not is_long and current_price <= p1)
+                min_pips = float(cfg.get('min_pips_recovery', 0))
+                
+                buffer_price = 0.0
+                if market_type == 'forex_futures':
+                    pip_sizes = {'EURUSD': 0.0001, 'GBPUSD': 0.0001, 'USDJPY': 0.01, 'USDCHF': 0.0001, 'XAUUSD': 0.01, 'AUDUSD': 0.0001}
+                    sym = position.get('symbol', '')
+                    pip_size = pip_sizes.get(sym, 0.0001)
+                    buffer_price = min_pips * pip_size
+                else:
+                    buffer_price = p1 * (min_pips / 100.0)
+
+                target_p1 = p1 + buffer_price if is_long else p1 - buffer_price
+                recovered = (is_long and current_price >= target_p1) or (not is_long and current_price <= target_p1)
+                
                 if recovered:
                     return {
                         'action':  'close_all',
-                        'reason': f'RECUPERACIÓN NATURAL: EMA favorable y precio llegó a P1 ({p1:.4f}). Cerrar sin pérdidas.',
+                        'reason': f'RECUPERACIÓN NATURAL: EMA favorable y precio llegó a {target_p1:.4f} (P1 + margen). Cerrar asegurando ganancias.',
                         'close_type': 'natural_recovery',
                     }
 
@@ -834,7 +847,18 @@ def evaluate_erep_phase(
             }
 
         # Garantizar que estamos en ganancia respecto al PROMEDIO de posiciones (p3_avg)
-        reached_p3 = current_loss <= 0
+        min_pips = float(cfg.get('min_pips_recovery', 0))
+        target_margin_pct = 0.0
+        
+        if market_type == 'forex_futures' and p3_avg > 0:
+            pip_sizes = {'EURUSD': 0.0001, 'GBPUSD': 0.0001, 'USDJPY': 0.01, 'USDCHF': 0.0001, 'XAUUSD': 0.01, 'AUDUSD': 0.0001}
+            sym = position.get('symbol', '')
+            pip_size = pip_sizes.get(sym, 0.0001)
+            target_margin_pct = -((min_pips * pip_size) / p3_avg * 100)
+        else:
+            target_margin_pct = -min_pips
+
+        reached_p3 = current_loss <= target_margin_pct
         last_close = current_price
 
         if reached_p3:

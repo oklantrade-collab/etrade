@@ -261,10 +261,14 @@ class StandaloneForexWorker:
             self.log(f"Error enviando heartbeat: {e}", "ERROR")
 
     def _load_dynamic_symbols(self):
-        """Carga la lista de simbolos desde trading_config -> regime_params."""
+        """Carga la lista de simbolos y actualiza BOT_STATE.config_cache."""
         try:
-            res = sb.table('trading_config').select('regime_params').eq('id', 1).execute()
+            res = sb.table('trading_config').select('*').eq('id', 1).execute()
             data = res.data[0] if res.data else {}
+            if data:
+                from app.core.memory_store import BOT_STATE
+                BOT_STATE.config_cache.update(data)
+                
             if data.get('regime_params'):
                 assets = data['regime_params'].get('forex_assets')
                 if assets and isinstance(assets, list):
@@ -296,9 +300,17 @@ class StandaloneForexWorker:
             self._mgmt_task = task.LoopingCall(self.execution.run_position_management)
             self._mgmt_task.start(15, now=False)
 
+            # Ciclo de actualizacion de configuracion desde DB (cada 5 min)
+            self._config_task = task.LoopingCall(self._load_dynamic_symbols)
+            self._config_task.start(300, now=False)
+
             # Ciclo de reconciliacion en tiempo real con cTrader (cada 30s)
             self._reconcile_task = task.LoopingCall(self.request_reconciliation)
             self._reconcile_task.start(30, now=True)
+
+            # Ciclo de lectura de comandos IPC (cada 3s)
+            self._ipc_task = task.LoopingCall(self._process_manual_commands)
+            self._ipc_task.start(3, now=False)
 
         except Exception as e:
             self.log(f"Error iniciando Execution Service: {e}", "ERROR")
@@ -308,6 +320,65 @@ class StandaloneForexWorker:
         """Inicia el loop de evaluacion de estrategias."""
         self._eval_task = task.LoopingCall(self.execution.run_evaluation_cycle)
         self._eval_task.start(300, now=True)  # Cada 5 min, ejecutar inmediatamente
+
+    def _process_manual_commands(self):
+        """Lee el archivo de comandos IPC y ejecuta ordenes manuales."""
+        import os
+        import json
+        cmd_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scratch", "forex_commands.json")
+        if not os.path.exists(cmd_file):
+            return
+            
+        try:
+            with open(cmd_file, "r") as f:
+                cmds = json.load(f)
+            
+            if not cmds:
+                return
+                
+            # Clear file
+            with open(cmd_file, "w") as f:
+                json.dump([], f)
+                
+            for cmd in cmds:
+                action = cmd.get("action")
+                symbol = cmd.get("symbol")
+                if action == "open":
+                    self.log(f"⚡ [MANUAL OPEN] {symbol} {cmd.get('direction').upper()} lots: {cmd.get('lots')}")
+                    self.execution._execute_live_order(
+                        symbol=symbol,
+                        direction=cmd.get("direction"),
+                        lots=cmd.get("lots"),
+                        entry=0, # Market order
+                        sl=cmd.get("sl", 0),
+                        tp=cmd.get("tp", 0),
+                        rule_code="MANUAL"
+                    )
+                elif action == "close":
+                    pos_id = cmd.get("pos_id")
+                    self.log(f"⚡ [MANUAL CLOSE] Cerrando posicion {symbol} (id: {pos_id})")
+                    # Try to find position in memory
+                    pos_in_mem = next((p for p in self.execution._open_positions_list if str(p.get("id")) == str(pos_id)), None)
+                    if pos_in_mem:
+                        # Grab real time price
+                        price_data = STATE['prices'].get(symbol)
+                        price = float(price_data.get('mid')) if price_data else float(pos_in_mem.get('current_price', 0))
+                        
+                        pip_size = 0.0001
+                        if "JPY" in symbol: pip_size = 0.01
+                        elif "XAU" in symbol: pip_size = 0.01
+                        
+                        entry = float(pos_in_mem.get('entry_price', 0))
+                        is_long = pos_in_mem.get('side', '').lower() in ('long', 'buy')
+                        pips = (price - entry) / pip_size if is_long else (entry - price) / pip_size
+                        
+                        self.execution._close_position(pos_in_mem, price, "MANUAL_CLOSE", pips)
+                    else:
+                        self.log(f"⚠️ [MANUAL CLOSE] Posicion {pos_id} no encontrada en memoria.")
+                        
+        except Exception as e:
+            self.log(f"Error procesando comandos manuales: {e}", "ERROR")
+
 
     def on_message(self, client, message):
         pt = message.payloadType

@@ -39,6 +39,50 @@ export default function ForexPositions() {
   const [selectedTicker, setSelectedTicker] = useState<string>('')
   const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
   
+  // Manual Trading States
+  const [manualSymbol, setManualSymbol] = useState<string>('EURUSD')
+  const [manualSL, setManualSL] = useState<string>('')
+  const [manualTP, setManualTP] = useState<string>('')
+  const [manualLoading, setManualLoading] = useState<boolean>(false)
+
+  // Actualizar SL y TP cuando cambia el símbolo
+  useEffect(() => {
+    if (snapshots && snapshots[manualSymbol]) {
+      const snap = snapshots[manualSymbol]
+      const decimals = manualSymbol.includes('JPY') || manualSymbol.includes('XAU') ? 3 : 5
+      if (snap.lower_1) setManualSL(Number(snap.lower_1).toFixed(decimals))
+      if (snap.upper_1) setManualTP(Number(snap.upper_1).toFixed(decimals))
+    }
+  }, [manualSymbol, snapshots])
+
+  const handleManualTrade = async (direction: 'long' | 'short') => {
+    if (!manualSymbol) return alert("Selecciona un símbolo")
+    
+    setManualLoading(true)
+    try {
+      const res = await fetch('/api/v1/positions/forex/open_manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: manualSymbol,
+          direction: direction,
+          tp_price: parseFloat(manualTP || '0'),
+          sl_price: parseFloat(manualSL || '0')
+        })
+      })
+      if (res.ok) {
+        alert(`Comando manual de ${direction.toUpperCase()} enviado para ${manualSymbol}`)
+      } else {
+        alert("Error enviando comando manual.")
+      }
+    } catch (e) {
+      console.error(e)
+      alert("Error enviando comando manual.")
+    } finally {
+      setManualLoading(false)
+    }
+  }
+
   useEffect(() => {
     async function init() {
       try {
@@ -151,6 +195,72 @@ export default function ForexPositions() {
                  </div>
                  <div className="text-[0.7rem] text-slate-500">Unrealized aggregated (USD)</div>
             </div>
+        </div>
+
+        {/* --- PANEL DE TRADING MANUAL --- */}
+        <div className="glass-card !p-6 border-white/5 shadow-xl mb-8 flex flex-col md:flex-row items-end gap-6 relative overflow-hidden">
+           <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none">
+              <span className="text-8xl font-black italic">⚡</span>
+           </div>
+           
+           <div className="flex-1 w-full z-10">
+              <div className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest mb-3">Trading Manual Rápido</div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                 <div>
+                    <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1 block">Moneda</label>
+                    <select 
+                       value={manualSymbol}
+                       onChange={(e) => setManualSymbol(e.target.value)}
+                       className="w-full bg-[#020205] text-white text-sm font-black italic rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
+                    >
+                       {Object.keys(snapshots).length > 0 ? (
+                           Object.keys(snapshots).map(sym => (
+                               <option key={sym} value={sym}>{sym}</option>
+                           ))
+                       ) : (
+                           <option value="EURUSD">EURUSD</option>
+                       )}
+                    </select>
+                 </div>
+                 <div>
+                    <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1 block">Stop Loss (BB Inf)</label>
+                    <input 
+                       type="number"
+                       step="0.00001"
+                       value={manualSL}
+                       onChange={(e) => setManualSL(e.target.value)}
+                       className="w-full bg-[#020205] text-white text-sm font-mono rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
+                    />
+                 </div>
+                 <div>
+                    <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-1 block">Take Profit (BB Sup)</label>
+                    <input 
+                       type="number"
+                       step="0.00001"
+                       value={manualTP}
+                       onChange={(e) => setManualTP(e.target.value)}
+                       className="w-full bg-[#020205] text-white text-sm font-mono rounded-xl px-4 py-3 border border-white/10 outline-none focus:border-blue-500/50 transition-all"
+                    />
+                 </div>
+              </div>
+           </div>
+
+           <div className="flex items-center gap-3 w-full md:w-auto z-10">
+              <button 
+                 disabled={manualLoading}
+                 onClick={() => handleManualTrade('long')}
+                 className="flex-1 md:flex-none px-6 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-black font-black uppercase tracking-widest text-[0.65rem] transition-all shadow-[0_0_20px_rgba(16,185,129,0.2)] disabled:opacity-50"
+              >
+                 {manualLoading ? 'Enviando...' : 'BUY LONG'}
+              </button>
+              <button 
+                 disabled={manualLoading}
+                 onClick={() => handleManualTrade('short')}
+                 className="flex-1 md:flex-none px-6 py-3 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-black uppercase tracking-widest text-[0.65rem] transition-all shadow-[0_0_20px_rgba(244,63,94,0.2)] disabled:opacity-50"
+              >
+                 {manualLoading ? 'Enviando...' : 'SELL SHORT'}
+              </button>
+           </div>
         </div>
 
         <div className="glass-card !p-0 overflow-hidden border-white/10 shadow-3xl bg-white/[0.01] backdrop-blur-3xl rounded-[32px]">
