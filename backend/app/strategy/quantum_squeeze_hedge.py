@@ -117,15 +117,15 @@ def detect_bollinger_squeeze_expansion(df_5m: pd.DataFrame) -> dict:
         curr_lower = float(lower_series.iloc[-1])
         prev_lower = float(lower_series.iloc[-2])
 
-        upper_slope = curr_upper - prev_upper
-        lower_slope = curr_lower - prev_lower
+        curr_bandwidth = curr_upper - curr_lower
+        prev_bandwidth = prev_upper - prev_lower
 
-        is_expanding = (upper_slope > 0) and (lower_slope < 0)
+        is_expanding = curr_bandwidth > prev_bandwidth
 
         return {
             "is_expanding": is_expanding,
-            "upper_slope": upper_slope,
-            "lower_slope": lower_slope,
+            "upper_slope": curr_upper - prev_upper,
+            "lower_slope": curr_lower - prev_lower,
             "curr_upper": curr_upper,
             "curr_lower": curr_lower
         }
