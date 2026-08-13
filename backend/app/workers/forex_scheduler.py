@@ -2172,9 +2172,21 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                     if r['score'] >= 0.40:
                         await engine.log_evaluation(symbol, r, context)
 
-        # --- ESTRATEGIA CUSTOM APEX_EMA (SwingEma) para Forex ---
+        # GUARD: Check if Forex is enabled globally
+        fx_enabled = True
         try:
-            from app.strategy.swing_orders import process_swing_ema_strategy
+            fx_en_res = sb.table('system_config').select('value').eq('key', 'forex_enabled').maybe_single().execute()
+            if fx_en_res and fx_en_res.data:
+                val = fx_en_res.data.get('value')
+                if val is False or val == 'false' or val == False:
+                    fx_enabled = False
+        except Exception:
+            pass
+
+        if fx_enabled:
+            # --- ESTRATEGIA CUSTOM APEX_EMA (SwingEma) para Forex ---
+            try:
+                from app.strategy.swing_orders import process_swing_ema_strategy
             await process_swing_ema_strategy(
                 symbol=symbol,
                 df_15m=df,

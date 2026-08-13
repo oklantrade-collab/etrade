@@ -707,7 +707,13 @@ def evaluate_erep_phase(
         if check.get('wait_natural'):
             p1 = float(position.get('erep_p1_price') or 0)
             if p1 > 0:
-                min_pips = float(cfg.get('min_pips_recovery', 0))
+                cfg_min_pips = float(cfg.get('min_pips_recovery', 0))
+                
+                # Dinamizar pips según lote (1 pip = $10 USD por lote standard)
+                # target_usd_min = 1.00 USD
+                lots_qty = float(position.get('lots', position.get('size', 1.0)))
+                required_pips = 1.00 / (10.0 * max(0.01, abs(lots_qty))) if lots_qty > 0 else cfg_min_pips
+                min_pips = max(cfg_min_pips, required_pips)
                 
                 buffer_price = 0.0
                 if market_type == 'forex_futures':
@@ -724,7 +730,7 @@ def evaluate_erep_phase(
                 if recovered:
                     return {
                         'action':  'close_all',
-                        'reason': f'RECUPERACIÓN NATURAL: EMA favorable y precio llegó a {target_p1:.4f} (P1 + margen). Cerrar asegurando ganancias.',
+                        'reason': f'RECUPERACIÓN NATURAL: EMA favorable y precio llegó a {target_p1:.4f} (P1 + margen). Cerrar asegurando >$1.00 ganancias.',
                         'close_type': 'natural_recovery',
                     }
 
@@ -847,7 +853,15 @@ def evaluate_erep_phase(
             }
 
         # Garantizar que estamos en ganancia respecto al PROMEDIO de posiciones (p3_avg)
-        min_pips = float(cfg.get('min_pips_recovery', 0))
+        cfg_min_pips = float(cfg.get('min_pips_recovery', 0))
+        
+        # Dinamizar pips según lote total (1 pip = $10 USD por lote standard)
+        # target_usd_min = 1.00 USD
+        lots_qty = float(position.get('lots', position.get('size', 1.0)))
+        # Para crypto o forex, adaptamos. En forex usamos lots.
+        required_pips = 1.00 / (10.0 * max(0.01, abs(lots_qty))) if lots_qty > 0 else cfg_min_pips
+        min_pips = max(cfg_min_pips, required_pips)
+        
         target_margin_pct = 0.0
         
         if market_type == 'forex_futures' and p3_avg > 0:
