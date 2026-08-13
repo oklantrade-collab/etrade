@@ -704,56 +704,6 @@ export default function ForexPositions() {
                         </div>
                      )}
                   </div>
-
-                  <div className="pt-4 border-t border-white/5">
-                     <label className="text-[0.55rem] font-black text-slate-400 uppercase tracking-widest mb-3 block">Protección de Capital</label>
-                     <div className="grid grid-cols-3 gap-2 mb-4">
-                        <button 
-                           onClick={() => setManualProtectionMode('none')}
-                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualProtectionMode === 'none' ? 'bg-blue-500/10 border-blue-500/50 text-blue-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
-                        >
-                           Ninguno
-                        </button>
-                        <button 
-                           onClick={() => setManualProtectionMode('tp')}
-                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualProtectionMode === 'tp' ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
-                        >
-                           Solo TP
-                        </button>
-                        <button 
-                           onClick={() => setManualProtectionMode('sl')}
-                           className={`py-2 rounded-lg text-[0.6rem] font-black uppercase tracking-wider transition-all border ${manualProtectionMode === 'sl' ? 'bg-rose-500/10 border-rose-500/50 text-rose-400' : 'bg-[#0a0a0f] border-white/5 text-slate-500 hover:border-white/20'}`}
-                        >
-                           Solo SL
-                        </button>
-                     </div>
-                     
-                     {manualProtectionMode === 'tp' && (
-                        <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-                           <label className="text-[0.55rem] font-black text-emerald-400 uppercase tracking-widest mb-1.5 block">Take Profit (Auto: BB Sup)</label>
-                           <input 
-                              type="number"
-                              step="0.00001"
-                              value={manualTP}
-                              onChange={(e) => setManualTP(e.target.value)}
-                              className="w-full bg-[#0a0a0f] text-emerald-400 text-sm font-mono rounded-xl px-4 py-3 border border-emerald-500/20 outline-none focus:border-emerald-500 transition-all"
-                           />
-                        </div>
-                     )}
-                     
-                     {manualProtectionMode === 'sl' && (
-                        <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-                           <label className="text-[0.55rem] font-black text-rose-400 uppercase tracking-widest mb-1.5 block">Stop Loss (Auto: BB Inf)</label>
-                           <input 
-                              type="number"
-                              step="0.00001"
-                              value={manualSL}
-                              onChange={(e) => setManualSL(e.target.value)}
-                              className="w-full bg-[#0a0a0f] text-rose-400 text-sm font-mono rounded-xl px-4 py-3 border border-rose-500/20 outline-none focus:border-rose-500 transition-all"
-                           />
-                        </div>
-                     )}
-                  </div>
                </div>
                
                <div className="mt-8">
@@ -801,6 +751,7 @@ export default function ForexPositions() {
     </div>
   )
 }
+
 
 function TradingViewWidget({ symbol }: { symbol: string }) {
   const container = useRef<HTMLDivElement>(null);
