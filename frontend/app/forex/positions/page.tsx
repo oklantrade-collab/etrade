@@ -734,6 +734,66 @@ export default function ForexPositions() {
         </div>
       )}
 
+      {/* MODAL EDITAR TP/SL */}
+      {editingTPSL && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          onClick={() => setEditingTPSL(null)}
+        >
+          <div 
+            className="w-full max-w-md bg-[#0a0a0f] border border-white/10 rounded-2xl shadow-2xl p-6 relative overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-6">
+               <h3 className="text-white font-black uppercase tracking-wider text-sm flex items-center gap-2">
+                  <span className="text-orange-500">✏️</span> MODIFICAR TP / SL
+               </h3>
+               <button 
+                  onClick={() => setEditingTPSL(null)}
+                  className="text-slate-500 hover:text-white transition-colors"
+               >
+                  ✕
+               </button>
+            </div>
+            
+            <div className="space-y-4">
+               <div>
+                  <label className="text-[0.6rem] font-black text-emerald-400 uppercase tracking-widest mb-1.5 block">Take Profit (Precio)</label>
+                  <input 
+                     type="number"
+                     step="0.00001"
+                     value={editTP}
+                     onChange={(e) => setEditTP(e.target.value)}
+                     placeholder="Ej: 1.15000"
+                     className="w-full bg-black/50 text-emerald-400 text-sm font-mono rounded-xl px-4 py-3 border border-emerald-500/20 outline-none focus:border-emerald-500 transition-all"
+                  />
+               </div>
+               <div>
+                  <label className="text-[0.6rem] font-black text-rose-400 uppercase tracking-widest mb-1.5 block">Stop Loss (Precio)</label>
+                  <input 
+                     type="number"
+                     step="0.00001"
+                     value={editSL}
+                     onChange={(e) => setEditSL(e.target.value)}
+                     placeholder="Ej: 1.10000"
+                     className="w-full bg-black/50 text-rose-400 text-sm font-mono rounded-xl px-4 py-3 border border-rose-500/20 outline-none focus:border-rose-500 transition-all"
+                  />
+               </div>
+               
+               <div className="pt-4">
+                  <button 
+                     disabled={editLoading}
+                     onClick={handleSaveTPSL}
+                     className="w-full py-4 rounded-xl text-black bg-orange-500 hover:bg-orange-400 font-black uppercase tracking-widest text-xs transition-all disabled:opacity-50 flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(249,115,22,0.2)]"
+                  >
+                     {editLoading ? 'GUARDANDO...' : 'GUARDAR CAMBIOS'}
+                  </button>
+               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style jsx>{`
         .glass-card {
           background: rgba(255, 255, 255, 0.02);
