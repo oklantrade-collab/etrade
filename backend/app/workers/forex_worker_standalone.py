@@ -377,7 +377,20 @@ class StandaloneForexWorker:
                         self.execution._close_position(pos_in_mem, price, "MANUAL_CLOSE", pips)
                     else:
                         self.log(f"⚠️ [MANUAL CLOSE] Posicion {pos_id} no encontrada en memoria.")
-                        
+                elif action == "modify":
+                    pos_id = cmd.get("pos_id")
+                    new_tp = cmd.get("tp")
+                    new_sl = cmd.get("sl")
+                    pos_in_mem = next((p for p in self.execution._open_positions_list if str(p.get("id")) == str(pos_id)), None)
+                    if pos_in_mem:
+                        if new_tp is not None:
+                            pos_in_mem["tp_price"] = new_tp
+                        if new_sl is not None:
+                            pos_in_mem["sl_price"] = new_sl
+                        self.log(f"⚡ [MANUAL MODIFY] TP/SL actualizados en memoria para la posicion {pos_id}")
+                    else:
+                        self.log(f"⚠️ [MANUAL MODIFY] Posicion {pos_id} no encontrada en memoria.")
+
         except Exception as e:
             self.log(f"Error procesando comandos manuales: {e}", "ERROR")
 
@@ -710,7 +723,7 @@ class StandaloneForexWorker:
                             sb.table('forex_positions').update({
                                 'status': 'closed',
                                 'close_reason': 'ctrader_rejected_by_broker'
-                            }).eq('symbol', name).eq('status', 'open').is_('ctrader_pos_id', 'null').execute()
+                            }).eq('symbol', name).in_('status', ['open', 'pending']).is_('ctrader_pos_id', 'null').execute()
                     except Exception as rej_err:
                         self.log(f"Error limpiando posición rechazada por broker: {rej_err}", "WARNING")
 
@@ -732,7 +745,7 @@ class StandaloneForexWorker:
                                 .select('id, sl_price, tp_price')\
                                 .eq('symbol', name)\
                                 .eq('side', side)\
-                                .eq('status', 'open')\
+                                .in_('status', ['open', 'pending'])\
                                 .is_('ctrader_pos_id', 'null')\
                                 .order('opened_at', desc=True)\
                                 .limit(1).execute()

@@ -785,7 +785,7 @@ async def check_subprocesses_safety(supabase) -> dict:
         for pos in open_pos_list:
             if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
                 continue
-            if pos.get('rule_code') in ('AaApexEma', 'BbApexEma'):
+            if pos.get('rule_code') in ('AaApexEma', 'BbApexEma', 'Manual', 'MANUAL'):
                 continue
             sl = float(pos.get('sl_price') or 0)
             tp = float(pos.get('tp_price') or 0)

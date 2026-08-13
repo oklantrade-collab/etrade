@@ -243,3 +243,71 @@ def manual_open_forex_position(req: ManualForexTradeReq):
         return {"status": "ok", "message": "Manual trade command queued"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+class UpdatePositionReq(BaseModel):
+    tp_price: Optional[float] = None
+    sl_price: Optional[float] = None
+
+@router.patch("/{market}/{position_id}")
+def update_position(market: str, position_id: str, req: UpdatePositionReq):
+    """Updates tp_price and sl_price for an open position."""
+    sb = get_supabase()
+    
+    table_map = {
+        "crypto": "positions",
+        "forex": "forex_positions",
+        "stocks": "stocks_positions"
+    }
+    
+    table_name = table_map.get(market.lower())
+    if not table_name:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"status": "error", "message": f"Invalid market type: {market}"}
+        )
+    
+    update_data = {}
+    if req.tp_price is not None:
+        update_data["tp_price"] = req.tp_price
+    if req.sl_price is not None:
+        update_data["sl_price"] = req.sl_price
+        
+    if not update_data:
+        return {"status": "ok", "message": "No data to update"}
+        
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    try:
+        res = sb.table(table_name).update(update_data).eq("id", position_id).execute()
+        if res.data:
+            if market.lower() == "forex":
+                cmd = {
+                    "action": "modify",
+                    "pos_id": position_id,
+                    "tp": req.tp_price,
+                    "sl": req.sl_price,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+                cmd_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scratch", "forex_commands.json")
+                cmds = []
+                if os.path.exists(cmd_file):
+                    try:
+                        with open(cmd_file, "r") as f:
+                            cmds = json.load(f)
+                    except:
+                        pass
+                cmds.append(cmd)
+                with open(cmd_file, "w") as f:
+                    json.dump(cmds, f)
+            
+            return {"status": "updated", "market": market, "id": position_id, "data": res.data[0]}
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"status": "error", "message": "Position not found."}
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"status": "error", "message": str(e)}
+        )

@@ -53,8 +53,42 @@ export default function ForexPositions() {
   const [manualTP, setManualTP] = useState<string>('')
   
   const [manualLoading, setManualLoading] = useState<boolean>(false)
+  
+  // Edit TP/SL States
+  const [editingTPSL, setEditingTPSL] = useState<any | null>(null)
+  const [editTP, setEditTP] = useState<string>('')
+  const [editSL, setEditSL] = useState<string>('')
+  const [editLoading, setEditLoading] = useState<boolean>(false)
 
   const [defaultsLoadedFor, setDefaultsLoadedFor] = useState<string>('')
+  
+  const handleSaveTPSL = async () => {
+    if (!editingTPSL) return
+    setEditLoading(true)
+    try {
+      const payload = {
+        tp_price: editTP ? parseFloat(editTP) : null,
+        sl_price: editSL ? parseFloat(editSL) : null
+      }
+      const res = await fetch(`/api/v1/positions/forex/${editingTPSL.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      if (res.ok) {
+        setEditingTPSL(null)
+        fetchData()
+      } else {
+        const err = await res.json()
+        alert(`Error: ${err.message || err.error || 'No se pudo actualizar'}`)
+      }
+    } catch (e) {
+      console.error(e)
+      alert("Error actualizando TP/SL.")
+    } finally {
+      setEditLoading(false)
+    }
+  }
 
   // Autocompletar SL y TP desde Bollinger Bands solo la primera vez que se carga el simbolo
   useEffect(() => {
@@ -337,6 +371,18 @@ export default function ForexPositions() {
                                     <span className="bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-4 py-2 rounded-2xl font-mono text-[0.7rem] font-black uppercase tracking-[0.2em] shadow-[0_0_15px_rgba(99,102,241,0.1)]">
                                        {pos.rule_code || 'FX-CORE'}
                                     </span>
+                                     <button 
+                                       onClick={() => {
+                                         setEditTP(pos.tp_price ? pos.tp_price.toString() : '')
+                                         setEditSL(pos.sl_price ? pos.sl_price.toString() : '')
+                                         setEditingTPSL(pos)
+                                       }}
+                                       className="w-8 h-8 rounded-full bg-orange-500/10 border border-orange-500/20 flex items-center justify-center text-orange-500 hover:bg-orange-500 hover:text-white transition-all shadow-lg shadow-orange-500/10 group-hover:scale-110"
+                                       title="Modificar TP/SL"
+                                     >
+                                        <span className="text-[0.6rem] font-black">✏️</span>
+                                     </button>
+
                                     <button 
                                       onClick={() => {
                                         setSelectedTicker(pos.symbol)

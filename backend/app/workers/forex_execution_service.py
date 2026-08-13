@@ -1283,6 +1283,17 @@ class ForexExecutionService:
             self.log(f"Error calculando lotes fijos: {e}", "ERROR")
             return 0.05 if 'XAU' not in (symbol or '').upper() else 0.01
 
+    def _calculate_pnl_usd(self, symbol: str, pips: float, lots: float) -> float:
+        """Calcula el PNL en USD aproximado para aplicar filtros de seguridad."""
+        symbol_upper = symbol.upper()
+        is_xau = 'XAU' in symbol_upper
+        is_jpy = 'JPY' in symbol_upper
+        
+        pip_value = 10.0
+        if is_xau: pip_value = 1.0
+        if is_jpy: pip_value = 6.5
+        
+        return pips * pip_value * abs(float(lots))
 
     def _calculate_sl_tp(self, symbol, direction, entry, snap, rule_code):
         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
@@ -1381,14 +1392,14 @@ class ForexExecutionService:
                 self.worker.safe_send(req)
             else:
                 self.worker.client.send(req)
-            self._save_position(symbol, direction, lots, order_price, sl, tp, rule_code, mode='live')
+            self._save_position(symbol, direction, lots, order_price, sl, tp, rule_code, mode='live', is_limit=is_limit)
         except Exception as e: self.log(f'Error live: {e}')
 
     def _execute_paper_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
         self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='paper')
         self._send_telegram(f'[PAPER] {direction.upper()} {symbol} (Rule: {rule_code})')
 
-    def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper'):
+    def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper', is_limit=False):
         try:
             # Aplicar signo algebraico (Negativo para SHORT/SELL)
             final_lots = -abs(float(lots)) if str(direction).lower() == 'short' or str(direction).lower() == 'sell' else abs(float(lots))
@@ -1415,7 +1426,7 @@ class ForexExecutionService:
                 'entry_price': float(entry), 
                 'sl_price': float(sl), 
                 'tp_price': float(tp), 
-                'status': 'open', 
+                'status': 'pending' if is_limit else 'open', 
                 'mode': mode, 
                 'rule_code': rule_code, 
                 'opened_at': datetime.now(timezone.utc).isoformat(),
@@ -2038,6 +2049,9 @@ class ForexExecutionService:
         Evalua AaPX51/BbPX51 para posiciones Forex.
         Retorna True si se cerro la posicion.
         """
+        if str(pos.get('rule_code')).upper() == 'MANUAL':
+            return False
+            
         symbol = pos['symbol']
         price_data = self.state['prices'].get(symbol)
         if not price_data:
@@ -2090,6 +2104,15 @@ class ForexExecutionService:
             return False
 
         pnl = result['pnl']
+        
+        # Filtro de emergencia: Solo permitir cierres si PNL > 1 USD
+        rule_code = str(result.get('rule_code', '')).upper()
+        pnl_usd = self._calculate_pnl_usd(symbol, pnl.get('pnl_pips', 0), pos.get('lots', 0.01))
+        
+        if pnl_usd <= 1.0:
+            self.log(f"   [PROACTIVE EXIT] {symbol}: Cierre omitido ({rule_code}) porque PNL USD = {pnl_usd:.2f} <= 1.0")
+            return False
+
         self.log(
             f'[PROACTIVE EXIT] FOREX {symbol}: '
             f'{result["rule_code"]} '
@@ -2203,11 +2226,21 @@ class ForexExecutionService:
                 self.log(f"   [PROTECTION] {symbol}: Cierre parcial sugerido (No implementado en esta version)")
             elif action == 'close_market' or primary.get('type') == 'trailing_close':
                 reason = primary.get('reason', 'inverse_signal')
-                self.log(f"   [PROTECTION] {symbol}: Cierre de posición por {reason}")
                 
                 pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
                 side = pos['side'].lower()
                 pips = (price - state.entry_price)/pip_size if side in ('long', 'buy') else (state.entry_price - price)/pip_size
+                
+                # Filtro de emergencia: Solo permitir cierres de "Fallback" o similares si PNL > 1 USD
+                # Excluimos trailing_close normal si queremos, pero aplicamos general:
+                pnl_usd = self._calculate_pnl_usd(symbol, pips, pos.get('lots', 0.01))
+                reason_lower = reason.lower()
+                if 'fallback' in reason_lower or 'ema3_close' in reason_lower or 'emergency' in reason_lower:
+                    if pnl_usd <= 1.0:
+                        self.log(f"   [PROTECTION] {symbol}: Cierre omitido ({reason}) porque PNL USD = {pnl_usd:.2f} <= 1.0")
+                        return
+
+                self.log(f"   [PROTECTION] {symbol}: Cierre de posición por {reason} (PNL: ${pnl_usd:.2f})")
                 
                 self._close_position(pos, price, reason, pips)
                 
