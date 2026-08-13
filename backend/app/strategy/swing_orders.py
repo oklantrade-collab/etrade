@@ -265,7 +265,13 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         val = row.get(key)
         if pd.isna(val) or val is None:
             return default_val
-        return float(val)
+        try:
+            f_val = float(val)
+            if math.isnan(f_val):
+                return default_val
+            return f_val
+        except (ValueError, TypeError):
+            return default_val
 
     lower_5_5m = safe_get(last_row, 'lower_5', 0.0)
     lower_6_5m = safe_get(last_row, 'lower_6', 0.0)

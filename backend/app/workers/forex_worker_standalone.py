@@ -733,8 +733,11 @@ class StandaloneForexWorker:
                 p_status = pos.positionStatus
                 self.log(f"  Posicion cTrader: id={pid} status={p_status}")
 
-                # Vincular ID de cTrader con la DB si es una nueva posicion abierta
-                if p_status == 1: # 1 = OPEN
+                # Solo vincular y abrir la posicion en DB si la orden se llenó (ejecutada)
+                # executionType: 2 = ORDER_FILLED, 3 = ORDER_REPLACED, etc. 
+                # (Evitamos 1 = ORDER_ACCEPTED para que las LIMIT pendientes no cambien a OPEN)
+                exec_type = getattr(event, 'executionType', None)
+                if p_status == 1 and exec_type == 2: # 1 = OPEN, 2 = ORDER_FILLED
                     # Buscar el simbolo por ID
                     name = next((n for n, sid in STATE['symbol_ids'].items() if sid == pos.tradeData.symbolId), None)
                     if name:

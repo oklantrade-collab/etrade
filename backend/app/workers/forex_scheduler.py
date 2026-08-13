@@ -1158,7 +1158,8 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
             # 4.3 Guardia de Posición Fantasma cTrader (Live orders sin cTrader ID después de 300s / 5 min)
             # Ignoramos rule_code == 'MANUAL' porque pueden ser Limit Orders pendientes de ejecución
-            if position.get('mode') == 'live' and not position.get('ctrader_pos_id') and str(position.get('rule_code')).upper() != 'MANUAL':
+            # TAMBIEN debemos asegurar de solo afectar a posiciones con status 'open', no 'pending'
+            if position.get('status') == 'open' and position.get('mode') == 'live' and not position.get('ctrader_pos_id') and str(position.get('rule_code')).upper() != 'MANUAL':
                 opened_at_str = position.get('opened_at')
                 if opened_at_str:
                     try:
