@@ -1,13 +1,57 @@
 import subprocess
 import os
+import sys
 
 # Configuración DigitalOcean
 SERVER_IP = "165.22.87.171"
 SSH_KEY = "C:/Users/jyups/.ssh/etrade_cloud_key"
 REMOTE_PATH = "/home/etrade/etrade/backend"
+ROOT_REMOTE_PATH = "/home/etrade/etrade"
 
-# Archivos críticos para sincronizar
+# Archivos críticos para sincronizar (relativos a backend)
 files_to_sync = [
+    # HALCÓN CENTINELA
+    "app/halcon_centinela/__init__.py",
+    "app/halcon_centinela/config.py",
+    "app/halcon_centinela/halcon_engine.py",
+    "app/halcon_centinela/state_machine.py",
+    "app/halcon_centinela/arbitrage.py",
+    "app/halcon_centinela/centinela_monitor.py",
+    "app/halcon_centinela/logger.py",
+    "app/halcon_centinela/scoring/__init__.py",
+    "app/halcon_centinela/scoring/score_1d.py",
+    "app/halcon_centinela/scoring/score_4h.py",
+    "app/halcon_centinela/scoring/score_15m.py",
+    "app/halcon_centinela/scoring/score_5m.py",
+    "app/halcon_centinela/scoring/score_1m.py",
+    "app/halcon_centinela/scoring/rsi_component.py",
+    "app/halcon_centinela/scoring/regime_filter.py",
+    "app/halcon_centinela/scoring/compression_index.py",
+    "app/halcon_centinela/scoring/volume_confirmation.py",
+    "app/halcon_centinela/oraculo/__init__.py",
+    "app/halcon_centinela/oraculo/calendar_service.py",
+    "app/halcon_centinela/oraculo/pause_manager.py",
+    "app/halcon_centinela/oraculo/bracket_manager.py",
+    
+    # API
+    "app/api/halcon.py",
+    "app/main.py",
+    
+    # Migraciones & Tests
+    "migration_033_halcon_centinela.sql",
+    "apply_migration_033.py",
+    "tests/test_halcon_engine.py",
+    "tests/test_centinela_state_machine.py",
+    "tests/test_oraculo.py",
+
+    # Core & Workers modificados
+    "app/workers/forex_execution_service.py",
+    "app/core/position_monitor.py",
+    "app/core/symbol_state.py",
+    "app/core/memory_store.py",
+    "app/core/logger.py",
+
+    # Otros módulos de la plataforma
     "app/strategy/quantum_squeeze_hedge.py",
     "app/strategy/smart_loss_guard.py",
     "app/strategy/dca_manager.py",
@@ -21,7 +65,6 @@ files_to_sync = [
     "app/strategy/strategy_engine.py",
     "app/workers/forex_worker_standalone.py",
     "app/workers/forex_scheduler.py",
-    "app/workers/forex_execution_service.py",
     "app/strategy/virtual_sl_recovery.py",
     "app/workers/stocks_scheduler.py",
     "app/analysis/stocks_indicators.py",
@@ -30,12 +73,10 @@ files_to_sync = [
     "app/stocks/stocks_rule_engine.py",
     "app/stocks/stocks_orchestrator.py",
     "app/core/safety_manager.py",
-    "app/core/logger.py",
     "app/strategy/swing_orders.py",
     "app/strategy/capital_protection.py",
     "app/strategy/proactive_exit.py",
     "app/strategy/position_guards.py",
-    "app/core/position_monitor.py",
     "app/core/pnl_calculator.py",
     "app/strategy/rule_engine.py",
     "app/workers/unified_trading_worker.py",
@@ -47,7 +88,6 @@ files_to_sync = [
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/stocks/stocks_tp_manager.py",
     "app/stocks/position_monitor.py",
-    "app/data/ib_scanner.py",
     "app/strategy/risk_manager.py",
     "app/strategy/signal_generator.py",
     "app/api/stocks.py",
@@ -61,7 +101,6 @@ files_to_sync = [
     "app/analysis/capa3_fundamentals.py",
     "app/stocks/fundamental_analyzer.py",
     "app/workers/performance_monitor.py",
-    "app/core/symbol_state.py",
     "app/execution/data_provider.py",
     "app/data/yfinance_provider.py",
     "app/data/ib_scanner.py",
@@ -78,6 +117,12 @@ files_to_sync = [
     "config_btc_pilot.json",
     "requirements.txt",
     ".env"
+]
+
+# Archivos frontend para sincronizar (relativos a root)
+frontend_files = [
+    ("frontend/app/halcon/page.tsx", "frontend/app/halcon/page.tsx"),
+    ("frontend/components/HalconConfigModal.tsx", "frontend/components/HalconConfigModal.tsx")
 ]
 
 def check_syntax():
@@ -109,15 +154,42 @@ def check_syntax():
     print("=" * 60)
     return True
 
+def ensure_remote_directories():
+    print("Creando estructura de directorios remota...")
+    dirs = [
+        f"{REMOTE_PATH}/app/halcon_centinela/scoring",
+        f"{REMOTE_PATH}/app/halcon_centinela/oraculo",
+        f"{REMOTE_PATH}/tests",
+        f"{ROOT_REMOTE_PATH}/frontend/app/halcon",
+        f"{ROOT_REMOTE_PATH}/frontend/components"
+    ]
+    mkdir_cmd = f"mkdir -p {' '.join(dirs)}"
+    cmd = [
+        "ssh", "-i", SSH_KEY,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        f"root@{SERVER_IP}",
+        mkdir_cmd
+    ]
+    subprocess.run(cmd, check=True)
+    print("[OK] Directorios remotos listos.")
+
 def deploy():
     if not check_syntax():
         return
+    
+    ensure_remote_directories()
         
+    print("\nSincronizando archivos backend...")
     for f in files_to_sync:
         local_file = os.path.join("c:/Fuentes/eTrade/backend", f)
+        if not os.path.exists(local_file):
+            print(f"[SKIP] No existe localmente: {f}")
+            continue
+            
         remote_file = f"root@{SERVER_IP}:{REMOTE_PATH}/{f}"
         
-        print(f"Desplegando {f}...")
+        print(f"  -> {f}")
         cmd = [
             "scp", "-i", SSH_KEY,
             "-o", "StrictHostKeyChecking=no",
@@ -125,8 +197,30 @@ def deploy():
             local_file, remote_file
         ]
         subprocess.run(cmd, check=True)
-        import time
-        time.sleep(1)
+
+    print("\nSincronizando archivos frontend...")
+    for local_rel, remote_rel in frontend_files:
+        local_file = os.path.join("c:/Fuentes/eTrade", local_rel)
+        if os.path.exists(local_file):
+            remote_file = f"root@{SERVER_IP}:{ROOT_REMOTE_PATH}/{remote_rel}"
+            print(f"  -> {local_rel}")
+            cmd = [
+                "scp", "-i", SSH_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                local_file, remote_file
+            ]
+            subprocess.run(cmd, check=True)
+
+    print("\nAjustando permisos...")
+    chown_cmd = [
+        "ssh", "-i", SSH_KEY,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        f"root@{SERVER_IP}",
+        f"chown -R etrade:etrade {ROOT_REMOTE_PATH}"
+    ]
+    subprocess.run(chown_cmd, check=True)
 
     print("\nReiniciando servicios en el servidor...")
     restart_cmd = [
@@ -134,7 +228,7 @@ def deploy():
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         f"root@{SERVER_IP}",
-        "systemctl restart etrade-crypto etrade-forex etrade-forex-scheduler etrade-api etrade-stocks"
+        "systemctl restart etrade-api etrade-forex etrade-forex-scheduler etrade-crypto etrade-stocks"
     ]
     subprocess.run(restart_cmd, check=True)
     print("¡Despliegue y reinicio completado!")

@@ -842,6 +842,27 @@ async def check_open_positions_5m(
                 except Exception as upd_e:
                     log_warning(MODULE, f"Silent update fail for {symbol}: {upd_e}")
 
+                # ── HALCÓN CENTINELA: Evaluación Proactiva Multi-Timeframe ──
+                try:
+                    from app.halcon_centinela.arbitrage import check_closing_in_progress
+                    if not check_closing_in_progress(str(pos.get('id')), 'positions'):
+                        from app.halcon_centinela.centinela_monitor import CentinelaMonitor
+                        from app.halcon_centinela.config import CentinelaDecision
+                        cent_mon = CentinelaMonitor(supabase=supabase, market_type='crypto')
+                        eval_pos = dict(pos)
+                        eval_pos['current_price'] = price
+                        eval_pos['current_pnl'] = upnl
+                        eval_pos['direction'] = side
+                        eval_res = cent_mon._evaluate_single_position(eval_pos)
+                        if eval_res and eval_res.get('decision') == CentinelaDecision.CIERRE_TOTAL.value and upnl >= 1.0:
+                            reason = f"HALCON_CENTINELA_CIERRE_TOTAL (Score: {eval_res.get('score_final', 0)})"
+                            await _execute_paper_close(pos, price, reason, supabase)
+                            events.append({'symbol': norm_symbol, 'event': 'centinela_close'})
+                            log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Closed {norm_symbol} via proactive exit: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
+                            continue
+                except Exception as cent_err:
+                    log_warning(MODULE, f"Error evaluating Centinela for crypto {norm_symbol}: {cent_err}")
+
                 # 1. STOP LOSS (Full Close) via Dynamic SL Manager
                 from app.strategy.dynamic_sl_manager import evaluate_sl_action
                 from app.core.memory_store import get_memory_df

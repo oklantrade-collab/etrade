@@ -78,6 +78,21 @@ class ForexExecutionService:
         self._open_positions_list = []
         self._load_open_positions()
 
+        # ── HALCÓN CENTINELA: Proactive Close System ──
+        try:
+            from app.halcon_centinela.centinela_monitor import CentinelaMonitor
+            from app.halcon_centinela.oraculo.pause_manager import OraculoPauseManager
+            self.centinela_monitor = CentinelaMonitor(
+                execution_service=self,
+                supabase=supabase_client,
+                market_type='forex',
+                oraculo_manager=OraculoPauseManager()
+            )
+            self.log('✅ HALCÓN CENTINELA inicializado correctamente')
+        except Exception as e:
+            self.log(f'⚠️ HALCÓN CENTINELA no disponible: {e}', 'WARNING')
+            self.centinela_monitor = None
+
     def _safe_float(self, val, default=0.0):
         try:
             if val is None: return default
@@ -434,6 +449,8 @@ class ForexExecutionService:
         ema20_phase = 'flat'
         plus_di = 0.0
         minus_di = 0.0
+        support_barrier_3c = False
+        resistance_ceiling_3c = False
         
         try:
             from app.core.memory_store import MEMORY_STORE
@@ -446,6 +463,28 @@ class ForexExecutionService:
                 ema20_phase = str(last_row.get('ema20_phase', 'flat'))
                 plus_di = self._safe_float(last_row.get('plus_di', 0.0))
                 minus_di = self._safe_float(last_row.get('minus_di', 0.0))
+                
+                # Support/Resistance Barrier (last 3 candles)
+                if len(df_15m) >= 3:
+                    last_3 = df_15m.iloc[-3:]
+                    lows = last_3['low'].values
+                    highs = last_3['high'].values
+                    closes = last_3['close'].values
+                    opens = last_3['open'].values
+                    atr_val = self._safe_float(last_row.get('atr_14', last_row.get('atr', 0.001)))
+                    if atr_val > 0:
+                        # Support Barrier
+                        if (lows.max() - lows.min()) < (atr_val * 0.20):
+                            bodies_bottom = [min(o, c) for o, c in zip(opens, closes)]
+                            wicks_bottom = [b - l for b, l in zip(bodies_bottom, lows)]
+                            if sum(wicks_bottom) > (atr_val * 0.5):
+                                support_barrier_3c = True
+                        # Resistance Ceiling
+                        if (highs.max() - highs.min()) < (atr_val * 0.20):
+                            bodies_top = [max(o, c) for o, c in zip(opens, closes)]
+                            wicks_top = [h - b for h, b in zip(highs, bodies_top)]
+                            if sum(wicks_top) > (atr_val * 0.5):
+                                resistance_ceiling_3c = True
         except Exception:
             pass
 
@@ -518,6 +557,8 @@ class ForexExecutionService:
             'ema3_bounce_up_5m': ema3_bounce_up_5m,
             'ema3_bounce_dn_5m': ema3_bounce_dn_5m,
             'ema9_gt_ema20_5m': ema9_gt_ema20_5m,
+            'support_barrier_3c': support_barrier_3c,
+            'resistance_ceiling_3c': resistance_ceiling_3c,
             'ema9_lt_ema20_5m': ema9_lt_ema20_5m,
             'ema_50': ema_50,
             'ema_200': ema_200,
@@ -749,13 +790,24 @@ class ForexExecutionService:
             ema_200 = context.get('ema_200', 0.0)
             bb_upper_slope = float(context.get('bb_upper_slope_15m') or context.get('upper_slope') or 1.0)
             lower_5_val = float(context.get('lower_5', 0.0) or 0.0)
+            ema_9 = context.get('ema_9', 0.0)
+            low_price = context.get('low', price)
             
             is_lower5_touch = (price <= lower_5_val) if lower_5_val > 0 else (fib_zone <= -5)
+            
+            # PULLBACK GUARD: Ensure it dropped to touch/cross EMA9 before entering LONG on dips
+            pullback_ok = (low_price <= ema_9) if ema_9 > 0 else True
+            
+            # BARRIER GUARD: Avoid entering long into a 3-candle resistance ceiling
+            resistance_ceiling_3c = context.get('resistance_ceiling_3c', False)
             
             bb21_rule_triggered = (
                 (ema_50 > ema_200 if (ema_50 > 0 and ema_200 > 0) else True)
                 and bb_upper_slope > 0
                 and is_lower5_touch
+                and pullback_ok
+                and (not resistance_ceiling_3c)
+                and (ema3 > ema9 and ema9 > ema20 if ema3 and ema9 and ema20 else True)
             )
         else:
             if ema3 and ema9 and ema20:
@@ -769,12 +821,24 @@ class ForexExecutionService:
                 ema_200 = context.get('ema_200', 0.0)
                 bb_lower = context.get('bb_lower', 0.0)
                 
+                ema_9_15m = context.get('ema_9', 0.0)
+                high_price = context.get('high', price)
+                
+                # PULLBACK GUARD: Ensure it bounced to touch/cross EMA9 before entering SHORT
+                pullback_ok = (high_price >= ema_9_15m) if ema_9_15m > 0 else True
+                
+                # BARRIER GUARD: Avoid shorting into a 3-candle support floor
+                support_barrier_3c = context.get('support_barrier_3c', False)
+                
                 bb21_rule_triggered = (
                     ema_50 < ema_200
                     and ema20_angle <= 0
                     and ema20_phase == 'nivel_2_short'
                     and di_margin > 10
                     and (price > bb_lower if bb_lower > 0 else True)
+                    and pullback_ok
+                    and (not support_barrier_3c)
+                    and (ema3 < ema9 and ema9 < ema20)
                 )
 
         results.append({
@@ -1399,6 +1463,25 @@ class ForexExecutionService:
         self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='paper')
         self._send_telegram(f'[PAPER] {direction.upper()} {symbol} (Rule: {rule_code})')
 
+    def _classify_entry_profile(self, symbol: str) -> str:
+        """Classifies entry profile for HALCÓN CENTINELA based on current ADX/ATR%."""
+        try:
+            from app.halcon_centinela.config import classify_entry_profile
+            from app.core.memory_store import get_memory_df
+            df_15m = get_memory_df(symbol, '15m')
+            df_1d = get_memory_df(symbol, '1d')
+            adx = 20.0
+            atr_pct = 0.005
+            if df_15m is not None and not df_15m.empty and 'adx' in df_15m.columns:
+                adx = float(df_15m.iloc[-1].get('adx', 20.0))
+            if df_1d is not None and not df_1d.empty and 'atr' in df_1d.columns:
+                atr = float(df_1d.iloc[-1].get('atr', 0))
+                close = float(df_1d.iloc[-1].get('close', 1))
+                atr_pct = atr / close if close > 0 else 0.005
+            return classify_entry_profile(adx, atr_pct).value
+        except:
+            return 'TENDENCIA_SOSTENIDA'
+
     def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper', is_limit=False):
         try:
             # Aplicar signo algebraico (Negativo para SHORT/SELL)
@@ -1434,6 +1517,7 @@ class ForexExecutionService:
                 'slv_price': slv_price,
                 'recovery_mode': False,
                 'recovery_cycles': 0,
+                'entry_profile': self._classify_entry_profile(symbol)
             }
             res = self.sb.table('forex_positions').insert(pos).execute()
             if res.data: 
@@ -1491,9 +1575,34 @@ class ForexExecutionService:
             except Exception as e: 
                 self.log(f"Error gestion snaps (DB-Skip): {e}")
 
+        # ── HALCÓN CENTINELA: Evaluación proactiva de todas las posiciones ──
+        centinela_closed_ids = set()
+        if hasattr(self, 'centinela_monitor') and self.centinela_monitor:
+            try:
+                results = self.centinela_monitor.evaluate_all_positions(self._open_positions_list)
+                for r in results:
+                    if r.get('executed'):
+                        centinela_closed_ids.add(str(r.get('position_id')))
+                        self.log(f"🦅 [CENTINELA] {r.get('decision')} ejecutado para posición {r.get('position_id')} (score: {r.get('score_final', 0):.1f})")
+            except Exception as centinela_err:
+                self.log(f"⚠️ [CENTINELA] Error en evaluación: {centinela_err}", 'WARNING')
+
         for pos in list(self._open_positions_list):
             try: 
                 symbol = pos['symbol']
+
+                # Skip posiciones ya cerradas por CENTINELA en este ciclo
+                if str(pos.get('id')) in centinela_closed_ids:
+                    continue
+
+                # Skip posiciones con cierre en progreso (arbitraje CENTINELA)
+                try:
+                    from app.halcon_centinela.arbitrage import check_closing_in_progress
+                    if check_closing_in_progress(str(pos.get('id')), 'forex_positions'):
+                        continue
+                except:
+                    pass
+
                 snap = snaps.get(symbol)
                 
                 #    OBTENER PRECIO DE MEMORIA (REAL-TIME)   

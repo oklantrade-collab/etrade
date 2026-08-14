@@ -854,7 +854,6 @@ async def execute_adaptive_sl_close(
                 'sl_type': 'suspended_anti_loss_protection',
                 'stop_loss': 0,
                 'sl_dynamic_price': 0,
-                'sl_price': 0,
                 'erep_active': True,
                 'erep_phase': 1,
                 'erep_p1_price': entry_price,

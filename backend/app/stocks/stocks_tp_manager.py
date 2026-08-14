@@ -504,7 +504,6 @@ async def execute_partial_sell(
                     'sl_type': 'suspended_negative_protection',
                     'stop_loss': 0,
                     'sl_dynamic_price': 0,
-                    'sl_price': 0,
                     'erep_active': True,
                     'erep_phase': 2,
                     'erep_p1_price': entry_price,

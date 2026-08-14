@@ -305,6 +305,8 @@ class StrategyEngine:
         ema20_descending_15m = False
         low_below_ema9_or_ema20_15m = False
         high_above_ema9_or_ema20_15m = False
+        low_below_bb_lower_90_15m = False
+        high_above_bb_upper_90_15m = False
 
         if df_15m is not None and len(df_15m) >= 3:
             # BB Lower Ascending / Descending
@@ -326,6 +328,23 @@ class StrategyEngine:
                 bb_upper_descending_15m = True
             if b_u_0 > b_u_1 and b_u_1 > b_u_2 and b_u_2 > 0:
                 bb_upper_ascending_15m = True
+
+            # 90% Bollinger Touch 15m
+            basis_0 = safe_float(df_15m['basis'].iloc[-1] if 'basis' in df_15m.columns else df_15m.get('sma_20', pd.Series()).iloc[-1] if 'sma_20' in df_15m.columns else 0)
+            low_15m = safe_float(df_15m['low'].iloc[-1] if 'low' in df_15m.columns else 0)
+            high_15m = safe_float(df_15m['high'].iloc[-1] if 'high' in df_15m.columns else 0)
+            
+            if basis_0 > 0 and b_l_0 > 0 and low_15m > 0:
+                dist_down = basis_0 - b_l_0
+                target_down = basis_0 - 0.90 * dist_down
+                if low_15m < target_down:
+                    low_below_bb_lower_90_15m = True
+
+            if basis_0 > 0 and b_u_0 > 0 and high_15m > 0:
+                dist_up = b_u_0 - basis_0
+                target_up = basis_0 + 0.90 * dist_up
+                if high_15m > target_up:
+                    high_above_bb_upper_90_15m = True
 
             # Prev Low Touch Lower 5 or 6
             prev_low = safe_float(df_15m['low'].iloc[-2] if 'low' in df_15m.columns else 0)
@@ -573,6 +592,8 @@ class StrategyEngine:
             # Custom Aa13/Bb13 variables
             'low_below_bb_lower_1h': low_below_bb_lower_1h,
             'bb_lower_ascending_1h': bb_lower_ascending_1h,
+            'low_below_bb_lower_90_15m': low_below_bb_lower_90_15m,
+            'high_above_bb_upper_90_15m': high_above_bb_upper_90_15m,
             'bb_lower_ascending_15m': bb_lower_ascending_15m,
             'bb_lower_ascending_2c_15m': bb_lower_ascending_2c_15m,
             'prev_low_touch_lower56_15m': prev_low_touch_lower56_15m,
