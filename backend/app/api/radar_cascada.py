@@ -119,7 +119,7 @@ def get_symbol_strategy_hud(symbol: str):
     except Exception:
         pos_data = None
 
-    # Gather Halcon recent score or compute on the fly
+    # Gather Halcon recent score or compute dynamic score per asset
     halcon_score = 0.0
     halcon_semaforo = 'VERDE'
     try:
@@ -128,17 +128,31 @@ def get_symbol_strategy_hud(symbol: str):
             halcon_score = float(h_res.data[0].get('score_final', 0.0))
             halcon_semaforo = str(h_res.data[0].get('semaforo', 'VERDE'))
         else:
-            # Fallback estimation from RADAR indicators
+            # Dynamic calculation from multi-timeframe RADAR indicators
             adx = float(radar_snap.get('adx_val', 20.0))
             rsi = float(radar_snap.get('rsi_val', 50.0))
             squeeze = bool(radar_snap.get('squeeze_activo', False))
+            fib_zone_abs = abs(int(radar_snap.get('fibonacci_zone', 0)))
+            slope_m3 = abs(float(radar_snap.get('slope_ema3_val', 0.0)))
+            slope_m20 = abs(float(radar_snap.get('slope_ema20_val', 0.0)))
             
-            calc_score = 0.0
-            if rsi >= 75 or rsi <= 25: calc_score += 30.0
-            if squeeze: calc_score += 20.0
-            if adx < 15.0: calc_score += 15.0
+            # 1. RSI exhaustion score (up to 35 pts)
+            rsi_dist = abs(rsi - 50.0)
+            rsi_pts = min(35.0, (rsi_dist / 35.0) * 35.0) if rsi_dist > 15.0 else 5.0
             
-            halcon_score = calc_score
+            # 2. Fibonacci extension score (up to 30 pts)
+            fib_pts = min(30.0, fib_zone_abs * 6.0)
+            
+            # 3. Slope Divergence & Velocity (up to 20 pts)
+            slope_diff = abs(slope_m3 - slope_m20)
+            slope_pts = min(20.0, slope_diff * 15.0 + (5.0 if radar_snap.get('pendiente_EMA3') != radar_snap.get('pendiente_EMA20') else 0.0))
+            
+            # 4. Volatility & Squeeze (up to 15 pts)
+            vol_pts = 12.0 if squeeze else (8.0 if adx > 35.0 else 4.0)
+            
+            calc_score = round(rsi_pts + fib_pts + slope_pts + vol_pts, 1)
+            halcon_score = max(5.0, min(95.0, calc_score))
+            
             if halcon_score >= 60.0:
                 halcon_semaforo = 'ROJO'
             elif halcon_score >= 35.0:
@@ -146,7 +160,7 @@ def get_symbol_strategy_hud(symbol: str):
             else:
                 halcon_semaforo = 'VERDE'
     except Exception:
-        halcon_score = 15.0
+        halcon_score = 18.5
         halcon_semaforo = 'VERDE'
 
     # Compute Cascada projected level from EMA alignment & Fibonacci zone

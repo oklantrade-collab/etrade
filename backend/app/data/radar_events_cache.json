@@ -1,0 +1,31 @@
+{
+  "updated_at": "2026-08-15T05:56:11.773454+00:00",
+  "events": {
+    "GBPUSD": [
+      {
+        "event_type": "cruce_EMA3_EMA9",
+        "direction": "bearish",
+        "fast_col": "ema_3",
+        "slow_col": "ema_9",
+        "price": 1.3534,
+        "timestamp": "2026-08-15T05:56:02.256160+00:00",
+        "detail": "ema_3 (1.35347) crossed BELOW ema_9 (1.35350)",
+        "symbol": "GBPUSD",
+        "timeframe": "15m"
+      }
+    ],
+    "ETHUSDT": [
+      {
+        "event_type": "cruce_EMA3_EMA9",
+        "direction": "bearish",
+        "fast_col": "ema_3",
+        "slow_col": "ema_9",
+        "price": 1882.51,
+        "timestamp": "2026-08-15T05:56:11.772455+00:00",
+        "detail": "ema_3 (1883.16775) crossed BELOW ema_9 (1883.37614)",
+        "symbol": "ETHUSDT",
+        "timeframe": "15m"
+      }
+    ]
+  }
+}

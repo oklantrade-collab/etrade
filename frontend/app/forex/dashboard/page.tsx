@@ -324,27 +324,60 @@ function ForexPairCard({ pair, snap, isFocus, position, onClick, onOpenChart }: 
   const sarColor = sar === 'long' ? '#00C896' : sar === 'short' ? '#FF4757' : '#666'
   const hasPos = !!position
   const isBuy = position?.side?.toLowerCase() === 'long' || position?.side?.toLowerCase() === 'buy'
-
   return (
     <div
       onClick={onClick}
       style={{
-        background: isFocus ? 'rgba(0,200,150,0.04)' : 'rgba(17, 24, 39, 0.4)',
-        border: `1px solid ${hasPos ? (isBuy ? '#00C896' : '#FF4757') : (isFocus ? 'rgba(0,200,150,0.20)' : 'rgba(255,255,255,0.06)')}`,
+        background: isFocus ? 'rgba(56, 189, 248, 0.08)' : 'rgba(17, 24, 39, 0.4)',
+        border: isFocus 
+          ? '2px solid #38BDF8' 
+          : (hasPos ? `1px solid ${isBuy ? '#00C896' : '#FF4757'}` : '1px solid rgba(255,255,255,0.06)'),
         borderRadius: '12px',
         padding: '12px 14px',
         cursor: 'pointer',
         transition: 'all 0.3s ease',
         position: 'relative',
-        boxShadow: hasPos ? `0 0 15px ${isBuy ? '#00C89622' : '#FF475722'}` : 'none'
+        boxShadow: isFocus 
+          ? '0 0 20px rgba(56, 189, 248, 0.35)' 
+          : (hasPos ? `0 0 15px ${isBuy ? '#00C89622' : '#FF475722'}` : 'none'),
+        transform: isFocus ? 'scale(1.02)' : 'none'
       }}
     >
+      {/* Focus Indicator Badge */}
+      {isFocus && (
+        <div style={{
+          position: 'absolute',
+          top: '-10px',
+          left: '12px',
+          background: '#38BDF8',
+          color: '#000',
+          fontSize: '8px',
+          fontWeight: 950,
+          padding: '2px 8px',
+          borderRadius: '4px',
+          letterSpacing: '0.05em'
+        }}>
+          ● EN FOCO
+        </div>
+      )}
+
       {hasPos && (
-          <div style={{ position: 'absolute', top: '8px', right: '8px', background: isBuy ? '#00C896' : '#FF4757', color: '#000', fontSize: '8px', fontWeight: 900, padding: '2px 5px', borderRadius: '4px' }}>
-              {isBuy ? 'BUY' : 'SELL'}
+          <div style={{ 
+            position: 'absolute', 
+            top: '8px', 
+            right: '8px', 
+            background: isBuy ? '#00C896' : '#FF4757', 
+            color: '#000', 
+            fontSize: '8px', 
+            fontWeight: 900, 
+            padding: '2px 6px', 
+            borderRadius: '4px',
+            boxShadow: `0 0 8px ${isBuy ? '#00C89688' : '#FF475788'}`
+          }}>
+              {isBuy ? 'BUY' : 'SELL'} POS
           </div>
       )}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', marginTop: isFocus ? '2px' : '0' }}>
         <span style={{ fontSize: '13px', fontWeight: 900, color: '#FFF' }}>{meta.flag || '🏳️'} {pair}</span>
         <span style={{ fontSize: '9px', fontWeight: 900, color: zone > 0 ? '#00C896' : zone < 0 ? '#FF4757' : '#555' }}>ZONA {zone}</span>
       </div>
@@ -359,11 +392,26 @@ function ForexPairCard({ pair, snap, isFocus, position, onClick, onOpenChart }: 
       <div style={{ marginTop: '12px' }}>
          <button 
              onClick={(e) => { e.stopPropagation(); onOpenChart(pair); }}
-             style={{ background: '#38BDF8', color: '#000', border: 'none', padding: '6px 12px', borderRadius: '8px', fontSize: '9px', fontWeight: 950, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s', width: '100%', justifyContent: 'center' }}
+             style={{ 
+               background: isFocus ? '#38BDF8' : 'rgba(255,255,255,0.06)', 
+               color: isFocus ? '#000' : '#CBD5E1', 
+               border: 'none', 
+               padding: '6px 12px', 
+               borderRadius: '8px', 
+               fontSize: '9px', 
+               fontWeight: 950, 
+               cursor: 'pointer', 
+               display: 'flex', 
+               alignItems: 'center', 
+               gap: '5px', 
+               transition: 'all 0.2s', 
+               width: '100%', 
+               justifyContent: 'center' 
+             }}
              onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.02)'}
              onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}
          >
-             VER GRÁFICO 📊
+             📊 {isFocus ? 'GRÁFICO ACTIVO' : 'VER GRÁFICO'}
          </button>
       </div>
     </div>
