@@ -64,7 +64,7 @@ def load_radar_config_from_db() -> Dict[str, Any]:
                                 cfg[key] = int(val)
                         except ValueError:
                             cfg[key] = val
-        log_info(f"[{MODULE}] Config loaded from database successfully.")
+        log_info(MODULE, "Config loaded from database successfully.")
     except Exception as e:
-        log_error(f"[{MODULE}] Error loading config from DB (using defaults): {e}")
+        log_error(MODULE, f"Error loading config from DB (using defaults): {e}")
     return cfg

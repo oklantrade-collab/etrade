@@ -98,7 +98,7 @@ class RadarEventBus:
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, indent=2, default=str)
         except Exception as e:
-            log_error(f"[{MODULE}] Failed to persist events to disk ({self.cache_file}): {e}")
+            log_error(MODULE, f"Failed to persist events to disk ({self.cache_file}): {e}")
 
     def _load_from_disk(self) -> None:
         """
@@ -117,6 +117,6 @@ class RadarEventBus:
                         ev_type = ev.get('event_type')
                         if ev_type:
                             self._last_events[f"{sym}:{ev_type}"] = ev
-            log_info(f"[{MODULE}] Restored {sum(len(v) for v in self._events.values())} events from local cache.")
+            log_info(MODULE, f"Restored {sum(len(v) for v in self._events.values())} events from local cache.")
         except Exception as e:
-            log_warning(f"[{MODULE}] Could not load events cache from disk: {e}")
+            log_warning(MODULE, f"Could not load events cache from disk: {e}")

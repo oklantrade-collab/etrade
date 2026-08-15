@@ -1790,6 +1790,17 @@ class StandaloneForexWorker:
 
             # Update RADAR shared signal bus
             try:
+                from app.core.memory_store import update_memory_df
+                df['close'] = df['c']
+                df['high'] = df['h']
+                df['low'] = df['l']
+                df['open'] = df['o']
+                df['ema_3'] = df['ema3']
+                df['ema_9'] = df['ema9']
+                df['ema_20'] = df['ema20']
+                df['fibonacci_zone'] = int(zone)
+                update_memory_df(symbol, '15m', df)
+
                 from app.radar.radar_service import RadarService
                 RadarService.get_instance().update(symbol, '15m')
             except Exception as radar_err:

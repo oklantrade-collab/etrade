@@ -80,7 +80,7 @@ class CascadaManager:
                 self._update_position_db_state(pos_id, result, market_type)
 
             except Exception as e:
-                log_error(f"[{MODULE}] Error evaluating CASCADA for pos {pos.get('id')}: {e}")
+                log_error(MODULE, f"Error evaluating CASCADA for pos {pos.get('id')}: {e}")
 
         return results
 
@@ -107,4 +107,4 @@ class CascadaManager:
             }
             self.sb.table(table_name).update(update_data).eq('id', pos_id).execute()
         except Exception as e:
-            log_error(f"[{MODULE}] Error updating position DB state ({table_name} id={pos_id}): {e}")
+            log_error(MODULE, f"Error updating position DB state ({table_name} id={pos_id}): {e}")

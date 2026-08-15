@@ -43,28 +43,120 @@ class RadarService:
     def update(self, symbol: str, tf_primary: str = '15m') -> Dict[str, Any]:
         """
         Updates the signal calculations for a symbol using in-memory market data.
-        Called once per instrument/cycle by the worker.
+        Called once per instrument/cycle by the worker or on-demand by API.
         """
         sym = symbol.upper()
         df_15m = get_memory_df(sym, tf_primary)
-        df_5m = get_memory_df(sym, '5m')
-        df_1h = get_memory_df(sym, '1h')
-        df_4h = get_memory_df(sym, '4h')
-        df_1d = get_memory_df(sym, '1d')
         raw_snap = MEMORY_STORE.get('snapshots', {}).get(sym, {})
 
-        # Fail-safe (Section 2.4): If primary data is missing, publish explicit 'sin_datos'
+        # If primary data is missing from memory, attempt DB candle fetch
+        if df_15m is None or len(df_15m) < 10:
+            try:
+                from app.core.supabase_client import get_supabase
+                sb = get_supabase()
+                res = sb.table('market_candles')\
+                    .select('*')\
+                    .eq('symbol', sym)\
+                    .eq('timeframe', tf_primary)\
+                    .order('open_time', desc=True)\
+                    .limit(100)\
+                    .execute()
+                candles = res.data or []
+                if len(candles) >= 10:
+                    candles.reverse()
+                    df_fetched = pd.DataFrame(candles)
+                    return self.update_from_df(sym, df_fetched, tf_primary)
+            except Exception as db_err:
+                log_warning(f"DB fallback candle fetch failed for {sym}: {db_err}", MODULE)
+
         if df_15m is None or len(df_15m) < 10:
             snapshot = self._build_sin_datos_snapshot(sym)
             self._snapshots[sym] = snapshot
             return snapshot
 
+        return self.update_from_df(sym, df_15m, tf_primary)
+
+    def update_from_df(self, symbol: str, df_15m: pd.DataFrame, tf_primary: str = '15m') -> Dict[str, Any]:
+        """
+        Calculates all RADAR indicators from a DataFrame and updates internal snapshots.
+        """
+        sym = symbol.upper()
+        if df_15m is None or len(df_15m) < 5:
+            snapshot = self._build_sin_datos_snapshot(sym)
+            self._snapshots[sym] = snapshot
+            return snapshot
+
+        raw_snap = MEMORY_STORE.get('snapshots', {}).get(sym, {})
+
         try:
+            # Standardize numeric columns
+            df = df_15m.copy()
+            for col in ['open', 'high', 'low', 'close', 'o', 'h', 'l', 'c', 'volume', 'v']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            if 'c' in df.columns and 'close' not in df.columns: df['close'] = df['c']
+            if 'h' in df.columns and 'high' not in df.columns: df['high'] = df['h']
+            if 'l' in df.columns and 'low' not in df.columns: df['low'] = df['l']
+            if 'o' in df.columns and 'open' not in df.columns: df['open'] = df['o']
+            if 'v' in df.columns and 'volume' not in df.columns: df['volume'] = df['v']
+
+            # Compute EMAs if not present
+            if 'ema_3' not in df.columns and 'ema3' not in df.columns:
+                df['ema_3'] = df['close'].ewm(span=3, adjust=False).mean()
+            elif 'ema3' in df.columns and 'ema_3' not in df.columns:
+                df['ema_3'] = df['ema3']
+
+            if 'ema_9' not in df.columns and 'ema9' not in df.columns:
+                df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+            elif 'ema9' in df.columns and 'ema_9' not in df.columns:
+                df['ema_9'] = df['ema9']
+
+            if 'ema_20' not in df.columns and 'ema20' not in df.columns:
+                df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+            elif 'ema20' in df.columns and 'ema_20' not in df.columns:
+                df['ema_20'] = df['ema20']
+
+            if 'ema_50' not in df.columns and 'ema50' not in df.columns:
+                df['ema_50'] = df['close'].ewm(span=50, adjust=False).mean()
+            elif 'ema50' in df.columns and 'ema_50' not in df.columns:
+                df['ema_50'] = df['ema50']
+
+            if 'ema_200' not in df.columns and 'ema200' not in df.columns:
+                df['ema_200'] = df['close'].ewm(span=200, adjust=False).mean()
+            elif 'ema200' in df.columns and 'ema_200' not in df.columns:
+                df['ema_200'] = df['ema200']
+
+            # Compute ATR if not present
+            if 'atr' not in df.columns:
+                df['tr'] = np.maximum(df['high'] - df['low'], 
+                                     np.maximum(abs(df['high'] - df['close'].shift(1)), 
+                                                abs(df['low'] - df['close'].shift(1))))
+                df['atr'] = df['tr'].rolling(window=14).mean()
+                df.loc[df.index[:14], 'atr'] = df['tr'].rolling(window=14, min_periods=1).mean()
+
+            # Compute Bollinger Bands if not present
+            basis_col = 'ema_20' if 'ema_20' in df.columns else 'ema20'
+            df['basis'] = df[basis_col]
+            df['upper_1'] = df['basis'] + (df['atr'] * 1.618)
+            df['lower_1'] = df['basis'] - (df['atr'] * 1.618)
+            df['bb_width'] = (df['upper_1'] - df['lower_1']) / df['basis']
+
+            # Compute ADX if not present
+            if 'adx' not in df.columns:
+                df['dm_plus'] = np.where((df['high'] - df['high'].shift(1)) > (df['low'].shift(1) - df['low']), np.maximum(df['high'] - df['high'].shift(1), 0), 0)
+                df['dm_minus'] = np.where((df['low'].shift(1) - df['low']) > (df['high'] - df['high'].shift(1)), np.maximum(df['low'].shift(1) - df['low'], 0), 0)
+                tr_14 = df['atr']
+                df['plus_di'] = 100 * (df['dm_plus'].rolling(window=14).mean() / (tr_14 + 1e-10))
+                df['minus_di'] = 100 * (df['dm_minus'].rolling(window=14).mean() / (tr_14 + 1e-10))
+                dx = 100 * abs(df['plus_di'] - df['minus_di']) / (df['plus_di'] + df['minus_di'] + 1e-10)
+                df['adx'] = dx.rolling(window=14).mean()
+
             # 1. Classify Slopes on 15m (Spec Section 3.5)
             lookback = self.params.get('slope_lookback_candles', 3)
-            slope_ema3 = classify_slope(df_15m, 'ema_3', lookback=lookback)
-            slope_ema9 = classify_slope(df_15m, 'ema_9', lookback=lookback)
-            slope_ema20 = classify_slope(df_15m, 'ema_20', lookback=lookback)
+            slope_ema3 = classify_slope(df, 'ema_3', lookback=lookback)
+            slope_ema9 = classify_slope(df, 'ema_9', lookback=lookback)
+            slope_ema20 = classify_slope(df, 'ema_20', lookback=lookback)
 
             # Slope Matrix Interpretation (EMA3 x EMA20)
             slope_matrix = get_slope_matrix_interpretation(
@@ -73,7 +165,7 @@ class RadarService:
             )
 
             # 2. Detect EMA Crossovers
-            ema_crossovers = detect_ema_crossovers(df_15m)
+            ema_crossovers = detect_ema_crossovers(df)
             for cross_ev in ema_crossovers:
                 cross_ev['symbol'] = sym
                 cross_ev['timeframe'] = tf_primary
@@ -81,9 +173,9 @@ class RadarService:
                 log_radar_event(sym, cross_ev)
 
             # 3. Detect Fibonacci Zone & Transitions
-            curr_zone = int(df_15m['fibonacci_zone'].iloc[-2]) if 'fibonacci_zone' in df_15m.columns and not pd.isna(df_15m['fibonacci_zone'].iloc[-2]) else int(raw_snap.get('fibonacci_zone', 0))
+            curr_zone = int(df['fibonacci_zone'].iloc[-2]) if 'fibonacci_zone' in df.columns and not pd.isna(df['fibonacci_zone'].iloc[-2]) else int(raw_snap.get('fibonacci_zone', 0))
             prev_zone = self._prev_fib_zones.get(sym)
-            price = float(df_15m['close'].iloc[-2]) if 'close' in df_15m.columns else float(raw_snap.get('price', 0.0))
+            price = float(df['close'].iloc[-2]) if 'close' in df.columns else float(raw_snap.get('price', 0.0))
 
             fib_event = detect_fibonacci_crossover(prev_zone, curr_zone, price)
             if fib_event:
@@ -94,7 +186,7 @@ class RadarService:
             self._prev_fib_zones[sym] = curr_zone
 
             # 4. Detect Impulse Candle
-            impulse_event = detect_impulse_candle(df_15m, self.params.get('impulse_candle_atr_ratio', 1.8))
+            impulse_event = detect_impulse_candle(df, self.params.get('impulse_candle_atr_ratio', 1.8))
             if impulse_event:
                 impulse_event['symbol'] = sym
                 impulse_event['timeframe'] = tf_primary
@@ -102,7 +194,7 @@ class RadarService:
                 log_radar_event(sym, impulse_event)
 
             # 5. Local Regime 15m (Bullish / Bearish / Neutral)
-            last_closed = df_15m.iloc[-2]
+            last_closed = df.iloc[-2]
             ema_20 = float(last_closed.get('ema_20', 0.0))
             ema_50 = float(last_closed.get('ema_50', 0.0))
             ema_200 = float(last_closed.get('ema_200', 0.0))
@@ -129,15 +221,15 @@ class RadarService:
             # 7. Bollinger Squeeze
             bb_width = float(last_closed.get('bb_width', 0.0))
             squeeze_activo = False
-            if 'bb_width' in df_15m.columns and len(df_15m) >= 22:
-                avg_bb_width = float(df_15m['bb_width'].iloc[-22:-2].mean())
+            if 'bb_width' in df.columns and len(df) >= 22:
+                avg_bb_width = float(df['bb_width'].iloc[-22:-2].mean())
                 squeeze_activo = bb_width < avg_bb_width or bb_width < 0.02
 
             # 8. Volume Confirmation
             vol_confirmed = False
-            if 'volume' in df_15m.columns and len(df_15m) >= 12:
+            if 'volume' in df.columns and len(df) >= 12:
                 recent_vol = float(last_closed.get('volume', 0.0))
-                avg_vol = float(df_15m['volume'].iloc[-12:-2].mean())
+                avg_vol = float(df['volume'].iloc[-12:-2].mean())
                 if avg_vol > 0 and recent_vol >= (avg_vol * self.params.get('volume_expansion_ratio', 1.3)):
                     vol_confirmed = True
 
@@ -185,18 +277,18 @@ class RadarService:
             return self._snapshots[sym]
 
         except Exception as e:
-            log_error(f"[{MODULE}] Error updating RADAR for {sym}: {e}")
+            log_error(MODULE, f"Error updating RADAR for {sym}: {e}")
             return self._build_sin_datos_snapshot(sym, error=str(e))
 
     def get_snapshot(self, symbol: str) -> Dict[str, Any]:
         """
         Returns the latest computed signal snapshot for a symbol.
-        Returns 'sin_datos' if not yet calculated or missing data.
+        Automatically updates on demand if not present or 'sin_datos'.
         """
         sym = symbol.upper()
-        if sym in self._snapshots:
+        if sym in self._snapshots and self._snapshots[sym].get('status') == 'ok':
             return self._snapshots[sym]
-        return self._build_sin_datos_snapshot(sym)
+        return self.update(sym)
 
     def is_data_available(self, symbol: str) -> bool:
         """

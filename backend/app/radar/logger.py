@@ -42,6 +42,6 @@ def log_radar_event(symbol: str, event: Dict[str, Any]) -> None:
         ev_type = sanitized.get('event_type', 'UNKNOWN')
         direction = sanitized.get('direction', '')
         detail = sanitized.get('detail', '')
-        log_info(f"[{MODULE}] [{symbol}] EVENT: {ev_type} ({direction}) — {detail}")
+        log_info(MODULE, f"[{symbol}] EVENT: {ev_type} ({direction}) — {detail}")
     except Exception as e:
-        log_error(f"[{MODULE}] Error logging radar event: {e}")
+        log_error(MODULE, f"Error logging radar event: {e}")

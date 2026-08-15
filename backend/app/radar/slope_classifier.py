@@ -38,20 +38,29 @@ def classify_slope(
             'detail': f"Insufficient data (need at least {lookback + 2} candles)"
         }
 
-    # Ensure required columns exist
-    if ema_col not in df.columns:
-        return {
-            'ema_col': ema_col,
-            'slope_raw': 0.0,
-            'slope_normalized': 0.0,
-            'classification': 'sin_datos',
-            'detail': f"Column '{ema_col}' not found in dataframe"
-        }
+    # Ensure required columns exist with fallback aliases
+    actual_col = ema_col
+    if actual_col not in df.columns:
+        aliases = [ema_col.replace('_', ''), ema_col.upper(), ema_col.lower(), ema_col.upper().replace('_', '')]
+        found = False
+        for a in aliases:
+            if a in df.columns:
+                actual_col = a
+                found = True
+                break
+        if not found:
+            return {
+                'ema_col': ema_col,
+                'slope_raw': 0.0,
+                'slope_normalized': 0.0,
+                'classification': 'sin_datos',
+                'detail': f"Column '{ema_col}' not found in dataframe"
+            }
 
     # Closed candles: iloc[-2] is the last closed, iloc[-2 - lookback] is N candles back
     try:
-        current_ema = df[ema_col].iloc[-2]
-        past_ema = df[ema_col].iloc[-2 - lookback]
+        current_ema = df[actual_col].iloc[-2]
+        past_ema = df[actual_col].iloc[-2 - lookback]
         
         # Check for NaN
         if pd.isna(current_ema) or pd.isna(past_ema):

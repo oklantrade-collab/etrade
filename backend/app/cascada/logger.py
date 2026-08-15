@@ -61,9 +61,10 @@ def log_cascada_decision(result: Any) -> None:
         sb.table('cascada_decisions_log').insert(record).execute()
 
         log_info(
-            f"[{MODULE}] [{result.symbol}] Pos {result.position_id[:8]}: "
+            MODULE,
+            f"[{result.symbol}] Pos {result.position_id[:8]}: "
             f"N{result.current_level} -> {result.decision} (Hold: {result.cascade_hold}, "
             f"PnL: ${result.pnl_current:.2f}/{result.pnl_pico:.2f}) — {result.detail}"
         )
     except Exception as e:
-        log_error(f"[{MODULE}] Error saving cascada decision to log: {e}")
+        log_error(MODULE, f"Error saving cascada decision to log: {e}")
