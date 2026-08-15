@@ -93,6 +93,18 @@ class ForexExecutionService:
             self.log(f'⚠️ HALCÓN CENTINELA no disponible: {e}', 'WARNING')
             self.centinela_monitor = None
 
+        # ── RADAR & CASCADA: Shared Signal Bus & Extended Position Management ──
+        try:
+            from app.radar.radar_service import RadarService
+            from app.cascada.cascada_manager import CascadaManager
+            self.radar_service = RadarService.get_instance()
+            self.cascada_manager = CascadaManager.get_instance()
+            self.log('✅ RADAR y CASCADA inicializados correctamente')
+        except Exception as e:
+            self.log(f'⚠️ RADAR/CASCADA no disponible: {e}', 'WARNING')
+            self.radar_service = None
+            self.cascada_manager = None
+
     def _safe_float(self, val, default=0.0):
         try:
             if val is None: return default
@@ -1482,8 +1494,12 @@ class ForexExecutionService:
         except:
             return 'TENDENCIA_SOSTENIDA'
 
-    def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper', is_limit=False):
+    def _save_position(self, symbol, direction, lots, entry, sl, tp, rule_code, mode='paper', is_limit=False, origen='STANDARD'):
         try:
+            # Determine origin: if not explicitly provided, tag REBOTE if rule starts with AaReb/BbReb
+            if origen == 'STANDARD' and rule_code and str(rule_code).startswith(('AaReb', 'BbReb', 'REBOTE')):
+                origen = 'REBOTE'
+
             # Aplicar signo algebraico (Negativo para SHORT/SELL)
             final_lots = -abs(float(lots)) if str(direction).lower() == 'short' or str(direction).lower() == 'sell' else abs(float(lots))
             
@@ -1511,7 +1527,8 @@ class ForexExecutionService:
                 'tp_price': float(tp), 
                 'status': 'pending' if is_limit else 'open', 
                 'mode': mode, 
-                'rule_code': rule_code, 
+                'rule_code': rule_code,
+                'origen': origen,
                 'opened_at': datetime.now(timezone.utc).isoformat(),
                 #    SLVM Fields   
                 'slv_price': slv_price,
@@ -1521,7 +1538,7 @@ class ForexExecutionService:
             }
             res = self.sb.table('forex_positions').insert(pos).execute()
             if res.data: 
-                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots}')
+                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots} (Origen: {origen})')
                 self._open_positions_list.append(res.data[0])
         except Exception as e: self.log(f'Error guardando: {e}')
 
@@ -1587,12 +1604,35 @@ class ForexExecutionService:
             except Exception as centinela_err:
                 self.log(f"⚠️ [CENTINELA] Error en evaluación: {centinela_err}", 'WARNING')
 
+        # ── CASCADA: Gestor de posiciones en extensión (REBOTE) ──
+        cascada_closed_ids = set()
+        if hasattr(self, 'cascada_manager') and self.cascada_manager:
+            try:
+                cascada_results = self.cascada_manager.evaluate_all_cascade_positions(self._open_positions_list, market_type='forex')
+                for cr in cascada_results:
+                    if cr.decision in ('CERRAR', 'GIVEBACK_CLOSE'):
+                        target_pos = next((p for p in self._open_positions_list if str(p.get('id')) == str(cr.position_id)), None)
+                        if target_pos:
+                            price_data = self.state['prices'].get(cr.symbol)
+                            cur_p = self._safe_float(price_data.get('mid')) if price_data else self._safe_float(target_pos.get('current_price'))
+                            pip_sz = PIP_CONFIG.get(cr.symbol, {}).get('pip', 0.0001)
+                            entry_p = self._safe_float(target_pos.get('entry_price'))
+                            is_b = target_pos.get('side', '').lower() in ('long', 'buy')
+                            pips_val = (cur_p - entry_p)/pip_sz if is_b else (entry_p - cur_p)/pip_sz
+                            
+                            self.log(f"🌊 [CASCADA] Ejecutando cierre {cr.decision} para {cr.symbol} N{cr.current_level} ({cr.detail})")
+                            self._close_position(target_pos, cur_p, f"CASCADA_{cr.decision}_N{cr.current_level}", pips_val)
+                            cascada_closed_ids.add(str(cr.position_id))
+            except Exception as cascada_err:
+                self.log(f"⚠️ [CASCADA] Error en evaluación: {cascada_err}", 'WARNING')
+
         for pos in list(self._open_positions_list):
             try: 
                 symbol = pos['symbol']
 
-                # Skip posiciones ya cerradas por CENTINELA en este ciclo
-                if str(pos.get('id')) in centinela_closed_ids:
+                # Skip posiciones ya cerradas por CENTINELA o CASCADA en este ciclo
+                pos_id_str = str(pos.get('id'))
+                if pos_id_str in centinela_closed_ids or pos_id_str in cascada_closed_ids:
                     continue
 
                 # Skip posiciones con cierre en progreso (arbitraje CENTINELA)

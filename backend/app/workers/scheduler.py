@@ -1632,7 +1632,19 @@ async def process_profit_management_15m(
         if market_type == 'forex_futures'
         else 'stocks_positions'
     )
-    from app.workers.performance_monitor import send_telegram_message
+    # ── CASCADA: Extended Position Management (REBOTE) ───────────────
+    try:
+        from app.cascada.cascada_manager import CascadaManager
+        cm = CascadaManager.get_instance()
+        cascade_results = cm.evaluate_all_cascade_positions([position], market_type='crypto')
+        if cascade_results:
+            c_res = cascade_results[0]
+            if c_res.decision in ('CERRAR', 'GIVEBACK_CLOSE'):
+                log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Cierre {c_res.decision} para {symbol} N{c_res.current_level} ({c_res.detail})")
+                await _execute_paper_close(position, current_price, f"CASCADA_{c_res.decision}_N{c_res.current_level}", sb)
+                return True
+    except Exception as cascade_err:
+        log_error('CASCADA', f"Error evaluando CASCADA crypto para {symbol}: {cascade_err}")
 
     # ── MÓDULO A: Profit Capture ───────────────
     # (sobreextensión extrema → cierre inmediato)
@@ -2634,6 +2646,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                       vel_config = get_velocity_config(float(snap_ref.get('adx', 25)))
                                       cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
                                       qty_4h = (cap_op * 0.1 * vel_config.get('sizing_pct', 1.0)) / current_price
+                                      
                                       await _execute_paper_open(
                                           symbol=symbol, side=signal_4h['direction'], price=current_price,
                                           size=qty_4h, rule_code=signal_4h['rule_code'], 
@@ -2644,6 +2657,13 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                       )
                        except Exception as scalp_4h_e:
                            log_error('SCALPING_4H', f'{symbol}: Error en evaluación scalping 4h: {scalp_4h_e}')
+
+        # ── RADAR: Update shared signal bus for crypto symbol ──
+        try:
+            from app.radar.radar_service import RadarService
+            RadarService.get_instance().update(symbol, '15m')
+        except Exception as radar_err:
+            log_warning('RADAR', f"Error updating RADAR for crypto symbol {symbol}: {radar_err}")
 
     except Exception as inner_e:
         import traceback

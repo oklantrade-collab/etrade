@@ -992,6 +992,30 @@ async def open_forex_position(
     if diff != 0 and num_orders > 0:
         base_lots[0] = round(base_lots[0] + diff, 2)
         
+    # ── ADUANA: Validación centralizada de órdenes ──
+    try:
+        from app.rebote_aduana import AduanaValidator
+        from app.core.memory_store import get_memory_df
+        aduana = AduanaValidator(oraculo_manager=None)
+        market_data_aduana = {
+            'df_15m': get_memory_df(symbol, '15m'),
+            'df_5m': get_memory_df(symbol, '5m'),
+            'df_4h': get_memory_df(symbol, '4h'),
+            'df_1d': get_memory_df(symbol, '1d'),
+        }
+        aduana_res = aduana.validate(
+            symbol=symbol,
+            side=direction,
+            order_type='LIMIT' if is_primary_entry else 'MARKET',
+            market_data=market_data_aduana,
+            strategy=signal.get('rule_code', 'forex_signal'),
+        )
+        if not aduana_res.approved:
+            log_info('ADUANA_FX', f"🛑 {symbol} {direction.upper()} rechazada por ADUANA: {aduana_res.rule_triggered} ({aduana_res.reason})")
+            return
+    except Exception as aduana_err:
+        log_warning('ADUANA_FX', f"Error validando orden Forex con ADUANA para {symbol}: {aduana_err}")
+
     for idx, limit_px in enumerate(limit_list):
         order_lots = base_lots[idx]
         if order_lots < 0.01:
@@ -2254,6 +2278,18 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                 )
             except Exception as swing_ema_err:
                 log_error(MODULE, f"{symbol}/15m swing ema error: {swing_ema_err}")
+
+            # --- REBOTE (MOTOR DE ENTRADAS EN EXTREMOS) PARA FOREX ---
+            try:
+                from app.rebote_aduana.rebote_monitor import ReboteMonitor
+                rebote_mon = ReboteMonitor(supabase=sb, market_type='forex')
+                rebote_results = rebote_mon.scan_all_symbols([symbol])
+                if rebote_results:
+                    for r_res in rebote_results:
+                        if r_res.get('executed'):
+                            log_info('REBOTE_FX', f"🎯 Entrada REBOTE Forex ejecutada para {symbol}: {r_res}")
+            except Exception as rebote_fx_e:
+                log_error('REBOTE_FX', f"{symbol}: Error en evaluación REBOTE Forex: {rebote_fx_e}")
 
         # PHASE 6: Swing Orders (4h cycle = cada 16 ciclos)
         if _forex_cycle_count % 16 == 0:

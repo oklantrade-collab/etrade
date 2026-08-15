@@ -137,13 +137,13 @@ export default function HalconConfigModal({ onClose }: HalconConfigModalProps) {
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
       <div 
-        className={\`absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity duration-300 \${isVisible ? 'opacity-100' : 'opacity-0'}\`} 
+        className={`absolute inset-0 bg-slate-950/80 backdrop-blur-sm transition-opacity duration-300 ${isVisible ? 'opacity-100' : 'opacity-0'}`} 
         onClick={handleClose} 
       />
       
       {/* Modal Content */}
       <div 
-        className={\`relative w-full max-w-4xl max-h-[90vh] bg-slate-900 border border-slate-700 shadow-2xl rounded-2xl flex flex-col transition-all duration-300 ease-out transform \${isVisible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-8 scale-95'}\`}
+        className={`relative w-full max-w-4xl max-h-[90vh] bg-slate-900 border border-slate-700 shadow-2xl rounded-2xl flex flex-col transition-all duration-300 ease-out transform ${isVisible ? 'opacity-100 translate-y-0 scale-100' : 'opacity-0 translate-y-8 scale-95'}`}
       >
         {/* Header */}
         <div className="flex justify-between items-center p-6 border-b border-slate-800">

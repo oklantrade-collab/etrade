@@ -3,6 +3,9 @@ import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import ForexWelcomeScreen from '../WelcomeScreen'
 import TradeMarkerChart from '@/components/TradeMarkerChart'
+import RadarWidget from '@/components/widgets/RadarWidget'
+import CascadaWidget from '@/components/widgets/CascadaWidget'
+import HalconCentinelaWidget from '@/components/widgets/HalconCentinelaWidget'
 
 // No longer hardcoded - loaded from DB
 const DEFAULT_FOREX_PAIRS = [
@@ -18,6 +21,7 @@ const PAIR_META: Record<string, any> = {
 
 export default function ForexDashboard() {
   const [snapshots, setSnapshots] = useState<any>({})
+  const [strategyHud, setStrategyHud] = useState<any>(null)
   const [focusPair, setFocusPair] = useState('EURUSD')
   const [candles, setCandles] = useState<any[]>([])
   const [trades, setTrades] = useState<any[]>([])
@@ -37,16 +41,31 @@ export default function ForexDashboard() {
 
   useEffect(() => {
     if (connected) {
+        fetchStrategyHud(focusPair)
         const intervalSnap = setInterval(fetchSnapshots, 15000)
         const intervalCandles = setInterval(() => loadChartData(focusPair, false), 30000)
         const intervalPos = setInterval(fetchPositions, 10000)
+        const intervalHud = setInterval(() => fetchStrategyHud(focusPair), 15000)
         return () => {
             clearInterval(intervalSnap)
             clearInterval(intervalCandles)
             clearInterval(intervalPos)
+            clearInterval(intervalHud)
         }
     }
   }, [focusPair, timeframe, connected])
+
+  const fetchStrategyHud = async (pair: string) => {
+    try {
+      const res = await fetch(`/api/v1/strategy-hub/hud/${pair}`)
+      if (res.ok) {
+        const data = await res.json().catch(() => null)
+        setStrategyHud(data)
+      }
+    } catch (err) {
+      console.error("Fetch strategy hud failed", err)
+    }
+  }
 
   const loadConfig = async () => {
     try {
@@ -273,7 +292,24 @@ export default function ForexDashboard() {
               />
           </div>
         </div>
-        <ForexAnalysisPanel pair={focusPair} snap={snap} activePosition={activePosition} />
+        
+        {/* RIGHT COLUMN: UNIFIED STRATEGY HUD (RADAR, CASCADA, HALCÓN) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <RadarWidget 
+            symbol={focusPair} 
+            radarSnapshot={strategyHud?.radar} 
+          />
+          <CascadaWidget 
+            symbol={focusPair} 
+            position={activePosition} 
+            radarSnapshot={strategyHud?.radar} 
+          />
+          <HalconCentinelaWidget 
+            symbol={focusPair} 
+            halconData={strategyHud?.halcon} 
+            position={activePosition} 
+          />
+        </div>
       </div>
       {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
     </div>

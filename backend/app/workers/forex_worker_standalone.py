@@ -1443,6 +1443,14 @@ class StandaloneForexWorker:
                         self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
                         
                     elif res_trail['action'] == 'close_market':
+                        # Spec Section 3.6: CASCADA SLV/SLVM Delegation
+                        is_rebote_cascade = (str(pos.get('origen', '')).upper() == 'REBOTE' or str(pos.get('rule_code', '')).startswith(('AaReb', 'BbReb', 'REBOTE')))
+                        trail_reason = str(res_trail.get('reason', ''))
+                        
+                        if is_rebote_cascade and ('ema' in trail_reason.lower() or 'pnl_floor' in trail_reason.lower() or 'pnl <= $1' in trail_reason.lower()):
+                            self.log(f"🌊 [CASCADA DELEGATION] {symbol} {side.upper()} — Trailing trigger '{trail_reason}' delegado a evaluación de CASCADA")
+                            continue
+
                         self.log(f"[TRAILING-5M CLOSE] {symbol} {side.upper()} @ {current_price} | Razón: {res_trail['reason']}", "WARNING")
                         # 1. Cerrar en cTrader
                         c_id = pos.get('ctrader_pos_id')
@@ -1779,6 +1787,13 @@ class StandaloneForexWorker:
                         return sb.table('market_snapshot').upsert(s, on_conflict='symbol').execute()
 
                     raise e
+
+            # Update RADAR shared signal bus
+            try:
+                from app.radar.radar_service import RadarService
+                RadarService.get_instance().update(symbol, '15m')
+            except Exception as radar_err:
+                self.log(f"⚠️ [RADAR] Error updating signals for {symbol}: {radar_err}", "WARNING")
 
             threads.deferToThread(safe_upsert, query, snap).addErrback(
                 lambda f: self.log(f"Error async db snapshot: {f.getErrorMessage()}", "ERROR")

@@ -5,6 +5,9 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import TradeMarkerChart, { TradeEvent } from '@/components/TradeMarkerChart'
 import RuleDiagnosticPanel from '@/components/RuleDiagnosticPanel'
+import RadarWidget from '@/components/widgets/RadarWidget'
+import CascadaWidget from '@/components/widgets/CascadaWidget'
+import HalconCentinelaWidget from '@/components/widgets/HalconCentinelaWidget'
 
 interface SymbolData {
   price: number
@@ -114,6 +117,7 @@ export default function DashboardPage() {
 function DashboardContent() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
+  const [strategyHud, setStrategyHud] = useState<any>(null)
   const [diagnosticSymbol, setDiagnosticSymbol] = useState<string | null>(null)
   const [selectedTf, setSelectedTf] = useState('15m')
   const [showChart, setShowChart] = useState(false)
@@ -125,6 +129,24 @@ function DashboardContent() {
   const [mode, setMode] = useState<string | null>(null)
   const searchParams = useSearchParams()
   const urlSymbol = searchParams.get('symbol')
+
+  useEffect(() => {
+    if (selectedSymbol) {
+      fetchStrategyHud(selectedSymbol)
+    }
+  }, [selectedSymbol])
+
+  const fetchStrategyHud = async (sym: string) => {
+    try {
+      const res = await fetch(`/api/v1/strategy-hub/hud/${sym}`)
+      if (res.ok) {
+        const hud = await res.json().catch(() => null)
+        setStrategyHud(hud)
+      }
+    } catch (err) {
+      console.error("Crypto strategy hud fetch failed:", err)
+    }
+  }
 
   useEffect(() => {
     if (urlSymbol && data?.symbols[urlSymbol]) {
@@ -656,14 +678,34 @@ function DashboardContent() {
               </div>
             </div>
           ) : (
-            <div className="card glass-effect border-slate-800/50 h-full p-8 flex flex-col items-center justify-center text-center opacity-60">
-               <span className="text-4xl mb-6 grayscale text-slate-700">💼</span>
-               <h3 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-2">Sin Posición Activa</h3>
-               <p className="text-sm font-medium text-slate-600 italic">Esperando señal válida para {selectedSymbol}</p>
+            <div className="flex flex-col gap-4">
+              <RadarWidget 
+                symbol={selectedSymbol || 'BTCUSDT'} 
+                radarSnapshot={strategyHud?.radar} 
+              />
+              <HalconCentinelaWidget 
+                symbol={selectedSymbol || 'BTCUSDT'} 
+                halconData={strategyHud?.halcon} 
+              />
             </div>
           )}
         </div>
       </div>
+
+      {/* SECCIÓN 4.5 — STRATEGY HUD EXTENSION (CASCADA & RADAR) */}
+      {selectedSymbol && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <CascadaWidget 
+            symbol={selectedSymbol} 
+            position={currentFocus?.position} 
+            radarSnapshot={strategyHud?.radar} 
+          />
+          <RadarWidget 
+            symbol={selectedSymbol} 
+            radarSnapshot={strategyHud?.radar} 
+          />
+        </div>
+      )}
 
       {/* SECCIÓN 5 — Signals y Spikes */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">

@@ -87,14 +87,19 @@ class CentinelaMonitor:
         
         # 6. Arbitrate if decision is to close
         if decision in (CentinelaDecision.CIERRE_TOTAL.value, CentinelaDecision.CIERRE_PARCIAL.value):
-            arbitration = arbitrate_close_signal(decision, norm_pos, self.state_tracker)
-            if arbitration['execute']:
-                # 7. Execute close
-                executed = self._execute_close(norm_pos, decision, halcon_result)
-                if executed:
-                    self.state_tracker.register_close_action(pos_id, decision)
+            # Spec 4.1.2: Check cascade_hold lock
+            if norm_pos.get('cascade_hold', False):
+                decision = "BLOCKED_BY_CASCADE_HOLD"
+                log_info(f"[{MODULE}] Position {pos_id} close blocked by active CASCADE_HOLD", MODULE)
             else:
-                decision = f"BLOCKED_BY_{arbitration['blocked_by']}"
+                arbitration = arbitrate_close_signal(decision, norm_pos, self.state_tracker)
+                if arbitration['execute']:
+                    # 7. Execute close
+                    executed = self._execute_close(norm_pos, decision, halcon_result)
+                    if executed:
+                        self.state_tracker.register_close_action(pos_id, decision)
+                else:
+                    decision = f"BLOCKED_BY_{arbitration['blocked_by']}"
 
         # 8. Log decision
         log_centinela_decision(pos_id, decision, halcon_result, executed)

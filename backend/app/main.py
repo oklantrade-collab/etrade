@@ -50,6 +50,7 @@ from app.api.admin import router as admin_router
 from app.api.forex import router as forex_router
 from app.api.stocks import router as stocks_router
 from app.api.halcon import router as halcon_router
+from app.api.radar_cascada import router as radar_cascada_router
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Autenticación"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Administración"])
@@ -66,3 +67,5 @@ app.include_router(backtests_router, prefix="/api/v1/backtests", tags=["Backtest
 app.include_router(forex_router, prefix="/api/v1/forex", tags=["Forex"])
 app.include_router(stocks_router, prefix="/api/v1/stocks", tags=["Stocks"])
 app.include_router(halcon_router)
+app.include_router(radar_cascada_router)
+

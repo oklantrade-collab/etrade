@@ -10,6 +10,54 @@ ROOT_REMOTE_PATH = "/home/etrade/etrade"
 
 # Archivos críticos para sincronizar (relativos a backend)
 files_to_sync = [
+    # RADAR
+    "app/radar/__init__.py",
+    "app/radar/config.py",
+    "app/radar/slope_classifier.py",
+    "app/radar/crossover_detector.py",
+    "app/radar/event_bus.py",
+    "app/radar/radar_service.py",
+    "app/radar/logger.py",
+
+    # CASCADA
+    "app/cascada/__init__.py",
+    "app/cascada/config.py",
+    "app/cascada/giveback_monitor.py",
+    "app/cascada/level_evaluator.py",
+    "app/cascada/cascada_engine.py",
+    "app/cascada/cascada_manager.py",
+    "app/cascada/logger.py",
+
+    # API
+    "app/api/radar_cascada.py",
+    "app/api/halcon.py",
+    "app/main.py",
+
+    # Migraciones & Tests
+    "migration_035_radar_cascada.sql",
+    "migration_034_rebote_aduana.sql",
+    "tests/test_radar_service.py",
+    "tests/test_cascada_engine.py",
+
+    # REBOTE / ADUANA
+    "app/rebote_aduana/__init__.py",
+    "app/rebote_aduana/config.py",
+    "app/rebote_aduana/rebote_engine.py",
+    "app/rebote_aduana/aduana_validator.py",
+    "app/rebote_aduana/rebote_monitor.py",
+    "app/rebote_aduana/logger.py",
+    "app/rebote_aduana/scoring/__init__.py",
+    "app/rebote_aduana/scoring/signal_fib_extreme.py",
+    "app/rebote_aduana/scoring/signal_double_bottom.py",
+    "app/rebote_aduana/scoring/signal_ema_squeeze.py",
+    "app/rebote_aduana/scoring/signal_rsi_extreme.py",
+    "app/rebote_aduana/scoring/signal_zone_confluence.py",
+    "app/rebote_aduana/scoring/regime_local.py",
+    "app/core/breakpoint_detector.py",
+    "tests/test_rebote_engine.py",
+    "tests/test_aduana_validator.py",
+    "tests/test_breakpoint_detector.py",
+
     # HALCÓN CENTINELA
     "app/halcon_centinela/__init__.py",
     "app/halcon_centinela/config.py",
@@ -122,7 +170,12 @@ files_to_sync = [
 # Archivos frontend para sincronizar (relativos a root)
 frontend_files = [
     ("frontend/app/halcon/page.tsx", "frontend/app/halcon/page.tsx"),
-    ("frontend/components/HalconConfigModal.tsx", "frontend/components/HalconConfigModal.tsx")
+    ("frontend/components/HalconConfigModal.tsx", "frontend/components/HalconConfigModal.tsx"),
+    ("frontend/components/widgets/CascadaWidget.tsx", "frontend/components/widgets/CascadaWidget.tsx"),
+    ("frontend/components/widgets/RadarWidget.tsx", "frontend/components/widgets/RadarWidget.tsx"),
+    ("frontend/components/widgets/HalconCentinelaWidget.tsx", "frontend/components/widgets/HalconCentinelaWidget.tsx"),
+    ("frontend/app/forex/dashboard/page.tsx", "frontend/app/forex/dashboard/page.tsx"),
+    ("frontend/app/dashboard/page.tsx", "frontend/app/dashboard/page.tsx")
 ]
 
 def check_syntax():
@@ -157,11 +210,15 @@ def check_syntax():
 def ensure_remote_directories():
     print("Creando estructura de directorios remota...")
     dirs = [
+        f"{REMOTE_PATH}/app/radar",
+        f"{REMOTE_PATH}/app/cascada",
+        f"{REMOTE_PATH}/app/rebote_aduana/scoring",
         f"{REMOTE_PATH}/app/halcon_centinela/scoring",
         f"{REMOTE_PATH}/app/halcon_centinela/oraculo",
+        f"{REMOTE_PATH}/data",
         f"{REMOTE_PATH}/tests",
         f"{ROOT_REMOTE_PATH}/frontend/app/halcon",
-        f"{ROOT_REMOTE_PATH}/frontend/components"
+        f"{ROOT_REMOTE_PATH}/frontend/components/widgets"
     ]
     mkdir_cmd = f"mkdir -p {' '.join(dirs)}"
     cmd = [
