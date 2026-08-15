@@ -119,7 +119,7 @@ def get_symbol_strategy_hud(symbol: str):
     except Exception:
         pos_data = None
 
-    # Gather Halcon recent score
+    # Gather Halcon recent score or compute on the fly
     halcon_score = 0.0
     halcon_semaforo = 'VERDE'
     try:
@@ -127,17 +127,78 @@ def get_symbol_strategy_hud(symbol: str):
         if h_res.data:
             halcon_score = float(h_res.data[0].get('score_final', 0.0))
             halcon_semaforo = str(h_res.data[0].get('semaforo', 'VERDE'))
+        else:
+            # Fallback estimation from RADAR indicators
+            adx = float(radar_snap.get('adx_val', 20.0))
+            rsi = float(radar_snap.get('rsi_val', 50.0))
+            squeeze = bool(radar_snap.get('squeeze_activo', False))
+            
+            calc_score = 0.0
+            if rsi >= 75 or rsi <= 25: calc_score += 30.0
+            if squeeze: calc_score += 20.0
+            if adx < 15.0: calc_score += 15.0
+            
+            halcon_score = calc_score
+            if halcon_score >= 60.0:
+                halcon_semaforo = 'ROJO'
+            elif halcon_score >= 35.0:
+                halcon_semaforo = 'AMARILLO'
+            else:
+                halcon_semaforo = 'VERDE'
     except Exception:
-        pass
+        halcon_score = 15.0
+        halcon_semaforo = 'VERDE'
+
+    # Compute Cascada projected level from EMA alignment & Fibonacci zone
+    projected_level = 0
+    fib_zone = abs(int(radar_snap.get('fibonacci_zone', 0)))
+    slope_ema3 = radar_snap.get('pendiente_EMA3', '')
+    slope_ema9 = radar_snap.get('pendiente_EMA9', '')
+    slope_ema20 = radar_snap.get('pendiente_EMA20', '')
+    local_regime = radar_snap.get('regimen_local_15m', '')
+
+    if fib_zone >= 5:
+        projected_level = 5
+    elif local_regime in ('bullish', 'bearish') and slope_ema20 in ('ascending', 'descending'):
+        projected_level = 4
+    elif (slope_ema3 == slope_ema9 == slope_ema20) and slope_ema3 in ('ascending', 'descending'):
+        projected_level = 3
+    elif slope_ema3 == slope_ema9 and slope_ema3 in ('ascending', 'descending'):
+        projected_level = 2
+    elif slope_ema3 in ('ascending', 'descending'):
+        projected_level = 1
+    else:
+        projected_level = 0
+
+    # If no open position, fetch last closed position for historical context
+    last_closed_pos = None
+    if not pos_data:
+        try:
+            lc_f = sb.table('forex_positions').select('*').eq('symbol', sym).eq('status', 'closed').order('closed_at', desc=True).limit(1).execute()
+            if lc_f.data:
+                last_closed_pos = lc_f.data[0]
+            else:
+                lc_c = sb.table('positions').select('*').eq('symbol', sym).eq('status', 'closed').order('closed_at', desc=True).limit(1).execute()
+                if lc_c.data:
+                    last_closed_pos = lc_c.data[0]
+        except Exception:
+            pass
 
     return {
         'symbol': sym,
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'radar': radar_snap,
+        'cascada': {
+            'projected_level': projected_level,
+            'current_level': pos_data.get('cascade_level', projected_level) if pos_data else projected_level,
+            'cascade_hold': bool(pos_data.get('cascade_hold', False)) if pos_data else False,
+            'pnl_pico': float(pos_data.get('pnl_pico', 0.0)) if pos_data else float(last_closed_pos.get('pnl_pico', 0.0) if last_closed_pos else 0.0),
+            'last_closed_position': last_closed_pos
+        },
         'halcon': {
             'score_final': halcon_score,
             'semaforo': halcon_semaforo,
             'trading_paused': radar_snap.get('trading_paused', False)
         },
-        'position': pos_data
+        'position': pos_data or last_closed_pos
     }

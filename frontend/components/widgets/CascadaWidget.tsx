@@ -17,10 +17,33 @@ const LEVELS = [
 ]
 
 export default function CascadaWidget({ symbol, position, radarSnapshot }: CascadaWidgetProps) {
-  const currentLevel = position?.cascade_level !== undefined && position?.cascade_level !== null ? position.cascade_level : 0
-  const isCascadeHold = !!position?.cascade_hold
+  // Determine current level from position or projected market alignment
+  const hasActivePosition = !!position && (position.status === 'open' || !position.status)
+  
+  let currentLevel = 0
+  if (hasActivePosition && position?.cascade_level !== undefined && position?.cascade_level !== null) {
+    currentLevel = position.cascade_level
+  } else if (radarSnapshot?.cascada?.projected_level !== undefined) {
+    currentLevel = radarSnapshot.cascada.projected_level
+  } else {
+    // Local calculation from radarSnapshot slopes & fibonacci
+    const fibZone = Math.abs(parseInt(radarSnapshot?.fibonacci_zone || 0))
+    const slopeEma3 = radarSnapshot?.pendiente_EMA3
+    const slopeEma9 = radarSnapshot?.pendiente_EMA9
+    const slopeEma20 = radarSnapshot?.pendiente_EMA20
+    const localRegime = radarSnapshot?.regimen_local_15m
+
+    if (fibZone >= 5) currentLevel = 5
+    else if (localRegime && localRegime !== 'neutral' && slopeEma20 && slopeEma20 !== 'lateral') currentLevel = 4
+    else if (slopeEma3 && slopeEma3 === slopeEma9 && slopeEma9 === slopeEma20 && slopeEma3 !== 'lateral') currentLevel = 3
+    else if (slopeEma3 && slopeEma3 === slopeEma9 && slopeEma3 !== 'lateral') currentLevel = 2
+    else if (slopeEma3 && slopeEma3 !== 'lateral') currentLevel = 1
+    else currentLevel = 0
+  }
+
+  const isCascadeHold = hasActivePosition ? !!position?.cascade_hold : false
   const pnlCurrent = parseFloat(position?.pnl_usd || position?.unrealized_pnl || position?.unrealized_pnl_usd || 0)
-  const pnlPico = parseFloat(position?.pnl_pico || 0)
+  const pnlPico = parseFloat(position?.pnl_pico || radarSnapshot?.cascada?.pnl_pico || 0)
   const isReboteOrigin = position?.origen?.toUpperCase() === 'REBOTE' || position?.rule_code?.startsWith('AaReb') || position?.rule_code?.startsWith('BbReb')
 
   const floorPnl = pnlPico > 0 ? pnlPico * 0.5 : 0
@@ -47,7 +70,9 @@ export default function CascadaWidget({ symbol, position, radarSnapshot }: Casca
               CASCADA — Gestor en Extensión
             </h4>
             <span style={{ fontSize: '10px', color: '#64748B' }}>
-              {isReboteOrigin ? 'Modo Activo (Origen: REBOTE)' : 'Monitoreo Pasivo (Modo Estándar)'}
+              {hasActivePosition 
+                ? (isReboteOrigin ? 'Modo Activo (Origen: REBOTE)' : 'Monitoreo Pasivo (Modo Estándar)')
+                : 'Proyección de Tendencia (Sin posición activa)'}
             </span>
           </div>
         </div>
@@ -70,14 +95,16 @@ export default function CascadaWidget({ symbol, position, radarSnapshot }: Casca
             background: isCascadeHold ? '#38BDF8' : '#64748B',
             boxShadow: isCascadeHold ? '0 0 8px #38BDF8' : 'none'
           }} />
-          {isCascadeHold ? 'CASCADE HOLD: ACTIVO' : 'HOLD LIBRE'}
+          {hasActivePosition 
+            ? (isCascadeHold ? 'CASCADE HOLD: ACTIVO' : 'HOLD LIBRE')
+            : 'HOLD STANDBY'}
         </div>
       </div>
 
       {/* Waterfall Level Progress */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#94A3B8', fontWeight: 700 }}>
-          <span>Nivel de Cascada Alcanzado:</span>
+          <span>{hasActivePosition ? 'Nivel de Cascada Alcanzado:' : 'Nivel de Cascada Proyectado:'}</span>
           <span style={{ color: '#38BDF8', fontWeight: 900 }}>NIVEL N{currentLevel}</span>
         </div>
 

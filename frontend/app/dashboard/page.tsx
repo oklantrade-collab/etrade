@@ -971,66 +971,66 @@ function SymbolCard({
              </div>
           </div>
         ) : (
-          <div className="pt-3 border-t border-white/5 space-y-4">
-             {/* --- SECCION SCALPING --- */}
-             <div className="space-y-2">
-                <div className="flex items-center gap-2 border-b border-white/5 pb-1">
-                   <div className="w-1 h-3 bg-blue-500 rounded-full" />
-                   <span className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest">Scalping Signals</span>
+          <div className="pt-3 border-t border-white/5 space-y-3">
+             {/* --- SECCIÓN RADAR --- */}
+             <div className="space-y-1.5 bg-black/20 p-2.5 rounded-xl border border-white/5">
+                <div className="flex justify-between items-center pb-1 border-b border-white/5">
+                   <div className="flex items-center gap-1.5">
+                      <span className="text-xs">📡</span>
+                      <span className="text-[0.6rem] font-black text-slate-400 uppercase tracking-wider">RADAR 15M</span>
+                   </div>
+                   <span className="text-[0.55rem] font-black px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 uppercase">
+                     {data.adx >= 30 ? 'TENDENCIA' : data.adx < 15 ? 'RANGO' : 'MODERADO'}
+                   </span>
                 </div>
-                <div className="space-y-1.5 px-1">
-                   <div className="flex justify-between items-center text-[0.6rem] font-bold">
-                      <span className="text-slate-500">MTF Score</span>
-                      <span className={(data.mtf_score || 0) >= adxInfo.threshold ? 'text-emerald-400' : 'text-slate-400'}>
-                        {(data.mtf_score || 0).toFixed(2)} <span className="text-[0.5rem] opacity-50">/ {adxInfo.threshold}</span>
-                      </span>
+                <div className="grid grid-cols-3 gap-1 pt-1 text-center font-mono text-[0.6rem]">
+                   <div className="bg-white/5 p-1 rounded">
+                      <div className="text-[0.5rem] text-slate-500 font-sans">EMA3</div>
+                      <div className="font-black text-emerald-400">▲ ASC</div>
                    </div>
-                   <div className="flex justify-between items-center text-[0.6rem] font-bold">
-                      <span className="text-slate-500">Velocidad</span>
-                      <span className={adxInfo.color}>
-                        {adxInfo.label} <span className="text-[0.5rem] opacity-50">(ADX {(data.adx || 0).toFixed(1)})</span>
-                      </span>
+                   <div className="bg-white/5 p-1 rounded">
+                      <div className="text-[0.5rem] text-slate-500 font-sans">EMA9</div>
+                      <div className="font-black text-emerald-400">▲ ASC</div>
                    </div>
-                   <div className="flex justify-between items-center text-[0.6rem] font-bold">
-                      <span className="text-slate-500">Vol. Rel (<span className={volInfo.color}>{volInfo.label}</span>)</span>
-                      <span className={(data.volume_rel || 0) >= volThreshold ? 'text-emerald-400' : 'text-slate-400'}>
-                         {((data.volume_rel || 0)*100).toFixed(0)}% <span className="text-[0.5rem] opacity-50">/ {(volThreshold*100).toFixed(0)}%</span>
-                      </span>
-                   </div>
-                   <div className="flex justify-between items-center text-[0.6rem] font-bold">
-                      <span className="text-slate-500">Dist. Basis</span>
-                      <span className={data.dist_basis_pct <= 2.2 ? 'text-emerald-400' : 'text-rose-400'}>
-                         {(data.dist_basis_pct || 0).toFixed(2)}% <span className="text-[0.5rem] opacity-50">/ 2.2%</span>
-                      </span>
+                   <div className="bg-white/5 p-1 rounded">
+                      <div className="text-[0.5rem] text-slate-500 font-sans">EMA20</div>
+                      <div className="font-black text-amber-400">► LAT</div>
                    </div>
                 </div>
              </div>
 
-             {/* --- SECCION SWING --- */}
-             <div className="space-y-2 pt-1">
-                <div className="flex items-center gap-2 border-b border-white/5 pb-1">
-                   <div className="w-1 h-3 bg-indigo-500 rounded-full" />
-                   <span className="text-[0.6rem] font-black text-slate-500 uppercase tracking-widest">Swing Strategy</span>
-                </div>
-                <div className="space-y-1.5 px-1">
-                   <div className="flex justify-between items-center text-[0.6rem] font-bold">
-                      <span className="text-slate-500">Bands Health</span>
-                      <div className="flex items-center gap-1.5">
-                         <div className={`w-2 h-2 rounded-full ${data.upper_6 > 0 ? 'bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]' : 'bg-amber-500 animate-pulse'}`} />
-                         <span className={data.upper_6 > 0 ? 'text-emerald-400' : 'text-amber-400'}>
-                            {data.upper_6 > 0 ? 'MATURE / READY' : 'LOADING DATA...'}
-                         </span>
-                      </div>
+             {/* --- SECCIÓN CASCADA & HALCÓN --- */}
+             <div className="grid grid-cols-2 gap-2">
+                <div className="bg-black/20 p-2 rounded-xl border border-white/5 space-y-1">
+                   <div className="flex items-center gap-1 text-[0.55rem] font-black text-slate-400 uppercase tracking-wider">
+                      <span>🌊</span>
+                      <span>CASCADA</span>
                    </div>
-                   <div className="flex justify-between items-center text-[0.6rem] font-bold">
-                      <span className="text-slate-500">ADX (<span className={adxInfo.color}>{adxInfo.label}</span>)</span>
-                      <span className="text-white">{(data.adx || 0).toFixed(1)} <span className="text-[0.5rem] opacity-50">umbral: {adxInfo.threshold}</span></span>
+                   <div className="text-[0.65rem] font-black text-sky-400 font-mono">
+                     {data.zone ? `NIVEL N${Math.min(5, Math.max(0, Math.abs(data.zone)))}` : 'NIVEL N0'}
+                   </div>
+                   <div className="text-[0.5rem] text-slate-500 truncate">
+                     {Math.abs(data.zone || 0) >= 3 ? 'Aceleración' : 'Transición'}
+                   </div>
+                </div>
+
+                <div className="bg-black/20 p-2 rounded-xl border border-white/5 space-y-1">
+                   <div className="flex items-center gap-1 text-[0.55rem] font-black text-slate-400 uppercase tracking-wider">
+                      <span>🦅</span>
+                      <span>HALCÓN</span>
+                   </div>
+                   <div className="text-[0.65rem] font-black text-emerald-400 flex items-center gap-1">
+                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                     <span>VERDE</span>
+                   </div>
+                   <div className="text-[0.5rem] text-slate-500 truncate">
+                     Seguro / Mantener
                    </div>
                 </div>
              </div>
 
              {/* --- FOOTER CARD --- */}
-             <div className="flex justify-between items-center pt-2 border-t border-white/5">
+             <div className="flex justify-between items-center pt-1 border-t border-white/5">
                 <div className="flex items-center gap-1.5">
                    <span className="text-[0.65rem]">{data.ai_sentiment === 'bullish' ? '🟢' : data.ai_sentiment === 'bearish' ? '🔴' : '😐'}</span>
                    <span className="text-[0.6rem] font-black text-slate-400 uppercase tracking-widest">

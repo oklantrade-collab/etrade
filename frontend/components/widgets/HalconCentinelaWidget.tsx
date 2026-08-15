@@ -100,6 +100,34 @@ export default function HalconCentinelaWidget({ symbol, halconData, position }: 
         </div>
       </div>
 
+      {/* GUÍA DE SEMÁFORO (Explicación de Colores) */}
+      <div style={{
+        background: 'rgba(0, 0, 0, 0.25)',
+        padding: '10px 12px',
+        borderRadius: '8px',
+        border: '1px solid rgba(255, 255, 255, 0.05)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '6px',
+        fontSize: '9px'
+      }}>
+        <div style={{ fontWeight: 800, color: '#94A3B8', textTransform: 'uppercase', fontSize: '8px', letterSpacing: '0.05em' }}>
+          Significado del Semáforo Táctico:
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#00C896' }}>
+          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#00C896', display: 'inline-block' }} />
+          <span><strong>VERDE (0-34 pts):</strong> Seguro / Mantener — Sin riesgo de giro. Posición en desarrollo.</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#F59E0B' }}>
+          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#F59E0B', display: 'inline-block' }} />
+          <span><strong>AMARILLO (35-59 pts):</strong> Precaución — Divergencia RSI o compresión; asegurar parciales.</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#FF4757' }}>
+          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#FF4757', display: 'inline-block' }} />
+          <span><strong>ROJO (60+ pts):</strong> Cierre Total Proactivo — Giro confirmado; salida inmediata.</span>
+        </div>
+      </div>
+
       {/* Position Protection Summary */}
       {position ? (
         <div style={{
