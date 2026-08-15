@@ -153,36 +153,36 @@ def execute_trade(
     oco_list_id = None
 
     if is_filled:
-        oco_order = binance_client.create_oco_order(
-            symbol=sym_norm,
-            side=oco_side,
-            quantity=oco_params['quantity'],
-            price=str(tp_price_final),
-            stopPrice=str(sl_price_final),
-            stopLimitPrice=str(sl_limit_final),
-            stopLimitTimeInForce='GTC'
-        )
-        oco_list_id = str(oco_order.get('orderListId', ''))
-        
-        # Actualizar orden con OCO ID
-        supabase_client.table('orders').update({
-            'oco_list_client_id': oco_list_id,
-            'stop_loss_price': sl_price_final,
-            'take_profit_price': tp_price_final,
-            'status': 'open'
-        }).eq('id', order_id).execute()
-        
-    except BinanceAPIException as e:
-        loguear(logging.CRITICAL, 
-            f'⚠️ OCO FAILED para {sym_norm}. Posición abierta SIN SL/TP: {e}')
-        
-        supabase_client.table('alert_events').insert({
-            'event_type': 'oco_failed',
-            'symbol': sym_norm,
-            'message': f'OCO ORDER FAILED - posición sin protección: {str(e)}',
-            'severity': 'critical',
-            'data': { 'order_id': order_id, 'error': str(e) }
-        }).execute()
+        try:
+            oco_order = binance_client.create_oco_order(
+                symbol=sym_norm,
+                side=oco_side,
+                quantity=oco_params['quantity'],
+                price=str(tp_price_final),
+                stopPrice=str(sl_price_final),
+                stopLimitPrice=str(sl_limit_final),
+                stopLimitTimeInForce='GTC'
+            )
+            oco_list_id = str(oco_order.get('orderListId', ''))
+            # Actualizar orden con OCO ID
+            supabase_client.table('orders').update({
+                'oco_list_client_id': oco_list_id,
+                'stop_loss_price': sl_price_final,
+                'take_profit_price': tp_price_final,
+                'status': 'open'
+            }).eq('id', order_id).execute()
+            
+        except BinanceAPIException as e:
+            loguear(logging.CRITICAL, 
+                f'⚠️ OCO FAILED para {sym_norm}. Posición abierta SIN SL/TP: {e}')
+            
+            supabase_client.table('alert_events').insert({
+                'event_type': 'oco_failed',
+                'symbol': sym_norm,
+                'message': f'OCO ORDER FAILED - posición sin protección: {str(e)}',
+                'severity': 'critical',
+                'data': { 'order_id': order_id, 'error': str(e) }
+            }).execute()
         
         # Intentar colocar solo el stop loss como fallback
         try:
