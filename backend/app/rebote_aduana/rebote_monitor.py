@@ -118,7 +118,9 @@ class ReboteMonitor:
             'df_15m': get_memory_df(symbol, '15m'),
             'df_5m': get_memory_df(symbol, '5m'),
             'df_1m': get_memory_df(symbol, '1m'),
-            'snapshot': MEMORY_STORE.get('snapshots', {}).get(symbol, {})
+            'snapshot': MEMORY_STORE.get('snapshots', {}).get(symbol, {}),
+            'cascade_info': MEMORY_STORE.get('cascade_info', {}).get(symbol, {}),
+            'cascade_hold_active': False
         }
 
     def _count_open_positions(self, symbol: str, direction: str) -> int:
@@ -141,9 +143,15 @@ class ReboteMonitor:
             log_error(MODULE, f"Error counting positions for {symbol} {direction}: {str(e)}")
             return 0
 
-    def _execute_entry(self, symbol: str, direction: str, result: ReboteResult) -> bool:
+    def _execute_entry(self, symbol: str, direction: str, result: ReboteResult) -> Any:
         """Execute the entry via the execution service."""
+        reason = f"REBOTE (Score: {result.score_final})"
         if not self.execution_service:
+            if self.market_type == 'forex':
+                lots = result.detail.get('suggested_lots', 0.01)
+                sl = result.detail.get('suggested_sl')
+                tp = result.detail.get('suggested_tp')
+                return {'execute': True, 'direction': direction, 'sl': sl, 'tp': tp, 'lots': lots, 'reason': reason}
             log_warning(MODULE, "No execution service configured for ReboteMonitor")
             return False
             

@@ -38,6 +38,22 @@ class CentinelaMonitor:
         
         for pos in open_positions:
             try:
+                curr_pnl = pos.get('current_pnl')
+                if curr_pnl is None or curr_pnl == 0:
+                    for key in ['unrealized_pnl', 'unrealized_pnl_usd']:
+                        val = pos.get(key)
+                        if val is not None and val != 0:
+                            pos['current_pnl'] = val
+                            break
+                
+                curr_price = pos.get('current_price')
+                if curr_price is None or curr_price == 0:
+                    for key in ['mark_price', 'current_price_usd', 'price']:
+                        val = pos.get(key)
+                        if val is not None and val != 0:
+                            pos['current_price'] = val
+                            break
+
                 res = self._evaluate_single_position(pos)
                 if res:
                     results.append(res)
@@ -56,7 +72,7 @@ class CentinelaMonitor:
             return {'position_id': pos_id, 'decision': 'COOLDOWN', 'executed': False}
             
         # 2. Check ORACULO pause
-        if self.oraculo and self.oraculo.is_paused(norm_pos.get('symbol')):
+        if self.oraculo and self.oraculo.check_trading_paused(norm_pos.get('symbol')).get('paused', False):
             return {'position_id': pos_id, 'decision': 'ORACULO_PAUSE', 'executed': False}
 
         # 3. Gather market data
@@ -67,7 +83,18 @@ class CentinelaMonitor:
         halcon_result = self.halcon.evaluate(norm_pos, market_data)
         
         # Log score
-        log_halcon_score(pos_id, halcon_result)
+        class _EWrap:
+            def __init__(self, v): self.value = v
+        log_halcon_score(
+            position_id=pos_id,
+            symbol=symbol,
+            scores_by_layer=getattr(halcon_result, 'scores_by_layer', {}),
+            score_final=halcon_result.score_final,
+            semaforo=_EWrap(halcon_result.semaforo) if isinstance(halcon_result.semaforo, str) else halcon_result.semaforo,
+            decision=_EWrap(halcon_result.decision) if isinstance(halcon_result.decision, str) else halcon_result.decision,
+            executed=False,
+            detail=halcon_result.detail
+        )
 
         # 5. Apply state machine transition
         partial_range = (self.halcon.params.get('threshold_cierre_parcial_low', 25.0),
@@ -102,7 +129,18 @@ class CentinelaMonitor:
                     decision = f"BLOCKED_BY_{arbitration['blocked_by']}"
 
         # 8. Log decision
-        log_centinela_decision(pos_id, decision, halcon_result, executed)
+        class _DWrap:
+            def __init__(self, v): self.value = v
+        log_centinela_decision(
+            position_id=pos_id,
+            symbol=symbol,
+            decision=_DWrap(decision) if isinstance(decision, str) else decision,
+            reason="HALCON_EVALUATION" if not str(decision).startswith("BLOCKED") else f"Arbitration: {decision}",
+            score_final=halcon_result.score_final,
+            pnl_at_decision=norm_pos.get('current_pnl', 0.0),
+            oraculo_override=False,
+            executed=executed
+        )
         
         return {
             'position_id': pos_id,
@@ -113,7 +151,7 @@ class CentinelaMonitor:
         }
 
     def _gather_market_data(self, symbol: str) -> dict:
-        return {
+        data = {
             'df_1d': get_memory_df(symbol, '1d'),
             'df_4h': get_memory_df(symbol, '4h'),
             'df_15m': get_memory_df(symbol, '15m'),
@@ -121,6 +159,15 @@ class CentinelaMonitor:
             'df_1m': get_memory_df(symbol, '1m'),
             'snapshot': MEMORY_STORE.get('snapshots', {}).get(symbol, {})
         }
+        for tf, df in data.items():
+            if tf.startswith('df_') and df is not None and not df.empty:
+                if 'ema1' in df.columns and 'ema_3' not in df.columns:
+                    df['ema_3'] = df['ema1']
+                if 'ema2' in df.columns and 'ema_9' not in df.columns:
+                    df['ema_9'] = df['ema2']
+                if 'ema3' in df.columns and 'ema_20' not in df.columns:
+                    df['ema_20'] = df['ema3']
+        return data
 
     def _execute_close(self, position: dict, decision: str, halcon_result: HalconResult) -> bool:
         if not self.execution_service:

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from app.core.logger import log_info, log_error, log_warning
-from app.core.memory_store import MEMORY_STORE, get_memory_df, BOT_STATE
+from app.core.memory_store import MEMORY_STORE, get_memory_df, BOT_STATE, MARKET_SNAPSHOT_CACHE
 from app.radar.config import RADAR_PARAMS, MODULE, load_radar_config_from_db
 from app.radar.slope_classifier import classify_slope, get_slope_matrix_interpretation
 from app.radar.crossover_detector import (
@@ -47,7 +47,7 @@ class RadarService:
         """
         sym = symbol.upper()
         df_15m = get_memory_df(sym, tf_primary)
-        raw_snap = MEMORY_STORE.get('snapshots', {}).get(sym, {})
+        raw_snap = MARKET_SNAPSHOT_CACHE.get(sym, {})
 
         # If primary data is missing from memory, attempt DB candle fetch
         if df_15m is None or len(df_15m) < 10:
@@ -86,7 +86,7 @@ class RadarService:
             self._snapshots[sym] = snapshot
             return snapshot
 
-        raw_snap = MEMORY_STORE.get('snapshots', {}).get(sym, {})
+        raw_snap = MARKET_SNAPSHOT_CACHE.get(sym, {})
 
         try:
             # Standardize numeric columns

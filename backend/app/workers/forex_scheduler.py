@@ -2286,7 +2286,23 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                 rebote_results = rebote_mon.scan_all_symbols([symbol])
                 if rebote_results:
                     for r_res in rebote_results:
-                        if r_res.get('executed'):
+                        executed_val = r_res.get('executed')
+                        if r_res.get('decision') == 'ENTERED' or isinstance(executed_val, dict):
+                            sig_dict = executed_val if isinstance(executed_val, dict) else {'direction': r_res.get('direction'), 'reason': f"REBOTE (Score: {r_res.get('score_final')})"}
+                            
+                            # Pasar el signal con rule_code para open_forex_position
+                            signal_to_pass = {
+                                'direction': sig_dict.get('direction', r_res.get('direction')),
+                                'rule_code': sig_dict.get('reason', 'REBOTE_FX')
+                            }
+                            
+                            await open_forex_position(
+                                symbol=symbol,
+                                signal=signal_to_pass,
+                                price=current_price,
+                                provider=provider,
+                                sb=sb
+                            )
                             log_info('REBOTE_FX', f"🎯 Entrada REBOTE Forex ejecutada para {symbol}: {r_res}")
             except Exception as rebote_fx_e:
                 log_error('REBOTE_FX', f"{symbol}: Error en evaluación REBOTE Forex: {rebote_fx_e}")
