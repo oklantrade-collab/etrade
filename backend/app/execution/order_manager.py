@@ -8,6 +8,19 @@ from app.core.crypto_symbols import (
     crypto_symbol_match_variants,
 )
 
+def _send_telegram_sync(message: str):
+    try:
+        from app.workers.alerts_service import send_telegram_message
+        import asyncio
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(send_telegram_message(message, priority='high'))
+        else:
+            asyncio.run(send_telegram_message(message, priority='high'))
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to send telegram: {e}")
+
 def round_price(price: float, tick_size: float) -> float:
     import math
     if tick_size <= 0: return price
@@ -250,6 +263,15 @@ def execute_trade(
         'opened_at': datetime.utcnow().isoformat()
     }).execute()
 
+    # Enviar notificación Telegram
+    rule = signal.get('rule_code', 'MANUAL')
+    if is_filled:
+        msg = f"🟢 [CRYPTO OPEN] {oco_params['side']} {oco_params['quantity']} {sym_norm} @ {avg_fill_price:.4f} (Rule: {rule})"
+    else:
+        limit_p = round_price(oco_params['entry_price'], tick_size)
+        msg = f"⏳ [CRYPTO PENDING] LIMIT {oco_params['side']} {oco_params['quantity']} {sym_norm} @ {limit_p:.4f} (Rule: {rule})"
+    _send_telegram_sync(msg)
+
     # PASO 6 — Actualizar estado de la señal
     try:
         supabase_client.table('trading_signals').update({
@@ -432,6 +454,8 @@ def close_position(position_id: str, reason: str = "MANUAL") -> bool:
         except Exception as cancel_e:
             log_warning("ORDER_MANAGER", f"Error cancelando órdenes huérfanas: {cancel_e}")
 
+        msg = f"🔴 [CRYPTO CLOSE] {binance_symbol} ({position['side']}) closed at {avg_fill_price:.4f}. PnL: {realized_pnl:.4f} USD ({pnl_pct:.2f}%)"
+        _send_telegram_sync(msg)
         log_info("ORDER_MANAGER", f"Position {position_id} ({binance_symbol}) closed manually with PnL: {realized_pnl:.4f}")
         return True
 
@@ -618,6 +642,8 @@ def check_pending_fills(supabase, client):
                             'sl_price': sl_price_final
                         }).eq('id', pos_id).execute()
                         
+                    msg = f"🟢 [CRYPTO FILLED] LIMIT {o['side']} {o['quantity']} {symbol} @ {avg_fill_price:.4f}"
+                    _send_telegram_sync(msg)
                     log_info("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} FILLED. OCO placed.")
                 elif exchange_order['status'] in ['CANCELED', 'REJECTED', 'EXPIRED']:
                     supabase.table('orders').update({'status': 'error'}).eq('id', o['id']).execute()
