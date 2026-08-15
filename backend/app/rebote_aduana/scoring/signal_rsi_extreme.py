@@ -23,7 +23,8 @@ def calculate_signal_rsi_extreme(df_15m: pd.DataFrame, df_5m: pd.DataFrame, dire
         result['detail'] = 'Not enough 5m data'
         return result
         
-    if 'rsi' not in df_15m.columns:
+    rsi_col = 'rsi' if 'rsi' in df_15m.columns else 'rsi_14'
+    if rsi_col not in df_15m.columns:
         result['detail'] = 'Missing rsi column in 15m'
         return result
         
@@ -35,7 +36,7 @@ def calculate_signal_rsi_extreme(df_15m: pd.DataFrame, df_5m: pd.DataFrame, dire
     closed_15m = df_15m.iloc[:-1]
     closed_5m = df_5m.iloc[:-1]
     
-    last_15m_rsi = _safe_float(closed_15m['rsi'].iloc[-1])
+    last_15m_rsi = _safe_float(closed_15m[rsi_col].iloc[-1])
     
     rsi_extreme = False
     structure_confirmed = False

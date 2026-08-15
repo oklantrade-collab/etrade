@@ -167,6 +167,8 @@ class CentinelaMonitor:
                     df['ema_9'] = df['ema2']
                 if 'ema3' in df.columns and 'ema_20' not in df.columns:
                     df['ema_20'] = df['ema3']
+                if 'rsi_14' in df.columns and 'rsi' not in df.columns:
+                    df['rsi'] = df['rsi_14']
         return data
 
     def _execute_close(self, position: dict, decision: str, halcon_result: HalconResult) -> bool:

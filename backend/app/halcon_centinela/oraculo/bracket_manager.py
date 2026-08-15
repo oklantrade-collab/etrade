@@ -79,7 +79,7 @@ class BracketManager:
         """
         entry_price = float(position.get('entry_price', 0.0))
         current_loss = float(position.get('unrealized_pnl', 0.0))
-        volume = float(position.get('volume', 0.01))
+        volume = float(position.get('size', position.get('amount', position.get('volume', 0.01))))
         side = position.get('side', 'BUY').upper()
         
         floor_usd = self.params.get('bracket_sl_floor_usd', -8.0)
@@ -113,7 +113,8 @@ class BracketManager:
         entry_price = float(position.get('entry_price', 0.0))
         
         try:
-            df = MEMORY_STORE.get(symbol, {}).get('15m')
+            from app.core.memory_store import get_memory_df
+            df = get_memory_df(symbol, '15m')
             if df is not None and not df.empty:
                 last_row = df.iloc[-1]
                 

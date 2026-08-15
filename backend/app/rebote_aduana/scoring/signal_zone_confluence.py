@@ -63,7 +63,8 @@ def calculate_signal_zone_confluence(df_5m: pd.DataFrame, df_15m: pd.DataFrame, 
                 confluences.append('macd_hist_5m')
                 
         if 'sar_trend' in df_15m.columns:
-            if closed_15m['sar_trend'].iloc[-1] == 'ascending':
+            sar_val = closed_15m['sar_trend'].iloc[-1]
+            if sar_val in ('ascending', 1):
                 confluences.append('sar_asc_15m')
                 
         if 'ema_3' in df_15m.columns:
@@ -81,7 +82,8 @@ def calculate_signal_zone_confluence(df_5m: pd.DataFrame, df_15m: pd.DataFrame, 
                 confluences.append('macd_hist_5m')
                 
         if 'sar_trend' in df_15m.columns:
-            if closed_15m['sar_trend'].iloc[-1] == 'descending':
+            sar_val = closed_15m['sar_trend'].iloc[-1]
+            if sar_val in ('descending', -1):
                 confluences.append('sar_desc_15m')
                 
         if 'ema_3' in df_15m.columns:

@@ -1651,6 +1651,9 @@ async def process_profit_management_15m(
                 log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Cierre {c_res.decision} para {symbol} N{c_res.current_level} ({c_res.detail})")
                 await _execute_paper_close(position, current_price, f"CASCADA_{c_res.decision}_N{c_res.current_level}", sb)
                 return True
+            elif getattr(c_res, 'cascade_hold', False) or c_res.decision == 'MANTENER':
+                log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Hold / Mantener para {symbol} N{c_res.current_level} ({c_res.detail})")
+                return False
     except Exception as cascade_err:
         log_error('CASCADA', f"Error evaluando CASCADA crypto para {symbol}: {cascade_err}")
 
@@ -1914,6 +1917,13 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             mtf_result.get('score', 0.0),
             sb
         )
+        
+        # ── RADAR: Update shared signal bus for crypto symbol ──
+        try:
+            from app.radar.radar_service import RadarService
+            RadarService.get_instance().update(symbol, '15m')
+        except Exception as radar_err:
+            log_warning('RADAR', f"Error updating RADAR for crypto symbol {symbol}: {radar_err}")
         
         # ── INTEGRACIÓN MÓDULO A Y B (Gestión de Ganancias) ──
         positions = BOT_STATE.get_positions_by_symbol(symbol)
@@ -2666,12 +2676,27 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                        except Exception as scalp_4h_e:
                            log_error('SCALPING_4H', f'{symbol}: Error en evaluación scalping 4h: {scalp_4h_e}')
 
-        # ── RADAR: Update shared signal bus for crypto symbol ──
-        try:
-            from app.radar.radar_service import RadarService
-            RadarService.get_instance().update(symbol, '15m')
-        except Exception as radar_err:
-            log_warning('RADAR', f"Error updating RADAR for crypto symbol {symbol}: {radar_err}")
+                       # --- REBOTE ADUANA (CRYPTO) ---
+                       try:
+                           from app.rebote_aduana.rebote_monitor import ReboteMonitor
+                           rebote_monitor = ReboteMonitor(supabase=sb, market_type='crypto')
+                           rebote_results = rebote_monitor.scan_all_symbols([symbol])
+                           for res in rebote_results:
+                               if res.get('execute'):
+                                   direction = res['direction']
+                                   current_price = float(last_row['close'])
+                                   cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+                                   from app.core.parameter_guard import get_velocity_config
+                                   vel_config = get_velocity_config(float(snap_ref.get('adx', 25)))
+                                   qty = (cap_op * 0.1 * vel_config.get('sizing_pct', 1.0)) / current_price
+                                   await _execute_paper_open(
+                                       symbol=symbol, side=direction, price=current_price,
+                                       size=qty, rule_code="REBOTE_CRYPTO", 
+                                       regime=snap_ref, levels=snap_ref, vel_config=vel_config, supabase=sb,
+                                       origen='REBOTE'
+                                   )
+                       except Exception as rebote_e:
+                           log_error('REBOTE', f'{symbol}: Error en ReboteMonitor crypto: {rebote_e}')
 
     except Exception as inner_e:
         import traceback

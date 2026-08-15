@@ -27,6 +27,7 @@ from app.core.symbol_state import SymbolStateMachine
 
 MODULE = "POSITION_MONITOR"
 sm = SymbolStateMachine.get_instance()
+_CENTINELA_MONITOR_CRYPTO = None
 async def check_signal_reversal(
     position:     dict,
     current_mtf:  float,
@@ -90,6 +91,13 @@ async def check_signal_reversal(
 
     # 3. Regla estricta con Fee-Net Guard: Solo salir si PnL >= min_profit_pct (cobertura de comisión Binance)
     min_profit_pct = float(config.get('min_profit_exit_pct', 0.25))
+    
+    # Check if position is a cascade/rebote position
+    origen = str(position.get('origen', '')).upper()
+    rule_code = str(position.get('rule_code', ''))
+    if origen == 'REBOTE' or rule_code.startswith(('AaReb', 'BbReb', 'REBOTE', 'Aa12')):
+        return {'should_exit': False}
+        
     if pnl_pct >= min_profit_pct and ema_reversed_5m:
         return {
             'should_exit': True,
@@ -647,19 +655,24 @@ async def check_protections(
             log_error(MODULE, f"Error actualizando Trail para {symbol}: {e}")
             
     elif trail['action'] == 'close_market':
-        log_info('PROTECTION', f'🔴 TS CLOSE TRIGGERED [{symbol}]: precio={current_price:.6f}. Reason={trail["reason"]}')
-        closed = await _execute_paper_close(position, current_price, 'ts_close', supabase)
-        if closed:
-            # Register SL cooldown
-            side = (position.get('side') or 'long').lower()
-            register_sl_event(symbol, side)
-            
-            # Si no tocó BB, re-entramos con órdenes límite!
-            if not trail.get('bb_touched', False):
-                qty = float(position.get('size') or 0)
-                await trigger_trailing_stop_reentry(symbol, side, qty, df_15m, supabase)
+        origen = str(position.get('origen', '')).upper()
+        rule_code = str(position.get('rule_code', ''))
+        if origen == 'REBOTE' or rule_code.startswith(('AaReb', 'BbReb', 'REBOTE', 'Aa12')):
+            log_info('PROTECTION', f"🌊 [CASCADA] Ignorando TS Close para posición CASCADA/REBOTE {symbol}. Delegado a CascadaManager.")
+        else:
+            log_info('PROTECTION', f'🔴 TS CLOSE TRIGGERED [{symbol}]: precio={current_price:.6f}. Reason={trail["reason"]}')
+            closed = await _execute_paper_close(position, current_price, 'ts_close', supabase)
+            if closed:
+                # Register SL cooldown
+                side = (position.get('side') or 'long').lower()
+                register_sl_event(symbol, side)
                 
-            return 'closed'
+                # Si no tocó BB, re-entramos con órdenes límite!
+                if not trail.get('bb_touched', False):
+                    qty = float(position.get('size') or 0)
+                    await trigger_trailing_stop_reentry(symbol, side, qty, df_15m, supabase)
+                    
+                return 'closed'
 
     # ── CHECK 3: SL backstop hit ──────────────
     sl = state.current_sl
@@ -848,18 +861,29 @@ async def check_open_positions_5m(
                     if not check_closing_in_progress(str(pos.get('id')), 'positions'):
                         from app.halcon_centinela.centinela_monitor import CentinelaMonitor
                         from app.halcon_centinela.config import CentinelaDecision
-                        cent_mon = CentinelaMonitor(supabase=supabase, market_type='crypto')
+                        global _CENTINELA_MONITOR_CRYPTO
+                        if _CENTINELA_MONITOR_CRYPTO is None:
+                            _CENTINELA_MONITOR_CRYPTO = CentinelaMonitor(supabase=supabase, market_type='crypto')
+                        
                         eval_pos = dict(pos)
                         eval_pos['current_price'] = price
                         eval_pos['current_pnl'] = upnl
                         eval_pos['direction'] = side
-                        eval_res = cent_mon._evaluate_single_position(eval_pos)
-                        if eval_res and eval_res.get('decision') == CentinelaDecision.CIERRE_TOTAL.value and upnl >= 1.0:
-                            reason = f"HALCON_CENTINELA_CIERRE_TOTAL (Score: {eval_res.get('score_final', 0)})"
-                            await _execute_paper_close(pos, price, reason, supabase)
-                            events.append({'symbol': norm_symbol, 'event': 'centinela_close'})
-                            log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Closed {norm_symbol} via proactive exit: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
-                            continue
+                        eval_res = _CENTINELA_MONITOR_CRYPTO._evaluate_single_position(eval_pos)
+                        
+                        if eval_res and upnl >= 1.0:
+                            decision = eval_res.get('decision')
+                            if decision == CentinelaDecision.CIERRE_TOTAL.value:
+                                reason = f"HALCON_CENTINELA_CIERRE_TOTAL (Score: {eval_res.get('score_final', 0)})"
+                                await _execute_paper_close(pos, price, reason, supabase)
+                                events.append({'symbol': norm_symbol, 'event': 'centinela_close'})
+                                log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Closed {norm_symbol} via proactive exit: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
+                                continue
+                            elif decision == CentinelaDecision.CIERRE_PARCIAL.value:
+                                await _execute_paper_partial_close(pos, price, supabase)
+                                events.append({'symbol': norm_symbol, 'event': 'centinela_partial_close'})
+                                log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Partial Close for {norm_symbol}: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
+                                continue
                 except Exception as cent_err:
                     log_warning(MODULE, f"Error evaluating Centinela for crypto {norm_symbol}: {cent_err}")
 

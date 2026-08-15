@@ -147,7 +147,7 @@ class ReboteMonitor:
         """Execute the entry via the execution service."""
         reason = f"REBOTE (Score: {result.score_final})"
         if not self.execution_service:
-            if self.market_type == 'forex':
+            if self.market_type in ('forex', 'crypto'):
                 lots = result.detail.get('suggested_lots', 0.01)
                 sl = result.detail.get('suggested_sl')
                 tp = result.detail.get('suggested_tp')

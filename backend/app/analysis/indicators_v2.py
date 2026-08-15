@@ -166,6 +166,8 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['rsi_14'] = 100 - (100 / (1 + rs))
+    df['rsi'] = df['rsi_14']
+
     
     # --- CALCULO DE EXPANSIÓN DE BOLLINGER (SQUEEZE RELEASE) ---
     if 'upper_6' in df.columns and 'lower_6' in df.columns:

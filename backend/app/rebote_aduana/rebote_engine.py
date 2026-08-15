@@ -173,9 +173,10 @@ class ReboteEngine:
             result.regime_local = 'neutral'
             
         # Contra-trend
-        if direction == 'long' and result.regime_local == 'bearish':
+        regime_name = result.regime_local.get('regime', 'neutral') if isinstance(result.regime_local, dict) else str(result.regime_local)
+        if direction == 'long' and regime_name == 'bearish':
             result.contra_trend = True
-        elif direction == 'short' and result.regime_local == 'bullish':
+        elif direction == 'short' and regime_name == 'bullish':
             result.contra_trend = True
             
         # Check CASCADA interaction (Spec 3.8 & 4.2.2)
@@ -190,7 +191,7 @@ class ReboteEngine:
                 return result
 
         if result.contra_trend:
-            result.contra_trend_confirmed = check_contra_trend_confirmation(df_5m, df_15m, direction)
+            result.contra_trend_confirmed = check_contra_trend_confirmation(df_15m, direction)
             if not result.contra_trend_confirmed:
                 result.decision = 'SKIP'
                 result.detail['reason'] = 'Contra-trend not confirmed'

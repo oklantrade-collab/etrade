@@ -306,7 +306,8 @@ class HalconEngine:
                         cross_idx = i
                         break
 
-        return check_volume_confirmation(closed, cross_idx, self.params, market_type='forex')
+        market_type = self.params.get('market_type', 'forex')
+        return check_volume_confirmation(closed, cross_idx, self.params, market_type=market_type)
 
     def _map_to_semaforo(self, score_final: float, direction: str) -> Semaforo:
         """Mapea score final a semáforo. Para SHORT, se invierte el signo."""
