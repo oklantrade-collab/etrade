@@ -176,8 +176,16 @@ function DashboardContent() {
       }, (payload) => updateSymbolData(payload.new.symbol, payload.new))
       .subscribe()
 
-    return () => { supabase.removeChannel(channel) }
-  }, [])
+    const interval = setInterval(() => {
+      loadData();
+      if (selectedSymbol) fetchStrategyHud(selectedSymbol);
+    }, 12000);
+
+    return () => { 
+      clearInterval(interval);
+      supabase.removeChannel(channel);
+    }
+  }, [selectedSymbol])
 
   useEffect(() => {
     if (selectedSymbol) {
