@@ -83,14 +83,14 @@ class ReboteMonitor:
         aduana_res = self.aduana.validate(
             symbol=symbol,
             side=direction,
-            order_type='MARKET',
+            order_type='LIMIT',
             market_data=market_data,
             strategy='REBOTE',
             contra_trend_confirmed=result.contra_trend_confirmed
         )
         
         # 9. Log ADUANA decision
-        log_aduana_decision(symbol, direction, 'MARKET', aduana_res, strategy='REBOTE')
+        log_aduana_decision(symbol, direction, 'LIMIT', aduana_res, strategy='REBOTE')
         
         # 10. Check ADUANA approval
         if not aduana_res.approved:

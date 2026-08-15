@@ -375,6 +375,9 @@ def _process_symbol(
             # Forzar la cantidad calculada por nuestro módulo de sizing
             oco_params['quantity'] = sizing['quantity']
             oco_params['order_value_usdt'] = sizing['nocional']
+            
+            # Forzar LIMIT orders para Crypto
+            oco_params['order_type'] = 'LIMIT'
 
             log_info(MODULE, f"{symbol}: OCO params -> qty={oco_params['quantity']} | SL=${oco_params['stop_loss']:,.4f} | TP=${oco_params['take_profit']:,.4f} | Valor=${oco_params['order_value_usdt']:,.2f}", cycle_id=cycle_id)
 

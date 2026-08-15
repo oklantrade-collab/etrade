@@ -38,11 +38,12 @@ def execute_trade(
     # PASO 1 — Crear registro de orden en Supabase (status='pending')
     try:
         sym_norm = normalize_crypto_symbol(oco_params['symbol'])
+        order_type_in = oco_params.get('order_type', 'MARKET')
         order_record = supabase_client.table('orders').insert({
             'signal_id': signal['signal_id'],
             'symbol': sym_norm,
             'side': oco_params['side'],
-            'order_type': 'MARKET',
+            'order_type': order_type_in,
             'quantity': oco_params['quantity'],
             'stop_loss_price': oco_params['stop_loss'],
             'take_profit_price': oco_params['take_profit'],
@@ -57,18 +58,43 @@ def execute_trade(
         loguear(logging.CRITICAL, f'Fail saving pending order: {e}')
         return None
 
-    # PASO 2 — Ejecutar orden de ENTRADA (MARKET)
+    # Find tick size using symbol info (needed early for limit price rounding)
     try:
-        if oco_params['side'] == 'BUY':
-            entry_order = binance_client.order_market_buy(
-                symbol=sym_norm,
-                quantity=oco_params['quantity']
-            )
+        info = binance_client.get_symbol_info(sym_norm)
+        tick_size = 0.01
+        for f in info['filters']:
+            if f['filterType'] == 'PRICE_FILTER':
+                tick_size = float(f['tickSize'])
+    except:
+        tick_size = 0.01
+
+    # PASO 2 — Ejecutar orden de ENTRADA
+    try:
+        if order_type_in == 'LIMIT':
+            limit_price = round_price(oco_params['entry_price'], tick_size)
+            if oco_params['side'] == 'BUY':
+                entry_order = binance_client.order_limit_buy(
+                    symbol=sym_norm,
+                    quantity=oco_params['quantity'],
+                    price=str(limit_price)
+                )
+            else:
+                entry_order = binance_client.order_limit_sell(
+                    symbol=sym_norm,
+                    quantity=oco_params['quantity'],
+                    price=str(limit_price)
+                )
         else:
-            entry_order = binance_client.order_market_sell(
-                symbol=sym_norm,
-                quantity=oco_params['quantity']
-            )
+            if oco_params['side'] == 'BUY':
+                entry_order = binance_client.order_market_buy(
+                    symbol=sym_norm,
+                    quantity=oco_params['quantity']
+                )
+            else:
+                entry_order = binance_client.order_market_sell(
+                    symbol=sym_norm,
+                    quantity=oco_params['quantity']
+                )
             
     except BinanceAPIException as e:
         # Si la entrada falla → marcar orden como error y retornar
@@ -83,7 +109,7 @@ def execute_trade(
         loguear(logging.CRITICAL, f'Entry order FAILED: {e}')
         return None
 
-    # Extraer precio real de ejecución
+    # Extraer precio real de ejecución o asumir precio de la orden limit
     fills = entry_order.get('fills', [])
     if fills:
         avg_fill_price = sum(
@@ -91,33 +117,29 @@ def execute_trade(
         ) / sum(float(f['qty']) for f in fills)
         commission = sum(float(f['commission']) for f in fills)
     else:
-        avg_fill_price = oco_params['entry_price']
+        # En orden LIMIT, si no hay fills inmediatos, tomar el precio límite colocado
+        avg_fill_price = limit_price if order_type_in == 'LIMIT' else oco_params['entry_price']
         commission = 0.0
 
-    exchange_order_id = str(entry_order['orderId'])
+    exchange_order_id = str(entry_order.get('orderId', ''))
+    entry_status = entry_order.get('status', 'NEW')
+    
+    # Determinar si la orden está completely filled
+    is_filled = (entry_status == 'FILLED' or (order_type_in == 'MARKET' and len(fills) > 0))
+    db_order_status = 'open' if is_filled else 'pending_fill'
 
     # Actualizar orden con datos de ejecución
     supabase_client.table('orders').update({
         'exchange_order_id': exchange_order_id,
         'entry_price': avg_fill_price,
         'commission': commission,
-        'status': 'open'
+        'status': db_order_status
     }).eq('id', order_id).execute()
 
     # PASO 3 — Recalcular SL y TP con precio real de ejecución
     price_diff = avg_fill_price - oco_params['entry_price']
     sl_price_final = oco_params['stop_loss'] + price_diff
     tp_price_final = oco_params['take_profit'] + price_diff
-
-    # Find tick size using symbol info
-    try:
-        info = binance_client.get_symbol_info(sym_norm)
-        tick_size = 0.01
-        for f in info['filters']:
-            if f['filterType'] == 'PRICE_FILTER':
-                tick_size = float(f['tickSize'])
-    except:
-        tick_size = 0.01
 
     sl_price_final = round_price(sl_price_final, tick_size)
     tp_price_final = round_price(tp_price_final, tick_size)
@@ -126,11 +148,11 @@ def execute_trade(
         tick_size
     )
 
-    # PASO 4 — Colocar OCO Order (SL + TP juntos)
+    # PASO 4 — Colocar OCO Order (SL + TP juntos) SOLO SI ESTÁ FILLED
     oco_side = 'SELL' if oco_params['side'] == 'BUY' else 'BUY'
     oco_list_id = None
 
-    try:
+    if is_filled:
         oco_order = binance_client.create_oco_order(
             symbol=sym_norm,
             side=oco_side,
@@ -188,6 +210,8 @@ def execute_trade(
                 loguear(logging.WARNING, 'Fallback SL colocado exitosamente')
         except:
             loguear(logging.CRITICAL, 'Fallback SL también falló. Intervención manual requerida.')
+    else:
+        loguear(logging.INFO, f'Orden {order_id} LIMIT {sym_norm} colocada. Esperando a que se llene (pending_fill) para colocar OCO.')
 
     # PASO 5 — Obtener niveles Fibonacci finales de market_snapshot
     try:
@@ -219,7 +243,7 @@ def execute_trade(
         'tp_full_price': tp_full,
         'unrealized_pnl': 0.0,
         'realized_pnl': 0.0,
-        'status': 'open',
+        'status': db_order_status,
         'regime_entry': signal.get('regime', 'riesgo_medio'),
         'rule_code': signal.get('rule_code'),
         'rule_entry': signal.get('rule_code'),
@@ -512,3 +536,96 @@ def modify_oco_breakeven(position_id: str, new_tp_price: float) -> bool:
         from app.core.logger import log_error
         log_error("ORDER_MANAGER", f"Exception modifying OCO breakeven: {e}")
         return False
+
+def check_pending_fills(supabase, client):
+    from app.core.logger import log_info, log_error, log_warning
+    
+    # Obtener ordenes en status 'pending_fill'
+    try:
+        orders = supabase.table('orders').select('*, positions(*)').eq('status', 'pending_fill').execute()
+        if not orders.data:
+            return
+
+        for o in orders.data:
+            symbol = normalize_crypto_symbol(o['symbol'])
+            order_id = o['exchange_order_id']
+            if not order_id:
+                continue
+                
+            try:
+                exchange_order = client.get_order(symbol=symbol, orderId=order_id)
+                if exchange_order['status'] == 'FILLED':
+                    fills = exchange_order.get('fills', [])
+                    if fills:
+                        avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in fills) / sum(float(f['qty']) for f in fills)
+                        commission = sum(float(f['commission']) for f in fills)
+                    else:
+                        # Sometimes get_order doesn't return fills array, estimate with executedQty and cummulativeQuoteQty
+                        cumm_qty = float(exchange_order.get('cummulativeQuoteQty', 0))
+                        exec_qty = float(exchange_order.get('executedQty', 0))
+                        if exec_qty > 0:
+                            avg_fill_price = cumm_qty / exec_qty
+                        else:
+                            avg_fill_price = float(exchange_order['price'])
+                        commission = 0.0
+
+                    price_diff = avg_fill_price - float(o['entry_price'])
+                    sl_price_final = float(o['stop_loss_price']) + price_diff
+                    tp_price_final = float(o['take_profit_price']) + price_diff
+                    
+                    info = client.get_symbol_info(symbol)
+                    tick_size = 0.01
+                    for f in info['filters']:
+                        if f['filterType'] == 'PRICE_FILTER':
+                            tick_size = float(f['tickSize'])
+                            
+                    sl_price_final = round_price(sl_price_final, tick_size)
+                    tp_price_final = round_price(tp_price_final, tick_size)
+                    sl_limit_final = round_price(
+                        sl_price_final * (0.998 if o['side'] == 'BUY' else 1.002),
+                        tick_size
+                    )
+                    
+                    oco_side = 'SELL' if o['side'] == 'BUY' else 'BUY'
+                    oco_order = client.create_oco_order(
+                        symbol=symbol,
+                        side=oco_side,
+                        quantity=o['quantity'],
+                        price=str(tp_price_final),
+                        stopPrice=str(sl_price_final),
+                        stopLimitPrice=str(sl_limit_final),
+                        stopLimitTimeInForce='GTC'
+                    )
+                    oco_list_id = str(oco_order.get('orderListId', ''))
+                    
+                    supabase.table('orders').update({
+                        'status': 'open',
+                        'entry_price': avg_fill_price,
+                        'commission': commission,
+                        'stop_loss_price': sl_price_final,
+                        'take_profit_price': tp_price_final,
+                        'oco_list_client_id': oco_list_id
+                    }).eq('id', o['id']).execute()
+                    
+                    if o.get('positions') and len(o['positions']) > 0:
+                        pos_id = o['positions'][0]['id']
+                        supabase.table('positions').update({
+                            'status': 'open',
+                            'entry_price': avg_fill_price,
+                            'avg_entry_price': avg_fill_price,
+                            'current_price': avg_fill_price,
+                            'stop_loss': sl_price_final,
+                            'sl_price': sl_price_final
+                        }).eq('id', pos_id).execute()
+                        
+                    log_info("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} FILLED. OCO placed.")
+                elif exchange_order['status'] in ['CANCELED', 'REJECTED', 'EXPIRED']:
+                    supabase.table('orders').update({'status': 'error'}).eq('id', o['id']).execute()
+                    if o.get('positions') and len(o['positions']) > 0:
+                        pos_id = o['positions'][0]['id']
+                        supabase.table('positions').update({'status': 'closed', 'close_reason': 'limit_order_canceled'}).eq('id', pos_id).execute()
+                    log_warning("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} was {exchange_order['status']}.")
+            except Exception as e:
+                log_error("ORDER_MANAGER", f"Error checking pending order {order_id}: {e}")
+    except Exception as general_e:
+        log_error("ORDER_MANAGER", f"Fatal error checking pending fills: {general_e}")

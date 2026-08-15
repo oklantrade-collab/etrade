@@ -1404,6 +1404,14 @@ async def cycle_5m():
     
     try:
         async def _run_cycle():
+            from app.execution.order_manager import check_pending_fills
+            from app.execution.binance_connector import get_client
+            try:
+                # Call synchronous check_pending_fills using the raw binance client
+                check_pending_fills(sb, get_client())
+            except Exception as e:
+                log_error(MODULE, f"Error in check_pending_fills: {e}")
+                
             events = await check_open_positions_5m(
                 provider    = provider,
                 supabase    = sb,
