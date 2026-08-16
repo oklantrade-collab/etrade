@@ -14,9 +14,9 @@ def _send_telegram_sync(message: str):
         import asyncio
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            loop.create_task(send_telegram_message(message, priority='high'))
+            loop.create_task(send_telegram_message(message))
         else:
-            asyncio.run(send_telegram_message(message, priority='high'))
+            asyncio.run(send_telegram_message(message))
     except Exception as e:
         import logging
         logging.error(f"Failed to send telegram: {e}")
