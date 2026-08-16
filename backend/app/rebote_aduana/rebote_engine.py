@@ -191,7 +191,8 @@ class ReboteEngine:
                 return result
 
         if result.contra_trend:
-            result.contra_trend_confirmed = check_contra_trend_confirmation(df_15m, direction)
+            contra_result = check_contra_trend_confirmation(df_15m, direction)
+            result.contra_trend_confirmed = contra_result.get('confirmed', False) if isinstance(contra_result, dict) else bool(contra_result)
             if not result.contra_trend_confirmed:
                 result.decision = 'SKIP'
                 result.detail['reason'] = 'Contra-trend not confirmed'

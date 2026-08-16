@@ -10,8 +10,8 @@ def set_closing_in_progress(position_id: str, table: str = 'forex_positions') ->
     """
     try:
         sb = get_supabase()
-        res = sb.table(table).update({'closing_in_progress': True}).eq('id', position_id).execute()
-        return len(res.data) > 0
+        res = sb.table('centinela_position_state').update({'closing_in_progress': True}).eq('position_id', position_id).execute()
+        return True
     except Exception as e:
         log_error(f"Error setting closing_in_progress for {position_id}: {str(e)}", MODULE)
         return False
@@ -20,8 +20,8 @@ def clear_closing_in_progress(position_id: str, table: str = 'forex_positions') 
     """Clears closing_in_progress flag. Called if close order fails."""
     try:
         sb = get_supabase()
-        res = sb.table(table).update({'closing_in_progress': False}).eq('id', position_id).execute()
-        return len(res.data) > 0
+        res = sb.table('centinela_position_state').update({'closing_in_progress': False}).eq('position_id', position_id).execute()
+        return True
     except Exception as e:
         log_error(f"Error clearing closing_in_progress for {position_id}: {str(e)}", MODULE)
         return False
@@ -30,7 +30,7 @@ def check_closing_in_progress(position_id: str, table: str = 'forex_positions') 
     """Checks if closing_in_progress is set. Used by SLV/SLVM/Trailing to skip."""
     try:
         sb = get_supabase()
-        res = sb.table(table).select('closing_in_progress').eq('id', position_id).execute()
+        res = sb.table('centinela_position_state').select('closing_in_progress').eq('position_id', position_id).execute()
         if res.data and len(res.data) > 0:
             return bool(res.data[0].get('closing_in_progress', False))
     except Exception as e:

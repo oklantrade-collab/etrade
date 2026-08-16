@@ -22,21 +22,33 @@ def log_halcon_score(
         data = {
             'position_id': position_id,
             'symbol': symbol,
-            'scores_by_layer': scores_by_layer,
+            'direction': detail.get('direction', 'LONG') if detail else 'LONG',
+            'score_1d': scores_by_layer.get('1d', 0),
+            'score_4h': scores_by_layer.get('4h', 0),
+            'score_15m': scores_by_layer.get('15m', 0),
+            'score_5m': scores_by_layer.get('5m', 0),
+            'score_1m': scores_by_layer.get('1m', 0),
+            'rsi_adj_1d': detail.get('rsi_adj_1d', 0) if detail else 0,
+            'rsi_adj_4h': detail.get('rsi_adj_4h', 0) if detail else 0,
+            'rsi_adj_15m': detail.get('rsi_adj_15m', 0) if detail else 0,
+            'rsi_adj_5m': detail.get('rsi_adj_5m', 0) if detail else 0,
+            'regime': detail.get('regime', 'neutral') if detail else 'neutral',
+            'regime_adx': detail.get('regime_adx', 1.0) if detail else 1.0,
+            'compression_index': detail.get('compression_index', 0.0) if detail else 0.0,
+            'compression_timeframe': detail.get('compression_timeframe', '') if detail else '',
             'score_final': score_final,
             'semaforo': semaforo.value,
             'decision': decision.value,
             'executed': executed,
-            'detail': detail or {},
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         
         supabase.table('halcon_scores_log').insert(data).execute()
         
         log_info(
-            f"HALCON Score | {symbol} | Pos: {position_id} | Final: {score_final} | Semaforo: {semaforo.value} | Decision: {decision.value}",
             MODULE,
-            detail=data
+            f"HALCON Score | {symbol} | Pos: {position_id} | Final: {score_final} | Semaforo: {semaforo.value} | Decision: {decision.value}",
+            context=data
         )
     except Exception as e:
         log_error(f"Error logging HALCON score: {str(e)}", MODULE)
@@ -73,9 +85,9 @@ def log_centinela_decision(
         supabase.table('centinela_decisions_log').insert(data).execute()
         
         log_info(
-            f"Centinela Decision | {symbol} | Pos: {position_id} | Decision: {decision.value} | PnL: {pnl_at_decision}",
             MODULE,
-            detail=data
+            f"Centinela Decision | {symbol} | Pos: {position_id} | Decision: {decision.value} | PnL: {pnl_at_decision}",
+            context=data
         )
     except Exception as e:
         log_error(f"Error logging Centinela decision: {str(e)}", MODULE)
