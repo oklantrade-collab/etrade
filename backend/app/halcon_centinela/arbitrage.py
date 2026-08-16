@@ -44,7 +44,7 @@ def arbitrate_close_signal(decision: str, position: dict, state_tracker) -> dict
     pos_id = position.get('id')
     
     # 1. Check if closing already in progress
-    if position.get('closing_in_progress'):
+    if check_closing_in_progress(pos_id):
         return {'execute': False, 'reason': 'Closing already in progress', 'blocked_by': 'System'}
         
     # 2. Check if EREP is active
