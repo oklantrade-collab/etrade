@@ -1653,13 +1653,16 @@ async def _execute_paper_partial_close(pos, price, supabase):
         db_key_name = 'ctrader_order_id'
         db_record_id = pos.get('ctrader_order_id') or pos_id
     
+    size_key = 'lots' if is_forex else 'size'
+    original_size = float(pos.get(size_key) or pos.get('lots') or pos.get('size') or 0)
+    
     # Update Position
     supabase.table(table_name).update({
         'partial_closed': True,
         'partial_close_price': price,
         'current_price': price,
         'partial_close_usd': round(partial_pnl_usd, 4),
-        'size': float(pos['size']) - partial_qty
+        size_key: original_size - partial_qty
     }).eq(db_key_name, db_record_id).execute()
     
     # 2. Persistir en paper_trades (Log de actividad parcial)
