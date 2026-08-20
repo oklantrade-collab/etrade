@@ -6,6 +6,7 @@ import TradeMarkerChart from '@/components/TradeMarkerChart'
 import RadarWidget from '@/components/widgets/RadarWidget'
 import CascadaWidget from '@/components/widgets/CascadaWidget'
 import HalconCentinelaWidget from '@/components/widgets/HalconCentinelaWidget'
+import QshrWidget from '@/components/widgets/QshrWidget'
 
 // No longer hardcoded - loaded from DB
 const DEFAULT_FOREX_PAIRS = [
@@ -293,8 +294,13 @@ export default function ForexDashboard() {
           </div>
         </div>
         
-        {/* RIGHT COLUMN: UNIFIED STRATEGY HUD (RADAR, CASCADA, HALCÓN) */}
+        {/* RIGHT COLUMN: UNIFIED STRATEGY HUD (RADAR, CASCADA, HALCÓN, QSHR) */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <QshrWidget 
+            symbol={focusPair} 
+            position={activePosition} 
+            snap={snapshots[focusPair] || {}} 
+          />
           <RadarWidget 
             symbol={focusPair} 
             radarSnapshot={strategyHud?.radar} 

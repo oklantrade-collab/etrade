@@ -1262,21 +1262,188 @@ class StandaloneForexWorker:
         df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'})
         return df
 
+    def _route_qshr_to_aduana(self, symbol, signal, df_5m, df_15m, positions):
+        """Enruta señal QSHR v5 a ADUANAS respetando Cant. Monedas Activas."""
+        try:
+            from app.rebote_aduana.aduana_validator import AduanaValidator
+            from app.core.memory_store import BOT_STATE
+            
+            regime_params = BOT_STATE.config_cache.get('regime_params') or {}
+            max_active = int(regime_params.get('max_active_symbols_forex', 1))
+            
+            res = self.safe_db_execute(sb.table('forex_positions').select('symbol').eq('status', 'open'))
+            open_symbols = list(set([r['symbol'] for r in (res.data or [])]))
+            
+            aduana = AduanaValidator()
+            side = signal.get('side', 'long')
+            market_data = {
+                'df_15m': df_15m,
+                'df_5m': df_5m,
+                'squeeze_velocity': float(signal.get('velocity', 0.0)),
+                'open_symbols': open_symbols,
+                'max_active_symbols': max_active
+            }
+            
+            rule_code = signal.get('rule_code', 'Bb33_QSHR')
+            result = aduana.validate(
+                symbol=symbol,
+                side=side,
+                order_type='MARKET',
+                market_data=market_data,
+                strategy=rule_code
+            )
+            
+            if not result.approved:
+                self.log(f"🛑 [ADUANA QSHR REJECT] {symbol} {side.upper()}: {result.rule_triggered} — {result.reason}")
+                return False
+                
+            self.log(f"✅ [ADUANA QSHR APPROVED] {symbol} {side.upper()}: {signal.get('reason')}")
+            self._execute_qshr_order(symbol, side, signal, df_5m)
+            return True
+        except Exception as e:
+            self.log(f"Error enrutando QSHR a Aduana: {e}", "ERROR")
+            return False
+
+    def _execute_qshr_order(self, symbol, side, signal, df_5m):
+        """Ejecuta orden MARKET para QSHR v5 con lotaje fijo según Settings."""
+        try:
+            from app.core.memory_store import BOT_STATE
+            regime_params = BOT_STATE.config_cache.get('regime_params') or {}
+            custom_lots = regime_params.get('custom_lots_forex') or {}
+            sym_upper = symbol.upper()
+            
+            if signal.get('custom_lots') and float(signal['custom_lots']) > 0:
+                lots = round(float(signal['custom_lots']), 2)
+            elif sym_upper in custom_lots and float(custom_lots[sym_upper]) > 0:
+                lots = round(float(custom_lots[sym_upper]), 2)
+            elif 'XAU' in sym_upper or 'GOLD' in sym_upper:
+                lots = 0.10
+            else:
+                lots = 0.05
+                
+            price_data = STATE['prices'].get(symbol, {})
+            current_price = price_data.get('mid', 0)
+            if current_price <= 0:
+                last_c = df_5m['close'].iloc[-1] if df_5m is not None and not df_5m.empty else 0
+                current_price = float(last_c)
+                
+            if current_price <= 0:
+                self.log(f"No se pudo determinar precio para orden QSHR en {symbol}", "WARNING")
+                return
+
+            rule_code = signal.get('rule_code', 'Bb33_QSHR_DIRECT')
+            sl_price = float(signal.get('sl_price') or 0)
+            mode_val = os.getenv('FOREX_MODE', 'paper')
+            
+            if mode_val == 'live' and hasattr(self, 'execution') and self.execution:
+                self.execution._execute_live_order(
+                    symbol=symbol,
+                    direction=side,
+                    lots=lots,
+                    entry=current_price,
+                    sl=sl_price,
+                    tp=0.0,
+                    rule_code=rule_code,
+                    order_type='market'
+                )
+            elif hasattr(self, 'execution') and self.execution:
+                self.execution._execute_paper_order(
+                    symbol=symbol,
+                    direction=side,
+                    lots=lots,
+                    entry=current_price,
+                    sl=sl_price,
+                    tp=0.0,
+                    rule_code=rule_code
+                )
+            else:
+                new_pos = {
+                    'symbol': symbol,
+                    'side': side.lower(),
+                    'lots': lots,
+                    'entry_price': current_price,
+                    'sl_price': sl_price,
+                    'tp_price': 0,
+                    'status': 'open',
+                    'rule_code': rule_code,
+                    'mode': mode_val,
+                    'created_at': datetime.now(timezone.utc).isoformat()
+                }
+                self.safe_db_execute(sb.table('forex_positions').insert(new_pos))
+
+            self.log(f"⚡ [QSHR MARKET ORDER EXECUTED] {symbol} {side.upper()} | Lots: {lots} | Price: {current_price} | Rule: {rule_code}")
+            
+            try:
+                from app.workers.alerts_service import send_telegram_message
+                reactor.callInThread(lambda: asyncio.run(send_telegram_message(
+                    f"⚡ QUANTUM SQUEEZE BREAKOUT [{symbol}]\n"
+                    f"Dirección: {side.upper()}\n"
+                    f"Velocidad 5m: {signal.get('velocity', 'N/A')}\n"
+                    f"BB Expansion: {signal.get('bandwidth_ratio', 'N/A')}x\n"
+                    f"Precio: {current_price:.5f}\n"
+                    f"Lots: {lots} (Lotes Fijos)\n"
+                    f"Aprobado por ADUANAS ✅"
+                )))
+            except Exception as tg_e:
+                self.log(f"Error enviando alerta Telegram QSHR: {tg_e}", "WARNING")
+
+            try:
+                from app.halcon_centinela.logger import log_halcon_score
+                log_halcon_score(
+                    position_id='QSHR_SCANNER',
+                    symbol=symbol,
+                    scores_by_layer={'5m_squeeze': float(signal.get('velocity', 2.5))},
+                    score_final=float(signal.get('velocity', 2.5)) * 10,
+                    semaforo='VERDE' if side == 'long' else 'ROJO',
+                    decision='QSHR_BREAKOUT',
+                    executed=True,
+                    detail=f"Squeeze Breakout {side.upper()} ejecutado a MARKET"
+                )
+            except Exception as hl_e:
+                self.log(f"Error registrando score HALCÓN QSHR: {hl_e}", "DEBUG")
+
+        except Exception as e:
+            self.log(f"Error ejecutando orden QSHR {symbol}: {e}", "ERROR")
+
     def _manage_position_5m(self, symbol: str):
         """
         Gestión de posiciones en ciclo rápido (5m).
-        Implementa el trailing dinámico reactivo para SHORT/SELL.
+        Implementa scanner multi-par QSHR v5 y trailing dinámico reactivo para SHORT/SELL.
         """
         try:
             # 1. Obtener posiciones abiertas del símbolo
             res = self.safe_db_execute(sb.table('forex_positions').select('*').eq('symbol', symbol).eq('status', 'open'))
             positions = res.data or []
-            if not positions: return
 
             # 2. Obtener dataframes (15m, 5m y 4h)
             df_15m = self._get_candles_df(symbol, '15m')
             df_5m  = self._get_candles_df(symbol, '5m')
             df_4h  = self._get_candles_df(symbol, '4h')
+
+            # ─── TTL 90M: Cancelación automática de órdenes limit huérfanas ───
+            try:
+                pending_res = self.safe_db_execute(sb.table('forex_positions').select('*').eq('symbol', symbol).in_('status', ['pending_limit', 'pending']))
+                for p_order in (pending_res.data or []):
+                    opened_str = p_order.get('opened_at') or p_order.get('created_at')
+                    if opened_str:
+                        opened_dt = datetime.fromisoformat(opened_str.replace('Z', '+00:00'))
+                        elapsed_min = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 60.0
+                        if elapsed_min >= 90.0:
+                            self.safe_db_execute(sb.table('forex_positions').update({'status': 'cancelled_ttl'}).eq('id', p_order['id']))
+                            self.log(f"🧹 [TTL 90M EXPIRED] {symbol}: Orden límite {p_order['id'][:8]} cancelada por exceder 90 min ({elapsed_min:.0f}m)")
+            except Exception as ttl_e:
+                self.log(f"Error en TTL 90M cleanup {symbol}: {ttl_e}", "DEBUG")
+
+            # ─── NUEVO: QSHR v5 Scanner Multi-Par Autónomo (antes de if not positions) ───
+            try:
+                from app.strategy.quantum_squeeze_hedge import scan_squeeze_opportunities
+                squeeze_signal = scan_squeeze_opportunities(symbol, df_5m, df_15m, market_type='forex_futures')
+                if squeeze_signal and not positions:
+                    self._route_qshr_to_aduana(symbol, squeeze_signal, df_5m, df_15m, positions)
+            except Exception as sq_err:
+                self.log(f"Error en QSHR Scanner {symbol}: {sq_err}", "WARNING")
+
+            if not positions: return
             
             # 3. Obtener snapshot para indicadores
             snap_res = self.safe_db_execute(sb.table('market_snapshot').select('*').eq('symbol', symbol).limit(1))
@@ -1312,19 +1479,80 @@ class StandaloneForexWorker:
                         self.log(f"Error cerrando en fin de semana: {e}", "ERROR")
                 return
 
+            # ─── Evaluacion QUANTUM SQUEEZE CLUSTER EXIT (15m SIPV Take Profit) ───
+            try:
+                from app.strategy.quantum_squeeze_hedge import evaluate_cluster_exit
+                cluster_res = evaluate_cluster_exit(symbol, positions, df_5m, df_15m, current_price)
+                if cluster_res and cluster_res.get('action') == 'cluster_take_profit':
+                    self.log(f"🎯 [QSHR CLUSTER TAKE PROFIT] {symbol}: {cluster_res['reason']}")
+                    for p in positions:
+                        c_id = p.get('ctrader_pos_id')
+                        if c_id:
+                            self.close_position(c_id, symbol=symbol)
+                        from app.core.position_monitor import _execute_paper_close
+                        reactor.callInThread(lambda pos_to_close=p: asyncio.run(_execute_paper_close(pos_to_close, current_price, 'qshr_cluster_tp_15m', sb)))
+                    return
+            except Exception as cl_err:
+                self.log(f"Error evaluando cluster exit {symbol}: {cl_err}", "DEBUG")
+
             for pos in positions:
                 try:
                     side = pos['side'].lower()
                     is_short = side in ('short', 'sell')
                     
-                    # ─── Evaluacion QUANTUM SQUEEZE HEDGE & REVERSAL (Bb33_QSHR v4) ───
+                    # ─── Evaluacion EREP v2.0 (Rescate por Escalamiento Asimétrico) ───
+                    try:
+                        from app.strategy.erep_recovery_engine import evaluate_erep_entry_trigger, evaluate_erep_exit_trigger
+                        
+                        # 1. Chequear salida Breakeven si P2 ya se encuentra activo
+                        erep_exit = evaluate_erep_exit_trigger(pos, current_price, symbol)
+                        if erep_exit and erep_exit.get('action') == 'close_erep_cluster':
+                            self.log(f"🎯 [EREP v2.0 CLUSTER EXIT] {symbol}: {erep_exit['reason']}")
+                            for p in positions:
+                                c_id = p.get('ctrader_pos_id')
+                                if c_id:
+                                    self.close_position(c_id, symbol=symbol)
+                                from app.core.position_monitor import _execute_paper_close
+                                reactor.callInThread(lambda p_close=p: asyncio.run(_execute_paper_close(p_close, current_price, 'erep_breakeven_p3', sb)))
+                            return
+
+                        # 2. Chequear entrada P2 de Rescate si la posición está en drawdown
+                        erep_entry = evaluate_erep_entry_trigger(pos, df_5m, df_15m, current_price, snap)
+                        if erep_entry and erep_entry.get('action') == 'execute_erep_p2':
+                            p2_side = erep_entry['side']
+                            self.log(f"🚑 [EREP v2.0 P2 RESCATE TRIGGER] {symbol} {p2_side.upper()}: {erep_entry['reason']}")
+                            approved = self._route_qshr_to_aduana(
+                                symbol,
+                                {
+                                    'side': p2_side,
+                                    'rule_code': 'Bb33_EREP_RECOVERY_P2',
+                                    'reason': erep_entry['reason'],
+                                    'velocity': 1.0,
+                                    'custom_lots': erep_entry['p2_size']
+                                },
+                                df_5m, df_15m, positions
+                            )
+                            if approved:
+                                self.safe_db_execute(sb.table('forex_positions').update({
+                                    'erep_active': True,
+                                    'erep_p2_price': current_price,
+                                    'erep_p2_size': erep_entry['p2_size'],
+                                    'erep_p3_avg': erep_entry['p3_avg'],
+                                    'erep_q2': erep_entry['p2_size'],
+                                    'erep_activated_at': datetime.now(timezone.utc).isoformat()
+                                }).eq('id', pos['id']))
+                                pos['erep_active'] = True
+                                pos['erep_p2_price'] = current_price
+                                pos['erep_p3_avg'] = erep_entry['p3_avg']
+                    except Exception as erep_err:
+                        self.log(f"Error evaluando EREP v2.0 {symbol}: {erep_err}", "DEBUG")
+                    
+                    # ─── Evaluacion QUANTUM SQUEEZE HEDGE & REVERSAL & BOOSTER (Bb33_QSHR v5) ───
                     try:
                         from app.strategy.quantum_squeeze_hedge import evaluate_qshr_hedge_signal
-                        df_1m = self._get_candles_df(symbol, '1m') or df_5m
                         qshr_res = evaluate_qshr_hedge_signal(
                             symbol=symbol,
                             df_5m=df_5m,
-                            df_1m=df_1m,
                             df_15m=df_15m,
                             active_position=pos,
                             market_type='forex_futures'
@@ -1334,30 +1562,46 @@ class StandaloneForexWorker:
                             q_action = qshr_res['action']
                             q_reason = qshr_res['reason']
                             
-                            if q_action == 'open_hedge_short':
+                            if q_action in ('open_booster_long', 'open_booster_short'):
+                                booster_side = 'long' if 'long' in q_action else 'short'
+                                self.log(f"🚀 [QSHR TREND BOOSTER {booster_side.upper()}] {symbol}: {q_reason}")
+                                self._route_qshr_to_aduana(
+                                    symbol,
+                                    {'side': booster_side, 'rule_code': qshr_res.get('rule_code', 'Bb33_QSHR_BOOSTER'), 'reason': q_reason, 'velocity': qshr_res.get('velocity', 2.5), 'sl_price': qshr_res.get('sl_price', 0)},
+                                    df_5m, df_15m, positions
+                                )
+                                # Sincronizar Cluster Stop Loss para todas las posiciones del par
+                                cluster_sl = qshr_res.get('sl_price')
+                                if cluster_sl:
+                                    for p in positions:
+                                        try:
+                                            self.safe_db_execute(sb.table('forex_positions').update({'sl_price': cluster_sl}).eq('id', p['id']))
+                                            self.log(f"🛡️ [CLUSTER SL SYNC] {symbol} Pos {p['id'][:8]}: SL ajustado a {cluster_sl}")
+                                        except Exception as sl_e:
+                                            self.log(f"Error actualizando Cluster SL {p['id']}: {sl_e}", "DEBUG")
+                            elif q_action == 'open_hedge_short':
                                 self.log(f"🛡️ [QSHR HEDGE SHORT] {symbol}: {q_reason}")
-                                self.trigger_forex_reentry_standalone(symbol, 'short', abs(float(pos.get('lots') or 0.01)), df_5m)
+                                self._route_qshr_to_aduana(symbol, {'side': 'short', 'rule_code': 'Bb33_QSHR_HEDGE', 'reason': q_reason, 'velocity': 2.5}, df_5m, df_15m, positions)
                             elif q_action == 'open_hedge_long':
                                 self.log(f"🛡️ [QSHR HEDGE LONG] {symbol}: {q_reason}")
-                                self.trigger_forex_reentry_standalone(symbol, 'long', abs(float(pos.get('lots') or 0.01)), df_5m)
-                            elif q_action in ('close_original_long', 'close_original_short'):
-                                self.log(f"🛡️ [QSHR EXIT 4-FACTOR] {symbol}: {q_reason}")
-                                # Cerrar posición en cTrader/IC Markets (broker real)
+                                self._route_qshr_to_aduana(symbol, {'side': 'long', 'rule_code': 'Bb33_QSHR_HEDGE', 'reason': q_reason, 'velocity': 2.5}, df_5m, df_15m, positions)
+                            elif q_action in ('close_original_long', 'close_original_short', 'close_market_active_sipv', 'close_market_passive_ema9', 'partial_close_market_active_sipv'):
+                                self.log(f"🛡️ [QSHR EXIT / RIDE & CLOSE] {symbol}: {q_reason}")
                                 c_id = pos.get('ctrader_pos_id')
                                 if c_id:
                                     self.close_position(c_id, symbol=symbol)
                                 from app.core.position_monitor import _execute_paper_close
-                                reactor.callInThread(lambda: asyncio.run(_execute_paper_close(pos, current_price, 'qshr_4factor_exit', sb)))
+                                exit_reason = 'qshr_sipv_climax' if 'sipv' in q_action else ('qshr_ema9_trailing' if 'ema9' in q_action else 'qshr_4factor_exit')
+                                reactor.callInThread(lambda: asyncio.run(_execute_paper_close(pos, current_price, exit_reason, sb)))
                             elif q_action in ('reversal_at_level5', 'reversal_at_level6'):
                                 self.log(f"🎯 [QSHR 15M REVERSAL] {symbol}: {q_reason}")
-                                # Cerrar posición antigua en cTrader/IC Markets (broker real)
                                 c_id = pos.get('ctrader_pos_id')
                                 if c_id:
                                     self.close_position(c_id, symbol=symbol)
                                 from app.core.position_monitor import _execute_paper_close
                                 reactor.callInThread(lambda: asyncio.run(_execute_paper_close(pos, current_price, 'qshr_reversal_15m', sb)))
                                 rev_side = qshr_res.get('reversal_side', 'long')
-                                self.trigger_forex_reentry_standalone(symbol, rev_side, abs(float(pos.get('lots') or 0.01)), df_5m)
+                                self._route_qshr_to_aduana(symbol, {'side': rev_side, 'rule_code': qshr_res.get('rule_code', 'Bb33_QSHR_REVERSAL'), 'reason': q_reason, 'velocity': 2.5}, df_5m, df_15m, positions)
                     except Exception as q_err:
                         self.log(f"Error evaluando QSHR para {symbol}: {q_err}", "WARNING")
                     

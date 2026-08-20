@@ -26,7 +26,10 @@ ADUANA_PARAMS = {
     'impulse_candle_atr_ratio': 1.8,
     'extreme_proximity_zones': 3,
     'range_bb_bandwidth_threshold': 0.02,
-    'macro_score_threshold': 30.0
+    'macro_score_threshold': 30.0,
+    'qshr_squeeze_velocity_min': 2.5,
+    'qshr_sipv_climax_threshold': 2.0,
+    'qshr_ema_trailing_period': 9
 }
 
 def load_rebote_config_from_db() -> dict:

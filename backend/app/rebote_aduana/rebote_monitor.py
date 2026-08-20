@@ -46,17 +46,18 @@ class ReboteMonitor:
 
     def _evaluate_symbol_direction(self, symbol: str, direction: str, market_data: dict) -> dict:
         """Evaluate a single symbol and direction for a potential REBOTE entry."""
-        # 1. Count existing open positions for this symbol+direction
+        # 1. Count existing open positions for this symbol (total and direction)
         existing_count = self._count_open_positions(symbol, direction)
+        total_symbol_count = self._count_total_open_positions(symbol)
         
         # 2. Get max_positions
-        max_positions = BOT_STATE.config_cache.get('max_positions_per_symbol', 4)
+        max_positions = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
         
-        # 3. If existing >= max_positions → skip
-        if existing_count >= max_positions:
+        # 3. If total existing >= max_positions → skip
+        if total_symbol_count >= max_positions or existing_count >= max_positions:
             return {
                 'symbol': symbol, 'direction': direction, 'decision': 'SKIP', 
-                'reason': f'Max positions reached ({existing_count}/{max_positions})'
+                'reason': f'Max positions reached ({total_symbol_count}/{max_positions})'
             }
             
         # 4. Determine score threshold
@@ -141,6 +142,22 @@ class ReboteMonitor:
             return len(response.data) if response and response.data else 0
         except Exception as e:
             log_error(MODULE, f"Error counting positions for {symbol} {direction}: {str(e)}")
+            return 0
+
+    def _count_total_open_positions(self, symbol: str) -> int:
+        """Count all open positions for this symbol regardless of direction."""
+        try:
+            if hasattr(BOT_STATE, 'get_positions_by_symbol'):
+                mem_pos = BOT_STATE.get_positions_by_symbol(symbol)
+                if mem_pos:
+                    matching = [p for p in mem_pos if str(p.get('status', 'open')).lower() in ('open', 'pending')]
+                    return len(matching)
+
+            table = 'forex_positions' if self.market_type == 'forex' else 'positions'
+            response = self.sb.table(table).select('id').eq('symbol', symbol).in_('status', ['OPEN', 'open']).execute()
+            return len(response.data) if response and response.data else 0
+        except Exception as e:
+            log_error(MODULE, f"Error counting total positions for {symbol}: {str(e)}")
             return 0
 
     def _execute_entry(self, symbol: str, direction: str, result: ReboteResult) -> Any:

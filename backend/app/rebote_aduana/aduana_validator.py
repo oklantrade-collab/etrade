@@ -109,6 +109,20 @@ class AduanaValidator:
         norm_side = self._normalize_side(side)
         df_15m = market_data.get('df_15m')
         
+        # Step 0: Check Cant. Monedas Activas (Forex & Crypto)
+        step = 0
+        open_symbols = market_data.get('open_symbols')
+        max_active_symbols = market_data.get('max_active_symbols')
+        if open_symbols is not None and max_active_symbols is not None:
+            open_set = set(open_symbols)
+            if symbol not in open_set and len(open_set) >= int(max_active_symbols):
+                return AduanaResult(
+                    approved=False,
+                    rule_triggered='MAX_ACTIVE_SYMBOLS_REACHED',
+                    reason=f'Cant. Monedas Activas alcanzado ({len(open_set)}/{max_active_symbols} activas: {list(open_set)})',
+                    step=step
+                )
+
         # Step 1: Check ORÁCULO trading_paused
         step = 1
         is_paused = False
@@ -126,13 +140,73 @@ class AduanaValidator:
         if is_paused:
             return AduanaResult(approved=False, rule_triggered='ORACULO_PAUSE', reason='Trading is paused by Oraculo', step=step)
 
-        # Step 2: Check extreme in SAME direction
+        # Step 1.5: Check Cant. Operación x Par (Max Positions Per Symbol)
+        step = 1
+        current_symbol_positions = market_data.get('current_symbol_positions')
+        max_positions_per_symbol = market_data.get('max_positions_per_symbol')
+        if current_symbol_positions is not None and max_positions_per_symbol is not None:
+            if int(current_symbol_positions) >= int(max_positions_per_symbol):
+                return AduanaResult(
+                    approved=False,
+                    rule_triggered='MAX_POSITIONS_PER_SYMBOL_REACHED',
+                    reason=f'Límite de posiciones por par alcanzado ({current_symbol_positions}/{max_positions_per_symbol})',
+                    step=step
+                )
+
+        # Step 2.5: QSHR Squeeze Override & Booster Handling
+        is_qshr_strategy = strategy.startswith('Bb33_QSHR') or strategy in ('Bb33_QSHR', 'qshr_v5')
+        squeeze_velocity = float(market_data.get('squeeze_velocity', 0.0))
+        min_squeeze_vel = float(self.params.get('qshr_squeeze_velocity_min', 2.5))
+
+        if is_qshr_strategy:
+            if squeeze_velocity >= min_squeeze_vel:
+                rule_name = 'QSHR_BOOSTER_APPROVED' if 'BOOSTER' in strategy else 'QSHR_SQUEEZE_OVERRIDE'
+                log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity} >= {min_squeeze_vel}")
+                return AduanaResult(approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity})', step=2)
+            else:
+                return AduanaResult(approved=False, rule_triggered='QSHR_LOW_VELOCITY', reason=f'Squeeze velocity insuficiente ({squeeze_velocity:.2f} < {min_squeeze_vel})', step=2)
+
+        # Step 2.8: EREP Recovery Validation
+        is_erep_strategy = strategy.startswith('Bb33_EREP') or 'EREP' in strategy
+        if is_erep_strategy:
+            if squeeze_velocity >= min_squeeze_vel:
+                return AduanaResult(
+                    approved=False,
+                    rule_triggered='EREP_SQUEEZE_BLOCKED',
+                    reason=f'EREP bloqueado por Squeeze activo en contra (V_5m={squeeze_velocity:.2f} >= {min_squeeze_vel})',
+                    step=2
+                )
+            else:
+                log_info(MODULE, f"⚡ [ADUANA EREP APPROVED] {symbol} {norm_side.upper()} P2 Rescate aprobado (V_5m={squeeze_velocity:.2f} segura)")
+                return AduanaResult(
+                    approved=True,
+                    rule_triggered='EREP_P2_APPROVED',
+                    reason=f'EREP v2.0 P2 Rescate aprobado para {symbol} {norm_side.upper()}',
+                    step=2
+                )
+
+        # Step 2: Check extreme in SAME direction (para estrategias de rebote)
         step = 2
         fib_zone = self._get_fib_zone(df_15m)
         if norm_side == 'long' and fib_zone >= 4:
             return AduanaResult(approved=False, rule_triggered='SAME_DIR_EXTREME', reason=f'Long at upper extreme (fib {fib_zone})', step=step)
         if norm_side == 'short' and fib_zone <= -4:
             return AduanaResult(approved=False, rule_triggered='SAME_DIR_EXTREME', reason=f'Short at lower extreme (fib {fib_zone})', step=step)
+
+        # Step 2.9: Asset-Specific Shields (XAUUSD Anti-Spike NY & JPY Prime Hours)
+        now_utc = datetime.now(timezone.utc)
+        current_minute_utc = now_utc.hour * 60 + now_utc.minute
+
+        # A) XAUUSD Anti-Spike Shield en apertura de Wall Street (13:30 a 15:30 UTC = 810 a 930 min)
+        if symbol in ('XAUUSD', 'XAU/USD') and not is_qshr_strategy:
+            if 810 <= current_minute_utc <= 930 and abs(fib_zone) < 5:
+                log_info(MODULE, f"🛡️ [ADUANA XAUUSD SHIELD] {symbol} {norm_side.upper()} bloqueado por apertura de Wall Street / Noticias EE.UU. (Solo Level 5/6 o QSHR)")
+                return AduanaResult(
+                    approved=False,
+                    rule_triggered='XAUUSD_NEWS_SPIKE_SHIELD',
+                    reason='Ventana de alta volatilidad NY en Oro (13:30-15:30 UTC): Solo se permiten rebotes extremos Level 5/6 o QSHR Breakout',
+                    step=2
+                )
 
         # Step 3: Check contra macro HALCÓN bias without reinforced confirmation
         step = 3

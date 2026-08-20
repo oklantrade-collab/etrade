@@ -101,6 +101,8 @@ files_to_sync = [
 
     # Otros módulos de la plataforma
     "app/strategy/quantum_squeeze_hedge.py",
+    "app/strategy/erep_recovery_engine.py",
+    "app/strategy/crypto_multi_asset_calibrations.py",
     "app/strategy/smart_loss_guard.py",
     "app/strategy/dca_manager.py",
     "app/strategy/profit_capture.py",
@@ -174,6 +176,7 @@ frontend_files = [
     ("frontend/components/widgets/CascadaWidget.tsx", "frontend/components/widgets/CascadaWidget.tsx"),
     ("frontend/components/widgets/RadarWidget.tsx", "frontend/components/widgets/RadarWidget.tsx"),
     ("frontend/components/widgets/HalconCentinelaWidget.tsx", "frontend/components/widgets/HalconCentinelaWidget.tsx"),
+    ("frontend/components/widgets/QshrWidget.tsx", "frontend/components/widgets/QshrWidget.tsx"),
     ("frontend/app/forex/dashboard/page.tsx", "frontend/app/forex/dashboard/page.tsx"),
     ("frontend/app/dashboard/page.tsx", "frontend/app/dashboard/page.tsx")
 ]

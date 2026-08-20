@@ -725,6 +725,28 @@ async def open_forex_position(
             return
     except Exception as e:
         log_error(MODULE, f"Error en validación max_active_symbols_forex: {e}")
+
+    # === CHECK CANTIDAD MÁXIMA DE POSICIONES POR PAR (FOREX) ===
+    try:
+        max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
+        if 'max_positions_per_symbol' not in BOT_STATE.config_cache:
+            rc_cfg = sb.table('risk_config').select('max_positions_per_symbol').limit(1).execute()
+            if rc_cfg.data:
+                max_per_pair = int(rc_cfg.data[0].get('max_positions_per_symbol', 3))
+                
+        open_pos_for_sym = sb.table('forex_positions').select('id, side').eq('status', 'open').eq('symbol', symbol).execute().data or []
+        if len(open_pos_for_sym) >= max_per_pair:
+            log_warning(MODULE, f"⛔ [MAX POSITIONS PER PAIR] {symbol}: Señal {direction.upper()} rechazada. Límite de {max_per_pair} posiciones abiertas alcanzado ({len(open_pos_for_sym)}/{max_per_pair}).")
+            return
+            
+        # Check global max open trades
+        max_global = int(BOT_STATE.config_cache.get('max_open_trades', 15))
+        all_open_fx = sb.table('forex_positions').select('id').eq('status', 'open').execute().data or []
+        if len(all_open_fx) >= max_global:
+            log_warning(MODULE, f"⛔ [MAX GLOBAL TRADES] {symbol}: Límite global alcanzado ({len(all_open_fx)}/{max_global}).")
+            return
+    except Exception as e:
+        log_error(MODULE, f"Error en validación max_positions_per_pair en open_forex_position: {e}")
     # ========================================================
 
     # ═══════════════════════════════════════════════════
@@ -1597,11 +1619,18 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                                     should_move_sl = True
                                 
                                 if should_move_sl:
-                                    sb.table('forex_positions').update({
-                                        'sl_price': new_sl_be,
-                                        'sl_type': 'breakeven_after_partial'
-                                    }).eq('id', position['id']).execute()
+                                    try:
+                                        sb.table('forex_positions').update({
+                                            'sl_price': new_sl_be,
+                                            'sl_type': 'breakeven_after_partial'
+                                        }).eq('id', position['id']).execute()
+                                    except Exception as sl_err:
+                                        log_warning(MODULE, f"Warning updating sl_type in forex_positions: {sl_err}")
+                                        sb.table('forex_positions').update({
+                                            'sl_price': new_sl_be
+                                        }).eq('id', position['id']).execute()
                                     position['sl_price'] = new_sl_be
+                                    position['sl_type'] = 'breakeven_after_partial'
                                     sl = new_sl_be
                                     
                             except Exception as e:
@@ -2397,13 +2426,20 @@ async def forex_cycle_15m():
         return
 
     try:
-        # Sync config
+        # Sync config from trading_config and risk_config
         try:
             res = sb.table('trading_config').select('*').eq('id', 1).maybe_single().execute()
             if res.data:
                 BOT_STATE.config_cache.update(res.data)
-        except:
-            pass
+                # If max_positions_per_symbol is inside regime_params, extract it
+                rp = res.data.get('regime_params') or {}
+                if 'max_positions_per_symbol' in rp:
+                    BOT_STATE.config_cache['max_positions_per_symbol'] = rp['max_positions_per_symbol']
+            rc_res = sb.table('risk_config').select('*').limit(1).execute()
+            if rc_res.data:
+                BOT_STATE.config_cache.update(rc_res.data[0])
+        except Exception as cfg_err:
+            log_error(MODULE, f"Error syncing config in forex 15m: {cfg_err}")
 
         # Sync positions to memory to enforce state limits
         try:
