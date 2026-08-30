@@ -270,6 +270,6 @@ if __name__ == "__main__":
     run_ws_monitor(
         test_symbols, 
         os.getenv("BINANCE_API_KEY", ""), 
-        os.getenv("BINANCE_SECRET", ""), 
+        os.getenv("BINANCE_SECRET") or os.getenv("BINANCE_API_SECRET", ""), 
         os.getenv("BINANCE_TESTNET", "true").lower() == "true"
     )

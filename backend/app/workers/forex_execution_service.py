@@ -152,7 +152,7 @@ class ForexExecutionService:
             # 2. Cargar config de riesgo dinamica
             from app.core.supabase_client import get_risk_config
             risk_config = get_risk_config()
-            limit_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+            limit_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
             limit_global = int(risk_config.get('max_total_positions', 16))
             max_retries = 3
 
@@ -1055,6 +1055,57 @@ class ForexExecutionService:
                 pass
             return
 
+        # 0.2: Validación Central en ADUANAS (Pullback, RSI Exhaustion, BB Curvature, Multi-Asset Shields)
+        try:
+            from app.rebote_aduana.aduana_validator import AduanaValidator
+            from app.core.memory_store import MEMORY_STORE
+            
+            df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+            df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+            
+            market_data = {
+                'df_15m': df_15m,
+                'df_5m': df_5m,
+                'price': price,
+                'rsi_15m': snap.get('rsi') or snap.get('rsi_15m'),
+                'ema9': snap.get('ema9'),
+                'ema20': snap.get('ema20'),
+                'open_symbols': [p['symbol'] for p in self._open_positions_list if p.get('status') == 'open'],
+                'active_positions': [p for p in self._open_positions_list if p.get('status') == 'open'],
+                'max_active_symbols': 3
+            }
+            
+            aduana = AduanaValidator()
+            aduana_res = aduana.validate(
+                symbol=symbol,
+                side=direction,
+                order_type='MARKET',
+                market_data=market_data,
+                strategy=signal.get('rule_code', '')
+            )
+            
+            if not aduana_res.approved:
+                self.log(f"⛔ [ADUANA REJECT] {symbol} {direction.upper()} ({signal.get('rule_code')}): {aduana_res.reason} [Rule: {aduana_res.rule_triggered}]", "WARNING")
+                try:
+                    self.sb.table('aduana_decisions_log').insert({
+                        'symbol': symbol,
+                        'direction': direction,
+                        'strategy': signal.get('rule_code', ''),
+                        'approved': False,
+                        'rule_triggered': aduana_res.rule_triggered,
+                        'reason': aduana_res.reason,
+                        'market_type': 'forex_futures',
+                        'price': price,
+                        'created_at': datetime.now(timezone.utc).isoformat()
+                    }).execute()
+                except Exception:
+                    pass
+                return
+            else:
+                self.log(f"✅ [ADUANA PASS] {symbol} {direction.upper()} ({signal.get('rule_code')}): Aprobado por Aduana ({aduana_res.reason})")
+        except Exception as aduana_err:
+            self.log(f"Error evaluando AduanaValidator para {symbol}: {aduana_err}", "WARNING")
+
         # 1. Reglas Multi-layer (Misma dirección) - Evita duplicados en la misma vela
         same_direction = [p for p in self._open_positions_list if p['symbol'] == symbol and p['side'].lower() == direction.lower()]
         
@@ -1107,7 +1158,7 @@ class ForexExecutionService:
         # 3. Guardian final: Limite TOTAL por simbolo y Cant. Monedas Activas
         total_symbol = len([p for p in self._open_positions_list if p['symbol'] == symbol])
         from app.core.supabase_client import get_risk_config
-        max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
+        max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 3))
         if total_symbol >= max_per_symbol:
             self.log(f'LIMITE TOTAL ALCANZADO para {symbol}: {total_symbol}/{max_per_symbol} posiciones.', 'WARNING')
             return
@@ -1128,12 +1179,30 @@ class ForexExecutionService:
         sl, tp, sl_pips = self._calculate_sl_tp(symbol, direction, price, snap, signal["rule_code"])
         lots = self._calculate_lot_size(symbol, sl_pips, snap, direction)
 
-        # Si es la 1ª posición del símbolo, convertir la entrada MARKET a una Orden LIMIT inteligente
+        # Si es la 1ª posición del símbolo, evaluar si entra a LIMIT o directo a MARKET por Alta Velocidad
         existing_positions = [p for p in self._open_positions_list if p['symbol'] == symbol]
         is_primary_entry = (len(existing_positions) == 0)
         
+        # Squeeze Breakout de Alta Velocidad (V_5m >= 2.5 o QSHR): Ejecutar directo a MARKET para no perder el impulso
+        is_high_velocity_market = False
+        try:
+            rule_c = str(signal.get('rule_code', ''))
+            if rule_c.startswith('Bb33_QSHR'):
+                is_high_velocity_market = True
+            else:
+                from app.core.memory_store import MEMORY_STORE
+                from app.strategy.quantum_squeeze_hedge import calculate_5m_velocity
+                df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                if df_5m is not None and len(df_5m) >= 20:
+                    vel_info = calculate_5m_velocity(df_5m)
+                    if vel_info.get('is_high_velocity') or vel_info.get('v_5m_score', 0) >= 2.5:
+                        is_high_velocity_market = True
+                        self.log(f"⚡ [HIGH VELOCITY MARKET OVERRIDE] {symbol} {direction.upper()}: V_5m={vel_info.get('v_5m_score')} >= 2.5. Ejecutando a MARKET directo.")
+        except Exception as v_err:
+            pass
+
         limit_price = None
-        if is_primary_entry:
+        if is_primary_entry and not is_high_velocity_market:
             limit_price = self._calculate_primary_limit_price(symbol, direction, snap)
             if limit_price is None:
                 self.log(f'⛔ [ABORT] 1ª Entrada {symbol} {direction.upper()} abortada por filtro de pendiente EMA3.', 'WARNING')
@@ -1438,6 +1507,9 @@ class ForexExecutionService:
 
     def _execute_live_order(self, symbol, direction, lots, entry, sl, tp, rule_code, order_type='limit', limit_price=None):
         try:
+            if self.symbols and symbol not in self.symbols:
+                self.log(f"🚨 [GATEWAY REJECT] Intento de orden en vivo para {symbol} abortado: Símbolo no está en lista permitida ({self.symbols})", "WARNING")
+                return
             from app.workers.forex_worker_standalone import ACCOUNT_ID, get_divisor, format_ctrader_price
             sid = self.state['symbol_ids'].get(symbol)
             if not sid: return
@@ -1460,7 +1532,7 @@ class ForexExecutionService:
             lots_clean = round(abs(float(lots)), 2)
             if symbol == 'XAUUSD':
                 vol_val = int(round(lots_clean * 10_000))
-                req.volume = max(vol_val, 1_000)
+                req.volume = max(vol_val, 100) # 0.01 lot = 100 volume units in cTrader OpenAPI
             else:
                 req.volume = int(round(lots_clean * 10_000_000))
             
@@ -1528,18 +1600,18 @@ class ForexExecutionService:
                 'status': 'pending' if is_limit else 'open', 
                 'mode': mode, 
                 'rule_code': rule_code,
-                'origen': origen,
                 'opened_at': datetime.now(timezone.utc).isoformat(),
                 #    SLVM Fields   
                 'slv_price': slv_price,
                 'recovery_mode': False,
-                'recovery_cycles': 0,
-                'entry_profile': self._classify_entry_profile(symbol)
+                'recovery_cycles': 0
             }
             res = self.sb.table('forex_positions').insert(pos).execute()
+
             if res.data: 
-                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots} (Origen: {origen})')
-                self._open_positions_list.append(res.data[0])
+                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots} (Origen: {origen}) [Status: {"pending" if is_limit else "open"}]')
+                if not is_limit:
+                    self._open_positions_list.append(res.data[0])
         except Exception as e: self.log(f'Error guardando: {e}')
 
     def run_position_management(self):
@@ -1755,51 +1827,124 @@ class ForexExecutionService:
                         pip_size = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
                         pips_pnl = (price - entry) / pip_size if side in ['long', 'buy'] else (entry - price) / pip_size
                         
-                        # --- CIERRE PROACTIVO PERSONALIZADO Bb61 (Aa61 / Aa61_short) ---
+                        # --- GESTIÓN AVANZADA FKR (Aa61 / Aa61_short) POR ZONAS 15M Y TRAILING KINÉTICO ---
                         if '61' in rule:
-                            triggered_exit_61 = False
-                            exit_reason = ""
-                            
-                            # 1. Chequeo en 5 minutos para corte ultra rápido: si EMA3 < EMA9 (para LONG)
+                            from app.strategy.capital_protection import evaluate_fkr_kinetic_trailing, ProtectionState
                             from app.core.memory_store import MEMORY_STORE
-                            df_5m = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
                             
-                            if df_5m is not None and len(df_5m) >= 2:
-                                last_5m = df_5m.iloc[-1]
-                                ema3_5m = self._safe_float(last_5m.get('ema1'))
-                                ema9_5m = self._safe_float(last_5m.get('ema2'))
-                                
-                                if side in ['long', 'buy'] and ema3_5m > 0 and ema9_5m > 0 and ema3_5m < ema9_5m:
-                                    triggered_exit_61 = True
-                                    exit_reason = f"Bb61 (5m contrary cross: EMA3 {ema3_5m:.5f} < EMA9 {ema9_5m:.5f})"
-                                elif side in ['short', 'sell'] and ema3_5m > 0 and ema9_5m > 0 and ema3_5m > ema9_5m:
-                                    triggered_exit_61 = True
-                                    exit_reason = f"Bb61 (5m contrary cross: EMA3 {ema3_5m:.5f} > EMA9 {ema9_5m:.5f})"
+                            df_15m_fkr = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
                             
-                            # 2. Chequeo en 15m: si tiende a cruzar (proximidad estrecha)
-                            if not triggered_exit_61:
-                                proximity = abs(ema3_val - ema9_val) / ema9_val * 100
-                                if side in ['long', 'buy']:
-                                    if ema3_val < ema9_val:
-                                        triggered_exit_61 = True
-                                        exit_reason = f"Bb61 (15m cross: EMA3 {ema3_val:.5f} < EMA9 {ema9_val:.5f})"
-                                    elif proximity < 0.02:  # Menos de 0.02% de distancia: tiende a cruzar
-                                        triggered_exit_61 = True
-                                        exit_reason = f"Bb61 (15m proximity: EMA3 se acerca a EMA9, dist={proximity:.3f}%)"
-                                elif side in ['short', 'sell']:
-                                    if ema3_val > ema9_val:
-                                        triggered_exit_61 = True
-                                        exit_reason = f"Bb61 (15m cross: EMA3 {ema3_val:.5f} > EMA9 {ema9_val:.5f})"
-                                    elif proximity < 0.02:
-                                        triggered_exit_61 = True
-                                        exit_reason = f"Bb61 (15m proximity: EMA3 se acerca a EMA9, dist={proximity:.3f}%)"
+                            prot_state = ProtectionState(
+                                position_id=str(pos.get('id', '')),
+                                symbol=symbol,
+                                side=side,
+                                entry_price=entry,
+                                current_sl=self._safe_float(pos.get('sl_price')),
+                                original_sl=self._safe_float(pos.get('sl_price')),
+                                market_type='forex_futures',
+                                rule_code=rule,
+                                lots=abs(self._safe_float(pos.get('lots'), 0.01))
+                            )
                             
-                            if triggered_exit_61 and pips_pnl >= 0:
-                                self.log(f"[EARLY EXIT Bb61] {symbol} {side.upper()}: {exit_reason}. Cerrando.")
-                                self._close_position(pos, price, 'Bb61', pips_pnl)
-                                self._send_telegram(f"🔔 [EARLY EXIT Bb61] {symbol} {side.upper()} cerrado proactivamente por: {exit_reason} (PnL: {pips_pnl:.1f} pips)")
+                            fkr_res = evaluate_fkr_kinetic_trailing(
+                                state=prot_state,
+                                current_price=price,
+                                df_15m=df_15m_fkr,
+                                snap=snap,
+                                pnl_pico=self._safe_float(pos.get('pnl_pico'))
+                            )
+                            
+                            if fkr_res.get('action') == 'close_market' and pips_pnl >= 0:
+                                close_reason_fkr = fkr_res.get('reason', 'fkr_profit_exit')
+                                self.log(f"[FKR PROFIT EXIT] {symbol} {side.upper()}: {close_reason_fkr} (PnL: +{pips_pnl:.1f} pips)")
+                                self._close_position(pos, price, close_reason_fkr, pips_pnl)
+                                self._send_telegram(f"🎯 [FKR PROFIT EXIT] {symbol} {side.upper()} cerrado con beneficio extendido: {close_reason_fkr} (+{pips_pnl:.1f} pips)")
                                 continue
+                            elif fkr_res.get('action') == 'update_sl':
+                                new_sl = fkr_res.get('new_sl')
+                                self.log(f"🛡️ [FKR TRAILING SL] {symbol} {side.upper()} -> Nuevo SL Virtual: {new_sl:.5f} ({fkr_res.get('reason')})")
+                                try:
+                                    self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos['id']).execute()
+                                    pos['sl_price'] = new_sl
+                                except Exception as sl_err:
+                                    self.log(f"Error actualizando SL FKR: {sl_err}", "WARNING")
+                            
+                            # FKR se gestiona 100% por evaluate_fkr_kinetic_trailing, omitir salidas de micro-cruces
+                            continue
                         
+                        # --- GESTIÓN AVANZADA REBOTE (Dd11 / Dd12 / Rebote_V5) POR ZONAS 15M Y TRAILING KINÉTICO ---
+                        elif any(k in rule for k in ('Dd11', 'Dd12', 'Reb', 'rebote', 'rebound', 'ERE_P2')):
+                            from app.strategy.capital_protection import evaluate_rebote_kinetic_trailing, ProtectionState
+                            from app.core.memory_store import MEMORY_STORE
+                            
+                            df_15m_reb = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                            
+                            prot_state = ProtectionState(
+                                position_id=str(pos.get('id', '')),
+                                symbol=symbol,
+                                side=side,
+                                entry_price=entry,
+                                current_sl=self._safe_float(pos.get('sl_price')),
+                                original_sl=self._safe_float(pos.get('sl_price')),
+                                market_type='forex_futures',
+                                rule_code=rule,
+                                lots=abs(self._safe_float(pos.get('lots'), 0.01))
+                            )
+                            
+                            reb_res = evaluate_rebote_kinetic_trailing(
+                                state=prot_state,
+                                current_price=price,
+                                df_15m=df_15m_reb,
+                                snap=snap,
+                                pnl_pico=self._safe_float(pos.get('pnl_pico'))
+                            )
+                            
+                            if reb_res.get('action') == 'close_market' and pips_pnl >= 0:
+                                close_reason_reb = reb_res.get('reason', 'rebote_profit_exit')
+                                self.log(f"[REBOTE PROFIT EXIT] {symbol} {side.upper()}: {close_reason_reb} (PnL: +{pips_pnl:.1f} pips)")
+                                self._close_position(pos, price, close_reason_reb, pips_pnl)
+                                self._send_telegram(f"🎯 [REBOTE PROFIT EXIT] {symbol} {side.upper()} cerrado con beneficio extendido: {close_reason_reb} (+{pips_pnl:.1f} pips)")
+                                continue
+                            elif reb_res.get('action') == 'update_sl':
+                                new_sl = reb_res.get('new_sl')
+                                self.log(f"🛡️ [REBOTE TRAILING SL] {symbol} {side.upper()} -> Nuevo SL Virtual: {new_sl:.5f} ({reb_res.get('reason')})")
+                                try:
+                                    self.sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos['id']).execute()
+                                    pos['sl_price'] = new_sl
+                                except Exception as sl_err:
+                                    self.log(f"Error actualizando SL Rebote: {sl_err}", "WARNING")
+                            
+                            # Rebote se gestiona 100% por evaluate_rebote_kinetic_trailing, omitir salidas de micro-cruces
+                            continue
+                        
+                        # --- RANGE_BAND_TOUCH_EXIT (Salida en Piso/Techo en Mercado Lateral con PnL > 0) ---
+                        from app.strategy.capital_protection import evaluate_range_bollinger_exit, ProtectionState
+                        from app.core.memory_store import MEMORY_STORE
+                        prot_state_range = ProtectionState(
+                            position_id=str(pos.get('id', '')),
+                            symbol=symbol,
+                            side=side,
+                            entry_price=entry,
+                            current_sl=self._safe_float(pos.get('sl_price')),
+                            original_sl=self._safe_float(pos.get('sl_price')),
+                            market_type='forex_futures',
+                            rule_code=rule,
+                            lots=abs(self._safe_float(pos.get('lots'), 0.01))
+                        )
+                        df_15m_range = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                        range_res = evaluate_range_bollinger_exit(
+                            state=prot_state_range,
+                            current_price=price,
+                            df_15m=df_15m_range,
+                            snap=snap
+                        )
+                        if range_res.get('action') == 'close_market' and pips_pnl >= 0:
+                            close_reason_rb = range_res.get('reason', 'range_bollinger_touch_exit')
+                            self.log(f"🎯 [RANGE BAND EXIT] {symbol} {side.upper()}: {close_reason_rb} (+{pips_pnl:.1f} pips)")
+                            self._close_position(pos, price, close_reason_rb, pips_pnl)
+                            self._send_telegram(f"🎯 [RANGE BAND EXIT] {symbol} {side.upper()} cerrado con beneficio en límite de banda lateral: {close_reason_rb} (+{pips_pnl:.1f} pips)")
+                            continue
+
                         # --- CORTES CONTRARIOS ESTANDAR ---
                         elif side in ['long', 'buy'] and ema3_val < ema9_val and pips_pnl >= 0:
                             self.log(f"[EARLY EXIT] {symbol} LONG ({rule}): EMA3 ({ema3_val:.5f}) < EMA9 ({ema9_val:.5f}) - Cruce contrario. Cerrando.")
@@ -1859,7 +2004,7 @@ class ForexExecutionService:
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.check_forex_erep(pos['symbol'], pos, price, snap, self.sb))
+            loop.run_until_complete(self.check_forex_erep(pos['symbol'], pos, price, snap or {}, self.sb))
         except Exception as e:
             self.log(f"Error executing Forex EREP in thread: {e}", "ERROR")
         finally:
@@ -2119,7 +2264,8 @@ class ForexExecutionService:
 
         #   2. SL / TP Estandar
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
-        hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
+        # [ADUANA SALIDA]: TP solo dispara si PnL >= $1.00 USD y pips >= 1.0
+        hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)) and pips_pnl >= 1.0 and pnl_usd >= 1.00)
         
         if hit_hard_cap or hit_sl:
             # Opción A: Excluir Swing (BbApexEma/AaApexEma) de EREP si la tendencia es super fuerte en contra
@@ -2541,23 +2687,43 @@ class ForexExecutionService:
                     self.sb.table('forex_positions').update({'sl_price': entry_price}).eq('id', pos['id']).execute()
                     pos['sl_price'] = entry_price
 
-        #    Verificaci n estricta de SL/TP   
+        #    Verificación estricta de SL/TP   
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))
-        hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)))
+        # [ADUANA SALIDA]: TP solo dispara si PnL >= $1.00 USD y pips >= 1.0
+        hit_tp = (tp > 0 and ((side in ['long', 'buy'] and price >= tp) or (side in ['short', 'sell'] and price <= tp)) and pips_pnl >= 1.0 and pnl_usd >= 1.00)
 
         if hit_sl or hit_tp:
             reason = 'sl' if hit_sl else 'tp'
             self.log(f"[EXECUTION] Disparando cierre {reason.upper()} para {symbol} at {price} (SL: {sl}, TP: {tp})")
             self._close_position(pos, price, reason, pips_pnl, snap=snap)
 
-    def _close_position(self, pos, close_price, reason, pips_pnl, mr_result=None, snap=None):
+    def _close_position(self, pos, close_price, reason, pips_pnl=None, mr_result=None, snap=None):
         try:
             symbol = pos['symbol']
             
-            # Usar valor absoluto de lots para el calculo de PnL ya que pips_pnl ya considera la direccion
+            entry_p = self._safe_float(pos.get('entry_price'))
+            close_p = self._safe_float(close_price)
+            pip_sz = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
             pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
-            pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots')))
+            is_buy = pos.get('side', '').lower() in ('long', 'buy')
             
+            # Recalcular pips si llega None o 0.0 con precios validos
+            if (pips_pnl is None or pips_pnl == 0.0) and close_p > 0 and entry_p > 0 and pip_sz > 0:
+                pips_pnl = (close_p - entry_p) / pip_sz if is_buy else (entry_p - close_p) / pip_sz
+            elif pips_pnl is None:
+                pips_pnl = 0.0
+                
+            # Usar valor absoluto de lots para el calculo de PnL ya que pips_pnl ya considera la direccion
+            pnl_usd = pips_pnl * pip_val * abs(self._safe_float(pos.get('lots'), 0.01))
+            
+            # 🛡️ REGLA ESTRICTA ANTI-PÉRDIDAS FOREX: SOLO QSHR O MANUAL 🛡️
+            is_qshr_exit = any(k in str(reason).lower() for k in ('qshr', 'cut_and_flip', 'early_invalidation', 'close_and_flip'))
+            is_manual_exit = 'manual' in str(reason).lower()
+            
+            if pnl_usd < -0.05 and not is_qshr_exit and not is_manual_exit:
+                self.log(f"🛡️ [BLOCKED LOSS EXIT] Bloqueando intento de cierre Forex en pérdida para {symbol} ({reason}) con P&L: ${pnl_usd:.2f} ({pips_pnl:.1f} pips). Cierre en pérdida SOLO permitido por QSHR.", "WARNING")
+                return False
+
             # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS FOREX 🛡️
             from app.strategy.smart_loss_guard import should_block_close
             guard_result = should_block_close(
@@ -2639,7 +2805,7 @@ class ForexExecutionService:
             self.log(f'Error cierre: {e}')
             return False
 
-    def _partial_close_position(self, pos, close_price, pct, pips_pnl, snap=None):
+    def _partial_close_position(self, pos, close_price, pct, pips_pnl=None, snap=None):
         try:
             symbol = pos['symbol']
             
@@ -2649,7 +2815,17 @@ class ForexExecutionService:
             close_lots = current_lots * pct
             remaining_lots = current_lots - close_lots
             
+            entry_p = self._safe_float(pos.get('entry_price'))
+            close_p = self._safe_float(close_price)
+            pip_sz = PIP_CONFIG.get(symbol, {}).get('pip', 0.0001)
             pip_val = PIP_CONFIG.get(symbol, {}).get('pip_val_std', 10.0)
+            is_buy = pos.get('side', '').lower() in ('long', 'buy')
+            
+            if (pips_pnl is None or pips_pnl == 0.0) and close_p > 0 and entry_p > 0 and pip_sz > 0:
+                pips_pnl = (close_p - entry_p) / pip_sz if is_buy else (entry_p - close_p) / pip_sz
+            elif pips_pnl is None:
+                pips_pnl = 0.0
+                
             pnl_usd = pips_pnl * pip_val * abs(close_lots)
             
             # Cerrar parcial en cTrader si es cuenta real

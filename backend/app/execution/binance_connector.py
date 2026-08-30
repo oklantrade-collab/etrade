@@ -20,7 +20,7 @@ _SYMBOL_INFO_TTL = timedelta(hours=1)
 
 def get_client() -> BinanceClient:
     api_key    = os.getenv('BINANCE_API_KEY') or settings.binance_api_key
-    api_secret = os.getenv('BINANCE_SECRET') or settings.binance_secret
+    api_secret = os.getenv('BINANCE_SECRET') or os.getenv('BINANCE_API_SECRET') or settings.binance_secret
     testnet_val = os.getenv('BINANCE_TESTNET')
     if testnet_val is not None:
         testnet = testnet_val.lower() == 'true'
@@ -101,12 +101,61 @@ def get_symbol_info_cached(client: BinanceClient, symbol: str) -> dict:
     return info
 
 
+_futures_symbol_info_cache: dict[str, tuple[dict, datetime]] = {}
+
+def get_futures_symbol_info(client: BinanceClient, symbol: str) -> dict:
+    """
+    Retorna información del símbolo para Futuros: step_size, min_qty, min_notional, tick_size.
+    """
+    symbol_clean = symbol.replace("/", "").upper()
+    result = {
+        'symbol': symbol_clean,
+        'step_size': None,
+        'min_qty': None,
+        'min_notional': None,
+        'price_precision': None,
+        'qty_precision': None,
+        'tick_size': None
+    }
+    try:
+        exchange_info = client.futures_exchange_info()
+        for s in exchange_info.get('symbols', []):
+            if s.get('symbol') == symbol_clean:
+                result['price_precision'] = s.get('pricePrecision')
+                result['qty_precision'] = s.get('quantityPrecision')
+                for f in s.get('filters', []):
+                    if f['filterType'] == 'LOT_SIZE':
+                        result['step_size'] = float(f['stepSize'])
+                        result['min_qty'] = float(f['minQty'])
+                    elif f['filterType'] == 'MIN_NOTIONAL':
+                        result['min_notional'] = float(f.get('notional', 5.0))
+                    elif f['filterType'] == 'PRICE_FILTER':
+                        result['tick_size'] = float(f['tickSize'])
+                return result
+    except Exception as e:
+        log_error(MODULE, f"Failed to get futures symbol info for {symbol_clean}: {e}")
+    return get_symbol_info(client, symbol_clean)
+
+
+def get_futures_symbol_info_cached(client: BinanceClient, symbol: str) -> dict:
+    now = datetime.now(timezone.utc)
+    symbol_clean = symbol.replace("/", "").upper()
+    if symbol_clean in _futures_symbol_info_cache:
+        data, expires_at = _futures_symbol_info_cache[symbol_clean]
+        if now < expires_at:
+            return data
+
+    info = get_futures_symbol_info(client, symbol_clean)
+    _futures_symbol_info_cache[symbol_clean] = (info, now + _SYMBOL_INFO_TTL)
+    return info
+
+
 def get_step_size(symbol: str) -> float:
-    info = get_symbol_info_cached(get_client(), symbol)
+    info = get_futures_symbol_info_cached(get_client(), symbol)
     return info.get('step_size') or 0.001
 
 def get_tick_size(symbol: str) -> float:
-    info = get_symbol_info_cached(get_client(), symbol)
+    info = get_futures_symbol_info_cached(get_client(), symbol)
     return info.get('tick_size') or 0.01
 
 def get_current_price(symbol: str) -> float:

@@ -125,7 +125,9 @@ class StrategyEngine:
         snap:   dict,
         df_15m: pd.DataFrame,
         df_4h:  pd.DataFrame,
-        df_5m:  pd.DataFrame = None
+        df_5m:  pd.DataFrame = None,
+        df_1h:  pd.DataFrame = None,
+        **kwargs
     ) -> dict:
         """
         Construye el contexto de mercado unificado
@@ -163,6 +165,9 @@ class StrategyEngine:
         last_5m  = df_5m.iloc[-1].to_dict() \
                    if df_5m is not None \
                    and len(df_5m) > 0 else {}
+        last_1h  = df_1h.iloc[-1].to_dict() \
+                   if df_1h is not None \
+                   and len(df_1h) > 0 else {}
 
         # ── 5m/15m Indicators ──
         # Obtener SAR 5m y Pine 5m si hay df_5m
@@ -485,9 +490,9 @@ class StrategyEngine:
             'ema200':            safe_float(last_15m.get('ema_200') if last_15m.get('ema_200') is not None else last_15m.get('ema200')),
             
             # EMAs 5m
-            'ema3_5m':           safe_float(last_5m.get('ema_3') if last_5m.get('ema_3') is not None else last_5m.get('ema1')),
-            'ema9_5m':           safe_float(last_5m.get('ema_9') if last_5m.get('ema_9') is not None else last_5m.get('ema2')),
-            'ema20_5m':          safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else last_5m.get('ema3')),
+            'ema3_5m':           safe_float(last_5m.get('ema_3') if last_5m.get('ema_3') is not None else (last_5m.get('ema1') if last_5m.get('ema1') is not None else (last_5m.get('ma3') if last_5m.get('ma3') is not None else last_5m.get('ema3')))),
+            'ema9_5m':           safe_float(last_5m.get('ema_9') if last_5m.get('ema_9') is not None else (last_5m.get('ema2') if last_5m.get('ema2') is not None else (last_5m.get('ma9') if last_5m.get('ma9') is not None else last_5m.get('ema9')))),
+            'ema20_5m':          safe_float(last_5m.get('ema_20') if last_5m.get('ema_20') is not None else (last_5m.get('ema3') if last_5m.get('ema3') is not None else (last_5m.get('basis') if last_5m.get('basis') is not None else last_5m.get('ema20')))),
             'ema9_angle_5m':     safe_float(last_5m.get('ema9_angle', 0.0)),
             'ema20_angle_5m':    safe_float(last_5m.get('ema20_angle', 0.0)),
             

@@ -52,11 +52,20 @@ files_to_sync = [
     "app/rebote_aduana/scoring/signal_ema_squeeze.py",
     "app/rebote_aduana/scoring/signal_rsi_extreme.py",
     "app/rebote_aduana/scoring/signal_zone_confluence.py",
+    "app/rebote_aduana/scoring/signal_rebote_cascada_1h.py",
+    "app/rebote_aduana/scoring/signal_rebote_pullback_ema20.py",
+    "app/rebote_aduana/scoring/signal_rebote_cascada_multitf.py",
     "app/rebote_aduana/scoring/regime_local.py",
     "app/core/breakpoint_detector.py",
     "tests/test_rebote_engine.py",
     "tests/test_aduana_validator.py",
     "tests/test_breakpoint_detector.py",
+    "app/tests/test_bb_squeeze_confluence.py",
+    "app/tests/test_aduana_entry_guards.py",
+    "app/tests/test_cascada_universal_sipv.py",
+    "app/tests/test_fkr_kinetic_trailing.py",
+    "app/tests/test_rebote_kinetic_trailing.py",
+    "app/tests/test_range_band_and_anti_chop.py",
 
     # HALCÓN CENTINELA
     "app/halcon_centinela/__init__.py",
@@ -100,6 +109,10 @@ files_to_sync = [
     "app/core/logger.py",
 
     # Otros módulos de la plataforma
+    "app/strategy/candle_momentum_guard.py",
+    "app/strategy/crypto_adaptive_exit.py",
+    "app/strategy/forex_adaptive_exit.py",
+    "tests/test_candle_momentum_guard.py",
     "app/strategy/quantum_squeeze_hedge.py",
     "app/strategy/erep_recovery_engine.py",
     "app/strategy/crypto_multi_asset_calibrations.py",
@@ -108,6 +121,7 @@ files_to_sync = [
     "app/strategy/profit_capture.py",
     "app/strategy/profit_ladder.py",
     "app/strategy/erep_manager.py",
+    "app/strategy/bollinger_exhaustion.py",
     "app/strategy/macro_filter.py",
     "app/workers/scheduler.py",
     "app/analysis/indicators_v2.py",
@@ -122,6 +136,7 @@ files_to_sync = [
     "app/stocks/apex_scheduler.py",
     "app/stocks/stocks_rule_engine.py",
     "app/stocks/stocks_orchestrator.py",
+    "app/core/config.py",
     "app/core/safety_manager.py",
     "app/strategy/swing_orders.py",
     "app/strategy/capital_protection.py",
@@ -132,20 +147,46 @@ files_to_sync = [
     "app/workers/unified_trading_worker.py",
     "app/execution/oco_builder.py",
     "app/execution/order_manager.py",
+    "app/execution/provider_factory.py",
+    "app/execution/binance_connector.py",
     "app/core/position_sizing.py",
     "app/strategy/dynamic_sl_manager.py",
+    "app/stocks/stocks_adaptive_sl.py",
+    "app/stocks/stocks_order_executor.py",
     "app/stocks/stocks_adaptive_tp.py",
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/stocks/stocks_tp_manager.py",
     "app/stocks/position_monitor.py",
+    "app/tests/test_qshr_booster.py",
+    "app/tests/test_qshr_v5.py",
+    "app/tests/test_qshr_early_invalidation.py",
+    "app/tests/test_qshr_forex_enhancements.py",
+    "app/tests/test_mtf_trend_runner.py",
+    "app/tests/test_erep_v2.py",
+    "app/tests/test_multi_asset_calibrations.py",
+    "app/tests/test_pnl_exit_guard.py",
+    "app/tests/test_risk_and_dynamic_tp_fix.py",
     "app/strategy/risk_manager.py",
+    "app/strategy/risk_controls.py",
     "app/strategy/signal_generator.py",
+    "app/workers/data_cleanup.py",
+    "app/execution/broker_sync.py",
+    "app/api/dashboard.py",
     "app/api/stocks.py",
     "app/api/market.py",
     "app/api/forex.py",
     "app/api/crypto.py",
     "app/api/portfolio.py",
     "app/api/positions.py",
+    "app/api/signals.py",
+    "app/api/risk.py",
+    "app/api/logs.py",
+    "app/api/admin.py",
+    "app/api/auth.py",
+    "app/api/backtests.py",
+    "app/api/performance.py",
+    "app/api/halcon.py",
+    "app/api/radar_cascada.py",
     "app/analysis/fundamental_scorer.py",
     "app/stocks/universe_builder.py",
     "app/analysis/capa3_fundamentals.py",
@@ -218,6 +259,12 @@ def ensure_remote_directories():
         f"{REMOTE_PATH}/app/rebote_aduana/scoring",
         f"{REMOTE_PATH}/app/halcon_centinela/scoring",
         f"{REMOTE_PATH}/app/halcon_centinela/oraculo",
+        f"{REMOTE_PATH}/app/stocks",
+        f"{REMOTE_PATH}/app/tests",
+        f"{REMOTE_PATH}/app/strategy",
+        f"{REMOTE_PATH}/app/workers",
+        f"{REMOTE_PATH}/app/execution",
+        f"{REMOTE_PATH}/app/candle_signals",
         f"{REMOTE_PATH}/data",
         f"{REMOTE_PATH}/tests",
         f"{ROOT_REMOTE_PATH}/frontend/app/halcon",
@@ -239,38 +286,46 @@ def deploy():
         return
     
     ensure_remote_directories()
-        
-    print("\nSincronizando archivos backend...")
-    for f in files_to_sync:
-        local_file = os.path.join("c:/Fuentes/eTrade/backend", f)
-        if not os.path.exists(local_file):
-            print(f"[SKIP] No existe localmente: {f}")
-            continue
-            
-        remote_file = f"root@{SERVER_IP}:{REMOTE_PATH}/{f}"
-        
-        print(f"  -> {f}")
-        cmd = [
-            "scp", "-i", SSH_KEY,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            local_file, remote_file
-        ]
-        subprocess.run(cmd, check=True)
+    
+    import tarfile
+    import tempfile
+    
+    bundle_path = os.path.join(tempfile.gettempdir(), "etrade_bundle.tar.gz")
+    print(f"\nEmpaquetando archivos para sincronización rápida...")
+    
+    with tarfile.open(bundle_path, "w:gz") as tar:
+        # Backend files
+        for f in files_to_sync:
+            local_file = os.path.join("c:/Fuentes/eTrade/backend", f)
+            if os.path.exists(local_file):
+                tar.add(local_file, arcname=f"backend/{f}")
+            else:
+                print(f"[SKIP] No existe localmente: {f}")
+                
+        # Frontend files
+        for local_rel, remote_rel in frontend_files:
+            local_file = os.path.join("c:/Fuentes/eTrade", local_rel)
+            if os.path.exists(local_file):
+                tar.add(local_file, arcname=remote_rel)
 
-    print("\nSincronizando archivos frontend...")
-    for local_rel, remote_rel in frontend_files:
-        local_file = os.path.join("c:/Fuentes/eTrade", local_rel)
-        if os.path.exists(local_file):
-            remote_file = f"root@{SERVER_IP}:{ROOT_REMOTE_PATH}/{remote_rel}"
-            print(f"  -> {local_rel}")
-            cmd = [
-                "scp", "-i", SSH_KEY,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "UserKnownHostsFile=/dev/null",
-                local_file, remote_file
-            ]
-            subprocess.run(cmd, check=True)
+    print(f"Transfiriendo bundle comprimido a {SERVER_IP}...")
+    scp_cmd = [
+        "scp", "-i", SSH_KEY,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        bundle_path, f"root@{SERVER_IP}:/tmp/etrade_bundle.tar.gz"
+    ]
+    subprocess.run(scp_cmd, check=True)
+    
+    print(f"Extrayendo archivos en {ROOT_REMOTE_PATH}...")
+    extract_cmd = [
+        "ssh", "-i", SSH_KEY,
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        f"root@{SERVER_IP}",
+        f"tar -xzf /tmp/etrade_bundle.tar.gz -C {ROOT_REMOTE_PATH} && rm -f /tmp/etrade_bundle.tar.gz"
+    ]
+    subprocess.run(extract_cmd, check=True)
 
     print("\nAjustando permisos...")
     chown_cmd = [
@@ -291,7 +346,11 @@ def deploy():
         "systemctl restart etrade-api etrade-forex etrade-forex-scheduler etrade-crypto etrade-stocks"
     ]
     subprocess.run(restart_cmd, check=True)
-    print("¡Despliegue y reinicio completado!")
+    
+    if os.path.exists(bundle_path):
+        os.remove(bundle_path)
+        
+    print("¡Despliegue y reinicio completado con éxito!")
 
 if __name__ == "__main__":
     deploy()

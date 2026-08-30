@@ -157,12 +157,12 @@ def can_open_position(
         from app.core.crypto_symbols import normalize_crypto_symbol
         norm_symbol = normalize_crypto_symbol(symbol)
         
-        # Obtenemos el límite de la configuración o usamos 4 por defecto
+        # Obtenemos el límite de la configuración o usamos 3 por defecto
         from app.core.supabase_client import get_risk_config
         try:
-            max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 4))
+            max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 3))
         except:
-            max_per_symbol = 4
+            max_per_symbol = 3
 
         count = 0
         for pos in open_positions:

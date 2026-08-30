@@ -563,6 +563,9 @@ def modify_oco_breakeven(position_id: str, new_tp_price: float) -> bool:
 
 def check_pending_fills(supabase, client):
     from app.core.logger import log_info, log_error, log_warning
+    from datetime import datetime, timezone, timedelta
+    
+    PENDING_TIMEOUT_MINUTES = 15  # Auto-cancel LIMIT orders older than 15 minutes
     
     # Obtener ordenes en status 'pending_fill'
     try:
@@ -577,14 +580,41 @@ def check_pending_fills(supabase, client):
                 continue
                 
             try:
-                exchange_order = client.get_order(symbol=symbol, orderId=order_id)
-                if exchange_order['status'] == 'FILLED':
+                exchange_order = client.get_order(symbol=symbol, orderId=int(order_id))
+                ex_status = exchange_order['status']
+                
+                # ── TIMEOUT: Auto-cancel órdenes LIMIT que llevan más de N minutos sin fill ──
+                if ex_status == 'NEW':
+                    order_time_ms = exchange_order.get('time', 0)
+                    if order_time_ms > 0:
+                        order_age = datetime.now(timezone.utc) - datetime.fromtimestamp(order_time_ms / 1000, tz=timezone.utc)
+                        if order_age > timedelta(minutes=PENDING_TIMEOUT_MINUTES):
+                            try:
+                                client.cancel_order(symbol=symbol, orderId=int(order_id))
+                                log_warning("ORDER_MANAGER", f"⏰ TIMEOUT: Cancelled unfilled LIMIT order {order_id} for {symbol} after {order_age.total_seconds()/60:.0f}min")
+                            except Exception as cancel_err:
+                                log_error("ORDER_MANAGER", f"Error cancelling timed-out order {order_id}: {cancel_err}")
+                            
+                            # Marcar como expirado en DB
+                            supabase.table('orders').update({'status': 'error', 'updated_at': datetime.now(timezone.utc).isoformat()}).eq('id', o['id']).execute()
+                            if o.get('positions') and len(o['positions']) > 0:
+                                pos_id = o['positions'][0]['id']
+                                supabase.table('positions').update({
+                                    'status': 'closed',
+                                    'close_reason': 'limit_order_timeout'
+                                }).eq('id', pos_id).execute()
+                            
+                            msg = f"⏰ [CRYPTO TIMEOUT] LIMIT {o['side']} {symbol} cancelada tras {order_age.total_seconds()/60:.0f}min sin fill"
+                            _send_telegram_sync(msg)
+                    continue  # Skip to next order (still NEW or just cancelled)
+                
+                # ── FILLED: Orden completamente ejecutada ──
+                if ex_status == 'FILLED':
                     fills = exchange_order.get('fills', [])
                     if fills:
                         avg_fill_price = sum(float(f['price']) * float(f['qty']) for f in fills) / sum(float(f['qty']) for f in fills)
                         commission = sum(float(f['commission']) for f in fills)
                     else:
-                        # Sometimes get_order doesn't return fills array, estimate with executedQty and cummulativeQuoteQty
                         cumm_qty = float(exchange_order.get('cummulativeQuoteQty', 0))
                         exec_qty = float(exchange_order.get('executedQty', 0))
                         if exec_qty > 0:
@@ -611,17 +641,41 @@ def check_pending_fills(supabase, client):
                     )
                     
                     oco_side = 'SELL' if o['side'] == 'BUY' else 'BUY'
-                    oco_order = client.create_oco_order(
-                        symbol=symbol,
-                        side=oco_side,
-                        quantity=o['quantity'],
-                        price=str(tp_price_final),
-                        stopPrice=str(sl_price_final),
-                        stopLimitPrice=str(sl_limit_final),
-                        stopLimitTimeInForce='GTC'
-                    )
-                    oco_list_id = str(oco_order.get('orderListId', ''))
+                    oco_list_id = ''
                     
+                    # Intentar colocar OCO con fallback a SL simple
+                    try:
+                        oco_order = client.create_oco_order(
+                            symbol=symbol,
+                            side=oco_side,
+                            quantity=o['quantity'],
+                            price=str(tp_price_final),
+                            stopPrice=str(sl_price_final),
+                            stopLimitPrice=str(sl_limit_final),
+                            stopLimitTimeInForce='GTC'
+                        )
+                        oco_list_id = str(oco_order.get('orderListId', ''))
+                        log_info("ORDER_MANAGER", f"OCO placed for filled LIMIT {order_id} {symbol}")
+                    except Exception as oco_err:
+                        log_error("ORDER_MANAGER", f"OCO failed for filled LIMIT {order_id} {symbol}: {oco_err}. Placing fallback SL.")
+                        # Fallback: colocar al menos un STOP_LOSS_LIMIT
+                        try:
+                            client.create_order(
+                                symbol=symbol,
+                                side=oco_side,
+                                type='STOP_LOSS_LIMIT',
+                                quantity=o['quantity'],
+                                price=str(sl_limit_final),
+                                stopPrice=str(sl_price_final),
+                                timeInForce='GTC'
+                            )
+                            log_warning("ORDER_MANAGER", f"Fallback SL placed for {symbol}")
+                        except Exception as sl_err:
+                            log_error("ORDER_MANAGER", f"Fallback SL ALSO FAILED for {symbol}: {sl_err}. MANUAL INTERVENTION REQUIRED.")
+                            msg = f"🚨 [CRITICAL] Posición {symbol} FILLED sin SL/TP. Intervención manual requerida."
+                            _send_telegram_sync(msg)
+                    
+                    # SIEMPRE actualizar DB a 'open' cuando está FILLED (aunque OCO falle)
                     supabase.table('orders').update({
                         'status': 'open',
                         'entry_price': avg_fill_price,
@@ -644,14 +698,22 @@ def check_pending_fills(supabase, client):
                         
                     msg = f"🟢 [CRYPTO FILLED] LIMIT {o['side']} {o['quantity']} {symbol} @ {avg_fill_price:.4f}"
                     _send_telegram_sync(msg)
-                    log_info("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} FILLED. OCO placed.")
-                elif exchange_order['status'] in ['CANCELED', 'REJECTED', 'EXPIRED']:
+                    log_info("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} FILLED. Position opened.")
+                    
+                elif ex_status == 'PARTIALLY_FILLED':
+                    # Log pero no actuar — esperar al fill completo o timeout
+                    exec_qty = float(exchange_order.get('executedQty', 0))
+                    orig_qty = float(exchange_order.get('origQty', 0))
+                    log_info("ORDER_MANAGER", f"⏳ LIMIT order {order_id} {symbol} PARTIALLY_FILLED: {exec_qty}/{orig_qty}")
+                    
+                elif ex_status in ['CANCELED', 'REJECTED', 'EXPIRED']:
                     supabase.table('orders').update({'status': 'error'}).eq('id', o['id']).execute()
                     if o.get('positions') and len(o['positions']) > 0:
                         pos_id = o['positions'][0]['id']
                         supabase.table('positions').update({'status': 'closed', 'close_reason': 'limit_order_canceled'}).eq('id', pos_id).execute()
-                    log_warning("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} was {exchange_order['status']}.")
+                    log_warning("ORDER_MANAGER", f"Pending LIMIT order {order_id} for {symbol} was {ex_status}.")
             except Exception as e:
                 log_error("ORDER_MANAGER", f"Error checking pending order {order_id}: {e}")
     except Exception as general_e:
         log_error("ORDER_MANAGER", f"Fatal error checking pending fills: {general_e}")
+

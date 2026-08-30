@@ -356,7 +356,7 @@ def execute_crypto_signal(
 
     from app.core.supabase_client import get_risk_config
     risk_config = get_risk_config()
-    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
 
     # ── CHECK 1: Limit per symbol (Ya validado por can_open_position arriba, pero reforzamos con dato fresco) ──
     if not guard_check['allowed']:
@@ -470,26 +470,37 @@ def execute_crypto_signal(
         qty_display = paper_size
         log_info(MODULE, f"[PAPER] ✅ SL-BASED Crypto {action} {binance_symbol} @ {price} | Qty: {paper_size} (Risk: ${risk_usd_per_trade})")
     else:
-        # Live mode: Binance MARKET order
+        # Live mode: Binance FUTURES MARKET order
         try:
-            from app.execution.binance_connector import get_client, get_symbol_info_cached, round_step_size
+            from app.execution.binance_connector import get_client, get_futures_symbol_info_cached, round_step_size
             client = get_client()
             
-            info = get_symbol_info_cached(client, binance_symbol)
+            info = get_futures_symbol_info_cached(client, binance_symbol)
             step_size = info.get("step_size", 0.001)
+            min_qty = info.get("min_qty") or step_size
             quantity_live = round_step_size(quantity, step_size)
+            if quantity_live < min_qty and quantity > 0:
+                quantity_live = min_qty
 
             if quantity_live <= 0:
                 return {"success": False, "reason": "Cantidad insuficiente tras redondeo"}
 
-            if action == "BUY":
-                entry_order = client.order_market_buy(symbol=binance_symbol, quantity=quantity)
-            else:
-                entry_order = client.order_market_sell(symbol=binance_symbol, quantity=quantity)
+            pos_side = "LONG" if action == "BUY" else "SHORT"
+            binance_side = "BUY" if action == "BUY" else "SELL"
+
+            entry_order = client.futures_create_order(
+                symbol=binance_symbol,
+                side=binance_side,
+                type="MARKET",
+                quantity=quantity_live,
+                positionSide=pos_side
+            )
 
             fills = entry_order.get("fills", [])
             if fills:
                 avg_price = sum(float(f["price"]) * float(f["qty"]) for f in fills) / sum(float(f["qty"]) for f in fills)
+            elif entry_order.get("avgPrice") and float(entry_order.get("avgPrice")) > 0:
+                avg_price = float(entry_order.get("avgPrice"))
             else:
                 avg_price = price
 
@@ -504,13 +515,13 @@ def execute_crypto_signal(
 
             sl_live, tp1_live, tp2_live = _ensure_crypto_sl_tp(float(avg_price), action, snap=current_snap)
             order_row_id = _save_candle_order_crypto(
-                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, "live", quantity, sl_live, tp1_live, tp2_live
+                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, "live", quantity_live, sl_live, tp1_live, tp2_live
             )
             order_uuid = _order_uuid_for_position(order_row_id)
             if not order_row_id:
                 log_warning(MODULE, f"No se pudo guardar orden live en Supabase para {binance_symbol}; position sin order_id.")
             if not _save_candle_position_crypto(
-                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, order_uuid, quantity, sl_live, tp1_live, tp2_live
+                sb, binance_symbol, action, strategy_code, avg_price, pattern, timeframe, order_uuid, quantity_live, sl_live, tp1_live, tp2_live
             ):
                 log_error(
                     MODULE,
@@ -522,12 +533,12 @@ def execute_crypto_signal(
                     "pair": binance_symbol,
                 }
 
-            qty_display = float(quantity)
+            qty_display = float(quantity_live)
             entry_display = float(avg_price)
-            log_info(MODULE, f"[LIVE] ✅ Crypto {action} {binance_symbol} @ {avg_price} | Strategy: {strategy_code}")
+            log_info(MODULE, f"[LIVE] ✅ Binance Futures {action} {binance_symbol} @ {avg_price} | Strategy: {strategy_code}")
 
         except Exception as e:
-            log_error(MODULE, f"Crypto MARKET order failed: {e}\n{traceback.format_exc()}")
+            log_error(MODULE, f"Crypto Binance Futures MARKET order failed: {e}\n{traceback.format_exc()}")
             return {"success": False, "reason": str(e)}
 
     # Solo notificar si hay posición persistida (paper o live)
@@ -680,6 +691,29 @@ def _close_all_positions_crypto(binance_symbol: str, strategy_code: str, new_sig
                 continue
 
             try:
+                # Si la posición es LIVE, enviar orden de cierre real a Binance Futures
+                if not is_paper and pos.get("mode") == "live":
+                    try:
+                        from app.execution.binance_connector import get_client, get_futures_symbol_info_cached, round_step_size
+                        client = get_client()
+                        info = get_futures_symbol_info_cached(client, binance_symbol)
+                        step_size = info.get("step_size", 0.001)
+                        c_qty = round_step_size(abs(size), step_size)
+                        p_side_str = (pos.get("side") or "").upper()
+                        pos_side = "LONG" if p_side_str in ("LONG", "BUY") else "SHORT"
+                        close_side = "SELL" if pos_side == "LONG" else "BUY"
+                        if c_qty > 0:
+                            c_order = client.futures_create_order(
+                                symbol=binance_symbol,
+                                side=close_side,
+                                type="MARKET",
+                                quantity=c_qty,
+                                positionSide=pos_side
+                            )
+                            log_info(MODULE, f"⚡ [BINANCE FUTURES CANDLE LIVE CLOSE] {binance_symbol} {pos_side} qty={c_qty} orderId={c_order.get('orderId')}")
+                    except Exception as live_close_err:
+                        log_error(MODULE, f"❌ Error enviando cierre Binance Futures en candle signal para {binance_symbol}: {live_close_err}")
+
                 # El valor de la inversión (notional) se basa en el tamaño absoluto
                 notional = float(pos.get("entry_price", 0) or 0) * abs(size)
                 pnl_pct_row = round((pnl / notional * 100), 4) if notional > 0 else round(pnl_pct, 4)
@@ -791,7 +825,7 @@ def _save_candle_position_crypto(sb, binance_symbol, action, strategy_code, pric
         from app.core.supabase_client import get_risk_config
         try:
             risk_config = get_risk_config()
-            max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+            max_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
         except Exception:
             max_per_symbol = 4
 
@@ -989,7 +1023,7 @@ def execute_forex_signal(
     # ── CHECK 1: Limit per symbol (Forex) ──
     from app.core.supabase_client import get_risk_config
     risk_config = get_risk_config()
-    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
     
     db_symbol = pair.replace("/", "").replace("-", "")
     res_count = sb.table("forex_positions").select("id", count='exact').eq("symbol", db_symbol).eq("status", "open").execute()
@@ -1246,7 +1280,7 @@ def execute_stocks_signal(
     # ── CHECK 1: Limit per symbol (Stocks) ──
     from app.core.supabase_client import get_risk_config
     risk_config = get_risk_config()
-    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+    max_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
     
     total_open_symbol = sb.table("stocks_positions").select("id", count='exact').eq("ticker", ticker).eq("status", "open").execute().count
     

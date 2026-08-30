@@ -15,6 +15,7 @@ import traceback
 import json
 import time
 import threading
+import asyncio
 
 #     PASO 1: Resolver rutas y cargar .env manualmente    
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -189,6 +190,7 @@ class StandaloneForexWorker:
         self.client.setMessageReceivedCallback(self.on_message)
         self.execution = None  # Se inicializa despues de auth
         self.symbols = DEFAULT_FOREX_SYMBOLS
+        self._notified_broker_closed = set()
 
     def safe_send(self, req):
         from twisted.internet import reactor
@@ -261,13 +263,17 @@ class StandaloneForexWorker:
             self.log(f"Error enviando heartbeat: {e}", "ERROR")
 
     def _load_dynamic_symbols(self):
-        """Carga la lista de simbolos y actualiza BOT_STATE.config_cache."""
+        """Carga la lista de simbolos y actualiza BOT_STATE.config_cache con trading_config y risk_config."""
         try:
+            from app.core.memory_store import BOT_STATE
             res = sb.table('trading_config').select('*').eq('id', 1).execute()
             data = res.data[0] if res.data else {}
             if data:
-                from app.core.memory_store import BOT_STATE
                 BOT_STATE.config_cache.update(data)
+                
+            rc_res = sb.table('risk_config').select('*').limit(1).execute()
+            if rc_res.data:
+                BOT_STATE.config_cache.update(rc_res.data[0])
                 
             if data.get('regime_params'):
                 assets = data['regime_params'].get('forex_assets')
@@ -279,7 +285,7 @@ class StandaloneForexWorker:
             else:
                 self.log("No se pudo cargar trading_config. Usando valores por defecto.")
         except Exception as e:
-            self.log(f"Error cargando s mbolos din micos: {e}. Usando valores por defecto.")
+            self.log(f"Error cargando símbolos dinámicos: {e}. Usando valores por defecto.")
 
     def _init_execution_service(self):
         """Inicializa el Execution Service despues de cargar simbolos."""
@@ -516,6 +522,12 @@ class StandaloneForexWorker:
                             self.log(f"⚠️ [RECONCILE WARN] No se pudo mapear símbolo para symbolId {pos.tradeData.symbolId} (Pos ID: {pid})")
                             continue
                             
+                        # 🛡️ Si el símbolo NO está en la lista permitida de Forex, auto-liquidar de inmediato
+                        if symbol_name not in self.symbols:
+                            self.log(f"🚨 [AUTO-LIQUIDATE UNAUTHORIZED SYMBOL] {symbol_name} no está en lista de permitidos ({self.symbols}). Liquidando posición cTrader ID {pid} a mercado...")
+                            self.close_position(pid, symbol=symbol_name, reason='unauthorized_symbol_safety_close')
+                            continue
+
                         side = 'long' if pos.tradeData.tradeSide == 1 else 'short'
                         
                         # Extraer monto en lotes y precio de entrada oficial del broker
@@ -592,8 +604,8 @@ class StandaloneForexWorker:
                                             'side': side,
                                             'lots': lots,
                                             'entry_price': entry_price,
-                                            'sl_price': sl_price,
-                                            'tp_price': tp_price,
+                                            'sl_price': sl_price or 0.0,
+                                            'tp_price': tp_price or 0.0,
                                             'status': 'open',
                                             'mode': 'live',
                                             'ctrader_pos_id': pid,
@@ -631,27 +643,64 @@ class StandaloneForexWorker:
                 
                 if db_open_res.data:
                     for db_p in db_open_res.data:
-                        c_id = db_p.get('ctrader_pos_id')
-                        if c_id and c_id not in active_ctrader_ids:
-                            # La posición fue cerrada en IC Markets (manualmente o por SL/TP del broker)
-                            self._sync_broker_closed_position(db_p['id'], close_price=None, close_reason='closed_at_broker')
-                            self.log(f"🛡️ [RECONCILE CLOSE] Posición DB {db_p['id']} (cTrader {c_id}) ya no está activa en IC Markets. Marcada como CLOSED.")
-                            
-                            try:
-                                from app.workers.alerts_service import send_telegram_message
-                                msg = (
-                                    f"🛡️ *[POSICIÓN CERRADA EN BROKER]*\n"
-                                    f"La posición fue cerrada en IC Markets y sincronizada en eTrade:\n"
-                                    f"• *Símbolo*: {db_p.get('symbol')}\n"
-                                    f"• *Lado*: {(db_p.get('side') or '').upper()}\n"
-                                    f"• *Lotes*: {db_p.get('lots')}\n"
-                                    f"• *cTrader ID*: `{c_id}`"
-                                )
-                                reactor.callInThread(lambda: asyncio.run(send_telegram_message(msg)))
-                            except Exception as tele_e:
-                                pass
+                        c_id = str(db_p.get('ctrader_pos_id') or '')
+                        if c_id and (int(c_id) if c_id.isdigit() else c_id) not in active_ctrader_ids and c_id not in active_ctrader_ids:
+                            # 1. Sincronizar el cierre en DB
+                            synced = self._sync_broker_closed_position(db_p['id'], close_price=None, close_reason='closed_at_broker')
+                            self.log(f"🛡️ [RECONCILE CLOSE] Posición DB {db_p['id']} (cTrader {c_id}) ya no está activa en IC Markets. Marcada como CLOSED (synced={synced}).")
+
+                            # 2. Notificar por Telegram una sola vez
+                            if c_id not in self._notified_broker_closed:
+                                self._notified_broker_closed.add(c_id)
+                                try:
+                                    from app.workers.alerts_service import send_telegram_message
+                                    msg = (
+                                        f"🛡️ *[POSICIÓN CERRADA EN BROKER]*\n"
+                                        f"La posición fue cerrada en IC Markets y sincronizada en eTrade:\n"
+                                        f"• *Símbolo*: {db_p.get('symbol')}\n"
+                                        f"• *Lado*: {(db_p.get('side') or '').upper()}\n"
+                                        f"• *Lotes*: {db_p.get('lots')}\n"
+                                        f"• *cTrader ID*: `{c_id}`"
+                                    )
+                                    reactor.callInThread(lambda: asyncio.run(send_telegram_message(msg)))
+                                except Exception as tele_e:
+                                    pass
             except Exception as close_sync_e:
                 self.log(f"Error sincronizando cierres desde cTrader: {close_sync_e}")
+
+            # 6. RECONCILIACIÓN DE ÓRDENES PENDIENTES (ANTI-FANTASMAS)
+            try:
+                if hasattr(res, 'order') and res.order:
+                    for ord_item in res.order:
+                        ord_id = getattr(ord_item, 'orderId', None)
+                        if not ord_id:
+                            continue
+                        ord_sym_id = getattr(getattr(ord_item, 'tradeData', None), 'symbolId', None)
+                        ord_sym_name = next((n for n, sid in STATE.get('symbol_ids', {}).items() if sid == ord_sym_id), None)
+                        
+                        should_cancel = False
+                        cancel_reason = ""
+                        
+                        if ord_sym_name and ord_sym_name not in self.symbols:
+                            should_cancel = True
+                            cancel_reason = f"Símbolo no autorizado ({ord_sym_name})"
+                        else:
+                            try:
+                                db_ord = sb.table('forex_positions').select('id, status')\
+                                    .eq('ctrader_order_id', ord_id)\
+                                    .in_('status', ['pending', 'pending_limit'])\
+                                    .execute()
+                                if not db_ord.data:
+                                    should_cancel = True
+                                    cancel_reason = "Orden huérfana no reconocida en eTrade"
+                            except Exception:
+                                pass
+                                
+                        if should_cancel:
+                            self.log(f"🧹 [ANTI-GHOST] Cancelando orden fantasma en cTrader OrderID {ord_id} ({ord_sym_name or 'N/A'}). Razón: {cancel_reason}")
+                            self.cancel_order(ord_id)
+            except Exception as ord_reconcile_e:
+                self.log(f"Error reconciliando órdenes pendientes cTrader: {ord_reconcile_e}", "WARNING")
 
         except Exception as e:
             self.log(f"Error procesando ProtoOAReconcileRes: {e}")
@@ -659,9 +708,10 @@ class StandaloneForexWorker:
     def _sync_broker_closed_position(self, pos_id, close_price=None, close_reason='ctrader_broker_closed'):
         """Actualiza el cierre de una posición en DB calculando PnL exacto si cerró en cTrader."""
         try:
+            from app.strategy.capital_protection import PIP_SIZES
             res = sb.table('forex_positions').select('*').eq('id', pos_id).execute()
             if not res.data:
-                return
+                return False
             pos = res.data[0]
             symbol = pos.get('symbol') or ''
             side = (pos.get('side') or 'long').lower()
@@ -678,9 +728,8 @@ class StandaloneForexWorker:
             }
             
             if entry_price > 0 and close_price > 0:
-                from app.strategy.capital_protection import PIP_SIZES
-                pip_size_val = PIP_SIZES.get(symbol, 0.0001)
-                pip_val_usd = 10.0
+                pip_size_val = PIP_SIZES.get(symbol, 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001)
+                pip_val_usd = 1.0 if 'XAU' in symbol else (6.5 if 'JPY' in symbol else 10.0)
                 is_short_pos = side in ('short', 'sell')
                 pips_pnl_calc = (entry_price - close_price) / pip_size_val if is_short_pos else (close_price - entry_price) / pip_size_val
                 pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
@@ -695,18 +744,21 @@ class StandaloneForexWorker:
                 except Exception:
                     pass
                     
-            sb.table('forex_positions').update(upd_fields).eq('id', pos_id).execute()
+            self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos_id))
             self.log(f"[SYNC] Cierre sincronizado en DB (ID: {pos_id}, Razón: {close_reason}, Exit: {close_price}, PnL: {upd_fields.get('pnl_usd')})")
+            return True
         except Exception as e:
             self.log(f"Error sincronizando cierre en DB para {pos_id}: {e}", "ERROR")
+            return False
 
     def _handle_execution_event(self, event):
         """Maneja respuestas de ejecucion de ordenes de cTrader."""
         try:
             if hasattr(event, 'order') and event.order:
                 order = event.order
+                oid = order.orderId
                 self.log(
-                    f"  Orden cTrader: id={order.orderId} "
+                    f"  Orden cTrader: id={oid} "
                     f"status={event.executionType} "
                     f"symbol_id={order.tradeData.symbolId if hasattr(order, 'tradeData') else 'N/A'}"
                 )
@@ -714,18 +766,33 @@ class StandaloneForexWorker:
                 # Manejar rechazo de orden por parte del broker (cTrader)
                 exec_type_str = str(getattr(event, 'executionType', '')).upper()
                 if 'REJECT' in exec_type_str or str(getattr(event, 'executionType', '')) == '5':
-                    self.log(f"⚠️ [BROKER REJECT] Orden rechazada por cTrader: {exec_type_str}. Limpiando posición no vinculada en DB.")
+                    self.log(f"⚠️ [BROKER REJECT] Orden rechazada por cTrader: {exec_type_str}. Marcando como cancelled_rejected en DB.")
                     try:
                         sym_id = getattr(order, 'tradeData', None)
                         sym_id_val = getattr(sym_id, 'symbolId', None) if sym_id else None
                         name = next((n for n, sid in STATE['symbol_ids'].items() if sid == sym_id_val), None)
                         if name:
                             sb.table('forex_positions').update({
-                                'status': 'closed',
+                                'status': 'cancelled_rejected',
                                 'close_reason': 'ctrader_rejected_by_broker'
                             }).eq('symbol', name).in_('status', ['open', 'pending']).is_('ctrader_pos_id', 'null').execute()
                     except Exception as rej_err:
                         self.log(f"Error limpiando posición rechazada por broker: {rej_err}", "WARNING")
+                elif getattr(event, 'executionType', None) == 1: # ORDER_ACCEPTED
+                    # Vincular ctrader_order_id a la orden pendiente en DB
+                    try:
+                        sym_id = getattr(order, 'tradeData', None)
+                        sym_id_val = getattr(sym_id, 'symbolId', None) if sym_id else None
+                        name = next((n for n, sid in STATE['symbol_ids'].items() if sid == sym_id_val), None)
+                        if name:
+                            sb.table('forex_positions').update({'ctrader_order_id': oid})\
+                                .eq('symbol', name)\
+                                .in_('status', ['pending', 'pending_limit'])\
+                                .is_('ctrader_order_id', 'null')\
+                                .order('opened_at', desc=True)\
+                                .limit(1).execute()
+                    except Exception as ord_link_e:
+                        self.log(f"Error vinculando ctrader_order_id {oid}: {ord_link_e}", "DEBUG")
 
             if hasattr(event, 'position') and event.position:
                 pos = event.position
@@ -741,38 +808,69 @@ class StandaloneForexWorker:
                     # Buscar el simbolo por ID
                     name = next((n for n, sid in STATE['symbol_ids'].items() if sid == pos.tradeData.symbolId), None)
                     if name:
+                        # 🛡️ Si el símbolo NO está en la lista permitida de Forex, auto-liquidar de inmediato
+                        if name not in self.symbols:
+                            self.log(f"🚨 [AUTO-LIQUIDATE UNAUTHORIZED SYMBOL] {name} no permitido ({self.symbols}). Liquidando posición cTrader ID {pid} a mercado...")
+                            self.close_position(pid, symbol=name, reason='unauthorized_symbol_safety_close')
+                            return
+
+                        # 🛡️ Anti-Duplicados: Verificar si este ctrader_pos_id ya existe en DB
+                        try:
+                            existing_pos = sb.table('forex_positions').select('id, status').eq('ctrader_pos_id', pid).execute()
+                            if existing_pos.data:
+                                self.log(f"[SYNC] cTrader ID {pid} ya registrado en DB (ID: {existing_pos.data[0]['id']}). Omitiendo duplicado.")
+                                return
+                        except Exception:
+                            pass
+
                         side = 'long' if pos.tradeData.tradeSide == 1 else 'short'
-                        # Buscar la posicion mas reciente abierta en la DB que no tenga ID vinculado
+                        # Buscar la posicion mas reciente abierta o pendiente en DB sin ID vinculado
                         try:
                             res = sb.table('forex_positions')\
-                                .select('id, sl_price, tp_price')\
+                                .select('id, sl_price, tp_price, entry_price')\
                                 .eq('symbol', name)\
                                 .eq('side', side)\
-                                .in_('status', ['open', 'pending'])\
+                                .in_('status', ['open', 'pending', 'pending_limit'])\
                                 .is_('ctrader_pos_id', 'null')\
                                 .order('opened_at', desc=True)\
                                 .limit(1).execute()
                             
-                            if not res.data:
-                                # Fallback: Buscar si fue marcada prematuramente como ctrader_unconfirmed_ghost
-                                res = sb.table('forex_positions')\
-                                    .select('id, sl_price, tp_price')\
-                                    .eq('symbol', name)\
-                                    .eq('side', side)\
-                                    .eq('status', 'closed')\
-                                    .eq('close_reason', 'ctrader_unconfirmed_ghost')\
-                                    .order('opened_at', desc=True)\
-                                    .limit(1).execute()
-
                             if res.data:
                                 db_pos = res.data[0]
                                 db_id = db_pos['id']
+                                fill_price = float(pos.price) if hasattr(pos, 'price') and pos.price else float(db_pos.get('entry_price') or 0)
                                 sb.table('forex_positions').update({
                                     'ctrader_pos_id': pid,
                                     'status': 'open',
+                                    'entry_price': fill_price if fill_price > 0 else db_pos.get('entry_price'),
                                     'close_reason': None
                                 }).eq('id', db_id).execute()
-                                self.log(f"[SYNC] Vinculado y Re-abierto cTrader ID {pid} a posicion DB {db_id} (Gestión 100% Virtual SL/TP por eTrade)")
+                                self.log(f"[SYNC] Vinculado cTrader ID {pid} a posicion DB {db_id} (Gestión 100% Virtual SL/TP por eTrade)")
+                            else:
+                                # Si no existía registro previo, insertar una nueva posición limpia sin pisar el historial cerrado
+                                entry_px = float(pos.price) if hasattr(pos, 'price') and pos.price else float(STATE.get('prices', {}).get(name, {}).get('bid') or 0)
+                                lot_size = float(pos.tradeData.volume) / 10000000.0 if hasattr(pos, 'tradeData') and hasattr(pos.tradeData, 'volume') else 0.01
+                                pip_sz = 0.01 if name in ('USDJPY', 'XAUUSD') else 0.0001
+                                # SL Virtual Fibonacci: NO enviar SL real al broker.
+                                # eTrade controla 100% las salidas. Solo un SL catástrofe ultra-lejano como red de seguridad.
+                                catastrophe_pips = 500 if name in ('XAUUSD',) else 200
+                                default_sl = round(entry_px - (catastrophe_pips * pip_sz) if side == 'long' else entry_px + (catastrophe_pips * pip_sz), 5)
+                                new_rec = {
+                                    'symbol': name,
+                                    'side': side,
+                                    'lots': round(lot_size, 2) if lot_size > 0 else 0.01,
+                                    'entry_price': entry_px,
+                                    'sl_price': default_sl if entry_px > 0 else 0.0,
+                                    'tp_price': 0.0,
+                                    'rule_code': 'cTrader_Direct',
+                                    'ctrader_pos_id': pid,
+                                    'status': 'open',
+                                    'market_type': 'forex_futures',
+                                    'mode': 'live',
+                                    'opened_at': datetime.now(timezone.utc).isoformat()
+                                }
+                                sb.table('forex_positions').insert(new_rec).execute()
+                                self.log(f"[SYNC] Creado nuevo registro en DB para cTrader ID {pid} ({name} {side.upper()}, SL: {default_sl})")
                         except Exception as e:
                             self.log(f"Error vinculando ID: {e}", "ERROR")
 
@@ -795,19 +893,60 @@ class StandaloneForexWorker:
         except Exception as e:
             self.log(f"Error procesando evento de ejecucion: {e}", "ERROR")
 
-    def close_position(self, pos_id, volume_units):
-        """Envía orden de cierre a cTrader."""
+    def cancel_order(self, order_id):
+        """Envía ProtoOACancelOrderReq a cTrader OpenAPI para cancelar una orden pendiente."""
         try:
+            if not order_id:
+                return False
+            req = ProtoOACancelOrderReq()
+            req.ctidTraderAccountId = ACCOUNT_ID
+            req.orderId = int(order_id)
+            if hasattr(self, 'safe_send'):
+                self.safe_send(req)
+            else:
+                self.client.send(req)
+            self.log(f"🧹 [CTRADER CANCEL] Enviada orden de cancelación a cTrader para OrderID {order_id}")
+            return True
+        except Exception as e:
+            self.log(f"Error enviando cancel_order a cTrader para {order_id}: {e}", "ERROR")
+            return False
+
+    def close_position(self, pos_id, volume_units=None, symbol=None, reason='manual', is_qshr=False, **kwargs):
+        """Envía orden de cierre a cTrader OpenAPI."""
+        try:
+            pos = None
+            if hasattr(self, 'execution') and hasattr(self.execution, '_open_positions_list'):
+                pos = next((p for p in self.execution._open_positions_list if str(p.get('ctrader_pos_id')) == str(pos_id) or str(p.get('id')) == str(pos_id)), None)
+            if not pos:
+                try:
+                    res = sb.table('forex_positions').select('*').eq('ctrader_pos_id', int(pos_id)).limit(1).execute()
+                    if res.data:
+                        pos = res.data[0]
+                except Exception:
+                    pass
+
+            sym = (symbol or (pos.get('symbol') if pos else 'GBPUSD')).upper()
+            
             from ctrader_open_api.messages.OpenApiMessages_pb2 import ProtoOAClosePositionReq
             req = ProtoOAClosePositionReq()
             req.ctidTraderAccountId = ACCOUNT_ID
             req.positionId = int(pos_id)
+            
+            if volume_units is None:
+                lots_abs = abs(float(pos.get('lots', 0.01))) if pos else 0.01
+                if sym == 'XAUUSD':
+                    volume_units = int(round(lots_abs * 10_000))
+                elif sym in ('US30', 'US500', 'NAS100', 'XAGUSD'):
+                    volume_units = int(round(lots_abs * 100))
+                else:
+                    volume_units = int(round(lots_abs * 10_000_000))
+                    
             req.volume = int(volume_units)
             self.safe_send(req)
-            self.log(f"[CTRIDER] Enviada solicitud de cierre para posicion {pos_id}")
+            self.log(f"[CTRADER] Enviada solicitud de cierre para posicion {pos_id} (vol: {req.volume}, symbol: {sym}, reason: {reason})")
             return True
         except Exception as e:
-            self.log(f"Error enviando cierre a cTrader: {e}", "ERROR")
+            self.log(f"Error enviando cierre a cTrader para pos {pos_id}: {e}", "ERROR")
             return False
 
     def trigger_forex_reentry_standalone(self, symbol, side, lots, df_15m):
@@ -1262,17 +1401,31 @@ class StandaloneForexWorker:
         df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'})
         return df
 
-    def _route_qshr_to_aduana(self, symbol, signal, df_5m, df_15m, positions):
-        """Enruta señal QSHR v5 a ADUANAS respetando Cant. Monedas Activas."""
+    def _route_qshr_to_aduana(self, symbol, signal, df_5m, df_15m, positions=None):
+        """Enruta señal QSHR v5 a ADUANAS respetando Cant. Monedas Activas y Cant. Operación x Par."""
         try:
             from app.rebote_aduana.aduana_validator import AduanaValidator
             from app.core.memory_store import BOT_STATE
             
             regime_params = BOT_STATE.config_cache.get('regime_params') or {}
             max_active = int(regime_params.get('max_active_symbols_forex', 1))
+            max_per_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
             
-            res = self.safe_db_execute(sb.table('forex_positions').select('symbol').eq('status', 'open'))
-            open_symbols = list(set([r['symbol'] for r in (res.data or [])]))
+            # Consultar símbolos y posiciones activos en tiempo real (open, pending, pending_limit)
+            res = self.safe_db_execute(sb.table('forex_positions').select('symbol').in_('status', ['open', 'pending', 'pending_limit']))
+            open_symbols = list(set([r['symbol'] for r in (res.data or []) if r.get('symbol')]))
+            
+            sym_pos_res = self.safe_db_execute(sb.table('forex_positions').select('id').eq('symbol', symbol).in_('status', ['open', 'pending', 'pending_limit']))
+            current_sym_positions = len(sym_pos_res.data or [])
+            
+            # Pre-filtro estricto antes de ADUANA
+            if symbol not in open_symbols and len(open_symbols) >= max_active:
+                self.log(f"🛑 [QSHR ACTIVE SYMBOL LIMIT] {symbol}: Máximo de {max_active} monedas activas alcanzado ({len(open_symbols)}/{max_active}: {open_symbols})")
+                return False
+                
+            if current_sym_positions >= max_per_symbol:
+                self.log(f"🛑 [QSHR MAX POSITIONS PER SYMBOL] {symbol}: Máximo de {max_per_symbol} posiciones alcanzado ({current_sym_positions}/{max_per_symbol})")
+                return False
             
             aduana = AduanaValidator()
             side = signal.get('side', 'long')
@@ -1281,7 +1434,9 @@ class StandaloneForexWorker:
                 'df_5m': df_5m,
                 'squeeze_velocity': float(signal.get('velocity', 0.0)),
                 'open_symbols': open_symbols,
-                'max_active_symbols': max_active
+                'max_active_symbols': max_active,
+                'current_symbol_positions': current_sym_positions,
+                'max_positions_per_symbol': max_per_symbol
             }
             
             rule_code = signal.get('rule_code', 'Bb33_QSHR')
@@ -1312,7 +1467,9 @@ class StandaloneForexWorker:
             custom_lots = regime_params.get('custom_lots_forex') or {}
             sym_upper = symbol.upper()
             
-            if signal.get('custom_lots') and float(signal['custom_lots']) > 0:
+            if signal.get('lots') and float(signal['lots']) > 0:
+                lots = round(float(signal['lots']), 2)
+            elif signal.get('custom_lots') and float(signal['custom_lots']) > 0:
                 lots = round(float(signal['custom_lots']), 2)
             elif sym_upper in custom_lots and float(custom_lots[sym_upper]) > 0:
                 lots = round(float(custom_lots[sym_upper]), 2)
@@ -1429,8 +1586,12 @@ class StandaloneForexWorker:
                         opened_dt = datetime.fromisoformat(opened_str.replace('Z', '+00:00'))
                         elapsed_min = (datetime.now(timezone.utc) - opened_dt).total_seconds() / 60.0
                         if elapsed_min >= 90.0:
+                            # 🛡️ Cancelar orden real en cTrader si tiene ctrader_order_id
+                            ord_id_to_cancel = p_order.get('ctrader_order_id')
+                            if ord_id_to_cancel:
+                                self.cancel_order(ord_id_to_cancel)
                             self.safe_db_execute(sb.table('forex_positions').update({'status': 'cancelled_ttl'}).eq('id', p_order['id']))
-                            self.log(f"🧹 [TTL 90M EXPIRED] {symbol}: Orden límite {p_order['id'][:8]} cancelada por exceder 90 min ({elapsed_min:.0f}m)")
+                            self.log(f"🧹 [TTL 90M EXPIRED] {symbol}: Orden límite {p_order['id'][:8]} cancelada en broker y DB por exceder 90 min ({elapsed_min:.0f}m)")
             except Exception as ttl_e:
                 self.log(f"Error en TTL 90M cleanup {symbol}: {ttl_e}", "DEBUG")
 
@@ -1484,8 +1645,10 @@ class StandaloneForexWorker:
                 from app.strategy.quantum_squeeze_hedge import evaluate_cluster_exit
                 cluster_res = evaluate_cluster_exit(symbol, positions, df_5m, df_15m, current_price)
                 if cluster_res and cluster_res.get('action') == 'cluster_take_profit':
-                    self.log(f"🎯 [QSHR CLUSTER TAKE PROFIT] {symbol}: {cluster_res['reason']}")
-                    for p in positions:
+                    cl_side = cluster_res.get('side', '').lower()
+                    target_cl_pos = [p for p in positions if p.get('side', '').lower() in (cl_side, 'buy' if cl_side == 'long' else 'sell')]
+                    self.log(f"🎯 [QSHR CLUSTER TAKE PROFIT] {symbol} {cl_side.upper()}: {cluster_res['reason']} ({len(target_cl_pos)} posiciones)")
+                    for p in target_cl_pos:
                         c_id = p.get('ctrader_pos_id')
                         if c_id:
                             self.close_position(c_id, symbol=symbol)
@@ -1500,6 +1663,36 @@ class StandaloneForexWorker:
                     side = pos['side'].lower()
                     is_short = side in ('short', 'sell')
                     
+                    # ─── EVALUACIÓN PROFIT TARGET: PnL >= $1.00 USD ───
+                    entry_px = float(pos.get('entry_price') or 0)
+                    lots_qty = abs(float(pos.get('lots') or 0.01))
+                    pip_val_usd = 10.0
+                    from app.strategy.capital_protection import PIP_SIZES
+                    pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                    pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short else (current_price - entry_px) / pip_size_val
+                    pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
+
+                    if pnl_usd_calc >= 1.00:
+                        self.log(f"🎯 [TAKE PROFIT $1.00 REACHED] {symbol} {side.upper()} @ {current_price:.5f} | PnL: +${pnl_usd_calc:.2f} (+{pips_pnl_calc:.1f} pips) >= $1.00 USD. Cerrando posición para asegurar ganancias.", "WARNING")
+                        c_id = pos.get('ctrader_pos_id')
+                        if c_id:
+                            self.close_position(c_id, symbol=symbol)
+                        upd_fields = {
+                            'status': 'closed',
+                            'current_price': current_price,
+                            'pnl_pips': round(pips_pnl_calc, 1),
+                            'pnl_usd': round(pnl_usd_calc, 2),
+                            'closed_at': datetime.now(timezone.utc).isoformat(),
+                            'close_reason': 'take_profit_target_1usd'
+                        }
+                        try:
+                            self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
+                            from app.core.capital_manager import register_realized_pnl
+                            register_realized_pnl('forex', round(pnl_usd_calc, 2))
+                        except Exception as upd_err:
+                            self.log(f"Error actualizando DB en TP $1.00 Close: {upd_err}", "ERROR")
+                        continue
+                    
                     # ─── Evaluacion EREP v2.0 (Rescate por Escalamiento Asimétrico) ───
                     try:
                         from app.strategy.erep_recovery_engine import evaluate_erep_entry_trigger, evaluate_erep_exit_trigger
@@ -1507,8 +1700,10 @@ class StandaloneForexWorker:
                         # 1. Chequear salida Breakeven si P2 ya se encuentra activo
                         erep_exit = evaluate_erep_exit_trigger(pos, current_price, symbol)
                         if erep_exit and erep_exit.get('action') == 'close_erep_cluster':
-                            self.log(f"🎯 [EREP v2.0 CLUSTER EXIT] {symbol}: {erep_exit['reason']}")
-                            for p in positions:
+                            erep_side = erep_exit.get('side', side).lower()
+                            target_erep_pos = [p for p in positions if p.get('side', '').lower() in (erep_side, 'buy' if erep_side == 'long' else 'sell')]
+                            self.log(f"🎯 [EREP v2.0 CLUSTER EXIT] {symbol} {erep_side.upper()}: {erep_exit['reason']} ({len(target_erep_pos)} posiciones)")
+                            for p in target_erep_pos:
                                 c_id = p.get('ctrader_pos_id')
                                 if c_id:
                                     self.close_position(c_id, symbol=symbol)
@@ -1547,6 +1742,29 @@ class StandaloneForexWorker:
                     except Exception as erep_err:
                         self.log(f"Error evaluando EREP v2.0 {symbol}: {erep_err}", "DEBUG")
                     
+                    # ─── PASO PRIORITARIO: STOP LOSS VIRTUAL FIBONACCI (eTrade 100% Control) ───
+                    try:
+                        from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
+                        fib_sl_res = evaluate_fib_band_virtual_sl(pos, df_15m, current_price, symbol)
+                        if fib_sl_res and fib_sl_res.get('action') == 'close_virtual_fib_sl':
+                            self.log(f"🛡️ [VIRTUAL FIB SL TRIGGERED] {symbol} {side.upper()}: {fib_sl_res.get('reason')}", "WARNING")
+                            c_id = pos.get('ctrader_pos_id')
+                            if c_id:
+                                self.close_position(c_id, symbol=symbol, reason='qshr_fib_band_virtual_sl', is_qshr=True)
+                            upd_fields = {
+                                'status': 'closed',
+                                'current_price': current_price,
+                                'closed_at': datetime.now(timezone.utc).isoformat(),
+                                'close_reason': 'qshr_fib_band_virtual_sl'
+                            }
+                            try:
+                                self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
+                            except Exception as upd_err:
+                                self.log(f"Error actualizando DB en Virtual Fib SL: {upd_err}", "ERROR")
+                            continue
+                    except Exception as fib_sl_err:
+                        self.log(f"Error evaluando SL Virtual Fibonacci {symbol}: {fib_sl_err}", "DEBUG")
+                    
                     # ─── Evaluacion QUANTUM SQUEEZE HEDGE & REVERSAL & BOOSTER (Bb33_QSHR v5) ───
                     try:
                         from app.strategy.quantum_squeeze_hedge import evaluate_qshr_hedge_signal
@@ -1563,17 +1781,28 @@ class StandaloneForexWorker:
                             q_reason = qshr_res['reason']
                             
                             if q_action in ('open_booster_long', 'open_booster_short'):
+                                # Límite estricto de máximo 2 posiciones totales por símbolo (1 primaria + 1 booster)
+                                if len(positions) >= 2:
+                                    self.log(f"⛔ [BOOSTER MAX POS LIMIT] {symbol}: Ya existen {len(positions)} posiciones abiertas (Máx: 2). Booster omitido.", "INFO")
+                                    continue
                                 booster_side = 'long' if 'long' in q_action else 'short'
                                 self.log(f"🚀 [QSHR TREND BOOSTER {booster_side.upper()}] {symbol}: {q_reason}")
                                 self._route_qshr_to_aduana(
                                     symbol,
-                                    {'side': booster_side, 'rule_code': qshr_res.get('rule_code', 'Bb33_QSHR_BOOSTER'), 'reason': q_reason, 'velocity': qshr_res.get('velocity', 2.5), 'sl_price': qshr_res.get('sl_price', 0)},
+                                    {
+                                        'side': booster_side,
+                                        'rule_code': qshr_res.get('rule_code', 'Bb33_QSHR_BOOSTER'),
+                                        'reason': q_reason,
+                                        'velocity': qshr_res.get('velocity', 2.5),
+                                        'sl_price': qshr_res.get('sl_price', 0),
+                                        'unrealized_pnl_pips': qshr_res.get('unrealized_pnl_pips', 5.0)
+                                    },
                                     df_5m, df_15m, positions
                                 )
                                 # Sincronizar Cluster Stop Loss para todas las posiciones del par
                                 cluster_sl = qshr_res.get('sl_price')
                                 if cluster_sl:
-                                    for p in positions:
+                                    for p in [x for x in positions if x.get('side', '').lower() in (booster_side, 'buy' if booster_side == 'long' else 'sell')]:
                                         try:
                                             self.safe_db_execute(sb.table('forex_positions').update({'sl_price': cluster_sl}).eq('id', p['id']))
                                             self.log(f"🛡️ [CLUSTER SL SYNC] {symbol} Pos {p['id'][:8]}: SL ajustado a {cluster_sl}")
@@ -1585,14 +1814,73 @@ class StandaloneForexWorker:
                             elif q_action == 'open_hedge_long':
                                 self.log(f"🛡️ [QSHR HEDGE LONG] {symbol}: {q_reason}")
                                 self._route_qshr_to_aduana(symbol, {'side': 'long', 'rule_code': 'Bb33_QSHR_HEDGE', 'reason': q_reason, 'velocity': 2.5}, df_5m, df_15m, positions)
-                            elif q_action in ('close_original_long', 'close_original_short', 'close_market_active_sipv', 'close_market_passive_ema9', 'partial_close_market_active_sipv'):
-                                self.log(f"🛡️ [QSHR EXIT / RIDE & CLOSE] {symbol}: {q_reason}")
+                            elif q_action in ('close_and_flip_long', 'close_and_flip_short'):
+                                # 1. Cerrar inmediatamente la posición anterior en pérdida
+                                entry_px = float(pos.get('entry_price') or 0)
+                                lots_qty = abs(float(pos.get('lots') or 0))
+                                from app.strategy.capital_protection import PIP_SIZES
+                                pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                                is_short_pos = side.lower() in ('short', 'sell')
+                                pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                                pnl_usd_calc = pips_pnl_calc * 10.0 * lots_qty
+                                pnl_label = f"+${pnl_usd_calc:.2f}, +{pips_pnl_calc:.1f} pips" if pips_pnl_calc >= 0 else f"-${abs(pnl_usd_calc):.2f}, {pips_pnl_calc:.1f} pips"
+
+                                self.log(f"🔄 [QSHR CUT & FLIP TRIGGER] {symbol}: Cerrando {side.upper()} ({pnl_label}) y girando a {qshr_res['flip_side'].upper()} ({qshr_res.get('flip_lots', 0.02)}L)")
                                 c_id = pos.get('ctrader_pos_id')
                                 if c_id:
                                     self.close_position(c_id, symbol=symbol)
                                 from app.core.position_monitor import _execute_paper_close
-                                exit_reason = 'qshr_sipv_climax' if 'sipv' in q_action else ('qshr_ema9_trailing' if 'ema9' in q_action else 'qshr_4factor_exit')
-                                reactor.callInThread(lambda: asyncio.run(_execute_paper_close(pos, current_price, exit_reason, sb)))
+                                reactor.callInThread(lambda: asyncio.run(_execute_paper_close(pos, current_price, 'qshr_cut_and_flip', sb)))
+
+                                # 2. Abrir inmediatamente la posición contraria con volumen asimétrico
+                                flip_signal = {
+                                    'side': qshr_res['flip_side'],
+                                    'rule_code': qshr_res.get('flip_rule', 'Bb33_QSHR_FLIP'),
+                                    'lots': qshr_res.get('flip_lots', 0.02),
+                                    'custom_lots': qshr_res.get('flip_lots', 0.02),
+                                    'sl_price': qshr_res.get('sl_price', 0),
+                                    'velocity': qshr_res.get('velocity', 2.5),
+                                    'reason': qshr_res['reason']
+                                }
+                                self._route_qshr_to_aduana(symbol, flip_signal, df_5m, df_15m, positions)
+
+                            elif q_action in ('close_original_long', 'close_original_short', 'close_market_active_sipv', 'close_bollinger_exhaustion', 'close_cascada_fib_stagnation', 'partial_close_market_active_sipv', 'close_virtual_fib_sl'):
+                                entry_px = float(pos.get('entry_price') or 0)
+                                lots_qty = abs(float(pos.get('lots') or 0))
+                                from app.strategy.capital_protection import PIP_SIZES
+                                pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                                is_short_pos = side.lower() in ('short', 'sell')
+                                pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                                pnl_usd_calc = pips_pnl_calc * 10.0 * lots_qty
+
+                                # Salidas de EMERGENCIA / INVALIDACIÓN QSHR (close_original_long / close_original_short) cierran SIEMPRE, incluso en pérdida
+                                is_emergency_cut = q_action in ('close_original_long', 'close_original_short')
+                                min_pnl_ok = is_emergency_cut or (pips_pnl_calc >= 1.5) or (pnl_usd_calc >= 0.15 * max(0.01, lots_qty) / 0.01)
+
+                                if not min_pnl_ok:
+                                    self.log(f"🛡️ [ADUANA SALIDA / QSHR SKIP] {symbol} {side.upper()}: Salida QSHR ({q_action}) ignorada por PnL insuficiente (${pnl_usd_calc:.2f}, {pips_pnl_calc:.1f} pips). Se mantiene posición activa.", "INFO")
+                                else:
+                                    pnl_label = f"+${pnl_usd_calc:.2f}, +{pips_pnl_calc:.1f} pips" if pips_pnl_calc >= 0 else f"-${abs(pnl_usd_calc):.2f}, {pips_pnl_calc:.1f} pips"
+                                    self.log(f"🛡️ [QSHR EXIT / {'EMERGENCY CUT' if is_emergency_cut else 'RIDE & CLOSE'}] {symbol}: {q_reason} (PnL: {pnl_label})")
+                                    c_id = pos.get('ctrader_pos_id')
+                                    if c_id:
+                                        self.close_position(c_id, symbol=symbol)
+                                    from app.core.position_monitor import _execute_paper_close
+                                    exit_reason = (
+                                        'qshr_early_invalidation' if 'Early Invalidation' in q_reason
+                                        else ('bollinger_exhaustion' if 'bollinger' in q_action 
+                                        else ('cascada_fib_stagnation' if 'cascada' in q_action 
+                                        else ('qshr_sipv_climax' if 'sipv' in q_action else 'qshr_4factor_exit')))
+                                    )
+                                    reactor.callInThread(lambda: asyncio.run(_execute_paper_close(pos, current_price, exit_reason, sb)))
+                            elif q_action == 'adjust_trailing_sl':
+                                new_sl = qshr_res.get('sl_price')
+                                if new_sl:
+                                    try:
+                                        self.safe_db_execute(sb.table('forex_positions').update({'sl_price': new_sl}).eq('id', pos['id']))
+                                        self.log(f"🛡️ [CASCADA FIB SL SYNC] {symbol} Pos {pos['id'][:8]}: SL ajustado a {new_sl}")
+                                    except Exception as sl_e:
+                                        self.log(f"Error actualizando Fib SL {pos['id']}: {sl_e}", "DEBUG")
                             elif q_action in ('reversal_at_level5', 'reversal_at_level6'):
                                 self.log(f"🎯 [QSHR 15M REVERSAL] {symbol}: {q_reason}")
                                 c_id = pos.get('ctrader_pos_id')
@@ -1686,6 +1974,12 @@ class StandaloneForexWorker:
                             
                         self.safe_db_execute(sb.table('forex_positions').update(upd_data).eq('id', pos['id']))
                         
+                        # Gestión 100% Virtual por eTrade: NO enviamos SL/TP físico al broker cTrader
+                        # para evitar cazas de stop por ensanchamiento de spread / aperturas de fin de semana.
+                        # c_id = pos.get('ctrader_pos_id')
+                        # if c_id:
+                        #     self.amend_position(c_id, sl_price=new_sl, tp_price=new_tp, symbol=symbol)
+                        
                     elif res_trail['action'] == 'close_market':
                         # Spec Section 3.6: CASCADA SLV/SLVM Delegation
                         is_rebote_cascade = (str(pos.get('origen', '')).upper() == 'REBOTE' or str(pos.get('rule_code', '')).startswith(('AaReb', 'BbReb', 'REBOTE')))
@@ -1695,11 +1989,24 @@ class StandaloneForexWorker:
                             self.log(f"🌊 [CASCADA DELEGATION] {symbol} {side.upper()} — Trailing trigger '{trail_reason}' delegado a evaluación de CASCADA")
                             continue
 
+                        # 🛡️ ADUANA SALIDA: Solo permitir cierre de Trailing si está en ganancia
+                        entry_px = float(pos.get('entry_price') or 0)
+                        lots_qty = abs(float(pos.get('lots') or 0))
+                        from app.strategy.capital_protection import PIP_SIZES
+                        pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                        is_short_pos = side.lower() in ('short', 'sell')
+                        pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                        pnl_usd_calc = pips_pnl_calc * 10.0 * lots_qty
+
+                        if pnl_usd_calc < 0.0:
+                            self.log(f"🛡️ [TRAILING-5M SKIP LOSS] {symbol} {side.upper()}: Trailing Stop omitido porque PnL es negativo (${pnl_usd_calc:.2f}, {pips_pnl_calc:.1f} p). Cierre en pérdida SOLO permitido por QSHR.", "INFO")
+                            continue
+
                         self.log(f"[TRAILING-5M CLOSE] {symbol} {side.upper()} @ {current_price} | Razón: {res_trail['reason']}", "WARNING")
                         # 1. Cerrar en cTrader
                         c_id = pos.get('ctrader_pos_id')
                         if c_id:
-                            self.close_position(c_id, symbol=symbol)
+                            self.close_position(c_id, symbol=symbol, reason=res_trail['reason'])
                         # 2. Cerrar en DB con datos reales financieros
                         try:
                             entry_px = float(pos.get('entry_price') or 0)
@@ -1744,6 +2051,7 @@ class StandaloneForexWorker:
                         continue
                     
                     # ── NUEVO: CIERRE PROACTIVO MARKET POR GIRO DE TENDENCIA (15m EMA3 vs EMA9) ──
+                    # [ADUANA SALIDA]: Solo cierra si el beneficio neto garantizado es PnL >= $1.00 USD
                     if df_15m is not None and len(df_15m) >= 2:
                         last_15m = df_15m.iloc[-1]
                         c_series_15m = df_15m['close']
@@ -1754,12 +2062,6 @@ class StandaloneForexWorker:
                         should_trend_close = (is_long_pos and ema3_15m < ema9_15m) or ((not is_long_pos) and ema3_15m > ema9_15m)
                         
                         if should_trend_close:
-                            reason_str = 'trend_reversal_ema3_below_ema9' if is_long_pos else 'trend_reversal_ema3_above_ema9'
-                            self.log(f"🚨 [PROACTIVE MARKET CLOSE] {symbol} {side.upper()} @ {current_price:.5f} | Razón: 15m Giro de Tendencia ({reason_str}) | ema3={ema3_15m:.5f}, ema9={ema9_15m:.5f}", "WARNING")
-                            c_id = pos.get('ctrader_pos_id')
-                            if c_id:
-                                self.close_position(c_id, symbol=symbol)
-                            
                             entry_px = float(pos.get('entry_price') or 0)
                             lots_qty = abs(float(pos.get('lots') or 0))
                             pip_val_usd = 10.0
@@ -1769,22 +2071,31 @@ class StandaloneForexWorker:
                             pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
                             pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
                             
-                            upd_fields = {
-                                'status': 'closed', 
-                                'current_price': current_price,
-                                'pnl_pips': round(pips_pnl_calc, 1),
-                                'pnl_usd': round(pnl_usd_calc, 2),
-                                'closed_at': datetime.now(timezone.utc).isoformat(), 
-                                'close_reason': reason_str,
-                                'exit_reason': reason_str
-                            }
-                            try:
-                                sb.table('forex_positions').update(upd_fields).eq('id', pos['id']).execute()
-                                from app.core.capital_manager import register_realized_pnl
-                                register_realized_pnl('forex', round(pnl_usd_calc, 2))
-                            except Exception as upd_err:
-                                self.log(f"Error actualizando DB en Proactive Close: {upd_err}", "ERROR")
-                            continue
+                            reason_str = 'trend_reversal_ema3_below_ema9' if is_long_pos else 'trend_reversal_ema3_above_ema9'
+                            
+                            if pnl_usd_calc < 1.00:
+                                self.log(f"🛡️ [ADUANA SALIDA / TREND REVERSAL SKIP] {symbol} {side.upper()}: Giro 15m detectado ({reason_str}) pero PnL insuficiente (${pnl_usd_calc:.2f} < $1.00 USD, {pips_pnl_calc:.1f} pips). Se mantiene posición activa.", "INFO")
+                            else:
+                                self.log(f"🚨 [PROACTIVE MARKET CLOSE] {symbol} {side.upper()} @ {current_price:.5f} | Razón: 15m Giro de Tendencia ({reason_str}) con PnL +${pnl_usd_calc:.2f} | ema3={ema3_15m:.5f}, ema9={ema9_15m:.5f}", "WARNING")
+                                c_id = pos.get('ctrader_pos_id')
+                                if c_id:
+                                    self.close_position(c_id, symbol=symbol)
+                                
+                                upd_fields = {
+                                    'status': 'closed', 
+                                    'current_price': current_price,
+                                    'pnl_pips': round(pips_pnl_calc, 1),
+                                    'pnl_usd': round(pnl_usd_calc, 2),
+                                    'closed_at': datetime.now(timezone.utc).isoformat(), 
+                                    'close_reason': reason_str
+                                }
+                                try:
+                                    sb.table('forex_positions').update(upd_fields).eq('id', pos['id']).execute()
+                                    from app.core.capital_manager import register_realized_pnl
+                                    register_realized_pnl('forex', round(pnl_usd_calc, 2))
+                                except Exception as upd_err:
+                                    self.log(f"Error actualizando DB en Proactive Close: {upd_err}", "ERROR")
+                                continue
 
                     # --- NUEVO: CIERRE PROACTIVO (AaEXT/AaEXH) ---
                     proactive_res = evaluate_proactive_exit(
@@ -1796,30 +2107,48 @@ class StandaloneForexWorker:
                     )
                     
                     if proactive_res['should_close']:
+                        entry_px = float(pos.get('entry_price') or 0)
+                        lots_qty = abs(float(pos.get('lots') or 0))
+                        from app.strategy.capital_protection import PIP_SIZES
+                        pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                        is_short_pos = side.lower() in ('short', 'sell')
+                        pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                        pnl_usd_calc = pips_pnl_calc * 10.0 * lots_qty
+
+                        if pnl_usd_calc < 0.0:
+                            self.log(f"🛡️ [PROACTIVE-EXIT SKIP LOSS] {symbol} {side.upper()}: Proactive Exit omitido porque PnL es negativo (${pnl_usd_calc:.2f}, {pips_pnl_calc:.1f} p). Cierre en pérdida SOLO permitido por QSHR.", "INFO")
+                            continue
+
+                        # ── VALIDACIÓN MTF TREND GUARD (Anti-Micro-Scalp 15m -> 5m) ──
+                        try:
+                            from app.strategy.profit_capture import evaluate_mtf_trend_guard
+                            pnl_pct_calc = (pips_pnl_calc * pip_size_val / entry_px * 100.0) if entry_px > 0 else 0.0
+                            mtf_guard = evaluate_mtf_trend_guard(
+                                side=side, df_15m=df_15m, df_5m=df_5m,
+                                current_price=current_price, symbol=symbol,
+                                market_type='forex_futures',
+                                pnl_pips=pips_pnl_calc, pnl_pct=pnl_pct_calc
+                            )
+                            if mtf_guard.get('should_block'):
+                                self.log(f"🛡️ [MTF TREND GUARD] {symbol} {side.upper()}: Proactive Exit omitido. {mtf_guard.get('reason')}", "INFO")
+                                continue
+                        except Exception as mtf_e:
+                            self.log(f"Error evaluando MTF Trend Guard {symbol}: {mtf_e}", "DEBUG")
+
                         self.log(f"[PROACTIVE-EXIT] {symbol} {side.upper()} @ {current_price} | Regla: {proactive_res['rule_code']} | Razón: {proactive_res['reason']}", "WARNING")
                         # Cerrar en cTrader
                         c_id = pos.get('ctrader_pos_id')
                         if c_id:
-                            self.close_position(c_id, symbol=symbol)
-                        # Cerrar en DB con datos reales financieros
-                        try:
-                            entry_px = float(pos.get('entry_price') or 0)
-                            lots_qty = abs(float(pos.get('lots') or 0))
-                            pip_val_usd = 10.0
-                            from app.strategy.capital_protection import PIP_SIZES
-                            pip_size_val = PIP_SIZES.get(symbol, 0.0001)
-                            is_short_pos = side.lower() in ('short', 'sell')
-                            pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
-                            pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
+                            self.close_position(c_id, symbol=symbol, reason=proactive_res['reason'])
                             
+                        try:
                             upd_fields = {
                                 'status': 'closed', 
                                 'current_price': current_price,
                                 'pnl_pips': round(pips_pnl_calc, 1),
                                 'pnl_usd': round(pnl_usd_calc, 2),
                                 'closed_at': datetime.now(timezone.utc).isoformat(), 
-                                'close_reason': proactive_res.get('reason') or proactive_res.get('rule_code'),
-                                'exit_reason': proactive_res['rule_code']
+                                'close_reason': proactive_res.get('reason') or proactive_res.get('rule_code')
                             }
                             
                             try:
@@ -1833,7 +2162,7 @@ class StandaloneForexWorker:
                                 'status': 'closed', 
                                 'current_price': current_price,
                                 'closed_at': datetime.now(timezone.utc).isoformat(), 
-                                'exit_reason': proactive_res['rule_code']
+                                'close_reason': proactive_res.get('reason') or proactive_res.get('rule_code')
                             }
                             
                         self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))

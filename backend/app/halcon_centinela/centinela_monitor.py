@@ -183,11 +183,26 @@ class CentinelaMonitor:
             return False
             
         try:
-            current_price = position.get('current_price', 0.0)
+            symbol = position.get('symbol', '')
+            current_price = float(position.get('current_price', 0.0) or 0.0)
+            
+            # Si no hay precio actual, obtener de precios en tiempo real del execution_service
+            if current_price <= 0 and hasattr(self, 'execution_service') and hasattr(self.execution_service, 'state'):
+                prices_map = self.execution_service.state.get('prices', {})
+                p_data = prices_map.get(symbol, {})
+                current_price = float(p_data.get('mid') or p_data.get('bid') or p_data.get('ask') or 0.0)
+                
+            if current_price <= 0:
+                current_price = float(position.get('entry_price') or 0.0)
+
             reason = f"CENTINELA {decision} (Score: {halcon_result.score_final})"
             
             if self.market_type == 'forex':
-                pips_pnl = position.get('pips_pnl', 0.0)
+                pip_size = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
+                entry_p = float(position.get('entry_price', 0) or 0)
+                is_buy = position.get('side', '').lower() in ('long', 'buy')
+                pips_pnl = (current_price - entry_p) / pip_size if is_buy else (entry_p - current_price) / pip_size if (current_price > 0 and entry_p > 0) else 0.0
+
                 if decision == CentinelaDecision.CIERRE_TOTAL.value:
                     self.execution_service._close_position(position, current_price, reason, pips_pnl)
                 elif decision == CentinelaDecision.CIERRE_PARCIAL.value:
@@ -195,11 +210,16 @@ class CentinelaMonitor:
             else:
                 # Crypto
                 if decision == CentinelaDecision.CIERRE_TOTAL.value:
-                    self.execution_service.close_position(pos_id, reason)
+                    if hasattr(self.execution_service, 'close_position'):
+                        self.execution_service.close_position(pos_id, reason)
+                    else:
+                        from app.core.position_monitor import _execute_paper_close
+                        import asyncio
+                        asyncio.create_task(_execute_paper_close(position, current_price, reason, self.supabase))
                 elif decision == CentinelaDecision.CIERRE_PARCIAL.value:
-                    # Implement partial close for crypto if execution service supports it
-                    log_warning(f"Crypto partial close not natively supported yet for {pos_id}", MODULE)
-                    self.execution_service.close_position(pos_id, reason + " (Partial request converted to total)")
+                    from app.core.position_monitor import _execute_paper_partial_close
+                    import asyncio
+                    asyncio.create_task(_execute_paper_partial_close(position, current_price, self.supabase))
                     
             return True
         except Exception as e:

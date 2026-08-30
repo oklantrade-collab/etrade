@@ -35,9 +35,9 @@ def is_exempt_reason(reason: str) -> bool:
     """
     reason_lower = str(reason).lower()
     
-    # tp_band ya no es exento para que pueda ser bloqueado por el Guard
-    # si está en pérdida y la tendencia macro aún nos favorece.
-    if 'tp_band' in reason_lower:
+    # tp_band, bollinger_exhaustion y trend_reversal no son exentos para que puedan ser bloqueados por el Guard
+    # si están en pérdida y la tendencia aún favorece o no tienen ganancia.
+    if any(k in reason_lower for k in ('tp_band', 'bollinger_exhaustion', 'trend_reversal', 'cascada_fib_stagnation')):
         return False
         
     # Validar 'tp' exacto o prefijos conocidos para verdaderos Take Profits
@@ -233,6 +233,17 @@ def should_block_close(
             'reason': f'PnL positivo (${total_pnl:.4f}) — cierre permitido',
             'trend': None,
         }
+
+    # 1.1 Forex: Cierre en pérdida SOLO permitido si es QSHR o MANUAL
+    if market_type == 'forex_futures':
+        is_qshr = any(k in str(reason).lower() for k in ('qshr', 'cut_and_flip', 'early_invalidation', 'close_and_flip'))
+        is_manual = 'manual' in str(reason).lower()
+        if not is_qshr and not is_manual:
+            return {
+                'block': True,
+                'reason': f'Forex Anti-Loss: Cierre en pérdida SOLO permitido por QSHR (intentó {reason} con PnL ${total_pnl:.2f})',
+                'trend': None,
+            }
 
     # 2. Si la razón está exenta, NO bloquear
     if is_exempt_reason(reason):

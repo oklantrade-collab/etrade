@@ -539,7 +539,7 @@ def _close_all_positions(ticker: str, price: float):
         if pnl < 1.0:
             log_warning(MODULE, f"🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando _close_all_positions para {ticker} con PnL de ${pnl:.2f} USD < $1.00 USD.")
             sb.table('stocks_positions').update({
-                'sl_type': 'suspended_anti_loss_protection',
+                'sl_type': 'anti_loss_hold',
                 'stop_loss': 0,
                 'sl_dynamic_price': 0,
                 'erep_active': True,

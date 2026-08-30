@@ -17,7 +17,7 @@ class Settings(BaseModel):
 
     # Binance
     binance_api_key: str = os.getenv("BINANCE_API_KEY", "")
-    binance_secret: str = os.getenv("BINANCE_SECRET", "")
+    binance_secret: str = os.getenv("BINANCE_SECRET") or os.getenv("BINANCE_API_SECRET", "")
     binance_testnet: bool = os.getenv("BINANCE_TESTNET", "true").lower() == "true"
 
     # Gemini

@@ -495,3 +495,433 @@ def evaluate_profit_capture(
             f'PnL=+{pnl_pct:.2f}%'
         ),
     }
+
+
+def evaluate_mtf_trend_guard(
+    side: str,
+    df_15m: pd.DataFrame,
+    df_5m: pd.DataFrame = None,
+    current_price: float = 0.0,
+    symbol: str = '',
+    market_type: str = 'forex_futures',
+    pnl_pips: float = 0.0,
+    pnl_pct: float = 0.0,
+    max_pnl_pips: float = 0.0,
+    max_pnl_pct: float = 0.0
+) -> dict:
+    """
+    Blindaje de Tendencia en 15m y Transición Reactiva a 5m (Anti-Micro-Scalp).
+    Aplica para LONGs y SHORTs, en Forex y Crypto.
+    
+    1. Blindaje 15m:
+       - LONG: Si EMA3_15m > EMA9_15m y Slope > 0 -> Bloquea salida prematura.
+       - SHORT: Si EMA3_15m < EMA9_15m y Slope < 0 -> Bloquea salida prematura.
+    2. Transición 5m:
+       - Si la pendiente en 15m se aplana/invierte:
+         * LONG: Salida autorizada SOLO si EMA3_5m < EMA9_5m Y Precio < EMA20_5m.
+         * SHORT: Salida autorizada SOLO si EMA3_5m > EMA9_5m Y Precio > EMA20_5m.
+    3. Anti-Giveback:
+       - Si superó +8 pips (+0.50% en crypto) y cae a +3 pips (+0.20%), asegura salida con ganancia.
+    """
+    if df_15m is None or len(df_15m) < 15:
+        return {'should_block': False, 'reason': 'Datos 15m insuficientes'}
+    
+    try:
+        is_long = side.lower() in ('long', 'buy')
+        is_crypto = 'crypto' in market_type.lower() or 'USDT' in symbol.upper()
+        
+        # Calcular EMAs en 15m
+        c_15m = df_15m['close']
+        ema3_15m_series = c_15m.ewm(span=3, adjust=False).mean()
+        ema9_15m_series = c_15m.ewm(span=9, adjust=False).mean()
+        
+        ema3_15m = float(ema3_15m_series.iloc[-1])
+        ema3_15m_prev = float(ema3_15m_series.iloc[-2]) if len(ema3_15m_series) >= 2 else ema3_15m
+        ema9_15m = float(ema9_15m_series.iloc[-1])
+        
+        slope_15m = ema3_15m - ema3_15m_prev
+        
+        # ── 1. Anti-Giveback de Seguridad (Si el trade superó +8 pips y retrocede a +3 pips) ──
+        high_pnl_pips = max(max_pnl_pips, pnl_pips)
+        high_pnl_pct = max(max_pnl_pct, pnl_pct)
+        has_reached_high_profit = (high_pnl_pips >= 8.0) if not is_crypto else (high_pnl_pct >= 0.50)
+        at_safety_floor = (pnl_pips <= 3.5 and pnl_pips >= 2.0) if not is_crypto else (pnl_pct <= 0.25 and pnl_pct >= 0.15)
+        if has_reached_high_profit and at_safety_floor:
+            return {
+                'should_block': False,
+                'reason': f"Anti-Giveback Activado: Asegurando ganancia mínima (+{pnl_pips:.1f}p / +{pnl_pct:.2f}%)"
+            }
+
+        # ── 2. Evaluación para LONG ──
+        if is_long:
+            # Caso 1: Tendencia 15m alcista fuerte (EMA3 > EMA9 y Slope > 0) -> BLINDAJE
+            if ema3_15m > ema9_15m and slope_15m > 0:
+                return {
+                    'should_block': True,
+                    'reason': f"Blindaje 15m LONG Activo: EMA3_15m ({ema3_15m:.5f}) > EMA9_15m ({ema9_15m:.5f}) con pendiente positiva. Mantener Runner."
+                }
+            
+            # Caso 2: Pendiente 15m aplanada o negativa -> Transición Reactiva a 5m
+            if df_5m is not None and len(df_5m) >= 20:
+                c_5m = df_5m['close']
+                ema3_5m = float(c_5m.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_5m = float(c_5m.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_5m = float(c_5m.ewm(span=20, adjust=False).mean().iloc[-1])
+                
+                # Quiebre confirmado en 5m: EMA3 < EMA9 Y precio perfora EMA20
+                if ema3_5m < ema9_5m and current_price < ema20_5m:
+                    return {
+                        'should_block': False,
+                        'reason': f"Quiebre 5m LONG confirmado (EMA3_5m={ema3_5m:.5f} < EMA9_5m={ema9_5m:.5f} y Precio < EMA20_5m={ema20_5m:.5f}). Salida autorizada."
+                    }
+                else:
+                    return {
+                        'should_block': True,
+                        'reason': f"Transición 5m LONG: Pendiente 15m aplanada pero microestructura 5m sobre EMA20 ({ema20_5m:.5f}). Mantener posición."
+                    }
+
+        # ── 3. Evaluación para SHORT ──
+        else:
+            # Caso 1: Tendencia 15m bajista fuerte (EMA3 < EMA9 y Slope < 0) -> BLINDAJE
+            if ema3_15m < ema9_15m and slope_15m < 0:
+                return {
+                    'should_block': True,
+                    'reason': f"Blindaje 15m SHORT Activo: EMA3_15m ({ema3_15m:.5f}) < EMA9_15m ({ema9_15m:.5f}) con pendiente negativa. Mantener Runner."
+                }
+            
+            # Caso 2: Pendiente 15m aplanada o positiva -> Transición Reactiva a 5m
+            if df_5m is not None and len(df_5m) >= 20:
+                c_5m = df_5m['close']
+                ema3_5m = float(c_5m.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_5m = float(c_5m.ewm(span=9, adjust=False).mean().iloc[-1])
+                ema20_5m = float(c_5m.ewm(span=20, adjust=False).mean().iloc[-1])
+                
+                # Quiebre confirmado en 5m: EMA3 > EMA9 Y precio supera EMA20
+                if ema3_5m > ema9_5m and current_price > ema20_5m:
+                    return {
+                        'should_block': False,
+                        'reason': f"Quiebre 5m SHORT confirmado (EMA3_5m={ema3_5m:.5f} > EMA9_5m={ema9_5m:.5f} y Precio > EMA20_5m={ema20_5m:.5f}). Salida autorizada."
+                    }
+                else:
+                    return {
+                        'should_block': True,
+                        'reason': f"Transición 5m SHORT: Pendiente 15m aplanada pero microestructura 5m bajo EMA20 ({ema20_5m:.5f}). Mantener posición."
+                    }
+
+        return {'should_block': False, 'reason': 'Sin bloqueo activo'}
+    except Exception as e:
+        return {'should_block': False, 'reason': f"Error en MTF Trend Guard: {e}"}
+
+
+def evaluate_dynamic_tp_v6(
+    symbol: str,
+    side: str,
+    current_price: float,
+    entry_price: float,
+    df_15m: pd.DataFrame,
+    df_5m: pd.DataFrame = None,
+    snap: dict = None,
+    max_pnl_pips: float = 0.0,
+    max_pnl_pct: float = 0.0,
+    partial_already_taken: bool = False,
+    market_type: str = 'forex_futures',
+) -> dict:
+    """
+    Sistema Dinámico de Take Profit v6 (Unificado Forex y Crypto).
+    
+    Evalúa 5 reglas técnicas cuantitativas en 15m:
+    1. Clímax RSI de 2 Niveles (Extremo < 15 / > 85 o Giro en Sobreventa <= 22 / Sobrecompra >= 78).
+    2. Clímax Fibonacci (Toque L5/U5 o Falla en L4/U4).
+    3. Reversión SIPV tras Cascada de Medias (EMA3 vs EMA9 vs EMA20 con cierre opuesto a EMA3).
+    4. Guarda Anti-Giveback (Protección del 70% de ganancia máxima alcanzada tras +20 pips / +1.0%).
+    5. Scale-Out 50/50 (Toma parcial del 50% al alcanzar L4/U4 por primera vez).
+    
+    Retorna diccionario estructurado con la decisión de salida.
+    """
+    res_default = {
+        'should_close': False,
+        'is_partial': False,
+        'partial_pct': 0.0,
+        'trailing_sl_price': None,
+        'reason': 'Trend running - no TP trigger',
+        'rule_code': 'HOLD_TREND'
+    }
+
+    if df_15m is None or len(df_15m) < 20 or entry_price <= 0:
+        return res_default
+
+    side_norm = side.lower()
+    is_long = side_norm in ('long', 'buy')
+    snap = snap or {}
+    
+    # Parámetros por mercado
+    is_crypto = 'crypto' in market_type.lower() or 'USDT' in symbol.upper()
+    pip_size = 0.01 if ('JPY' in symbol.upper() or 'XAU' in symbol.upper()) else (0.0001 if not is_crypto else 1.0)
+    
+    # Calcular PnL actual
+    if is_long:
+        curr_pnl_pips = (current_price - entry_price) / pip_size if not is_crypto else 0.0
+        curr_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+    else:
+        curr_pnl_pips = (entry_price - current_price) / pip_size if not is_crypto else 0.0
+        curr_pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
+
+    # 🛡️ Blindaje de Take Profit: No activar salidas de toma de ganancias si la posición está en pérdida o breakeven
+    is_in_profit = (curr_pnl_pct > 0.05) if is_crypto else (curr_pnl_pips >= 1.0)
+    if not is_in_profit:
+        return res_default
+
+    # Extraer indicadores de 15m
+    c0 = df_15m.iloc[-1]
+    c1 = df_15m.iloc[-2] if len(df_15m) >= 2 else c0
+    
+    close0 = float(c0.get('close', c0.get('Close', current_price)))
+    open0 = float(c0.get('open', c0.get('Open', close0)))
+    high0 = float(c0.get('high', c0.get('High', close0)))
+    low0 = float(c0.get('low', c0.get('Low', close0)))
+    
+    close1 = float(c1.get('close', c1.get('Close', close0)))
+    high1 = float(c1.get('high', c1.get('High', high0)))
+    low1 = float(c1.get('low', c1.get('Low', low0)))
+
+    # Bollinger Bands 15m
+    basis_series = df_15m['close'].rolling(20).mean()
+    std_series = df_15m['close'].rolling(20).std()
+    
+    basis = float(snap.get('basis') or basis_series.iloc[-1])
+    std = float(std_series.iloc[-1]) if len(std_series) > 0 and not pd.isna(std_series.iloc[-1]) else 0.0
+    
+    bb_upper = float(snap.get('upper_1') or snap.get('upper_bollinger') or (basis + 2.0 * std))
+    bb_lower = float(snap.get('lower_1') or snap.get('lower_bollinger') or (basis - 2.0 * std))
+    
+    lower_4 = float(snap.get('lower_4') or (basis - 2.618 * std))
+    lower_5 = float(snap.get('lower_5') or (basis - 3.236 * std))
+    upper_4 = float(snap.get('upper_4') or (basis + 2.618 * std))
+    upper_5 = float(snap.get('upper_5') or (basis + 3.236 * std))
+    
+    # EMAs 15m
+    c_series = df_15m['close']
+    ema3_series = c_series.ewm(span=3, adjust=False).mean()
+    ema9_series = c_series.ewm(span=9, adjust=False).mean()
+    ema20_series = c_series.ewm(span=20, adjust=False).mean()
+    
+    ema3_0 = float(snap.get('ema3') or ema3_series.iloc[-1])
+    ema9_0 = float(snap.get('ema9') or ema9_series.iloc[-1])
+    ema20_0 = float(snap.get('ema20') or ema20_series.iloc[-1])
+    
+    # RSI 15m
+    delta = c_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_series = 100 - (100 / (1 + rs))
+    
+    rsi_0 = float(snap.get('rsi_14') or snap.get('rsi') or rsi_series.iloc[-1])
+    rsi_1 = float(rsi_series.iloc[-2]) if len(rsi_series) >= 2 else rsi_0
+
+    # ════════════════════════════════════════════════════════════
+    # REGLA 4: GUARDA ANTI-GIVEBACK (PROTECCIÓN 70% GANANCIA PICO)
+    # ════════════════════════════════════════════════════════════
+    peak_threshold_reached = (max_pnl_pips >= 20.0 if not is_crypto else max_pnl_pct >= 1.0)
+    if peak_threshold_reached:
+        if not is_crypto:
+            guaranteed_pips = max_pnl_pips * 0.70
+            if is_long:
+                trail_sl = entry_price + (guaranteed_pips * pip_size)
+                if current_price <= trail_sl and curr_pnl_pips > 0:
+                    return {
+                        'should_close': True,
+                        'is_partial': False,
+                        'partial_pct': 0.0,
+                        'trailing_sl_price': trail_sl,
+                        'reason': f"Anti-Giveback 70% activado (Pico: +{max_pnl_pips:.1f}p -> Asegurado: +{guaranteed_pips:.1f}p)",
+                        'rule_code': 'TP_ANTI_GIVEBACK_70'
+                    }
+            else:
+                trail_sl = entry_price - (guaranteed_pips * pip_size)
+                if current_price >= trail_sl and curr_pnl_pips > 0:
+                    return {
+                        'should_close': True,
+                        'is_partial': False,
+                        'partial_pct': 0.0,
+                        'trailing_sl_price': trail_sl,
+                        'reason': f"Anti-Giveback 70% activado (Pico: +{max_pnl_pips:.1f}p -> Asegurado: +{guaranteed_pips:.1f}p)",
+                        'rule_code': 'TP_ANTI_GIVEBACK_70'
+                    }
+        else:
+            guaranteed_pct = max_pnl_pct * 0.70
+            if is_long:
+                trail_sl = entry_price * (1.0 + guaranteed_pct / 100.0)
+                if current_price <= trail_sl and curr_pnl_pct > 0:
+                    return {
+                        'should_close': True,
+                        'is_partial': False,
+                        'partial_pct': 0.0,
+                        'trailing_sl_price': trail_sl,
+                        'reason': f"Anti-Giveback 70% activado (Pico: +{max_pnl_pct:.2f}% -> Asegurado: +{guaranteed_pct:.2f}%)",
+                        'rule_code': 'TP_ANTI_GIVEBACK_70'
+                    }
+            else:
+                trail_sl = entry_price * (1.0 - guaranteed_pct / 100.0)
+                if current_price >= trail_sl and curr_pnl_pct > 0:
+                    return {
+                        'should_close': True,
+                        'is_partial': False,
+                        'partial_pct': 0.0,
+                        'trailing_sl_price': trail_sl,
+                        'reason': f"Anti-Giveback 70% activado (Pico: +{max_pnl_pct:.2f}% -> Asegurado: +{guaranteed_pct:.2f}%)",
+                        'rule_code': 'TP_ANTI_GIVEBACK_70'
+                    }
+
+    # ════════════════════════════════════════════════════════════
+    # REGLA 1: CLÍMAX RSI (2 NIVELES)
+    # ════════════════════════════════════════════════════════════
+    if is_long:
+        # Nivel 1: Clímax Absoluto
+        if rsi_0 >= 85 and (close0 > bb_upper or current_price > bb_upper):
+            return {
+                'should_close': True,
+                'is_partial': False,
+                'partial_pct': 0.0,
+                'trailing_sl_price': None,
+                'reason': f"Clímax RSI Extremo LONG ({rsi_0:.1f} >= 85) con ruptura de BB superior",
+                'rule_code': 'TP_RSI_CLIMAX_EXTREME'
+            }
+        # Nivel 2: Giro en Sobrecompra
+        if rsi_0 >= 78 and rsi_0 < rsi_1 and close0 < open0:
+            return {
+                'should_close': True,
+                'is_partial': False,
+                'partial_pct': 0.0,
+                'trailing_sl_price': None,
+                'reason': f"Giro en Sobrecompra LONG (RSI={rsi_0:.1f} < prev={rsi_1:.1f}) con vela roja",
+                'rule_code': 'TP_RSI_TURNAROUND'
+            }
+    else:
+        # Nivel 1: Clímax Absoluto
+        if rsi_0 <= 15 and (close0 < bb_lower or current_price < bb_lower):
+            return {
+                'should_close': True,
+                'is_partial': False,
+                'partial_pct': 0.0,
+                'trailing_sl_price': None,
+                'reason': f"Clímax RSI Extremo SHORT ({rsi_0:.1f} <= 15) con ruptura de BB inferior",
+                'rule_code': 'TP_RSI_CLIMAX_EXTREME'
+            }
+        # Nivel 2: Giro en Sobreventa
+        if rsi_0 <= 22 and rsi_0 > rsi_1 and close0 > open0:
+            return {
+                'should_close': True,
+                'is_partial': False,
+                'partial_pct': 0.0,
+                'trailing_sl_price': None,
+                'reason': f"Giro en Sobreventa SHORT (RSI={rsi_0:.1f} > prev={rsi_1:.1f}) con vela verde",
+                'rule_code': 'TP_RSI_TURNAROUND'
+            }
+
+    # ════════════════════════════════════════════════════════════
+    # REGLA 2: CLÍMAX FIBONACCI (LOWER_5/UPPER_5 Y FALLA L4/U4)
+    # ════════════════════════════════════════════════════════════
+    if is_long:
+        if upper_5 > 0 and (current_price >= upper_5 or high0 >= upper_5) and (close0 > bb_upper or current_price > bb_upper):
+            return {
+                'should_close': True,
+                'is_partial': False,
+                'partial_pct': 0.0,
+                'trailing_sl_price': None,
+                'reason': f"Clímax Fibonacci UPPER_5 alcanzado ({max(high0, current_price):.5f} >= {upper_5:.5f})",
+                'rule_code': 'TP_FIB_U5_CLIMAX'
+            }
+        if upper_4 > 0 and high1 >= upper_4 and high0 < high1 and close0 < open0:
+            # Validar con MTF Trend Guard antes de cerrar
+            guard = evaluate_mtf_trend_guard('long', df_15m, df_5m, current_price, symbol, market_type, curr_pnl_pips, curr_pnl_pct)
+            if not guard['should_block']:
+                return {
+                    'should_close': True,
+                    'is_partial': False,
+                    'partial_pct': 0.0,
+                    'trailing_sl_price': None,
+                    'reason': f"Falla de nuevo máximo en UPPER_4 Fibonacci ({high0:.5f} < prev={high1:.5f}) | {guard.get('reason')}",
+                    'rule_code': 'TP_FIB_U4_EXHAUSTION'
+                }
+    else:
+        if lower_5 > 0 and (current_price <= lower_5 or low0 <= lower_5) and (close0 < bb_lower or current_price < bb_lower):
+            return {
+                'should_close': True,
+                'is_partial': False,
+                'partial_pct': 0.0,
+                'trailing_sl_price': None,
+                'reason': f"Clímax Fibonacci LOWER_5 alcanzado ({min(low0, current_price):.5f} <= {lower_5:.5f})",
+                'rule_code': 'TP_FIB_L5_CLIMAX'
+            }
+        if lower_4 > 0 and low1 <= lower_4 and low0 > low1 and close0 > open0:
+            # Validar con MTF Trend Guard antes de cerrar
+            guard = evaluate_mtf_trend_guard('short', df_15m, df_5m, current_price, symbol, market_type, curr_pnl_pips, curr_pnl_pct)
+            if not guard['should_block']:
+                return {
+                    'should_close': True,
+                    'is_partial': False,
+                    'partial_pct': 0.0,
+                    'trailing_sl_price': None,
+                    'reason': f"Falla de nuevo mínimo en LOWER_4 Fibonacci ({low0:.5f} > prev={low1:.5f}) | {guard.get('reason')}",
+                    'rule_code': 'TP_FIB_L4_EXHAUSTION'
+                }
+
+    # ════════════════════════════════════════════════════════════
+    # REGLA 3: REVERSIÓN SIPV TRAS CASCADA DE MEDIAS (CON BLINDAJE MTF)
+    # ════════════════════════════════════════════════════════════
+    if is_long:
+        dist_ema_long = (ema3_0 - ema9_0) / pip_size if not is_crypto else ((ema3_0 - ema9_0) / ema9_0 * 100.0)
+        is_cascade_long = (ema3_0 > ema9_0 > ema20_0) or (dist_ema_long >= (3.0 if not is_crypto else 0.25))
+        if is_cascade_long and close0 < ema3_0 and (close0 < open0 or close0 < close1):
+            guard = evaluate_mtf_trend_guard('long', df_15m, df_5m, current_price, symbol, market_type, curr_pnl_pips, curr_pnl_pct)
+            if not guard['should_block']:
+                return {
+                    'should_close': True,
+                    'is_partial': False,
+                    'partial_pct': 0.0,
+                    'trailing_sl_price': None,
+                    'reason': f"Reversión SIPV LONG confirmada (Close={close0:.5f} < EMA3={ema3_0:.5f}) | {guard.get('reason')}",
+                    'rule_code': 'TP_SIPV_REVERSAL'
+                }
+    else:
+        dist_ema_short = (ema9_0 - ema3_0) / pip_size if not is_crypto else ((ema9_0 - ema3_0) / ema3_0 * 100.0)
+        is_cascade_short = (ema3_0 < ema9_0 < ema20_0) or (dist_ema_short >= (3.0 if not is_crypto else 0.25))
+        if is_cascade_short and close0 > ema3_0 and (close0 > open0 or close0 > close1):
+            guard = evaluate_mtf_trend_guard('short', df_15m, df_5m, current_price, symbol, market_type, curr_pnl_pips, curr_pnl_pct)
+            if not guard['should_block']:
+                return {
+                    'should_close': True,
+                    'is_partial': False,
+                    'partial_pct': 0.0,
+                    'trailing_sl_price': None,
+                    'reason': f"Reversión SIPV SHORT confirmada (Close={close0:.5f} > EMA3={ema3_0:.5f}) | {guard.get('reason')}",
+                    'rule_code': 'TP_SIPV_REVERSAL'
+                }
+
+    # ════════════════════════════════════════════════════════════
+    # REGLA 5: SCALE-OUT 50/50 (TOMA PARCIAL AL ALCANZAR L4/U4)
+    # ════════════════════════════════════════════════════════════
+    if not partial_already_taken:
+        if is_long and upper_4 > 0 and (current_price >= upper_4 or high0 >= upper_4):
+            return {
+                'should_close': True,
+                'is_partial': True,
+                'partial_pct': 0.50,
+                'trailing_sl_price': ema9_0,
+                'reason': f"Scale-Out 50% al alcanzar UPPER_4 Fibonacci ({high0:.5f} >= {upper_4:.5f})",
+                'rule_code': 'TP_SCALE_OUT_U4'
+            }
+        elif not is_long and lower_4 > 0 and (current_price <= lower_4 or low0 <= lower_4):
+            return {
+                'should_close': True,
+                'is_partial': True,
+                'partial_pct': 0.50,
+                'trailing_sl_price': ema9_0,
+                'reason': f"Scale-Out 50% al alcanzar LOWER_4 Fibonacci ({low0:.5f} <= {lower_4:.5f})",
+                'rule_code': 'TP_SCALE_OUT_L4'
+            }
+
+    return res_default

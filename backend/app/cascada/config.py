@@ -10,7 +10,8 @@ MODULE = 'CASCADA'
 
 CASCADA_PARAMS: Dict[str, Any] = {
     'enabled': True,
-    'giveback_threshold_pct': 0.50,         # 50% max giveback from peak PnL
+    'giveback_threshold_pct': 0.30,         # 30% max giveback from peak PnL (locks in +70% profit)
+    'giveback_min_peak_usd': 0.50,          # Minimum $0.50 USD peak (+5 pips on 0.01 lots) to activate giveback
     'slope_ascending_threshold': 0.15,
     'slope_descending_threshold': -0.15,
     'support_signal_bb_tf': '15m',          # Bollinger upper/lower band flattening

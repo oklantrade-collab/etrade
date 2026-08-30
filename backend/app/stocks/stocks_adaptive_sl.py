@@ -851,7 +851,7 @@ async def execute_adaptive_sl_close(
         log_warning('ADAPTIVE_SL', f'🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando _close_stocks_position para {ticker} con PnL de ${pnl_usd:.2f} USD < $1.00 USD.')
         try:
             await supabase.table('stocks_positions').update({
-                'sl_type': 'suspended_anti_loss_protection',
+                'sl_type': 'anti_loss_hold',
                 'stop_loss': 0,
                 'sl_dynamic_price': 0,
                 'erep_active': True,

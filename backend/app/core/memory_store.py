@@ -48,6 +48,29 @@ class BotState:
         pos_list = self.get_positions_by_symbol(symbol)
         return pos_list[0] if pos_list else None
 
+    def get_positions_by_market(self, market_type: str) -> list[dict]:
+        """Helper to get all open positions for a specific market type (e.g. 'crypto', 'forex', 'stocks')."""
+        norm_type = market_type.lower()
+        if 'crypto' in norm_type:
+            return [
+                p for p in self.positions.values()
+                if (p.get('market_type') in ('crypto', 'crypto_futures'))
+                or ('USDT' in str(p.get('symbol', '')).upper())
+            ]
+        elif 'forex' in norm_type:
+            return [
+                p for p in self.positions.values()
+                if p.get('market_type') in ('forex', 'forex_futures')
+                or any(fx in str(p.get('symbol', '')).upper() for fx in ['EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF', 'NZD'])
+            ]
+        elif 'stock' in norm_type:
+            return [
+                p for p in self.positions.values()
+                if p.get('market_type') in ('stocks', 'stocks_spot') or 'ticker' in p
+            ]
+        return [p for p in self.positions.values() if p.get('market_type') == market_type]
+
+
 BOT_STATE = BotState()
 
 def get_memory_df(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:

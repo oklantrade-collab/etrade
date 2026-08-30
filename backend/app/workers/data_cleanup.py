@@ -72,24 +72,20 @@ async def cleanup_database() -> dict:
     # ───────────────────────────────────────
     total_candles_deleted = 0
 
-    # [OPTIMIZACIÓN DE EGRESS] Evitar descargar la tabla entera para buscar símbolos.
-    # Obtenemos los símbolos de market_snapshot y probamos los exchanges conocidos.
-    pairs = set()
-    try:
-        snap_res = sb.table("market_snapshot").select("symbol").execute()
-        if snap_res and snap_res.data:
-            # Añadimos combinaciones de exchanges para cada símbolo
-            for row in snap_res.data:
-                sym = row["symbol"]
-                for ex in ["binance", "icmarkets", "ibkr"]:
-                    pairs.add((sym, ex))
-    except Exception as e:
-        log_error(MODULE, f"Error pre-cargando símbolos: {e}")
+    # ───────────────────────────────────────
+    # 1. MARKET CANDLES (por conteo)
+    # ───────────────────────────────────────
+    total_candles_deleted = 0
+
+    # [OPTIMIZACIÓN DE EGRESS] Solo verificar pares activos reales de Crypto y Forex
+    pairs = [
+        ("BTCUSDT", "binance"), ("ETHUSDT", "binance"), 
+        ("SOLUSDT", "binance"), ("ADAUSDT", "binance"),
+        ("EURUSD", "icmarkets"), ("GBPUSD", "icmarkets"),
+        ("USDJPY", "icmarkets"), ("XAUUSD", "icmarkets"),
+    ]
 
     for tf, keep_count in CANDLE_RETENTION.items():
-        if not pairs:
-            break
-
         for symbol, exchange in pairs:
             try:
                 # Contar cuántas velas tiene (limit=0 para no transferir body, solo count headers)
@@ -181,28 +177,65 @@ async def cleanup_database() -> dict:
             log_warning(MODULE, f"{table_name} cleanup failed: {e}")
             results[table_name] = 0
 
-    # 2.2 Tablas base (Padres)
+    # 2.2 Tablas base (Padres y Logs Pesados)
     parent_tables = {
-        "volume_spikes":        {"days": 7,  "time_col": "detected_at"},
-        "signals_log":          {"days": 7, "time_col": "detected_at"},
-        "system_logs":          {"days": 1,  "time_col": "created_at"},
-        "pilot_diagnostics":    {"days": 0.25,  "time_col": "timestamp"},
-        "strategy_evaluations": {"days": 1,  "time_col": "created_at"},
-        "db_cleanup_log":       {"days": 30, "time_col": "executed_at"},
-        "technical_indicators": {"days": 1,  "time_col": "timestamp"},
-        "market_regime_history":{"days": 14, "time_col": "evaluated_at"},
-        "cron_cycles":          {"days": 1,  "time_col": "started_at"},
-        "news_sentiment":       {"days": 14, "time_col": "analyzed_at"},
-        "apex_scores":          {"days": 1,  "time_col": "calculated_at"},
-        "candle_patterns":      {"days": 1,  "time_col": "timestamp"},
-        "context_scores":       {"days": 1,  "time_col": "date"},
+        "strategy_evaluations":   {"days": 1,    "time_col": "created_at", "sliced": True},
+        "halcon_scores_log":      {"days": 2,    "time_col": "created_at", "sliced": True},
+        "centinela_decisions_log":{"days": 2,    "time_col": "created_at", "sliced": True},
+        "rebote_scores_log":      {"days": 2,    "time_col": "created_at", "sliced": True},
+        "oraculo_events":         {"days": 3,    "time_col": "created_at"},
+        "volume_spikes":          {"days": 7,    "time_col": "detected_at"},
+        "signals_log":            {"days": 7,    "time_col": "detected_at"},
+        "system_logs":            {"days": 1,    "time_col": "created_at"},
+        "pilot_diagnostics":      {"days": 0.25, "time_col": "timestamp"},
+        "db_cleanup_log":         {"days": 14,   "time_col": "executed_at"},
+        "technical_indicators":   {"days": 1,    "time_col": "timestamp"},
+        "market_regime_history":  {"days": 7,    "time_col": "evaluated_at"},
+        "cron_cycles":            {"days": 1,    "time_col": "started_at"},
+        "news_sentiment":         {"days": 7,    "time_col": "analyzed_at"},
+        "apex_scores":            {"days": 1,    "time_col": "calculated_at"},
+        "candle_patterns":        {"days": 1,    "time_col": "timestamp"},
+        "context_scores":         {"days": 1,    "time_col": "date"},
     }
 
     for table_name, config in parent_tables.items():
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(days=config["days"])
-            del_res = sb.table(table_name).delete().lt(config["time_col"], cutoff.isoformat()).execute()
-            results[table_name] = len(del_res.data) if del_res.data else 0
+            total_del_table = 0
+
+            # Si es una tabla pesada, limpiar en cortes de 6 horas (con fallback a 1h) para evitar timeout de BD
+            if config.get("sliced"):
+                cur_start = datetime.now(timezone.utc) - timedelta(days=30)
+                while cur_start < cutoff:
+                    cur_end = min(cur_start + timedelta(hours=6), cutoff)
+                    try:
+                        del_res = sb.table(table_name).delete(count="exact") \
+                            .gte(config["time_col"], cur_start.isoformat()) \
+                            .lt(config["time_col"], cur_end.isoformat()) \
+                            .execute()
+                        d_count = del_res.count if del_res.count is not None else len(del_res.data or [])
+                        total_del_table += d_count
+                    except Exception as slice_err:
+                        # Fallback a bloques de 1 hora si 6h superó el límite
+                        sub_start = cur_start
+                        while sub_start < cur_end:
+                            sub_end = min(sub_start + timedelta(hours=1), cur_end)
+                            try:
+                                sub_del = sb.table(table_name).delete(count="exact") \
+                                    .gte(config["time_col"], sub_start.isoformat()) \
+                                    .lt(config["time_col"], sub_end.isoformat()) \
+                                    .execute()
+                                d_sub = sub_del.count if sub_del.count is not None else len(sub_del.data or [])
+                                total_del_table += d_sub
+                            except Exception:
+                                pass
+                            sub_start = sub_end
+                    cur_start = cur_end
+            else:
+                del_res = sb.table(table_name).delete().lt(config["time_col"], cutoff.isoformat()).execute()
+                total_del_table = len(del_res.data) if del_res.data else 0
+
+            results[table_name] = total_del_table
         except Exception as e:
             err_msg = str(e)
             if "timeout" in err_msg.lower() or "57014" in err_msg:

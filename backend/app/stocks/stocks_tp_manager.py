@@ -501,7 +501,7 @@ async def execute_partial_sell(
             # Suspendemos el Stop Loss físico y enrutamos de forma segura a EREP Phase 2
             try:
                 supabase.table('stocks_positions').update({
-                    'sl_type': 'suspended_negative_protection',
+                    'sl_type': 'anti_loss_hold',
                     'stop_loss': 0,
                     'sl_dynamic_price': 0,
                     'erep_active': True,

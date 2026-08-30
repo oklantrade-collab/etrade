@@ -1,4 +1,14 @@
-import pytest
+import os
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+try:
+    import pytest
+    fixture_decorator = pytest.fixture
+except Exception:
+    def fixture_decorator(f):
+        return f
+
 import pandas as pd
 import numpy as np
 from app.rebote_aduana.aduana_validator import AduanaValidator, AduanaResult
@@ -10,7 +20,7 @@ class MockOraculo:
     def is_paused(self, symbol):
         return self.paused
 
-@pytest.fixture
+@fixture_decorator
 def validator():
     return AduanaValidator(oraculo_manager=MockOraculo(paused=False))
 
@@ -82,3 +92,47 @@ def test_contra_macro_no_confirm_rejects(validator):
     df = make_df_15m(ema_50=90, ema_200=100) # Macro bearish
     res = validator.validate('BTCUSD', 'long', 'MARKET', {'df_15m': df}, 'REBOTE', contra_trend_confirmed=False)
     assert res is not None
+
+
+def test_max_active_symbols_blocked(validator):
+    """Aduana: Rechazar si se alcanza el máximo de símbolos activos configurado."""
+    market_data = {
+        'open_symbols': ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT'],
+        'max_active_symbols': 4,
+    }
+    res = validator.validate('EURUSD', 'long', 'MARKET', market_data, 'AaReb_Traversal')
+    assert not res.approved
+    assert res.rule_triggered == 'MAX_ACTIVE_SYMBOLS_REACHED'
+
+
+def test_rebote_traversal_approved(validator):
+    """Aduana: Aprobar orden de Rebote Traversal válida con condiciones sanas."""
+    df_15m = make_df_15m(n=30, adx=25.0, rsi=30.0, volume=1500)
+    market_data = {
+        'df_15m': df_15m,
+        'open_symbols': ['BTCUSDT'],
+        'max_active_symbols': 5,
+        'current_symbol_positions': 0,
+        'max_positions_per_symbol': 3,
+        'price': 90.0,
+        'halcon_score': 70.0,
+    }
+    res = validator.validate('ETHUSDT', 'long', 'MARKET', market_data, 'AaReb_Traversal', halcon_scores={'score_1d': 0, 'score_4h': 0})
+    print(f"Res: approved={res.approved}, rule={res.rule_triggered}, reason={res.reason}")
+    assert res.approved
+
+
+if __name__ == '__main__':
+    print("Ejecutando tests de AduanaValidator Flexible...")
+    val = AduanaValidator(oraculo_manager=MockOraculo(paused=False))
+    test_oraculo_pause_rejects()
+    print("[PASS] test_oraculo_pause_rejects")
+    test_long_at_upper_extreme_rejected(val)
+    print("[PASS] test_long_at_upper_extreme_rejected")
+    test_short_at_lower_extreme_rejected(val)
+    print("[PASS] test_short_at_lower_extreme_rejected")
+    test_max_active_symbols_blocked(val)
+    print("[PASS] test_max_active_symbols_blocked")
+    test_rebote_traversal_approved(val)
+    print("[PASS] test_rebote_traversal_approved")
+    print("\n>>> TODOS LOS TESTS DE ADUANA PASARON EXITOSAMENTE! <<<")

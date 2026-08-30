@@ -342,6 +342,163 @@ DEFAULT_RULES = [
         "logic": "AND",
         "notes": "Estrategia Pullback Institucional: Toque a EMA20 en tendencia bajista con RSI sano. Aplica a Crypto y Forex.",
     },
+    # ═══ NUEVO MODELO DE REBOTE AVANZADO (Escenarios 1, 2-A, 2-B y 3) ═══
+    # ── ESCENARIO 1: Clímax Extremo (LOWER_6 / UPPER_6) ──
+    {
+        "id": 1052,
+        "rule_code": "AaReb_Climax",
+        "name": "Rebote Clímax Extremo LONG (LOWER_6)",
+        "description": "Entrada inmediata tras pánico extremo en LOWER_6 / Fib <= -5 con RSI <= 25. Cierra SHORTs opuestos y acompaña traversal.",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 15,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "aareb_climax_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 1 LONG: Capitulación extrema. Sizing 1.25x.",
+    },
+    {
+        "id": 1053,
+        "rule_code": "BbReb_Climax",
+        "name": "Rebote Clímax Extremo SHORT (UPPER_6)",
+        "description": "Entrada inmediata tras euforia extrema en UPPER_6 / Fib >= 5 con RSI >= 75. Cierra LONGs opuestos y acompaña traversal.",
+        "direction": "short",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 15,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "bbreb_climax_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 1 SHORT: Euforia extrema. Sizing 0.85x.",
+    },
+    # ── ESCENARIO 2-A: Agotamiento por 3 Velas + Curvatura + EMA Stack 5 Niveles ──
+    {
+        "id": 1054,
+        "rule_code": "AaReb_Floor_A",
+        "name": "Rebote Piso 3-Velas LONG (Escenario 2-A)",
+        "description": "Piso tras caída fuerte: 3 velas sin perforar banda inferior con mínimos ascendentes, BB inferior curvándose al alza, EMA3 asc y EMA Stack bajista.",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 13,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "aareb_floor_a_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 2-A LONG: Agotamiento de caída confirmado por acción del precio.",
+    },
+    {
+        "id": 1055,
+        "rule_code": "BbReb_Ceiling_A",
+        "name": "Rebote Techo 3-Velas SHORT (Escenario 2-A)",
+        "description": "Techo tras subida fuerte: 3 velas sin perforar banda superior con máximos descendentes, BB superior curvándose a la baja, EMA3 desc y EMA Stack alcista.",
+        "direction": "short",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 13,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "bbreb_ceiling_a_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 2-A SHORT: Distribución en techo confirmada sin filtros restrictivos de 1H/SAR.",
+    },
+    # ── ESCENARIO 2-B: Absorción SIPV + Vela Previa L5/U5 + EMA Stack 5 Niveles ──
+    {
+        "id": 1056,
+        "rule_code": "AaReb_Floor_B",
+        "name": "Rebote Absorción SIPV LONG (Escenario 2-B)",
+        "description": "Piso por absorción institucional SIPV con vela previa perforando Banda Inferior y Lower_5, con BB curvándose al alza y EMA Stack bajista.",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 14,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "aareb_floor_b_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 2-B LONG: Absorción institucional violenta.",
+    },
+    {
+        "id": 1057,
+        "rule_code": "BbReb_Ceiling_B",
+        "name": "Rebote Distribución SIPV SHORT (Escenario 2-B)",
+        "description": "Techo por distribución institucional SIPV con vela previa perforando Banda Superior y Upper_5, con BB curvándose a la baja y EMA Stack alcista.",
+        "direction": "short",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 14,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "bbreb_ceiling_b_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 2-B SHORT: Distribución institucional.",
+    },
+    # ── ESCENARIO 3: Pullback Menor Zonas Intermedias (L1-4 / U1-4) + PineScript ──
+    {
+        "id": 1058,
+        "rule_code": "AaReb_Pullback",
+        "name": "Rebote Pullback Intermedio LONG (Escenario 3)",
+        "description": "Pullback en zonas intermedias L1-L4 con 5M EMA3>EMA9>EMA20, confirmación (1H EMA3>EMA9 OR SAR 15M) y señal PineScript de compra.",
+        "direction": "long",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 11,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "aareb_pullback_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 3 LONG: Scalp ágil en retroceso menor.",
+    },
+    {
+        "id": 1059,
+        "rule_code": "BbReb_Pullback",
+        "name": "Rebote Pullback Intermedio SHORT (Escenario 3)",
+        "description": "Pullback en zonas intermedias U1-U4 con 5M EMA3<EMA9<EMA20, confirmación (1H EMA3<EMA9 OR SAR 15M) y señal PineScript de venta.",
+        "direction": "short",
+        "market_type": ["crypto_spot", "crypto_futures", "forex_futures"],
+        "ema50_vs_ema200": "any",
+        "enabled": True,
+        "regime_allowed": ["riesgo_alto", "riesgo_medio", "bajo_riesgo"],
+        "priority": 11,
+        "confidence": "high",
+        "entry_trades": [1],
+        "conditions": [
+            {"indicator": "bbreb_pullback_ok", "operator": "==", "value": True},
+        ],
+        "logic": "AND",
+        "notes": "Escenario 3 SHORT: Scalp ágil en retroceso menor.",
+    },
     # ═══ HOT MOMENTUM RULES (15m) — RAMA HOT ═══
     {
         "id": 1018,
@@ -369,7 +526,7 @@ DEFAULT_RULES = [
         "id": 1016,
         "rule_code": "AaHot",
         "name": "HOT Momentum LONG",
-        "description": "Entrada quirúrgica agresiva LONG con EMA ultra-cerca y ADX>22",
+        "description": "Entrada quirúrgica agresiva LONG con EMA ultra-cerca, expansión real de BB y ADX>20",
         "direction": "long",
         "market_type": ["forex_futures"],
         "ema50_vs_ema200": "above",
@@ -382,7 +539,7 @@ DEFAULT_RULES = [
             {"indicator": "fresh_cross_long", "operator": "==", "value": True},
             {"indicator": "low_touched_ema9", "operator": "==", "value": True},
             {"indicator": "hot_mtf_ok_long", "operator": "==", "value": True},
-            {"indicator": "bb_expanding_or_mtf_long_or_bottom", "operator": "==", "value": True},
+            {"indicator": "bb_expanding", "operator": "==", "value": True},
             {"indicator": "bb_upper_slope_positive", "operator": "==", "value": True},
             {"indicator": "ema_alignment_long", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -6},
@@ -393,7 +550,7 @@ DEFAULT_RULES = [
             {"indicator": "reversal_confirmation_long", "operator": "==", "value": True},
         ],
         "logic": "AND",
-        "notes": "Estrategia quirúrgica adaptada de Forex. Ultra rápida.",
+        "notes": "Estrategia quirúrgica adaptada de Forex con filtro de expansión de bandas.",
     },
     {
         "id": 1017,
@@ -412,7 +569,7 @@ DEFAULT_RULES = [
             {"indicator": "fresh_cross_short", "operator": "==", "value": True},
             {"indicator": "high_touched_ema9", "operator": "==", "value": True},
             {"indicator": "hot_mtf_ok_short", "operator": "==", "value": True},
-            {"indicator": "bb_expanding_or_mtf_short_or_top", "operator": "==", "value": True},
+            {"indicator": "bb_expanding", "operator": "==", "value": True},
             {"indicator": "bb_lower_slope_negative", "operator": "==", "value": True},
             {"indicator": "ema_alignment_short", "operator": "==", "value": True},
             {"indicator": "fib_zone", "operator": ">=", "value": -6},
@@ -1035,24 +1192,128 @@ def build_market_data_dict(
     if upper_6 > 0 and high_px >= upper_6:
         dd12_limit_ok = True
 
-    # Aa21 (DIP Sniper LONG Lower_5 / Lower_6 5m)
+    # Aa21 (DIP Sniper LONG Lower_5 / Lower_6 5m con confirmación de rechazo)
     aa21_limit_ok = False
     lower_5_trigger = (low_px <= lower_5) if lower_5 > 0 else (low_px <= lower_2 if lower_2 > 0 else False)
     macro_ema_ok = (ema50 > ema200) if (ema50 > 0 and ema200 > 0) else True
-    if lower_5_trigger and bb_upper_slope_positive and macro_ema_ok:
+    rejection_candle_long = (float(last.get("close", 0)) >= float(last.get("open", 0))) or (rsi_14_val >= 25.0)
+    if lower_5_trigger and bb_upper_slope_positive and macro_ema_ok and rejection_candle_long:
         aa21_limit_ok = True
 
-    # Bb21 (Trend Pullback SHORT)
+    # Bb21 (Trend Pullback SHORT con confirmación de rechazo)
     bb21_limit_ok = False
-    if ema3 < ema9 and ema9 < ema20 and ema20 < ema50 and float(last["close"]) < ema20 * 0.999:
+    rejection_candle_short = (float(last.get("close", 0)) <= float(last.get("open", 0))) or (rsi_14_val <= 75.0)
+    if ema3 < ema9 and ema9 < ema20 and ema20 < ema50 and float(last["close"]) < ema20 * 0.999 and rejection_candle_short:
         bb21_limit_ok = True
 
-    # Aa40 (Flash Crash Capitulation LONG)
+    # ── EMA STACK DE 5 NIVELES EN 15M ──
+    ema_stack_bearish_5 = (ema3 < ema9) and (ema9 < ema20) and (ema20 < ema50) and (ema50 < ema200) if (ema200 > 0) else ((ema3 < ema9) and (ema9 < ema20) and (ema20 < ema50))
+    ema_stack_bullish_5 = (ema3 > ema9) and (ema9 > ema20) and (ema20 > ema50) and (ema50 > ema200) if (ema200 > 0) else ((ema3 > ema9) and (ema9 > ema20) and (ema20 > ema50))
+    dist_ema200_pct = (abs(price - ema200) / ema200 * 100.0) if (ema200 > 0 and price > 0) else 0.0
+
+    # ── ESTRUCTURA DE 3 VELAS PARA ESCENARIO 2-A ──
+    floor_3candles_ok = False
+    ceiling_3candles_ok = False
+    if len(df) >= 3:
+        r0 = df.iloc[-1]
+        r1 = df.iloc[-2]
+        r2 = df.iloc[-3]
+        c0, c1, c2 = float(r0.get('close', 0)), float(r1.get('close', 0)), float(r2.get('close', 0))
+        low0, low1, low2 = float(r0.get('low', 0)), float(r1.get('low', 0)), float(r2.get('low', 0))
+        high0, high1, high2 = float(r0.get('high', 0)), float(r1.get('high', 0)), float(r2.get('high', 0))
+        lb0 = float(r0.get('lower_band', r0.get('lower_2', r0.get('lower_5', 0))))
+        lb1 = float(r1.get('lower_band', r1.get('lower_2', r1.get('lower_5', 0))))
+        lb2 = float(r2.get('lower_band', r2.get('lower_2', r2.get('lower_5', 0))))
+        ub0 = float(r0.get('upper_band', r0.get('upper_2', r0.get('upper_5', 0))))
+        ub1 = float(r1.get('upper_band', r1.get('upper_2', r1.get('upper_5', 0))))
+        ub2 = float(r2.get('upper_band', r2.get('upper_2', r2.get('upper_5', 0))))
+        
+        # 2-A LONG: Precio no cierra bajo la banda inferior y mínimos ascendentes
+        if (c0 >= lb0 and c1 >= lb1 and c2 >= lb2) and (low0 >= low1):
+            floor_3candles_ok = True
+        # 2-A SHORT: Precio no cierra sobre la banda superior y máximos descendentes
+        if (c0 <= ub0 and c1 <= ub1 and c2 <= ub2) and (high0 <= high1):
+            ceiling_3candles_ok = True
+
+    # ── VELA PREVIA PARA ESCENARIO 2-B ──
+    prev_closed = df.iloc[-2] if len(df) >= 2 else last
+    prev_close = float(prev_closed.get('close', 0))
+    prev_low = float(prev_closed.get('low', 0))
+    prev_high = float(prev_closed.get('high', 0))
+    prev_lower_5 = float(prev_closed.get('lower_5', 0))
+    prev_upper_5 = float(prev_closed.get('upper_5', 0))
+    prev_lower_bb = float(prev_closed.get('lower_band', prev_lower_5))
+    prev_upper_bb = float(prev_closed.get('upper_band', prev_upper_5))
+
+    # ── PINESCRIPT, 1H Y SAR PARA ESCENARIO 3 ──
+    pine_curr = str(last.get("pinescript_signal", "") or "").lower()
+    pine_prev = str(prev_closed.get("pinescript_signal", "") or "").lower()
+    has_pine_buy = ("buy" in pine_curr) or ("buy" in pine_prev) or bool(last.get("sipv_buy", False))
+    has_pine_sell = ("sell" in pine_curr) or ("sell" in pine_prev) or bool(last.get("sipv_sell", False))
+    ema3_above_ema9_1h = bool(last.get("ema3_above_ema9_1h", False))
+    ema3_below_ema9_1h = bool(last.get("ema3_below_ema9_1h", False))
+    sar_trend_val = int(last.get("sar_trend", 0)) if pd.notna(last.get("sar_trend")) else 0
+    sar_bullish_15m = sar_trend_val > 0
+    sar_bearish_15m = sar_trend_val < 0
+    stack_5m_bullish = bool(last.get("ema3_above_ema9_5m", False)) and bool(last.get("ema9_above_ema20_5m", False))
+    stack_5m_bearish = bool(last.get("ema3_below_ema9_5m", False)) and bool(last.get("ema9_below_ema20_5m", False))
+
+    # ════════════════════════════════════════════════════════════════════════
+    # CÁLCULO EXACTO DE LOS 4 ESCENARIOS DE REBOTE
+    # ════════════════════════════════════════════════════════════════════════
+
+    # 1. ESCENARIO 1: Clímax Extremo (LOWER_6 / UPPER_6)
+    aareb_climax_ok = False
+    if (lower_6 > 0 and low_px <= lower_6) or (fib_levels.get("zone", 0) <= -5) or (rsi_14_val <= 25.0 and low_px <= lower_5):
+        aareb_climax_ok = True
+
+    bbreb_climax_ok = False
+    if (upper_6 > 0 and high_px >= upper_6) or (fib_levels.get("zone", 0) >= 5) or (rsi_14_val >= 75.0 and high_px >= upper_5):
+        bbreb_climax_ok = True
+
+    # 2. ESCENARIO 2-A: Agotamiento 3 Velas + Curvatura + EMA Stack 5 Niveles
+    aareb_floor_a_ok = False
+    if floor_3candles_ok and bb_lower_slope_positive and (ema3_slope >= 0) and ema_stack_bearish_5:
+        aareb_floor_a_ok = True
+
+    bbreb_ceiling_a_ok = False
+    if ceiling_3candles_ok and bb_upper_slope_negative and (ema3_slope <= 0) and ema_stack_bullish_5:
+        bbreb_ceiling_a_ok = True
+
+    # 3. ESCENARIO 2-B: Absorción SIPV + Vela Previa L5/U5 + EMA Stack 5 Niveles
+    aareb_floor_b_ok = False
+    is_sipv_buy = bool(last.get("sipv_buy", False) or last.get("is_hammer", False) or last.get("is_dragonfly", False))
+    prev_dropped_hard = (prev_close <= prev_lower_bb) and (prev_low <= prev_lower_5 if prev_lower_5 > 0 else True)
+    if is_sipv_buy and prev_dropped_hard and bb_lower_slope_positive and (ema3_slope >= 0) and ema_stack_bearish_5:
+        aareb_floor_b_ok = True
+
+    bbreb_ceiling_b_ok = False
+    is_sipv_sell = bool(last.get("sipv_sell", False) or last.get("is_gravestone", False) or last.get("is_bearish_engulfing", False))
+    prev_pumped_hard = (prev_close >= prev_upper_bb) and (prev_high >= prev_upper_5 if prev_upper_5 > 0 else True)
+    if is_sipv_sell and prev_pumped_hard and bb_upper_slope_negative and (ema3_slope <= 0) and ema_stack_bullish_5:
+        bbreb_ceiling_b_ok = True
+
+    # 4. ESCENARIO 3: Pullback Zonas Intermedias + 5M Stack + (1H EMA OR SAR 15M) + PineScript
+    is_in_lower_zone = (low_px <= lower_2 if lower_2 > 0 else (fib_levels.get("zone", 0) <= -1))
+    is_in_upper_zone = (high_px >= upper_2 if upper_2 > 0 else (fib_levels.get("zone", 0) >= 1))
+
+    aareb_pullback_ok = False
+    if is_in_lower_zone and (ema3 > ema9) and stack_5m_bullish and (ema3_above_ema9_1h or sar_bullish_15m) and has_pine_buy:
+        aareb_pullback_ok = True
+
+    bbreb_pullback_ok = False
+    if is_in_upper_zone and (ema3 < ema9) and stack_5m_bearish and (ema3_below_ema9_1h or sar_bearish_15m) and has_pine_sell:
+        bbreb_pullback_ok = True
+
+    # AaReb_Traversal compatible
+    aareb_traversal_ok = aareb_climax_ok or aareb_floor_a_ok or aareb_floor_b_ok
+    bbreb_traversal_ok = bbreb_climax_ok or bbreb_ceiling_a_ok or bbreb_ceiling_b_ok
+
+    # Aa40 / Bb40
     aa40_limit_ok = False
     if ema3 < ema9 and ema9 < ema20 and ema20 < ema50 and (bb_exp or rsi_14_val <= 15):
         aa40_limit_ok = True
 
-    # Bb40 (Flash Crash Euphoria SHORT)
     bb40_limit_ok = False
     if ema3 > ema9 and ema9 > ema20 and ema20 > ema50 and (bb_exp or rsi_14_val >= 85):
         bb40_limit_ok = True
@@ -1062,6 +1323,16 @@ def build_market_data_dict(
         "dd12_limit_ok": dd12_limit_ok,
         "aa21_limit_ok": aa21_limit_ok,
         "bb21_limit_ok": bb21_limit_ok,
+        "aareb_climax_ok": aareb_climax_ok,
+        "bbreb_climax_ok": bbreb_climax_ok,
+        "aareb_floor_a_ok": aareb_floor_a_ok,
+        "bbreb_ceiling_a_ok": bbreb_ceiling_a_ok,
+        "aareb_floor_b_ok": aareb_floor_b_ok,
+        "bbreb_ceiling_b_ok": bbreb_ceiling_b_ok,
+        "aareb_pullback_ok": aareb_pullback_ok,
+        "bbreb_pullback_ok": bbreb_pullback_ok,
+        "aareb_traversal_ok": aareb_traversal_ok,
+        "bbreb_traversal_ok": bbreb_traversal_ok,
         "aa40_limit_ok": aa40_limit_ok,
         "bb40_limit_ok": bb40_limit_ok,
     })

@@ -617,16 +617,16 @@ async def send_sl_to_exchange(
         if market_type == 'crypto_futures':
             from app.execution.provider_factory import create_provider
             provider = create_provider(market_type)
-            # Stop Market: cierra al tocar el precio
-            order = await provider.place_order(
-                symbol       = symbol,
-                side         = sl_side,
-                order_type   = 'STOP_MARKET',
-                size         = quantity,
-                stopPrice    = str(sl_price),
-                reduceOnly   = True,  # Solo cerrar
-                positionSide = side.upper(),
-            )
+            # Stop Market: cierra al tocar el precio en Binance Futures
+            order_params = {
+                'symbol': symbol,
+                'side': sl_side,
+                'order_type': 'STOP_MARKET',
+                'size': quantity,
+                'stopPrice': str(sl_price),
+                'positionSide': side.upper(),
+            }
+            order = await provider.place_order(**order_params)
             # handle order returned
             exchange_id = None
             if order and 'orderId' in order:

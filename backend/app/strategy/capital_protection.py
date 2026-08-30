@@ -13,7 +13,7 @@ Compatible con:
 
 import pandas as pd
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Any
 from app.core.logger import log_info, log_error
 
 # ── Configuración por mercado ─────────────────
@@ -128,24 +128,24 @@ VOLATILE_TRAILING_CONFIG = {
 
     'GBPUSD': {
         'pip_size':             0.0001,
-        'min_pips_to_activate': 18,   # 18 pips para evitar ruido de spread
-        'min_sl_distance_pips': 22,   # 22 pips de respiro mínimo
-        'lock_in_trigger_pips': 14,   # +14 pips en ganancia -> BE + Buffer
-        'lock_in_buffer_pips':  2,    # +2 pips
+        'min_pips_to_activate': 4.5,   # 4.5 pips para trailing rápido
+        'min_sl_distance_pips': 6.0,   # 6.0 pips de respiro
+        'lock_in_trigger_pips': 3.0,   # +3.0 pips en ganancia -> BE + Buffer
+        'lock_in_buffer_pips':  0.5,   # +0.5 pips (protección contra spread)
         'long': {
             'phase1_atr_mult':      1.4,
-            'candle_switch_pips':   8,
+            'candle_switch_pips':   4,
             'candle_lookback':      2,
             'candle_timeframe':     '15m',
-            'accel_switch_pips':    20,
+            'accel_switch_pips':    10,
             'accel_atr_mult':       0.7,
         },
         'short': {
             'phase1_atr_mult':      1.2,
-            'candle_switch_pips':   6,
+            'candle_switch_pips':   4,
             'candle_lookback':      2,
             'candle_timeframe':     '15m',
-            'accel_switch_pips':    15,
+            'accel_switch_pips':    10,
             'accel_atr_mult':       0.65,
             'accel_atr_mult_5m':    0.55,
         },
@@ -159,24 +159,24 @@ VOLATILE_TRAILING_CONFIG = {
 
     'EURUSD': {
         'pip_size':             0.0001,
-        'min_pips_to_activate': 12,   # 12 pips para evitar mechas
-        'min_sl_distance_pips': 15,   # 15 pips de respiro mínimo
-        'lock_in_trigger_pips': 10,   # +10 pips en ganancia -> BE + Buffer
-        'lock_in_buffer_pips':  2,    # +2 pips
+        'min_pips_to_activate': 3.5,   # 3.5 pips para trailing rápido
+        'min_sl_distance_pips': 5.0,   # 5.0 pips de respiro
+        'lock_in_trigger_pips': 2.5,   # +2.5 pips en ganancia -> BE + Buffer
+        'lock_in_buffer_pips':  0.5,   # +0.5 pips (protección contra spread)
         'long': {
             'phase1_atr_mult':      1.3,
-            'candle_switch_pips':   7,
+            'candle_switch_pips':   3,
             'candle_lookback':      2,
             'candle_timeframe':     '15m',
-            'accel_switch_pips':    18,
+            'accel_switch_pips':    8,
             'accel_atr_mult':       0.7,
         },
         'short': {
             'phase1_atr_mult':      1.1,
-            'candle_switch_pips':   5,
+            'candle_switch_pips':   3,
             'candle_lookback':      2,
             'candle_timeframe':     '15m',
-            'accel_switch_pips':    14,
+            'accel_switch_pips':    8,
             'accel_atr_mult':       0.65,
             'accel_atr_mult_5m':    0.55,
         },
@@ -754,6 +754,7 @@ class ProtectionState:
     original_sl:       float
     market_type:       str
     rule_code:         str = ''
+    lots:              float = 0.01
 
     # Trailing
     # Trailing
@@ -819,6 +820,320 @@ def calculate_pnl(
     }
 
 
+def evaluate_fkr_kinetic_trailing(
+    state: ProtectionState,
+    current_price: float,
+    df_15m: Optional[pd.DataFrame] = None,
+    snap: Optional[Dict[str, Any]] = None,
+    pnl_pico: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Trailing Stop y Profit Ladder especializado para Fibonacci Kinetic Reversion (FKR / Aa61 / Aa61_short).
+    Timeframe base: 15m.
+    - Nivel 1 (+5.0 pips): Breakeven + 1.0 pip (Cero Riesgo).
+    - Nivel 2 (+10.0 pips): EMA9_15m Trailing.
+    - Nivel 3 (+12.0 pips y toque a banda Upper_5 / Lower_5): Cierre de beneficio extendido por Zone Traversal.
+    - Giveback Guard: Si el PnL pico >= $2.50 USD y retrocede > 30%, cierre para asegurar el 70% del beneficio.
+    """
+    symbol = state.symbol.upper()
+    pip_size = PIP_SIZES.get(symbol, 0.0001)
+    is_long = state.side.lower() in ('long', 'buy')
+    
+    entry = float(state.entry_price or 0)
+    if entry <= 0 or current_price <= 0:
+        return {'action': 'none'}
+        
+    pips = (current_price - entry) / pip_size if is_long else (entry - current_price) / pip_size
+    lots_abs = getattr(state, 'lots', 0.01) or 0.01
+    pnl_usd = pips * 10.0 * float(lots_abs)
+    
+    # 1. Giveback Guard Dinámico (30% Retención de Pico)
+    if pnl_pico is not None and pnl_pico >= 2.50:
+        giveback_pct = (pnl_pico - pnl_usd) / pnl_pico if pnl_pico > 0 else 0.0
+        if giveback_pct >= 0.30 and pnl_usd >= 1.50:
+            return {
+                'action': 'close_market',
+                'reason': f"fkr_giveback_guard_30pct (Pico: ${pnl_pico:.2f}, Actual: ${pnl_usd:.2f}, Pips: {pips:.1f})",
+                'pnl_usd': pnl_usd,
+                'pips': pips
+            }
+
+    # 2. Zone Traversal Target (Upper_5 / Lower_5 en 15m) si pips >= 12.0
+    if pips >= 12.0 and snap:
+        upper_5 = float(snap.get('upper_5') or snap.get('bb_upper') or 0.0)
+        lower_5 = float(snap.get('lower_5') or snap.get('bb_lower') or 0.0)
+        if is_long and upper_5 > 0 and current_price >= upper_5:
+            return {
+                'action': 'close_market',
+                'reason': f"fkr_zone_traversal_upper5_tp (Price {current_price:.5f} >= Upper_5 {upper_5:.5f}, +{pips:.1f} pips)",
+                'pnl_usd': pnl_usd,
+                'pips': pips
+            }
+        elif (not is_long) and lower_5 > 0 and current_price <= lower_5:
+            return {
+                'action': 'close_market',
+                'reason': f"fkr_zone_traversal_lower5_tp (Price {current_price:.5f} <= Lower_5 {lower_5:.5f}, +{pips:.1f} pips)",
+                'pnl_usd': pnl_usd,
+                'pips': pips
+            }
+
+    # 3. Trailing Stop Escalonado 15m
+    if df_15m is not None and len(df_15m) >= 10:
+        c_series = df_15m['close']
+        ema9_15m = float(df_15m.iloc[-1].get('ema2') or df_15m.iloc[-1].get('ema_9') or c_series.ewm(span=9, adjust=False).mean().iloc[-1])
+        
+        # Nivel 2 (+10.0 pips): Seguir EMA9 de 15m
+        if pips >= 10.0 and ema9_15m > 0:
+            if is_long:
+                new_sl = max(entry + (pip_size * 2.0), ema9_15m)
+                if state.current_sl == 0 or new_sl > state.current_sl:
+                    return {
+                        'action': 'update_sl',
+                        'new_sl': new_sl,
+                        'reason': f"fkr_ema9_15m_trail (+{pips:.1f}p)",
+                        'new_level': 2,
+                        'sl_type': 'ema_trail'
+                    }
+            else:
+                new_sl = min(entry - (pip_size * 2.0), ema9_15m)
+                if state.current_sl == 0 or new_sl < state.current_sl:
+                    return {
+                        'action': 'update_sl',
+                        'new_sl': new_sl,
+                        'reason': f"fkr_ema9_15m_trail (+{pips:.1f}p)",
+                        'new_level': 2,
+                        'sl_type': 'ema_trail'
+                    }
+                    
+        # Nivel 1 (+5.0 pips): Breakeven + 1 pip
+        elif pips >= 5.0:
+            be_sl = entry + (pip_size * 1.0) if is_long else entry - (pip_size * 1.0)
+            if is_long and (state.current_sl == 0 or be_sl > state.current_sl):
+                return {
+                    'action': 'update_sl',
+                    'new_sl': be_sl,
+                    'reason': f"fkr_breakeven_lock (+{pips:.1f}p)",
+                    'new_level': 1,
+                    'sl_type': 'breakeven'
+                }
+            elif (not is_long) and (state.current_sl == 0 or be_sl < state.current_sl):
+                return {
+                    'action': 'update_sl',
+                    'new_sl': be_sl,
+                    'reason': f"fkr_breakeven_lock (+{pips:.1f}p)",
+                    'new_level': 1,
+                    'sl_type': 'breakeven'
+                }
+
+    return {'action': 'none'}
+
+
+def evaluate_rebote_kinetic_trailing(
+    state: ProtectionState,
+    current_price: float,
+    df_15m: Optional[pd.DataFrame] = None,
+    snap: Optional[Dict[str, Any]] = None,
+    pnl_pico: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Trailing Stop Dinámico y Zone Traversal especializado para estrategias de REBOTE (Dd11, Dd12, Rebote_V5).
+    Timeframe base: 15m.
+    - Fase 1 (+5.0 pips): Breakeven + 1.5 pips (Cero Riesgo).
+    - Fase 2 (Cruce de Basis / EMA20 o +8.0 pips): Profit Floor + EMA9_15m Trailing Stop.
+    - Fase 3 (+12.0 pips y toque a banda extrema opuesta Upper_5/Lower_5): Take Profit por Zone Traversal.
+    - Giveback Guard: Si el PnL pico >= $2.50 USD y retrocede > 30%, cierre de seguridad reteniendo el 70% del beneficio.
+    """
+    symbol = state.symbol.upper()
+    pip_size = PIP_SIZES.get(symbol, 0.0001)
+    is_long = state.side.lower() in ('long', 'buy')
+    
+    entry = float(state.entry_price or 0)
+    if entry <= 0 or current_price <= 0:
+        return {'action': 'none'}
+        
+    pips = (current_price - entry) / pip_size if is_long else (entry - current_price) / pip_size
+    lots_abs = getattr(state, 'lots', 0.01) or 0.01
+    pnl_usd = pips * 10.0 * float(lots_abs)
+    
+    # 1. Giveback Guard Dinámico (30% Retención de Pico)
+    if pnl_pico is not None and pnl_pico >= 2.50:
+        giveback_pct = (pnl_pico - pnl_usd) / pnl_pico if pnl_pico > 0 else 0.0
+        if giveback_pct >= 0.30 and pnl_usd >= 1.50:
+            return {
+                'action': 'close_market',
+                'reason': f"rebote_giveback_guard_30pct (Pico: ${pnl_pico:.2f}, Actual: ${pnl_usd:.2f}, Pips: {pips:.1f})",
+                'pnl_usd': pnl_usd,
+                'pips': pips
+            }
+
+    # 2. Zone Traversal Target (Toque a Banda Extrema Opuesta Upper_5 / Lower_5 en 15m)
+    if pips >= 12.0 and snap:
+        upper_5 = float(snap.get('upper_5') or snap.get('upper_2') or snap.get('bb_upper') or 0.0)
+        lower_5 = float(snap.get('lower_5') or snap.get('lower_2') or snap.get('bb_lower') or 0.0)
+        if is_long and upper_5 > 0 and current_price >= upper_5:
+            return {
+                'action': 'close_market',
+                'reason': f"rebote_zone_traversal_upper5_tp (Price {current_price:.5f} >= Upper_5 {upper_5:.5f}, +{pips:.1f} pips)",
+                'pnl_usd': pnl_usd,
+                'pips': pips
+            }
+        elif (not is_long) and lower_5 > 0 and current_price <= lower_5:
+            return {
+                'action': 'close_market',
+                'reason': f"rebote_zone_traversal_lower5_tp (Price {current_price:.5f} <= Lower_5 {lower_5:.5f}, +{pips:.1f} pips)",
+                'pnl_usd': pnl_usd,
+                'pips': pips
+            }
+
+    # 3. Trailing Stop Escalonado 15m
+    if df_15m is not None and len(df_15m) >= 10:
+        c_series = df_15m['close']
+        ema9_15m = float(df_15m.iloc[-1].get('ema2') or df_15m.iloc[-1].get('ema_9') or c_series.ewm(span=9, adjust=False).mean().iloc[-1])
+        basis_15m = float(df_15m.iloc[-1].get('basis') or df_15m.iloc[-1].get('ema3') or df_15m.iloc[-1].get('ema_20') or c_series.ewm(span=20, adjust=False).mean().iloc[-1])
+        
+        # Fase 2 (Cruce de Basis o +8.0 pips): Activar EMA9 Trailing con Piso de Ganancia
+        basis_crossed = (current_price >= basis_15m) if is_long else (current_price <= basis_15m)
+        if (pips >= 8.0 or (pips >= 4.0 and basis_crossed)) and ema9_15m > 0:
+            if is_long:
+                # Piso de ganancia a +3 pips o EMA9 (el mayor)
+                new_sl = max(entry + (pip_size * 3.0), ema9_15m)
+                if state.current_sl == 0 or new_sl > state.current_sl:
+                    return {
+                        'action': 'update_sl',
+                        'new_sl': new_sl,
+                        'reason': f"rebote_ema9_trail_basis (+{pips:.1f}p)",
+                        'new_level': 2,
+                        'sl_type': 'ema_trail'
+                    }
+            else:
+                # Piso de ganancia a +3 pips o EMA9 (el menor para short)
+                new_sl = min(entry - (pip_size * 3.0), ema9_15m)
+                if state.current_sl == 0 or new_sl < state.current_sl:
+                    return {
+                        'action': 'update_sl',
+                        'new_sl': new_sl,
+                        'reason': f"rebote_ema9_trail_basis (+{pips:.1f}p)",
+                        'new_level': 2,
+                        'sl_type': 'ema_trail'
+                    }
+
+        # Fase 1 (+5.0 pips): Breakeven + 1.5 pips
+        elif pips >= 5.0:
+            be_sl = entry + (pip_size * 1.5) if is_long else entry - (pip_size * 1.5)
+            if is_long and (state.current_sl == 0 or be_sl > state.current_sl):
+                return {
+                    'action': 'update_sl',
+                    'new_sl': be_sl,
+                    'reason': f"rebote_breakeven_lock (+{pips:.1f}p)",
+                    'new_level': 1,
+                    'sl_type': 'breakeven'
+                }
+            elif (not is_long) and (state.current_sl == 0 or be_sl < state.current_sl):
+                return {
+                    'action': 'update_sl',
+                    'new_sl': be_sl,
+                    'reason': f"rebote_breakeven_lock (+{pips:.1f}p)",
+                    'new_level': 1,
+                    'sl_type': 'breakeven'
+                }
+
+    return {'action': 'none'}
+
+
+def evaluate_range_bollinger_exit(
+    state: ProtectionState,
+    current_price: float,
+    df_15m: Optional[pd.DataFrame] = None,
+    snap: Optional[Dict[str, Any]] = None,
+    pnl_pico: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    RANGE_BAND_TOUCH_EXIT (Multimarket: Forex & Crypto).
+    Si el mercado está en régimen lateral / compresión (BandWidth estrecho o ADX bajo)
+    y la posición está en GANANCIA POSITIVA (PnL > 0):
+    - SHORT: Cierra a mercado al primer toque de la Banda Inferior (Lower_2) asegurando el piso del rango.
+    - LONG: Cierra a mercado al primer toque de la Banda Superior (Upper_2) asegurando el techo del rango.
+    CANDADO ESTRICTO: NUNCA se activa si PnL <= 0 (prohibido cerrar en pérdida).
+    """
+    symbol = state.symbol.upper()
+    is_long = state.side.lower() in ('long', 'buy')
+    entry = float(state.entry_price or 0)
+    if entry <= 0 or current_price <= 0:
+        return {'action': 'none'}
+
+    is_crypto = getattr(state, 'market_type', 'forex_futures') == 'crypto' or ('USDT' in symbol and 'EUR' not in symbol and 'GBP' not in symbol)
+    pip_size = PIP_SIZES.get(symbol, 0.0001) if not is_crypto else (entry * 0.0001)
+
+    # Cálculo de PnL y Pips
+    pips = ((current_price - entry) if is_long else (entry - current_price)) / (pip_size if pip_size > 0 else 0.0001)
+    pnl_pct = ((current_price - entry) / entry * 100) if is_long else ((entry - current_price) / entry * 100)
+    
+    lots = abs(float(getattr(state, 'lots', 0.01) or 0.01))
+    pnl_usd = (pips * 10.0 * lots) if not is_crypto else (entry * lots * (pnl_pct / 100.0))
+
+    # 🛡️ CANDADO ESTRICTO INVIOLABLE: NUNCA CERRAR EN PÉRDIDA O SIN BENEFICIO REAL
+    min_pips_req = 1.0 if not is_crypto else 0.5
+    min_pct_req = 0.15 if is_crypto else 0.01
+    if pnl_usd <= 0 or pips < min_pips_req or pnl_pct < min_pct_req:
+        return {'action': 'none'}
+
+    # Extraer bandas de Bollinger de 15m
+    upper_2 = 0.0
+    lower_2 = 0.0
+    basis = 0.0
+    adx_val = 25.0
+
+    if snap:
+        upper_2 = float(snap.get('upper_2') or snap.get('upper') or 0.0)
+        lower_2 = float(snap.get('lower_2') or snap.get('lower') or 0.0)
+        basis = float(snap.get('basis') or snap.get('sma_20') or 0.0)
+        adx_val = float(snap.get('adx') or snap.get('adx_15m') or 25.0)
+
+    if (upper_2 == 0 or lower_2 == 0) and df_15m is not None and len(df_15m) >= 5:
+        last = df_15m.iloc[-1]
+        upper_2 = float(last.get('upper_2') or last.get('upper') or 0.0)
+        lower_2 = float(last.get('lower_2') or last.get('lower') or 0.0)
+        basis = float(last.get('basis') or last.get('ema_20') or last.get('sma20') or 0.0)
+        adx_val = float(last.get('adx') or 25.0)
+
+    if upper_2 <= 0 or lower_2 <= 0 or basis <= 0:
+        return {'action': 'none'}
+
+    # Cálculo de BandWidth
+    bandwidth = (upper_2 - lower_2) / basis
+    bw_thresh = 0.018 if is_crypto else 0.0015 # 1.8% en Crypto, ~15 pips en Forex
+
+    # Verificar si el régimen es lateral / compresión
+    is_range_regime = (bandwidth <= bw_thresh) or (adx_val < 18.0)
+    if not is_range_regime:
+        return {'action': 'none'}
+
+    # Margen de toque a la banda
+    touch_buffer = (pip_size * 1.0) if not is_crypto else (entry * 0.0008)
+
+    # 1. Caso SHORT: Precio toca o perfora Banda Inferior (Piso del Rango)
+    if not is_long and current_price <= (lower_2 + touch_buffer):
+        return {
+            'action': 'close_market',
+            'reason': f"range_bollinger_lower_exit (SHORT touched Lower_2={lower_2:.5f} at Price={current_price:.5f}, +{pips:.1f}p, PnL=${pnl_usd:.2f})",
+            'pips': pips,
+            'pnl_usd': pnl_usd,
+            'bandwidth': bandwidth
+        }
+
+    # 2. Caso LONG: Precio toca o perfora Banda Superior (Techo del Rango)
+    if is_long and current_price >= (upper_2 - touch_buffer):
+        return {
+            'action': 'close_market',
+            'reason': f"range_bollinger_upper_exit (LONG touched Upper_2={upper_2:.5f} at Price={current_price:.5f}, +{pips:.1f}p, PnL=${pnl_usd:.2f})",
+            'pips': pips,
+            'pnl_usd': pnl_usd,
+            'bandwidth': bandwidth
+        }
+
+    return {'action': 'none'}
+
+
 def evaluate_trailing_stop(
     state:         ProtectionState,
     current_price: float,
@@ -832,9 +1147,21 @@ def evaluate_trailing_stop(
     """
     symbol = state.symbol
     is_long = state.side.lower() in ('long', 'buy')
+    rule_code = getattr(state, 'rule_code', '')
+    is_fkr = rule_code in ('Aa61', 'Aa61_short', 'Aa61a', 'Bb61')
+    
+    # FKR / Aa61 tiene su propio motor de Trailing Stop y Profit Ladder por zonas 15m
+    if is_fkr:
+        return evaluate_fkr_kinetic_trailing(
+            state=state,
+            current_price=current_price,
+            df_15m=df_15m,
+            snap=snap,
+            pnl_pico=getattr(state, 'pnl_pico', None)
+        )
 
-    # ── FALLBACK 5M PROTECTION ──
-    if df_15m is not None and len(df_15m) >= 20 and df_5m is not None and len(df_5m) >= 20:
+    # ── FALLBACK 5M PROTECTION (Omitido para FKR) ──
+    if not is_fkr and df_15m is not None and len(df_15m) >= 20 and df_5m is not None and len(df_5m) >= 20:
         try:
             has_profit = (current_price > state.entry_price) if is_long else (current_price < state.entry_price)
             if has_profit:
@@ -989,8 +1316,8 @@ def evaluate_trailing_stop(
                     
             return action_dict
 
-    # ── CUSTOM TRAILING FOR STRATEGY ApexEma (SwingEma) ──
-    if rule_code in ('AaApexEma', 'BbApexEma', 'AaHot', 'BbHot'):
+    # ── CUSTOM TRAILING FOR STRATEGIES (ApexEma, Hot, etc.) ──
+    if rule_code in ('AaApexEma', 'BbApexEma', 'AaHot', 'BbHot', 'Aa13', 'Bb13', 'Aa21', 'Bb25'):
         if df_15m is not None and len(df_15m) >= 20:
             df = df_15m.copy()
             df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()

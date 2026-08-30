@@ -466,7 +466,7 @@ class PositionMonitor:
             log_warning(MODULE, f"🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando cierre de {ticker} ({exit_reason}) con PnL de ${pnl_usd:.2f} USD < $1.00 USD. La posición se mantiene ABIERTA para recuperación.")
             try:
                 sb.table('stocks_positions').update({
-                    'sl_type': 'suspended_anti_loss_protection',
+                    'sl_type': 'anti_loss_hold',
                     'stop_loss': 0,
                     'sl_dynamic_price': 0,
                     'erep_active': True,
@@ -535,11 +535,16 @@ class PositionMonitor:
         
         try:
             # 1. Update Position
+            raw_shares_remaining = trade.get("shares_remaining")
+            raw_shares = trade.get("shares")
+            current_shares = int(safe_float(raw_shares_remaining) if raw_shares_remaining is not None else safe_float(raw_shares, 0))
+            shares_rem = current_shares - int(shares_to_close)
+
             update_data = {
                 f"tp_{block_name}_executed": True,
                 f"tp_{block_name}_price": exit_price,
                 f"tp_{block_name}_pnl": pnl_usd,
-                "shares_remaining": int(trade.get("shares_remaining", trade["shares"])) - shares_to_close,
+                "shares_remaining": shares_rem,
                 "updated_at": now
             }
             

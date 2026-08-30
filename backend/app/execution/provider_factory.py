@@ -22,7 +22,7 @@ def create_provider(market_type: str):
         from app.core.config import settings
         return BinanceCryptoProvider(
             api_key=os.getenv('BINANCE_API_KEY') or settings.binance_api_key,
-            api_secret=os.getenv('BINANCE_SECRET') or settings.binance_secret,
+            api_secret=os.getenv('BINANCE_SECRET') or os.getenv('BINANCE_API_SECRET') or settings.binance_secret,
             market=market_type.replace('crypto_', ''),
             testnet=(os.getenv('BINANCE_TESTNET', 'true').lower() == 'true')
         )

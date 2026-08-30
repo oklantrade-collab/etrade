@@ -18,7 +18,7 @@ def calculate_score_1d(df_1d: pd.DataFrame, direction: str, params: dict) -> dic
     if df_1d is None or df_1d.empty or len(df_1d) < 5:
         return {'score': 0, 'components': {'bollinger': 0, 'ema3_basis': 0, 'sipv': 0}, 'detail': 'Not enough data'}
 
-    df = df_1d.iloc[:-1]  # Exclude forming candle
+    df = df_1d.iloc[:-1].copy()  # Exclude forming candle
     if len(df) < 4:
         return {'score': 0, 'components': {'bollinger': 0, 'ema3_basis': 0, 'sipv': 0}, 'detail': 'Not enough closed candles'}
 
@@ -27,13 +27,28 @@ def calculate_score_1d(df_1d: pd.DataFrame, direction: str, params: dict) -> dic
     score_bollinger = 0
     close_price = last_row.get('close', 0)
     
-    # Bollinger component
+    # 1. EMA3 vs EMA9 Macro Component (Primary 1D directional driver)
+    score_ema_cross = 0
+    if 'ema_3' not in df.columns and 'close' in df.columns:
+        df['ema_3'] = df['close'].ewm(span=3, adjust=False).mean()
+    if 'ema_9' not in df.columns and 'close' in df.columns and len(df) >= 9:
+        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
+
+    if 'ema_3' in df.columns and 'ema_9' in df.columns:
+        ema3_val = float(df['ema_3'].iloc[-1])
+        ema9_val = float(df['ema_9'].iloc[-1])
+        if ema3_val > ema9_val:
+            score_ema_cross = 30 if direction == 'long' else -30
+        else:
+            score_ema_cross = -30 if direction == 'long' else 30
+
+    # 2. Bollinger component
     if 'upper_6' in df.columns and close_price > last_row['upper_6']:
         score_bollinger = 40  # favorable SHORT close signal, unfavorable LONG
     elif 'lower_6' in df.columns and close_price < last_row['lower_6']:
         score_bollinger = -40 # favorable LONG close signal, unfavorable SHORT
 
-    # EMA3 slope vs BASIS
+    # 3. EMA3 slope vs BASIS
     score_ema3_basis = 0
     if 'ema_3' in df.columns and 'basis' in df.columns:
         last_3 = df.iloc[-3:]
@@ -65,15 +80,16 @@ def calculate_score_1d(df_1d: pd.DataFrame, direction: str, params: dict) -> dic
                 
     score_sipv = max(-20, min(20, score_sipv))
 
-    total_score = score_bollinger + score_ema3_basis + score_sipv
+    total_score = score_ema_cross + score_bollinger + score_ema3_basis + score_sipv
     total_score = max(-100, min(100, int(total_score)))
 
     return {
         'score': total_score,
         'components': {
+            'ema_cross': score_ema_cross,
             'bollinger': score_bollinger,
             'ema3_basis': score_ema3_basis,
             'sipv': score_sipv
         },
-        'detail': 'Calculated 1D score'
+        'detail': f"Calculated 1D score: ema_cross={score_ema_cross}, bb={score_bollinger}"
     }

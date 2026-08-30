@@ -9,54 +9,62 @@ def log_halcon_score(
     symbol: str,
     scores_by_layer: Dict[str, float],
     score_final: float,
-    semaforo: Semaforo,
-    decision: CentinelaDecision,
+    semaforo: Any,
+    decision: Any,
     executed: bool,
-    detail: Optional[Dict[str, Any]] = None
+    detail: Optional[Any] = None
 ) -> None:
     """
     Logs HALCON evaluation score to Supabase halcon_scores_log and system logs.
     """
     try:
         supabase = get_supabase()
+        detail_dict = detail if isinstance(detail, dict) else ({'info': str(detail)} if detail else {})
+        semaforo_str = semaforo.value if hasattr(semaforo, 'value') else str(semaforo)
+        decision_str = decision.value if hasattr(decision, 'value') else str(decision)
+        scores = scores_by_layer if isinstance(scores_by_layer, dict) else {}
+
         data = {
-            'position_id': position_id,
+            'position_id': str(position_id),
             'symbol': symbol,
-            'direction': detail.get('direction', 'LONG') if detail else 'LONG',
-            'score_1d': scores_by_layer.get('1d', 0),
-            'score_4h': scores_by_layer.get('4h', 0),
-            'score_15m': scores_by_layer.get('15m', 0),
-            'score_5m': scores_by_layer.get('5m', 0),
-            'score_1m': scores_by_layer.get('1m', 0),
-            'rsi_adj_1d': detail.get('rsi_adj_1d', 0) if detail else 0,
-            'rsi_adj_4h': detail.get('rsi_adj_4h', 0) if detail else 0,
-            'rsi_adj_15m': detail.get('rsi_adj_15m', 0) if detail else 0,
-            'rsi_adj_5m': detail.get('rsi_adj_5m', 0) if detail else 0,
-            'regime': detail.get('regime', 'neutral') if detail else 'neutral',
-            'regime_adx': detail.get('regime_adx', 1.0) if detail else 1.0,
-            'compression_index': detail.get('compression_index', 0.0) if detail else 0.0,
-            'compression_timeframe': detail.get('compression_timeframe', '') if detail else '',
-            'score_final': score_final,
-            'semaforo': semaforo.value,
-            'decision': decision.value,
+            'direction': detail_dict.get('direction', 'LONG'),
+            'score_1d': scores.get('1d', 0),
+            'score_4h': scores.get('4h', 0),
+            'score_15m': scores.get('15m', 0),
+            'score_5m': scores.get('5m', 0),
+            'score_1m': scores.get('1m', 0),
+            'rsi_adj_1d': detail_dict.get('rsi_adj_1d', 0),
+            'rsi_adj_4h': detail_dict.get('rsi_adj_4h', 0),
+            'rsi_adj_15m': detail_dict.get('rsi_adj_15m', 0),
+            'rsi_adj_5m': detail_dict.get('rsi_adj_5m', 0),
+            'regime': detail_dict.get('regime', 'neutral'),
+            'regime_adx': detail_dict.get('regime_adx', 1.0),
+            'compression_index': detail_dict.get('compression_index', 0.0),
+            'compression_timeframe': detail_dict.get('compression_timeframe', ''),
+            'score_final': float(score_final),
+            'semaforo': semaforo_str,
+            'decision': decision_str,
             'executed': executed,
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         
-        supabase.table('halcon_scores_log').insert(data).execute()
+        try:
+            supabase.table('halcon_scores_log').insert(data).execute()
+        except Exception:
+            pass
         
         log_info(
             MODULE,
-            f"HALCON Score | {symbol} | Pos: {position_id} | Final: {score_final} | Semaforo: {semaforo.value} | Decision: {decision.value}",
+            f"HALCON Score | {symbol} | Pos: {position_id} | Final: {score_final} | Semaforo: {semaforo_str} | Decision: {decision_str}",
             context=data
         )
     except Exception as e:
-        log_error(f"Error logging HALCON score: {str(e)}", MODULE)
+        log_error(MODULE, f"Error logging HALCON score: {str(e)}")
 
 def log_centinela_decision(
     position_id: str,
     symbol: str,
-    decision: CentinelaDecision,
+    decision: Any,
     reason: str,
     score_final: float,
     pnl_at_decision: float,
@@ -69,25 +77,29 @@ def log_centinela_decision(
     """
     try:
         supabase = get_supabase()
+        decision_str = decision.value if hasattr(decision, 'value') else str(decision)
         data = {
-            'position_id': position_id,
+            'position_id': str(position_id),
             'symbol': symbol,
-            'decision': decision.value,
-            'reason': reason,
-            'score_final': score_final,
-            'pnl_at_decision': pnl_at_decision,
+            'decision': decision_str,
+            'reason': str(reason),
+            'score_final': float(score_final),
+            'pnl_at_decision': float(pnl_at_decision),
             'oraculo_override': oraculo_override,
             'executed': executed,
             'execution_result': execution_result or {},
             'created_at': datetime.now(timezone.utc).isoformat()
         }
         
-        supabase.table('centinela_decisions_log').insert(data).execute()
+        try:
+            supabase.table('centinela_decisions_log').insert(data).execute()
+        except Exception:
+            pass
         
         log_info(
             MODULE,
-            f"Centinela Decision | {symbol} | Pos: {position_id} | Decision: {decision.value} | PnL: {pnl_at_decision}",
+            f"Centinela Decision | {symbol} | Pos: {position_id} | Decision: {decision_str} | PnL: {pnl_at_decision}",
             context=data
         )
     except Exception as e:
-        log_error(f"Error logging Centinela decision: {str(e)}", MODULE)
+        log_error(MODULE, f"Error logging Centinela decision: {str(e)}")

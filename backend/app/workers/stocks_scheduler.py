@@ -1196,7 +1196,7 @@ async def close_stock_position(symbol: str, side: str, size: float, price: float
             # Suspendemos el Stop Loss físico y forzamos/mantenemos EREP en Fase 2 para seguir esperando
             try:
                 supabase.table('stocks_positions').update({
-                    'sl_type': 'suspended_negative_protection',
+                    'sl_type': 'anti_loss_hold',
                     'stop_loss': 0,
                     'sl_dynamic_price': 0,
                     'sl_price': 0,
@@ -1335,7 +1335,7 @@ async def check_sl_with_erep(
     # ── SL RECIÉN TOCADO ───────────────────────
     if sl_touched:
         entry = float(position.get('avg_price') or position.get('entry_price') or current_price)
-        q1 = float(position.get('shares_remaining', position.get('shares', 0)))
+        q1 = float(position.get('shares_remaining') or position.get('shares') or 0)
         
         await supabase.table('stocks_positions').update({
             'erep_phase':   1,

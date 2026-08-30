@@ -17,8 +17,8 @@ def update_pnl_pico(pnl_current: float, pnl_pico: Optional[float]) -> float:
 def evaluate_giveback(
     pnl_current: float, 
     pnl_pico: Optional[float], 
-    threshold_pct: float = 0.50,
-    min_peak_usd: float = 2.0  # Only enforce giveback if position reached meaningful profit
+    threshold_pct: float = 0.30,
+    min_peak_usd: float = 0.50  # Enforce giveback if position reached at least $0.50 USD (+5 pips in 0.01 lots)
 ) -> Dict[str, Any]:
     """
     Evaluates dynamic giveback rule:

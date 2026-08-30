@@ -12,6 +12,7 @@ Forex:
 """
 
 import pandas as pd
+from typing import Optional, Tuple, Dict, Any, List
 from app.core.logger import log_info, log_warning
 from app.core.memory_store import MEMORY_STORE, MARKET_SNAPSHOT_CACHE
 
@@ -447,3 +448,41 @@ async def fetch_macro_context(
         )
         macro['market_type'] = 'forex'
         return macro
+
+
+def check_1h_macro_trend_gate(
+    df_1h: Optional[pd.DataFrame],
+    side: str,
+    current_price: float = 0.0
+) -> tuple[bool, str]:
+    """
+    Propuesta 4: Filtro de Régimen Macro de 1 Hora (Macro Trend Gate).
+    - Long: Requiere que el precio actual esté por encima de la EMA20_1h O que la pendiente de la EMA20_1h sea >= -0.01%.
+    - Short: Requiere que el precio actual esté por debajo de la EMA20_1h O que la pendiente de la EMA20_1h sea <= +0.01%.
+    Retorna (allow_entry: bool, reason: str).
+    """
+    if df_1h is None or len(df_1h) < 22:
+        return True, "Sin datos de 1H suficientes para Macro Gate (permitir por defecto)"
+
+    closes = pd.to_numeric(df_1h['close'] if 'close' in df_1h.columns else df_1h.get('c', []), errors='coerce').dropna()
+    if len(closes) < 22:
+        return True, "Datos de 1H insuficientes"
+
+    ema20_1h = closes.ewm(span=20, adjust=False).mean()
+    curr_ema20 = float(ema20_1h.iloc[-1])
+    prev_ema20 = float(ema20_1h.iloc[-3])
+    slope_1h = ((curr_ema20 - prev_ema20) / (prev_ema20 + 1e-9)) * 100.0
+    px = current_price if current_price > 0 else float(closes.iloc[-1])
+
+    is_long = (side.lower() in ('long', 'buy'))
+
+    if is_long:
+        if px >= curr_ema20 or slope_1h >= -0.01:
+            return True, f"Macro 1H favorable para LONG (Precio={px:.4f} vs EMA20_1h={curr_ema20:.4f}, pendiente={slope_1h:.3f}%)"
+        else:
+            return False, f"⛔ [MACRO_GATE_BLOCKED] Precio en 1H ({px:.4f}) por debajo de EMA20_1h ({curr_ema20:.4f}) con pendiente bajista ({slope_1h:.3f}%). LONG bloqueado para evitar chop."
+    else:
+        if px <= curr_ema20 or slope_1h <= +0.01:
+            return True, f"Macro 1H favorable para SHORT (Precio={px:.4f} vs EMA20_1h={curr_ema20:.4f}, pendiente={slope_1h:.3f}%)"
+        else:
+            return False, f"⛔ [MACRO_GATE_BLOCKED] Precio en 1H ({px:.4f}) por encima de EMA20_1h ({curr_ema20:.4f}) con pendiente alcista ({slope_1h:.3f}%). SHORT bloqueado para evitar chop."

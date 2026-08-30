@@ -711,10 +711,13 @@ async def open_forex_position(
     if not v_signal['valid']:
         log_warning(MODULE, f"❌ BLOQUEO DE SEGURIDAD [{symbol}]: Posición abortada. Motivo: {v_signal['reason']}")
         return
+
     # === CHECK CANTIDAD MÁXIMA DE MONEDAS ACTIVAS (FOREX) ===
+    active_fx_symbols = set()
+    max_active_symbols_forex = 1
     try:
-        open_fx = sb.table('forex_positions').select('symbol').eq('status', 'open').execute().data or []
-        active_fx_symbols = set(p['symbol'] for p in open_fx)
+        open_fx = sb.table('forex_positions').select('symbol').in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
+        active_fx_symbols = set(p['symbol'] for p in open_fx if p.get('symbol'))
         
         tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
         tc_params = (tc_res.data.get('regime_params') if tc_res and tc_res.data else {}) or {}
@@ -727,26 +730,60 @@ async def open_forex_position(
         log_error(MODULE, f"Error en validación max_active_symbols_forex: {e}")
 
     # === CHECK CANTIDAD MÁXIMA DE POSICIONES POR PAR (FOREX) ===
+    max_per_pair = 3
+    open_pos_for_sym = []
     try:
-        max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
-        if 'max_positions_per_symbol' not in BOT_STATE.config_cache:
-            rc_cfg = sb.table('risk_config').select('max_positions_per_symbol').limit(1).execute()
-            if rc_cfg.data:
-                max_per_pair = int(rc_cfg.data[0].get('max_positions_per_symbol', 3))
-                
-        open_pos_for_sym = sb.table('forex_positions').select('id, side').eq('status', 'open').eq('symbol', symbol).execute().data or []
+        rc_cfg = sb.table('risk_config').select('max_positions_per_symbol').limit(1).execute()
+        if rc_cfg.data:
+            max_per_pair = int(rc_cfg.data[0].get('max_positions_per_symbol', 3))
+        else:
+            max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
+            
+        open_pos_for_sym = sb.table('forex_positions').select('id, side').eq('symbol', symbol).in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
         if len(open_pos_for_sym) >= max_per_pair:
             log_warning(MODULE, f"⛔ [MAX POSITIONS PER PAIR] {symbol}: Señal {direction.upper()} rechazada. Límite de {max_per_pair} posiciones abiertas alcanzado ({len(open_pos_for_sym)}/{max_per_pair}).")
             return
             
         # Check global max open trades
         max_global = int(BOT_STATE.config_cache.get('max_open_trades', 15))
-        all_open_fx = sb.table('forex_positions').select('id').eq('status', 'open').execute().data or []
+        all_open_fx = sb.table('forex_positions').select('id').in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
         if len(all_open_fx) >= max_global:
             log_warning(MODULE, f"⛔ [MAX GLOBAL TRADES] {symbol}: Límite global alcanzado ({len(all_open_fx)}/{max_global}).")
             return
     except Exception as e:
         log_error(MODULE, f"Error en validación max_positions_per_pair en open_forex_position: {e}")
+
+    # === VALIDACIÓN MANDATORIA DE ADUANA ===
+    try:
+        from app.rebote_aduana.aduana_validator import AduanaValidator
+        aduana = AduanaValidator()
+        df_15m = get_memory_df(symbol, '15m')
+        df_5m = get_memory_df(symbol, '5m')
+        df_1h = get_memory_df(symbol, '1h')
+        df_1d = get_memory_df(symbol, '1d')
+        order_type_aduana = 'LIMIT' if signal.get('limit_price') else 'MARKET'
+        aduana_res = aduana.validate(
+            symbol=symbol,
+            side=direction,
+            order_type=order_type_aduana,
+            market_data={
+                'df_15m': df_15m,
+                'df_5m': df_5m,
+                'df_1h': df_1h,
+                'df_1d': df_1d,
+                'open_symbols': list(active_fx_symbols),
+                'max_active_symbols': max_active_symbols_forex,
+                'current_symbol_positions': len(open_pos_for_sym),
+                'max_positions_per_symbol': max_per_pair,
+                'is_squeeze': signal.get('strategy_type') == 'squeeze' or 'SQUEEZE' in rule_code.upper()
+            },
+            strategy=rule_code
+        )
+        if not aduana_res.approved:
+            log_warning(MODULE, f"🛑 [ADUANA REJECT] {symbol} {direction.upper()} ({rule_code}): {aduana_res.rule_triggered} - {aduana_res.reason}")
+            return
+    except Exception as aduana_err:
+        log_error(MODULE, f"Error en validación ADUANA para {symbol}: {aduana_err}")
     # ========================================================
 
     # ═══════════════════════════════════════════════════
@@ -923,7 +960,10 @@ async def open_forex_position(
                 except Exception as ex:
                     log_error(MODULE, f"Error calculando cross_bars: {ex}")
             
-            if is_long:
+            if signal.get('limit_price') is not None:
+                limit_prices = [float(signal['limit_price'])]
+                regime_name = f"Sniper Extremo ({signal.get('rule_code', 'BB_EXTREMO_SNIPER')})"
+            elif is_long:
                 if not ema3_is_ascending:
                     log_warning(MODULE, f"⛔ [EMA3 SLOPE REJECT] {symbol} LONG abortado: EMA3 de 5m NO está en modo ascendente (curr={ema3_5m:.5f} <= prev={ema3_5m_prev:.5f})")
                     return
@@ -1017,11 +1057,11 @@ async def open_forex_position(
     # ── ADUANA: Validación centralizada de órdenes ──
     try:
         from app.rebote_aduana import AduanaValidator
-        from app.core.memory_store import get_memory_df
         aduana = AduanaValidator(oraculo_manager=None)
         market_data_aduana = {
             'df_15m': get_memory_df(symbol, '15m'),
             'df_5m': get_memory_df(symbol, '5m'),
+            'df_1h': get_memory_df(symbol, '1h'),
             'df_4h': get_memory_df(symbol, '4h'),
             'df_1d': get_memory_df(symbol, '1d'),
         }
@@ -1066,7 +1106,7 @@ async def open_forex_position(
                 quantity=order_lots,
                 price=exec_px if exec_type == 'LIMIT' else None,
                 sl_price=levels['sl_price'],
-                tp_price=levels['tp_price'],
+                tp_price=None, # TP gestionado 100% dinamicamente por eTrader v6
             )
             log_info(MODULE, f"[LIVE {exec_type}] ({idx+1}/{num_orders}) {direction.upper()} {order_lots} lotes {symbol} @ {exec_px:.5f}")
             
@@ -1181,7 +1221,18 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
         sar_phase = sar_data.get('phase', 'neutral')
         sar_changed_at = sar_data.get('changed_at')
 
-        positions = BOT_STATE.get_positions_by_symbol(symbol)
+        raw_positions = BOT_STATE.get_positions_by_symbol(symbol)
+        positions = []
+        for p in raw_positions:
+            if p.get('status') == 'open' and p.get('closed_at'):
+                try:
+                    sb.table('forex_positions').update({'status': 'closed'}).eq('id', p['id']).execute()
+                    p['status'] = 'closed'
+                except: pass
+                continue
+            if p.get('status') == 'open':
+                positions.append(p)
+
         for position in positions:
             # --- SLVM v2 (Recovery & Hard Stop) ---
             from app.strategy.virtual_sl_recovery import process_symbol_5m_with_slvm_v2
@@ -1197,7 +1248,57 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
             if slvm_res and slvm_res.get('should_close'):
                 await _execute_paper_close(position, current_price, slvm_res.get('exit_type', 'slvm_close_fx'), sb)
                 continue
-            
+
+            # ── EVALUACIÓN ANCLA SL & TP EN FOREX (v5.0 / v6.0) ──
+            try:
+                from app.strategy.ancla_manager import AnclaManager
+                from app.rebote_aduana.aduana_exit_gate import GLOBAL_ADUANA_EXIT_GATE, ExitOrderRequest
+                
+                ancla_mgr = AnclaManager()
+                df_15m_ancla = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                df_4h_ancla = MEMORY_STORE.get(symbol, {}).get('4h', {}).get('df')
+                df_1d_ancla = MEMORY_STORE.get(symbol, {}).get('1d', {}).get('df')
+                fib_levels_ancla = snap.get('fib_levels', {}) if snap else {}
+                
+                if df_15m_ancla is not None and not df_15m_ancla.empty:
+                    position['current_price'] = current_price
+                    # 1. Stop Loss Dinámico ANCLA (15M)
+                    sl_calc = ancla_mgr.calculate_sl_dynamic(position, df_15m_ancla, fib_levels_ancla)
+                    if sl_calc['armed'] and sl_calc['sl_price'] > 0:
+                        req_sl = ExitOrderRequest(
+                            position_id=str(position['id']),
+                            symbol=symbol,
+                            side='sell' if (position.get('side') or '').lower() in ['long', 'buy'] else 'buy',
+                            order_type='STOP',
+                            price=sl_calc['sl_price'],
+                            volume=float(position.get('size') or position.get('lots') or 0),
+                            classification='ACTIVA',
+                            module_origin='ANCLA_SL'
+                        )
+                        GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_sl)
+                        
+                    # 2. Take Profit Etapa 1 ANCLA
+                    mode = ancla_mgr.get_mode_for_strategy(position.get('rule_code', ''))
+                    df_macro = df_1d_ancla if (mode == 'swing' and df_1d_ancla is not None) else df_4h_ancla
+                    df_sensor = df_4h_ancla if (mode == 'swing' and df_4h_ancla is not None) else df_15m_ancla
+                    
+                    if df_macro is not None and df_sensor is not None:
+                        tp1_calc = ancla_mgr.calculate_tp1_stage(position, df_macro, df_sensor, mode=mode)
+                        if tp1_calc['should_place_tp1'] and tp1_calc['tp1_price'] > 0:
+                            req_tp = ExitOrderRequest(
+                                position_id=str(position['id']),
+                                symbol=symbol,
+                                side='sell' if (position.get('side') or '').lower() in ['long', 'buy'] else 'buy',
+                                order_type='LIMIT',
+                                price=tp1_calc['tp1_price'],
+                                volume=float(position.get('size') or position.get('lots') or 0) * (tp1_calc['volume_pct'] / 100.0),
+                                classification='ACTIVA',
+                                module_origin='ANCLA_TP1'
+                            )
+                            GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_tp)
+            except Exception as ancla_err:
+                log_warning(MODULE, f"ANCLA monitor error for Forex {symbol}: {ancla_err}")
+
             # --- MARGIN CALL ALERT (Amenaza al Capital) ---
             entry_p_margin = float(position.get('entry_price') or position.get('avg_entry_price') or 0)
             if entry_p_margin > 0:
@@ -1301,18 +1402,20 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                             pnl_pips = (entry - current_price) / PIP_SIZES.get(symbol, 0.0001)
 
                     if pnl_pct >= -0.05:
-                        # 🛡️ Protección de tendencia EMA3/EMA9 (15m)
-                        _ema3 = float(snap.get('ema3', 0))
-                        _ema9 = float(snap.get('ema9', 0))
-                        _trend_protected = False
-                        if _ema3 > 0 and _ema9 > 0:
-                            if side == 'long' and _ema3 > _ema9:
-                                _trend_protected = True
-                            elif side == 'short' and _ema3 < _ema9:
-                                _trend_protected = True
-                        
-                        if _trend_protected:
-                            log_info(MODULE, f"🛡️ SAR_PHASE_CHANGE evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
+                        from app.strategy.candle_momentum_guard import should_allow_exit
+                        df_15m_fx = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                        df_5m_fx = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                        allow_sar, allow_msg = should_allow_exit(
+                            position=position,
+                            current_price=current_price,
+                            df_15m=df_15m_fx,
+                            df_5m=df_5m_fx,
+                            exit_rule_id='sar_phase_change_fx',
+                            market_type='forex_futures',
+                            snap=snap
+                        )
+                        if not allow_sar:
+                            log_info(MODULE, f"🛡️ SAR_PHASE_CHANGE evitado para {symbol}: {allow_msg}")
                         else:
                             await _execute_paper_close(position, current_price, 'sar_phase_change_fx', sb)
                             await send_telegram_message(
@@ -1344,19 +1447,20 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
             )
 
             if reversal.get('should_exit'):
-                # 🛡️ Protección de tendencia EMA3/EMA9 (15m)
-                side = (position.get('side') or '').lower()
-                _ema3 = float(snap.get('ema3', 0))
-                _ema9 = float(snap.get('ema9', 0))
-                _trend_protected = False
-                if _ema3 > 0 and _ema9 > 0:
-                    if side == 'long' and _ema3 > _ema9:
-                        _trend_protected = True
-                    elif side == 'short' and _ema3 < _ema9:
-                        _trend_protected = True
-                
-                if _trend_protected:
-                    log_info(MODULE, f"🛡️ SIGNAL_REVERSAL evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
+                from app.strategy.candle_momentum_guard import should_allow_exit
+                df_15m_fx = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                df_5m_fx = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                allow_rev, rev_msg = should_allow_exit(
+                    position=position,
+                    current_price=current_price,
+                    df_15m=df_15m_fx,
+                    df_5m=df_5m_fx,
+                    exit_rule_id='signal_reversal_fx',
+                    market_type='forex_futures',
+                    snap=snap
+                )
+                if not allow_rev:
+                    log_info(MODULE, f"🛡️ SIGNAL_REVERSAL evitado para {symbol}: {rev_msg}")
                 else:
                     await _execute_paper_close(position, current_price, 'signal_reversal_fx', sb)
                     await send_telegram_message(
@@ -1556,87 +1660,62 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                 except Exception as e:
                     log_error(MODULE, f"Error evaluating Structural Exit for {symbol}: {e}")
 
-            # 6b.6 Salida Temprana Parcial (Take Profit Parcial)
-            if not position.get('recovery_mode') and not position.get('partial_closed'):
+            # 6b.6 Sistema Dinámico de Take Profit v6 (5 Reglas de Clímax, Reversión SIPV y Anti-Giveback)
+            if not position.get('recovery_mode'):
                 try:
-                    ema3_15m = float(snap.get('ema3', 0))
-                    ema9_15m = float(snap.get('ema9', 0))
-                    ema3_5m = float(snap.get('ema3_5m', 0))
-                    ema9_5m = float(snap.get('ema9_5m', 0))
+                    from app.strategy.profit_capture import evaluate_dynamic_tp_v6
                     entry_pr = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
-                    
                     if entry_pr > 0:
                         pip_size_local = PIP_SIZES.get(symbol, 0.0001)
-                        qty_local = float(position.get('size') or position.get('lots') or 0.01)
-                        
                         pnl_pips_local = ((current_price - entry_pr) / pip_size_local) if side == 'long' else ((entry_pr - current_price) / pip_size_local)
                         
-                        df_15m = get_memory_df(symbol, '15m')
-                        ema3_descending_15m = False
-                        ema3_ascending_15m = False
-                        if df_15m is not None and not df_15m.empty:
-                            c15 = pd.to_numeric(df_15m['Close'] if 'Close' in df_15m.columns else df_15m.get('close', pd.Series()), errors='coerce').dropna()
-                            if len(c15) >= 2:
-                                ema3_series = c15.ewm(span=3, adjust=False).mean()
-                                ema3_descending_15m = float(ema3_series.iloc[-1]) < float(ema3_series.iloc[-2])
-                                ema3_ascending_15m = float(ema3_series.iloc[-1]) > float(ema3_series.iloc[-2])
-                                
-                        is_trend_reversed = False
-                        reason_msg = ""
-                        if side == 'long':
-                            if (ema3_5m > 0 and ema3_5m < ema9_5m):
-                                is_trend_reversed = True
-                                reason_msg = "Cruce EMA3 < EMA9 en 5m"
-                            elif ema3_descending_15m:
-                                is_trend_reversed = True
-                                reason_msg = "EMA3 15m descendiendo"
-                        elif side == 'short':
-                            if (ema3_5m > 0 and ema3_5m > ema9_5m):
-                                is_trend_reversed = True
-                                reason_msg = "Cruce EMA3 > EMA9 en 5m"
-                            elif ema3_ascending_15m:
-                                is_trend_reversed = True
-                                reason_msg = "EMA3 15m ascendiendo"
+                        max_pips_seen = max(float(position.get('max_pnl_pips') or 0.0), pnl_pips_local)
+                        position['max_pnl_pips'] = max_pips_seen
                         
-                        if is_trend_reversed and pnl_pips_local >= 10.0:
-                            try:
+                        df_15m = get_memory_df(symbol, '15m')
+                        tp_res = evaluate_dynamic_tp_v6(
+                            symbol=symbol,
+                            side=side,
+                            current_price=current_price,
+                            entry_price=entry_pr,
+                            df_15m=df_15m,
+                            snap=snap,
+                            max_pnl_pips=max_pips_seen,
+                            partial_already_taken=position.get('partial_closed', False),
+                            market_type='forex_futures'
+                        )
+                        
+                        if tp_res['should_close']:
+                            if tp_res.get('is_partial'):
                                 await _execute_paper_partial_close(position, current_price, sb)
                                 position['partial_closed'] = True
-                                log_info(MODULE, f"🚀 EARLY EXIT PARCIAL [{symbol}]: Asegurando 50% por {reason_msg} (+{pnl_pips_local:.1f} pips)")
+                                log_info(MODULE, f"🎯 [DYNAMIC TP v6 SCALE-OUT] [{symbol}]: 50% cerrado por {tp_res['rule_code']} (+{pnl_pips_local:.1f} pips)")
                                 await send_telegram_message(
-                                    f"🚀 EARLY EXIT PARCIAL (50%) [{symbol}]\n"
-                                    f"Razón: {reason_msg}\n"
+                                    f"🎯 TAKE PROFIT PARCIAL 50% [{symbol}]\n"
+                                    f"Regla: {tp_res['rule_code']}\n"
+                                    f"Razón: {tp_res['reason']}\n"
                                     f"Ganancia Asegurada: +{pnl_pips_local:.1f} pips"
                                 )
-                                
-                                # Mover Stop Loss a Break Even para el resto de la posición
+                                # Mover SL a Breakeven
                                 new_sl_be = entry_pr
-                                current_sl = float(position.get('sl_price', 0))
-                                should_move_sl = False
-                                if side == 'long' and (current_sl <= 0 or new_sl_be > current_sl):
-                                    should_move_sl = True
-                                elif side == 'short' and (current_sl <= 0 or new_sl_be < current_sl):
-                                    should_move_sl = True
-                                
-                                if should_move_sl:
-                                    try:
-                                        sb.table('forex_positions').update({
-                                            'sl_price': new_sl_be,
-                                            'sl_type': 'breakeven_after_partial'
-                                        }).eq('id', position['id']).execute()
-                                    except Exception as sl_err:
-                                        log_warning(MODULE, f"Warning updating sl_type in forex_positions: {sl_err}")
-                                        sb.table('forex_positions').update({
-                                            'sl_price': new_sl_be
-                                        }).eq('id', position['id']).execute()
-                                    position['sl_price'] = new_sl_be
-                                    position['sl_type'] = 'breakeven_after_partial'
-                                    sl = new_sl_be
-                                    
-                            except Exception as e:
-                                log_error(MODULE, f"Error executing partial early exit for {symbol}: {e}")
-                except Exception as e:
-                    log_error(MODULE, f"Error evaluating early exit for {symbol}: {e}")
+                                position['sl_price'] = new_sl_be
+                                position['sl_type'] = 'be_after_partial'
+                                try:
+                                    sb.table('forex_positions').update({'sl_price': new_sl_be, 'sl_type': 'be_after_partial'}).eq('id', position['id']).execute()
+                                except: pass
+                            else:
+                                await _execute_paper_close(position, current_price, f"tp_{tp_res['rule_code'].lower()}", sb)
+                                log_info(MODULE, f"🎯 [DYNAMIC TP v6 CLOSE] [{symbol}]: Cierre total por {tp_res['rule_code']} (+{pnl_pips_local:.1f} pips) - {tp_res['reason']}")
+                                await send_telegram_message(
+                                    f"🎯 FOREX TAKE PROFIT v6 [{symbol}]\n"
+                                    f"Dirección: {side.upper()}\n"
+                                    f"Regla: {tp_res['rule_code']}\n"
+                                    f"Razón: {tp_res['reason']}\n"
+                                    f"Precio: {current_price:.5f} (PnL: +{pnl_pips_local:.1f} pips)"
+                                )
+                                continue
+                except Exception as tp_err:
+                    log_error(MODULE, f"Error evaluando Dynamic TP v6 para {symbol}: {tp_err}")
 
             # 6c. Hard Stop de emergencia absoluta (último recurso, solo si no está en recovery)
             if sl > 0 and not position.get('recovery_mode'):
@@ -1674,17 +1753,6 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                         continue
                     else:
                         log_info(MODULE, f"🛡️ SL_HIT_FX_HARD evitado para {symbol} por protección de tendencia (EMA3 vs EMA9).")
-
-            if tp > 0:
-                if (side == 'long' and current_price >= tp) or \
-                   (side == 'short' and current_price <= tp):
-                    await _execute_paper_close(position, current_price, 'tp_hit_fx', sb)
-                    await send_telegram_message(
-                        f"FOREX TP HIT [{symbol}]\n"
-                        f"Precio: {current_price:.5f}\n"
-                        f"TP: {tp:.5f}"
-                    )
-                    continue
 
         # 7. Heartbeat
         try:
@@ -1750,9 +1818,9 @@ async def _evaluate_5m_primary_signals(symbol: str, provider: CTraderProtobufPro
         direction = 'long' if is_fresh_long else 'short'
         rule_code = 'BbHot' if direction == 'short' else 'AaHot'
 
-        # Verificar si ya existe posición abierta para este símbolo
-        existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
-        if existing_positions:
+        # Verificar si ya existe posición abierta o pendiente para este símbolo
+        open_db_pos = sb.table('forex_positions').select('id').eq('symbol', symbol).in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
+        if len(open_db_pos) >= 1:
             return
 
         signal = {
@@ -2119,11 +2187,10 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
             signal = None
             dca_smart_used = False
             
-            existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
+            existing_positions = sb.table('forex_positions').select('*').eq('symbol', symbol).in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
             if existing_positions:
                 from app.strategy.smart_dca_5m import evaluate_smart_dca
 
-                
                 snap_15m = snap
                 df_5m = get_memory_df(symbol, "5m")
                 snap_5m = df_5m.iloc[-1].to_dict() if df_5m is not None and not df_5m.empty else {}
@@ -2134,7 +2201,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                 
                 price_improvement_pct = 0.002
                 can_dca = False
-                max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
                 
                 if len(existing_positions) < max_per_pair:
                     if is_long and current_price <= last_entry * (1 - price_improvement_pct):
@@ -2155,7 +2222,28 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                         dca_smart_used = True
 
             if not dca_smart_used:
-                normal_signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
+                normal_signal = None
+                
+                # --- FASE 5.1: RADAR Extremo Sniper Evaluation (BB_EXTREMO_SNIPER) ---
+                try:
+                    from app.radar.crossover_detector import detect_extremo_opportunity
+                    df_1d_snap = get_memory_df(symbol, '1d')
+                    sniper_op = detect_extremo_opportunity(df, df_1d_snap, symbol=symbol, is_forex=True)
+                    if sniper_op:
+                        normal_signal = {
+                            'rule_code': 'BB_EXTREMO_SNIPER',
+                            'direction': 'long' if sniper_op['side'] == 'buy' else 'short',
+                            'strategy_type': 'scalping',
+                            'cycle': '15m',
+                            'limit_price': sniper_op['limit_price'],
+                            'reason': sniper_op['detail']
+                        }
+                        log_info(MODULE, f"🎯 [SNIPER FX OPPORTUNITY] {symbol} {normal_signal['direction'].upper()} LIMIT @ {sniper_op['limit_price']} | {sniper_op['detail']}")
+                except Exception as sniper_err:
+                    log_warning(MODULE, f"Error evaluando sniper extremo para {symbol}: {sniper_err}")
+
+                if not normal_signal:
+                    normal_signal = engine.get_best_signal(context=context, strategy_type='scalping', cycle='15m')
                 
                 # --- FASE 5.5: V1 Engine Fallback (Crypto Logic para Aa23, Bb23, etc) ---
                 if not normal_signal:
@@ -2213,13 +2301,14 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
             if signal:
                 await engine.log_evaluation(symbol, signal, context)
 
-                max_global = int(BOT_STATE.config_cache.get('max_open_trades', 16))
-                current_open = len(BOT_STATE.positions)
-                max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                max_global = int(BOT_STATE.config_cache.get('max_open_trades', 15))
+                all_open_fx = sb.table('forex_positions').select('id, symbol, side, status, entry_price').in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
+                current_open = len(all_open_fx)
+                max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
                 
                 # RESTRICCIÓN: Límite de Monedas Activas Diferentes (por defecto 1)
-                max_active_symbols = int(BOT_STATE.config_cache.get('max_active_symbols', 1))
-                active_symbols = set(p.get('symbol') for p in BOT_STATE.positions.values() if p.get('status') != 'closed')
+                max_active_symbols = int(BOT_STATE.config_cache.get('max_active_symbols_forex', 1))
+                active_symbols = set(p.get('symbol') for p in all_open_fx if p.get('symbol'))
 
                 if current_open >= max_global:
                     log_info('POSITION_LIMIT_FX', f'{symbol}: Limite GLOBAL {max_global} alcanzado')
@@ -2233,10 +2322,10 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                     else:
                         if sm_check.get('is_flip'):
                             log_info('FLIP_FX', f"{symbol}: FLIP {signal['direction']} - Evaluando posiciones opuestas")
-                            existing_positions = BOT_STATE.get_positions_by_symbol(symbol)
+                            existing_positions = [p for p in all_open_fx if p.get('symbol') == symbol]
                             for p in existing_positions:
                                 if p.get('side', '').lower() != signal['direction'].lower():
-                                    entry = float(p.get('avg_entry_price') or p.get('entry_price') or current_price)
+                                    entry = float(p.get('entry_price') or current_price)
                                     pnl_pct = 0.0
                                     if entry > 0:
                                         if p.get('side', '').lower() in ('long', 'buy'):
@@ -2256,13 +2345,13 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                                         log_error(MODULE, f"Error en flip close para {symbol}: {e}")
                                         
                         # ── RE-CHECK LIMIT POST-FLIP ──
-                        current_pair_count = len([p for p in BOT_STATE.positions.values() if p['symbol'] == symbol and p.get('status') == 'open'])
+                        fresh_sym_pos = sb.table('forex_positions').select('id').eq('symbol', symbol).in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
+                        current_pair_count = len(fresh_sym_pos)
                         if current_pair_count >= max_per_pair:
                             log_info('POSITION_LIMIT_FX', f"[{symbol}] Flip abortado u open excedido: {current_pair_count}/{max_per_pair} alcanzado.")
                         else:
                             # ── MEJORA C: Filtro Correlación USD ──
-                            all_forex_pos = [p for p in BOT_STATE.positions.values() if p.get('market_type') == 'forex']
-                            usd_check = check_usd_exposure_filter(symbol, signal['direction'], all_forex_pos)
+                            usd_check = check_usd_exposure_filter(symbol, signal['direction'], all_open_fx)
                             if not usd_check['passed']:
                                 log_info('USD_CORR_FX', f"{symbol}: {usd_check['reason']}")
                             else:
@@ -2322,7 +2411,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                             # Pasar el signal con rule_code para open_forex_position
                             signal_to_pass = {
                                 'direction': sig_dict.get('direction', r_res.get('direction')),
-                                'rule_code': sig_dict.get('reason', 'REBOTE_FX')
+                                'rule_code': sig_dict.get('rule_code') or sig_dict.get('reason', 'REBOTE_FX')
                             }
                             
                             await open_forex_position(
@@ -2351,8 +2440,8 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                     )
 
                     # Scalping 4h (Aa31/Bb31)
-                    existing_positions_4h = BOT_STATE.get_positions_by_symbol(symbol)
-                    max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+                    existing_positions_4h = sb.table('forex_positions').select('*').eq('symbol', symbol).in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
+                    max_per_pair = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
                     
                     if len(existing_positions_4h) < max_per_pair:
                         context_4h = engine.build_context(snap=snap, df_15m=df, df_4h=df_4h_safe)
@@ -2374,7 +2463,7 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                             
                             if can_open:
                                 # ── MEJORA C: Filtro Correlación USD (4h) ──
-                                all_forex_pos_4h = [p for p in BOT_STATE.positions.values() if p.get('market_type') == 'forex']
+                                all_forex_pos_4h = sb.table('forex_positions').select('*').in_('status', ['open', 'pending', 'pending_limit']).execute().data or []
                                 usd_check_4h = check_usd_exposure_filter(symbol, signal_4h['direction'], all_forex_pos_4h)
                                 if not usd_check_4h['passed']:
                                     log_info('USD_CORR_FX_4H', f"{symbol}: {usd_check_4h['reason']}")

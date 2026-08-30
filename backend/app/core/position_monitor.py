@@ -99,6 +99,21 @@ async def check_signal_reversal(
         return {'should_exit': False}
         
     if pnl_pct >= min_profit_pct and ema_reversed_5m:
+        from app.strategy.candle_momentum_guard import should_allow_exit
+        df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df') if symbol else None
+        allow, allow_msg = should_allow_exit(
+            position=position,
+            current_price=current_price,
+            df_15m=df_15m,
+            df_5m=df_5m,
+            exit_rule_id='early_profit_protect_ema_5m',
+            market_type='crypto_futures',
+            snap=snap
+        )
+        if not allow:
+            log_info(MODULE, f"Early profit protect 5M suprimido para {symbol}: {allow_msg}")
+            return {'should_exit': False}
+
         return {
             'should_exit': True,
             'reason': 'early_profit_protect_ema_5m',
@@ -617,6 +632,201 @@ async def check_protections(
         except Exception as e:
             log_error(MODULE, f"Error actualizando BE para {symbol}: {e}")
 
+    # ── CHECK 1.4.5: STOP LOSS VIRTUAL FIBONACCI (eTrade 100% Control, Crypto & Forex) ──
+    try:
+        from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
+        fib_sl_res = evaluate_fib_band_virtual_sl(position, df_15m, current_price, symbol)
+        if fib_sl_res and fib_sl_res.get('action') == 'close_virtual_fib_sl':
+            log_info('PROTECTION', f"🛡️ [VIRTUAL FIB SL TRIGGERED] [{symbol}]: {fib_sl_res.get('reason')}")
+            closed = await _execute_paper_close(position, current_price, 'qshr_fib_band_virtual_sl', supabase)
+            if closed:
+                return
+    except Exception as fib_sl_e:
+        log_error(MODULE, f"Error evaluando SL Virtual Fibonacci Crypto {symbol}: {fib_sl_e}")
+
+    # ── CHECK 1.5: Motor Dual de Salida (Bollinger Exhaustion & CASCADA Fib Stagnation) ──
+    try:
+        from app.strategy.quantum_squeeze_hedge import evaluate_qshr_trailing_and_exit
+        dual_exit = evaluate_qshr_trailing_and_exit(position, df_5m, df_15m, current_price, symbol, market_type='crypto')
+        if dual_exit:
+            action = dual_exit.get('action')
+            if action in ('close_bollinger_exhaustion', 'close_cascada_fib_stagnation'):
+                log_info('PROTECTION', f"🎯 [DUAL EXIT {action.upper()}] [{symbol}]: {dual_exit.get('reason')}")
+                closed = await _execute_paper_close(position, current_price, dual_exit.get('rule_code', 'dual_exit'), supabase)
+                if closed:
+                    return
+            elif action == 'adjust_trailing_sl':
+                new_sl = float(dual_exit.get('sl_price', 0))
+                if new_sl > 0:
+                    try:
+                        supabase.table('positions').update({
+                            'sl_price': new_sl,
+                            'stop_loss': new_sl,
+                            'trailing_sl_price': new_sl,
+                            'sl_type': 'cascada_fib_trail',
+                            'protection_activated': True
+                        }).eq('id', pos_id).execute()
+                        state.current_sl = new_sl
+                        position['sl_price'] = new_sl
+                        log_info('PROTECTION', f"📈 [CASCADA FIB SL SYNC] [{symbol}]: SL ceñido a {new_sl}")
+                    except Exception as sl_e:
+                        log_error(MODULE, f"Error actualizando Fib SL Crypto {pos_id}: {sl_e}")
+    except Exception as dual_e:
+        log_error(MODULE, f"Error evaluando Dual Exit Crypto {symbol}: {dual_e}")
+
+    # ── CHECK 1.6: QUANTUM SQUEEZE CLUSTER EXIT (15m SIPV Take Profit) ──
+    try:
+        from app.strategy.quantum_squeeze_hedge import evaluate_cluster_exit
+        sym_positions = [p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol and p.get('status') == 'open']
+        cluster_res = evaluate_cluster_exit(symbol, sym_positions, df_5m, df_15m, current_price, market_type='crypto_futures')
+        if cluster_res and cluster_res.get('action') == 'cluster_take_profit':
+            log_info('PROTECTION', f"🎯 [CRYPTO QSHR CLUSTER TAKE PROFIT] [{symbol}]: {cluster_res.get('reason')}")
+            for p_pos in sym_positions:
+                await _execute_paper_close(p_pos, current_price, 'qshr_cluster_tp_15m', supabase)
+            return
+    except Exception as cl_e:
+        log_error(MODULE, f"Error evaluando Cluster Exit Crypto {symbol}: {cl_e}")
+
+    # ── CHECK 1.7: QUANTUM SQUEEZE TREND BOOSTER & HEDGE ──
+    try:
+        from app.strategy.quantum_squeeze_hedge import evaluate_qshr_hedge_signal
+        sym_positions = [p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol and p.get('status') == 'open']
+        qshr_res = evaluate_qshr_hedge_signal(symbol, df_5m, df_15m, active_position=position, market_type='crypto_futures')
+        if qshr_res:
+            q_action = qshr_res.get('action')
+            q_reason = qshr_res.get('reason')
+            if q_action in ('open_booster_long', 'open_booster_short'):
+                if len(sym_positions) >= 2:
+                    log_info('BOOSTER', f"⛔ [CRYPTO BOOSTER MAX LIMIT] {symbol}: Ya existen {len(sym_positions)} posiciones abiertas (Máx: 2). Booster omitido.")
+                else:
+                    booster_side = 'long' if 'long' in q_action else 'short'
+                    log_info('BOOSTER', f"🚀 [CRYPTO QSHR TREND BOOSTER {booster_side.upper()}] {symbol}: {q_reason}")
+                    
+                    from app.rebote_aduana.aduana_validator import AduanaValidator
+                    aduana = AduanaValidator()
+                    res_open = supabase.table('positions').select('*').eq('status', 'open').execute()
+                    open_symbols = list(set([r['symbol'] for r in (res_open.data or []) if r.get('symbol')]))
+                    max_active = int(BOT_STATE.config_cache.get('max_active_symbols_crypto') or 3)
+                    max_per_sym = 2
+                    
+                    entry_px = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+                    pnl_pct = ((current_price - entry_px) / entry_px * 100) if booster_side == 'long' else ((entry_px - current_price) / entry_px * 100)
+                    
+                    market_data = {
+                        'df_15m': df_15m,
+                        'df_5m': df_5m,
+                        'squeeze_velocity': float(qshr_res.get('velocity', 2.5)),
+                        'unrealized_pnl_pct': pnl_pct,
+                        'open_symbols': open_symbols,
+                        'max_active_symbols': max_active,
+                        'current_symbol_positions': len(sym_positions),
+                        'max_positions_per_symbol': max_per_sym
+                    }
+                    val_res = aduana.validate(
+                        symbol=symbol, side=booster_side, order_type='MARKET',
+                        market_data=market_data, strategy=qshr_res.get('rule_code', 'Bb33_QSHR_BOOSTER')
+                    )
+                    if val_res.approved:
+                        cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+                        sizing_usd = max(18.0, cap_op * 0.10)
+                        qty = sizing_usd / current_price
+                        is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
+                        if is_paper:
+                            await _execute_paper_open(
+                                symbol=symbol, side=booster_side, price=current_price,
+                                size=qty, rule_code=qshr_res.get('rule_code', 'Bb33_QSHR_BOOSTER'),
+                                regime={'category': 'favorable_trend'}, levels={},
+                                vel_config={'adx_val': 30, 'multiplier': 1.0}, supabase=supabase
+                            )
+                            # Sincronizar cluster SL
+                            cluster_sl = qshr_res.get('sl_price')
+                            if cluster_sl:
+                                for p in sym_positions:
+                                    try:
+                                        supabase.table('positions').update({'sl_price': cluster_sl, 'stop_loss': cluster_sl}).eq('id', p['id']).execute()
+                                    except: pass
+            elif q_action in ('close_and_flip_long', 'close_and_flip_short'):
+                flip_side = qshr_res['flip_side']
+                flip_rule = qshr_res.get('flip_rule', 'Bb33_QSHR_FLIP')
+                log_info('QSHR_CRYPTO', f"🔄 [CRYPTO CUT & FLIP TRIGGER] {symbol}: Cerrando {position.get('side', '').upper()} y girando a {flip_side.upper()} ({q_reason})")
+                is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
+                if is_paper:
+                    await _execute_paper_close(position, current_price, 'qshr_cut_and_flip', supabase)
+                    cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+                    sizing_usd = max(18.0, cap_op * 0.15)
+                    qty = sizing_usd / current_price
+                    await _execute_paper_open(
+                        symbol=symbol, side=flip_side, price=current_price,
+                        size=qty, rule_code=flip_rule,
+                        regime={'category': 'favorable_trend'}, levels={},
+                        vel_config={'adx_val': 30, 'multiplier': 1.5}, supabase=supabase
+                    )
+            elif q_action in ('close_original_long', 'close_original_short'):
+                log_info('QSHR_CRYPTO', f"🛡️ [CRYPTO QSHR EMERGENCY CUT] {symbol}: {q_reason}")
+                is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
+                if is_paper:
+                    await _execute_paper_close(position, current_price, 'qshr_early_invalidation', supabase)
+    except Exception as boost_e:
+        log_error(MODULE, f"Error evaluando Crypto QSHR / Booster {symbol}: {boost_e}")
+
+    # ── CHECK 1.7.5: RANGE_BAND_TOUCH_EXIT (Cierre en Límite de Rango Lateral con PnL > 0) ──
+    try:
+        from app.strategy.capital_protection import evaluate_range_bollinger_exit
+        range_res = evaluate_range_bollinger_exit(
+            state=state,
+            current_price=current_price,
+            df_15m=df_15m,
+            snap=snap
+        )
+        if range_res.get('action') == 'close_market':
+            log_info('PROTECTION', f"🎯 [CRYPTO RANGE BAND EXIT] [{symbol}]: {range_res.get('reason')}")
+            from app.strategy.candle_momentum_guard import should_allow_exit
+            allow, allow_msg = should_allow_exit(position, current_price, df_15m, df_5m, 'range_bollinger_touch_exit', 'crypto_futures', snap=snap)
+            if not allow:
+                log_info('PROTECTION', f"🎯 [CRYPTO RANGE BAND EXIT] [{symbol}]: Bloqueado por {allow_msg}")
+            else:
+                is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
+                if is_paper:
+                    closed = await _execute_paper_close(position, current_price, 'range_bollinger_touch_exit', supabase)
+                    if closed:
+                        return 'closed'
+    except Exception as rb_e:
+        log_error(MODULE, f"Error evaluando Crypto Range Band Touch Exit {symbol}: {rb_e}")
+
+    # ── CHECK 1.8: DYNAMIC TAKE PROFIT v6 (5 RULES) ──
+    try:
+        from app.strategy.profit_capture import evaluate_dynamic_tp_v6
+        entry_px = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+        pos_side = position.get('side', 'long').lower()
+        curr_pnl_pct = ((current_price - entry_px) / entry_px * 100.0) if pos_side in ('long', 'buy') else ((entry_px - current_price) / entry_px * 100.0)
+        max_pct_seen = max(float(position.get('max_pnl_pct') or 0.0), curr_pnl_pct)
+        position['max_pnl_pct'] = max_pct_seen
+        
+        tp_v6_res = evaluate_dynamic_tp_v6(
+            symbol=symbol,
+            side=pos_side,
+            current_price=current_price,
+            entry_price=entry_px,
+            df_15m=df_15m,
+            snap=snap,
+            max_pnl_pct=max_pct_seen,
+            partial_already_taken=position.get('partial_closed', False),
+            market_type='crypto_futures'
+        )
+        if tp_v6_res['should_close'] and not tp_v6_res.get('is_partial'):
+            from app.strategy.candle_momentum_guard import should_allow_exit
+            rc_lower = str(tp_v6_res['rule_code']).lower()
+            exit_id = rc_lower if rc_lower.startswith('tp_') else f"tp_{rc_lower}"
+            allow, allow_msg = should_allow_exit(position, current_price, df_15m, df_5m, exit_id, 'crypto_futures', snap=snap)
+            if not allow:
+                log_info('PROTECTION', f"🎯 [CRYPTO DYNAMIC TP v6] [{symbol}]: Bloqueado por {allow_msg}")
+            else:
+                log_info('PROTECTION', f"🎯 [CRYPTO DYNAMIC TP v6] [{symbol}]: Cierre por {tp_v6_res['rule_code']} ({tp_v6_res['reason']})")
+                await _execute_paper_close(position, current_price, exit_id, supabase)
+                return
+    except Exception as tp_v6_err:
+        log_error(MODULE, f"Error evaluando Dynamic TP v6 Crypto {symbol}: {tp_v6_err}")
+
     # ── CHECK 2: Trailing Stop ────────────────
     
     trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
@@ -660,12 +870,17 @@ async def check_protections(
         if origen == 'REBOTE' or rule_code.startswith(('AaReb', 'BbReb', 'REBOTE', 'Aa12')):
             log_info('PROTECTION', f"🌊 [CASCADA] Ignorando TS Close para posición CASCADA/REBOTE {symbol}. Delegado a CascadaManager.")
         else:
-            log_info('PROTECTION', f'🔴 TS CLOSE TRIGGERED [{symbol}]: precio={current_price:.6f}. Reason={trail["reason"]}')
-            closed = await _execute_paper_close(position, current_price, 'ts_close', supabase)
-            if closed:
-                # Register SL cooldown
-                side = (position.get('side') or 'long').lower()
-                register_sl_event(symbol, side)
+            from app.strategy.candle_momentum_guard import should_allow_exit
+            allow, allow_msg = should_allow_exit(position, current_price, df_15m, df_5m, 'ts_close', 'crypto_futures', snap=snap)
+            if not allow:
+                log_info('PROTECTION', f"🔴 TS CLOSE BLOQUEADO [{symbol}]: {allow_msg}")
+            else:
+                log_info('PROTECTION', f'🔴 TS CLOSE TRIGGERED [{symbol}]: precio={current_price:.6f}. Reason={trail["reason"]}')
+                closed = await _execute_paper_close(position, current_price, 'ts_close', supabase)
+                if closed:
+                    # Register SL cooldown
+                    side = (position.get('side') or 'long').lower()
+                    register_sl_event(symbol, side)
                 
                 # Si no tocó BB, re-entramos con órdenes límite!
                 if not trail.get('bb_touched', False):
@@ -967,6 +1182,56 @@ async def check_open_positions_5m(
                     except Exception as upd_e:
                         log_warning(MODULE, f"Silent trailing SL update fail for {symbol}: {upd_e}")
 
+                # ── EVALUACIÓN ANCLA SL & TP (v5.0 / v6.0) ──
+                try:
+                    from app.strategy.ancla_manager import AnclaManager
+                    from app.rebote_aduana.aduana_exit_gate import GLOBAL_ADUANA_EXIT_GATE, ExitOrderRequest
+                    
+                    ancla_mgr = AnclaManager()
+                    df_15m_ancla = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                    df_4h_ancla = MEMORY_STORE.get(symbol, {}).get('4h', {}).get('df')
+                    df_1d_ancla = MEMORY_STORE.get(symbol, {}).get('1d', {}).get('df')
+                    fib_levels_ancla = snap.get('fib_levels', {}) if snap else {}
+                    
+                    if df_15m_ancla is not None and not df_15m_ancla.empty:
+                        pos['current_price'] = price
+                        # 1. Stop Loss Dinámico ANCLA (15M)
+                        sl_calc = ancla_mgr.calculate_sl_dynamic(pos, df_15m_ancla, fib_levels_ancla)
+                        if sl_calc['armed'] and sl_calc['sl_price'] > 0:
+                            req_sl = ExitOrderRequest(
+                                position_id=str(pos['id']),
+                                symbol=norm_symbol,
+                                side='sell' if side == 'long' else 'buy',
+                                order_type='STOP',
+                                price=sl_calc['sl_price'],
+                                volume=float(pos.get('volume', pos.get('size', 0))),
+                                classification='ACTIVA',
+                                module_origin='ANCLA_SL'
+                            )
+                            GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_sl)
+                            
+                        # 2. Take Profit Etapa 1 ANCLA
+                        mode = ancla_mgr.get_mode_for_strategy(pos.get('rule_code', ''))
+                        df_macro = df_1d_ancla if (mode == 'swing' and df_1d_ancla is not None) else df_4h_ancla
+                        df_sensor = df_4h_ancla if (mode == 'swing' and df_4h_ancla is not None) else df_15m_ancla
+                        
+                        if df_macro is not None and df_sensor is not None:
+                            tp1_calc = ancla_mgr.calculate_tp1_stage(pos, df_macro, df_sensor, mode=mode)
+                            if tp1_calc['should_place_tp1'] and tp1_calc['tp1_price'] > 0:
+                                req_tp = ExitOrderRequest(
+                                    position_id=str(pos['id']),
+                                    symbol=norm_symbol,
+                                    side='sell' if side == 'long' else 'buy',
+                                    order_type='LIMIT',
+                                    price=tp1_calc['tp1_price'],
+                                    volume=float(pos.get('volume', pos.get('size', 0))) * (tp1_calc['volume_pct'] / 100.0),
+                                    classification='ACTIVA',
+                                    module_origin='ANCLA_TP1'
+                                )
+                                GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_tp)
+                except Exception as ancla_err:
+                    log_warning(MODULE, f"ANCLA monitor error for {symbol}: {ancla_err}")
+
                 # 2. TAKE PROFIT PARTIAL (50% Close)
                 is_tp_p = (side == 'long' and price >= tp_p) or (side == 'short' and price <= tp_p) if (tp_p > 0 and not pos.get('partial_closed')) else False
                 if is_tp_p:
@@ -1020,6 +1285,14 @@ async def check_open_positions_5m(
 
                             if bars_held >= holding_max and hold_pnl >= 0:
                                 close_reason = f'hold_{vel_config["velocity"][:10]}'
+                                from app.strategy.candle_momentum_guard import should_allow_exit
+                                df_15m_hold = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                                df_5m_hold = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                                allow, allow_msg = should_allow_exit(pos, price, df_15m_hold, df_5m_hold, close_reason, 'crypto_futures', snap=snap)
+                                if not allow:
+                                    log_info(MODULE, f"Max holding close suprimido para {norm_symbol}: {allow_msg}")
+                                    continue
+
                                 await _execute_paper_close(pos, price, close_reason, supabase)
                                 events.append({'symbol': symbol, 'event': 'max_holding_close'})
                                 
@@ -1302,7 +1575,7 @@ async def _execute_paper_open(
                 return None
 
             # 3. Límite POR SÍMBOLO
-            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
             
             try:
                 variants = crypto_symbol_match_variants(symbol)
@@ -1543,14 +1816,86 @@ async def _execute_paper_open_unlocked(
     except Exception as sizing_e:
         log_warning(MODULE, f"Error calculando tamaño dinámico en _execute_paper_open_unlocked: {sizing_e}. Usando size original: {size}")
 
+    # Determinar si el modo es Paper o Live
+    is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
+    trade_mode = "paper" if is_paper else "live"
+    live_exchange_order_id = None
+    execution_fill_price = price
+    executed_size = size
+
+    if not is_paper:
+        try:
+            from app.execution.binance_connector import get_client, get_futures_symbol_info_cached, round_step_size
+            client = get_client()
+            sym_clean = symbol.replace("/", "").upper()
+            info = get_futures_symbol_info_cached(client, sym_clean)
+            step_size = info.get('step_size') or 0.001
+            min_qty = info.get('min_qty') or step_size
+            executed_size = round_step_size(size, step_size)
+            if executed_size < min_qty and size > 0:
+                executed_size = min_qty
+            if executed_size <= 0:
+                log_error(MODULE, f"Live sizing too small for {sym_clean}: size={size}, step={step_size}")
+                return None
+
+            binance_side = 'BUY' if side.lower() in ('long', 'buy') else 'SELL'
+            pos_side = 'LONG' if side.lower() in ('long', 'buy') else 'SHORT'
+
+            order_res = client.futures_create_order(
+                symbol=sym_clean,
+                side=binance_side,
+                type='MARKET',
+                quantity=executed_size,
+                positionSide=pos_side
+            )
+            live_exchange_order_id = str(order_res.get('orderId', ''))
+            fills = order_res.get('fills', [])
+            if fills:
+                execution_fill_price = sum(float(f['price']) * float(f['qty']) for f in fills) / sum(float(f['qty']) for f in fills)
+            elif order_res.get('avgPrice') and float(order_res.get('avgPrice')) > 0:
+                execution_fill_price = float(order_res.get('avgPrice'))
+            else:
+                execution_fill_price = price
+
+            log_info(MODULE, f"⚡ [BINANCE FUTURES LIVE ORDER FILLED] {sym_clean} {pos_side} qty={executed_size} avgPx={execution_fill_price} orderId={live_exchange_order_id}")
+        except Exception as live_err:
+            err_msg = str(live_err)
+            if "-2019" in err_msg or "Margin is insufficient" in err_msg:
+                log_warning(MODULE, f"⚠️ [BINANCE MARGIN INSUFFICIENT] {symbol}: Margen insuficiente en Binance Futures ({err_msg}). Apertura omitida.")
+            else:
+                log_error(MODULE, f"❌ Error placing live Binance Futures order for {symbol}: {live_err}")
+            return None
+
+    # Dashboard log (orders table)
+    order_db_uuid = None
+    try:
+        ord_res = supabase.table('orders').insert({
+            'symbol': symbol,
+            'side': 'BUY' if side.lower() == 'long' else 'SELL',
+            'order_type': 'MARKET',
+            'quantity': executed_size,
+            'limit_price': execution_fill_price,
+            'entry_price': execution_fill_price,
+            'stop_loss_price': sl_dict['sl_price'],
+            'take_profit_price': tp_full,
+            'status': 'open',
+            'is_paper': is_paper,
+            'binance_order_id': live_exchange_order_id,
+            'rule_code': rule_code
+        }).execute()
+        if ord_res and ord_res.data:
+            order_db_uuid = ord_res.data[0].get('id')
+    except Exception as e:
+        log_warning(MODULE, f"Failed to log order to orders table: {e}")
+
     # Persistir
     data = {
         'symbol':           symbol,
         'side':             side.upper(),
-        'entry_price':      round(price, 8),
-        'avg_entry_price':  round(price, 8),
-        'current_price':    round(price, 8),
-        'size':             round(size, 8),
+        'entry_price':      round(execution_fill_price, 8),
+        'avg_entry_price':  round(execution_fill_price, 8),
+        'current_price':    round(execution_fill_price, 8),
+        'size':             round(executed_size, 8),
         'stop_loss':        round(sl_final, 8),
         'take_profit':      round(tp_full, 8),
         'sl_price':         round(sl_final, 8),
@@ -1562,31 +1907,15 @@ async def _execute_paper_open_unlocked(
         'rule_entry':       rule_code,
         'velocity_entry':   vel_config.get('velocity', 'unknown'),
         'opened_at':        datetime.now(timezone.utc).isoformat(),
-        'mode':             'paper',
+        'mode':             trade_mode,
+        'order_id':         order_db_uuid,
+        'sl_exchange_order_id': live_exchange_order_id,
         # ── SLVM Fields ──
         'slv_price':        slv_price,
         'slv_hard_stop_pips': slv_hs_pips if slv_price else None,
         'recovery_mode':    False,
         'recovery_cycles':  0,
     }
-    
-    # Dashboard log (orders table)
-    try:
-        supabase.table('orders').insert({
-            'symbol': symbol,
-            'side': 'BUY' if side.lower() == 'long' else 'SELL',
-            'order_type': 'MARKET',
-            'quantity': size,
-            'limit_price': price,
-            'entry_price': price,
-            'stop_loss_price': sl_dict['sl_price'],
-            'take_profit_price': tp_full,
-            'status': 'open',
-            'is_paper': True,
-            'rule_code': rule_code
-        }).execute()
-    except Exception as e:
-        log_warning(MODULE, f"Failed to log order to orders table: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     # ATOMIC LIMIT RE-CHECK — LAST LINE OF DEFENSE BEFORE INSERT
@@ -1594,7 +1923,7 @@ async def _execute_paper_open_unlocked(
     # because candle_execution or other workers may have inserted.
     # ═══════════════════════════════════════════════════════════════
     try:
-        max_sym_recheck = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+        max_sym_recheck = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
         recheck_variants = crypto_symbol_match_variants(symbol)
         recheck_res = supabase.table('positions').select('id', count='exact') \
             .in_('symbol', recheck_variants).eq('status', 'open').execute()
@@ -1620,7 +1949,7 @@ async def _execute_paper_open_unlocked(
         BOT_STATE.positions[new_pos.get('id', symbol)] = new_pos
         sm.on_position_opened(symbol, side, new_pos)
 
-    log_info(MODULE, f"🚀 PAPER OPEN [{symbol}] {side.upper()} at ${price:,.2f} (SL: ${data['sl_price']:,.2f}, TP: ${data['tp_full_price']:,.2f})")
+    log_info(MODULE, f"🚀 [{trade_mode.upper()} OPEN] [{symbol}] {side.upper()} at ${execution_fill_price:,.2f} (SL: ${data['sl_price']:,.2f}, TP: ${data['tp_full_price']:,.2f})")
     return new_pos
 
 async def _execute_paper_partial_close(pos, price, supabase):
@@ -1664,6 +1993,29 @@ async def _execute_paper_partial_close(pos, price, supabase):
         'partial_close_usd': round(partial_pnl_usd, 4),
         size_key: original_size - partial_qty
     }).eq(db_key_name, db_record_id).execute()
+
+    # 🛡️ Si es una posición de Crypto LIVE, enviar orden de cierre parcial real a Binance Futures
+    if not is_forex and pos.get('mode') == 'live':
+        try:
+            from app.execution.binance_connector import get_client, get_futures_symbol_info_cached, round_step_size
+            client = get_client()
+            sym_clean = symbol.replace("/", "").upper()
+            info = get_futures_symbol_info_cached(client, sym_clean)
+            step_size = info.get('step_size') or 0.001
+            p_close_qty = round_step_size(partial_qty, step_size)
+            close_side = 'SELL' if side in ('long', 'buy') else 'BUY'
+            pos_side = 'LONG' if side in ('long', 'buy') else 'SHORT'
+            if p_close_qty > 0:
+                p_order = client.futures_create_order(
+                    symbol=sym_clean,
+                    side=close_side,
+                    type='MARKET',
+                    quantity=p_close_qty,
+                    positionSide=pos_side
+                )
+                log_info(MODULE, f"⚡ [BINANCE FUTURES LIVE PARTIAL CLOSE] {sym_clean} {pos_side} qty={p_close_qty} orderId={p_order.get('orderId')}")
+        except Exception as p_close_err:
+            log_error(MODULE, f"❌ Error enviando cierre parcial Binance Futures para {symbol}: {p_close_err}")
     
     # 2. Persistir en paper_trades (Log de actividad parcial)
     p_rule_code = pos.get('rule_code') or pos.get('rule_entry') or "Cc-Partial"
@@ -1776,22 +2128,49 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
             log_warning(MODULE, f"Error actualizando Smart Guard para {symbol}: {upd_e}")
         return False
 
+    # ── CANDLE MOMENTUM GUARD (Protección Central de Ganancias en Tendencia) ──
+    if total_pnl > 0 and reason not in ('emergency_sl', 'sl_hit', 'sl_hit_fx', 'sl_hit_fx_hard', 'liquidation', 'weekend_close', 'KILL_SWITCH', 'MANUAL', 'MANUAL_CLOSE'):
+        try:
+            from app.core.memory_store import MEMORY_STORE
+            from app.strategy.candle_momentum_guard import should_allow_exit
+            df_15m_g = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+            df_5m_g = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+            allow_exit_mom, mom_reason = should_allow_exit(
+                position=pos,
+                current_price=price,
+                df_15m=df_15m_g,
+                df_5m=df_5m_g,
+                exit_rule_id=reason,
+                market_type=market_type,
+                snap=snap
+            )
+            if not allow_exit_mom:
+                log_warning(MODULE, f"MOMENTUM GUARD bloquea cierre de {symbol} ({reason}) PnL=${total_pnl:.4f}: {mom_reason}")
+                return False
+        except Exception as mom_e:
+            log_warning(MODULE, f"Error evaluando Candle Momentum Guard en _execute_paper_close para {symbol}: {mom_e}")
+
     # ── Cerrar posición en la tabla correcta con columnas válidas ──
     if is_forex:
+        pip_sz = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
+        is_buy = side in ('long', 'buy')
+        pips_calc = ((price - entry) / pip_sz if is_buy else (entry - price) / pip_sz) if (price > 0 and entry > 0 and pip_sz > 0) else 0.0
         close_update = {
             'status': 'closed',
-            'close_reason': reason[:20],
+            'close_reason': reason[:50],
             'current_price': price,
             'closed_at': datetime.now(timezone.utc).isoformat(),
-            'pnl_usd': round(total_pnl, 4),
+            'pnl_usd': round(total_pnl, 2),
+            'pnl_pips': round(pips_calc, 1),
         }
     else:
         close_update = {
             'status': 'closed',
-            'close_reason': reason[:20],
+            'close_reason': reason[:50],
             'current_price': price,
             'closed_at': datetime.now(timezone.utc).isoformat(),
             'realized_pnl': round(total_pnl, 4),
+            'realized_pnl_pct': round(pnl_pct, 4),
         }
 
     log_info(MODULE, f"Cerrando {symbol} ({reason}) en tabla {table_name}: PnL=${total_pnl:.4f} ({pnl_pct:.2f}%)")
@@ -1799,16 +2178,66 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
     # 🛡️ Si es una posición de Forex LIVE con ID cTrader, enviar orden de cierre real a IC Markets / cTrader
     if is_forex and pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
         try:
+            ctrader_pid = pos.get('ctrader_pos_id')
             lots_clean = round(abs(float(pos.get('lots') or pos.get('size') or 0.01)), 2)
             close_vol = int(round(lots_clean * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots_clean * 10_000))
             
             from app.core.safety_manager import get_worker
             fw = get_worker('forex_worker')
             if fw and hasattr(fw, 'close_position'):
-                fw.close_position(ctrader_pid, close_vol)
+                fw.close_position(ctrader_pid, close_vol, symbol=symbol, reason=reason)
                 log_info(MODULE, f"[CTRADER LIVE CLOSE] Enviada orden de cierre a cTrader para {symbol} (posId {ctrader_pid}) volumen {close_vol}")
         except Exception as live_close_e:
             log_error(MODULE, f"Error enviando cierre cTrader para {symbol}: {live_close_e}")
+
+    # 🛡️ Si es una posición de Crypto LIVE, enviar orden de cierre real a Binance Futures
+    if not is_forex and pos.get('mode') in ('live', 'real'):
+        try:
+            from app.execution.binance_connector import get_client, get_futures_symbol_info_cached, round_step_size
+            client = get_client()
+            sym_clean = symbol.replace("/", "").upper()
+            info = get_futures_symbol_info_cached(client, sym_clean)
+            step_size = info.get('step_size') or 0.001
+            close_qty = round_step_size(qty, step_size)
+            close_side = 'SELL' if side in ('long', 'buy') else 'BUY'
+            pos_side = 'LONG' if side in ('long', 'buy') else 'SHORT'
+            
+            # Consultar saldo/posición real en Binance para evitar rechazos por reduceOnly
+            actual_amt = 0.0
+            try:
+                acc_info = client.futures_account()
+                matching_pos = next((p for p in acc_info.get('positions', []) if p.get('symbol') == sym_clean and p.get('positionSide') in (pos_side, 'BOTH') and abs(float(p.get('positionAmt') or 0)) > 0), None)
+                if matching_pos:
+                    actual_amt = abs(float(matching_pos.get('positionAmt') or 0))
+            except Exception as acc_err:
+                log_debug(MODULE, f"No se pudo consultar futures_account para {sym_clean}: {acc_err}")
+                actual_amt = close_qty
+
+            if actual_amt <= 0:
+                log_info(MODULE, f"ℹ️ [BINANCE FUTURES] Posición {sym_clean} {pos_side} ya estaba cerrada o liquidada en el exchange (amt=0). Sincronizando DB.")
+            else:
+                real_close_qty = round_step_size(actual_amt, step_size) if actual_amt > 0 else close_qty
+                if real_close_qty > 0:
+                    close_res = client.futures_create_order(
+                        symbol=sym_clean,
+                        side=close_side,
+                        type='MARKET',
+                        quantity=real_close_qty,
+                        positionSide=pos_side if matching_pos and matching_pos.get('positionSide') == pos_side else 'BOTH'
+                    )
+                    log_info(MODULE, f"⚡ [BINANCE FUTURES LIVE CLOSE] {sym_clean} {pos_side} qty={real_close_qty} orderId={close_res.get('orderId')}")
+            
+            # Cancelar cualquier orden limit/stop huérfana de este símbolo
+            try:
+                client.futures_cancel_all_open_orders(symbol=sym_clean)
+            except Exception:
+                pass
+        except Exception as live_close_err:
+            err_msg = str(live_close_err)
+            if '-2022' in err_msg or 'ReduceOnly' in err_msg:
+                log_info(MODULE, f"ℹ️ [BINANCE FUTURES] Posición {symbol} ya no tenía saldo abierto para reducir en Binance: {err_msg}")
+            else:
+                log_error(MODULE, f"❌ Error enviando cierre Binance Futures para {symbol}: {live_close_err}")
 
     supabase.table(table_name).update(close_update).eq(db_key_name, db_record_id).execute()
     

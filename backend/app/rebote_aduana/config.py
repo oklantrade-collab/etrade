@@ -29,7 +29,15 @@ ADUANA_PARAMS = {
     'macro_score_threshold': 30.0,
     'qshr_squeeze_velocity_min': 2.5,
     'qshr_sipv_climax_threshold': 2.0,
-    'qshr_ema_trailing_period': 9
+    'qshr_ema_trailing_period': 9,
+    # ── ADUANAS v6.0 ENTRADAS DE ALTA PRECISIÓN ──
+    'forex_session_start_hour': 7,
+    'forex_session_start_minute': 0,
+    'forex_session_end_hour': 17,
+    'forex_session_end_minute': 30,
+    'adx_min_trend': 22.0,
+    'ema20_min_slope': 0.025,
+    'volume_min_ratio': 1.15
 }
 
 def load_rebote_config_from_db() -> dict:

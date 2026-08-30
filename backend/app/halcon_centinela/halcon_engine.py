@@ -185,8 +185,17 @@ class HalconEngine:
                 (profile.partial_threshold_low, profile.partial_threshold_high)
             )
 
+            # 9.5 Macro Direction Weighted (60% 1D + 40% 4H)
+            macro_score_1d = raw_scores.get('1d', 0)
+            macro_score_4h = raw_scores.get('4h', 0)
+            macro_weighted_score = round((0.60 * macro_score_1d) + (0.40 * macro_score_4h), 2)
+            macro_bias = 'BULLISH' if macro_weighted_score >= 20 else ('BEARISH' if macro_weighted_score <= -20 else 'NEUTRAL')
+
             detail = {
                 'profile': entry_profile_str,
+                'macro_weighted_score': macro_weighted_score,
+                'macro_bias': macro_bias,
+                'macro_weights': {'1d': 0.60, '4h': 0.40},
                 'raw_scores': raw_scores,
                 'adjusted_scores': dict(regime_adjusted_scores),
                 'rsi_adjustments': rsi_adjustments,

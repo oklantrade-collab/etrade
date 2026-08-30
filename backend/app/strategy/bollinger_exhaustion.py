@@ -151,19 +151,46 @@ async def execute_market_bollinger_exhaustion(market: str):
                 
             # 3. Evaluar
             if check_bollinger_exhaustion(df_15m, side):
-                log_info(MODULE, f"🔥 BOLLINGER EXHAUSTION DETECTADO: {sym} ({side.upper()}) en 15m. Iniciando Scale-Out (Cierre de la posición más antigua).")
-                
-                # 4. Cerrar la más antigua
+                # 4. Obtener la más antigua y calcular su PnL en tiempo real
                 sorted_pos = sorted(pos_list, key=lambda x: x.get('opened_at') or x.get('created_at') or '')
                 oldest_pos = sorted_pos[0]
                 pos_id = oldest_pos.get('id')
                 
+                current_price = float(df_15m['close'].iloc[-1])
+                entry_price = float(oldest_pos.get('entry_price') or oldest_pos.get('avg_entry_price') or 0)
+                is_short = side in ('short', 'sell')
+                
+                # Calcular PnL estimado
+                pnl_usd = 0.0
+                if entry_price > 0 and current_price > 0:
+                    if market == 'forex':
+                        pip_sz = 0.01 if 'JPY' in sym.upper() else 0.0001
+                        pips = (entry_price - current_price) / pip_sz if is_short else (current_price - entry_price) / pip_sz
+                        lots = abs(float(oldest_pos.get('lots') or oldest_pos.get('size') or 0.01))
+                        pnl_usd = pips * 10.0 * lots
+                    else:
+                        qty = abs(float(oldest_pos.get('size') or oldest_pos.get('shares') or oldest_pos.get('lots') or 1.0))
+                        pnl_usd = (entry_price - current_price) * qty if is_short else (current_price - entry_price) * qty
+
+                # [ADUANA SALIDA]: Proporcional a pips / lotaje en Forex y % en Crypto (Anti-Bloqueo de Ganancias)
+                min_pnl_allowed = False
+                if market == 'forex':
+                    min_pnl_allowed = (pips >= 1.5) or (pnl_usd >= 0.15 * max(0.01, lots) / 0.01)
+                elif market == 'stocks':
+                    min_pnl_allowed = (pnl_usd >= 1.00)
+                else: # crypto
+                    pnl_pct = ((current_price - entry_price) / entry_price * 100) if not is_short else ((entry_price - current_price) / entry_price * 100)
+                    min_pnl_allowed = (pnl_pct >= 0.15) or (pnl_usd > 0)
+
+                if not min_pnl_allowed:
+                    log_info(MODULE, f"🛡️ [ADUANA SALIDA / BOLLINGER EXHAUSTION SKIP] {sym} ({side.upper()}): Agotamiento 15m detectado pero PnL insuficiente (${pnl_usd:.2f}). No se ejecuta scale-out de pos {pos_id}.")
+                    continue
+
+                log_info(MODULE, f"🔥 BOLLINGER EXHAUSTION DETECTADO: {sym} ({side.upper()}) en 15m con PnL +${pnl_usd:.2f}. Iniciando Scale-Out (Cierre de la posición más antigua {pos_id}).")
+                
                 if market == 'stocks':
                     # stocks usa su propio mecanismo de cierre
                     from app.stocks.stocks_tp_manager import execute_tp_sell
-                    # Necesitamos precio actual (usar el último close de 15m)
-                    current_price = float(df_15m['close'].iloc[-1])
-                    # Construir payload de order
                     order_payload = {
                         "ticker": sym,
                         "type": "market",
@@ -178,7 +205,6 @@ async def execute_market_bollinger_exhaustion(market: str):
                         log_info(MODULE, f"✅ Orden de cierre de agotamiento Bollinger enviada para {sym} (ID pos: {pos_id})")
                         
                 elif market == 'forex':
-                    # Para forex invocamos el endpoint de cierre via API o la función interna
                     from app.execution.order_manager import close_position as close_crypto_forex
                     close_crypto_forex(pos_id, reason="bollinger_exhaustion_15m")
                     log_info(MODULE, f"✅ Orden de cierre enviada para Forex {sym} (ID pos: {pos_id})")

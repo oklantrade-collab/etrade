@@ -30,6 +30,14 @@ def get_positions(
     return {"positions": result.data}
 
 
+@router.post("/sync-broker")
+async def sync_broker_endpoint():
+    """Sincroniza en tiempo real las posiciones abiertas/cerradas de Binance Futures y Supabase."""
+    from app.execution.broker_sync import GLOBAL_BROKER_SYNC
+    res = await GLOBAL_BROKER_SYNC.sync_binance_futures()
+    return {"status": "ok", "sync_result": res}
+
+
 @router.delete("/{position_id}/close")
 def close_position_endpoint(position_id: str):
     """Close a position manually."""

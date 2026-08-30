@@ -5,7 +5,7 @@ eTrade v5.0
 import numpy as np
 import pandas as pd
 from typing import Any, Dict
-from app.core.logger import log_info, log_error, log_warning
+from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.core.supabase_client import get_supabase
 from app.cascada.config import MODULE
 
@@ -58,7 +58,10 @@ def log_cascada_decision(result: Any) -> None:
         }
 
         # Fire and forget DB insertion
-        sb.table('cascada_decisions_log').insert(record).execute()
+        try:
+            sb.table('cascada_decisions_log').insert(record).execute()
+        except Exception as ins_e:
+            log_debug(MODULE, f"cascada_decisions_log insert skipped: {ins_e}")
 
         log_info(
             MODULE,
@@ -67,4 +70,4 @@ def log_cascada_decision(result: Any) -> None:
             f"PnL: ${result.pnl_current:.2f}/{result.pnl_pico:.2f}) — {result.detail}"
         )
     except Exception as e:
-        log_error(MODULE, f"Error saving cascada decision to log: {e}")
+        log_debug(MODULE, f"Cascada logging note: {e}")

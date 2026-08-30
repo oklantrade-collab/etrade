@@ -417,7 +417,7 @@ def check_pre_filters(
     # Price improvement check (DCA logic) - REQ: "menor que la anterior en el caso de BUY"
     if symbol_positions_count > 0:
         from app.core.memory_store import BOT_STATE
-        existing_pos = [p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol]
+        existing_pos = BOT_STATE.get_positions_by_symbol(symbol)
         if existing_pos:
             # Sort by opened_at to find the "last" one
             sorted_pos = sorted(existing_pos, key=lambda x: x.get('opened_at', ''), reverse=True)

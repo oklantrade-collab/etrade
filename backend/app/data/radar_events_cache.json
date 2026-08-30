@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-08-15T05:56:11.773454+00:00",
+  "updated_at": "2026-08-27T00:16:51.539480+00:00",
   "events": {
     "GBPUSD": [
       {
@@ -24,6 +24,58 @@
         "timestamp": "2026-08-15T05:56:11.772455+00:00",
         "detail": "ema_3 (1883.16775) crossed BELOW ema_9 (1883.37614)",
         "symbol": "ETHUSDT",
+        "timeframe": "15m"
+      }
+    ],
+    "EURUSD": [
+      {
+        "event_type": "cruce_bollinger_LOWER",
+        "direction": "bullish",
+        "bandwidth": 0.000853,
+        "lower_bb": 1.16751,
+        "sma20": 1.16801,
+        "price": 1.16753,
+        "timestamp": "2026-08-22T00:19:58.704511+00:00",
+        "detail": "Low (1.16749) pierced Lower Bollinger Band (1.16751) | Bandwidth=0.0009",
+        "symbol": "EURUSD",
+        "timeframe": "15m"
+      },
+      {
+        "event_type": "cruce_bollinger_LOWER",
+        "direction": "bullish",
+        "bandwidth": 0.000853,
+        "lower_bb": 1.16751,
+        "sma20": 1.16801,
+        "price": 1.16753,
+        "timestamp": "2026-08-22T00:21:08.475319+00:00",
+        "detail": "Low (1.16749) pierced Lower Bollinger Band (1.16751) | Bandwidth=0.0009",
+        "symbol": "EURUSD",
+        "timeframe": "15m"
+      },
+      {
+        "event_type": "cruce_bollinger_LOWER",
+        "direction": "bullish",
+        "bandwidth": 0.000853,
+        "lower_bb": 1.16751,
+        "sma20": 1.16801,
+        "price": 1.16753,
+        "timestamp": "2026-08-22T00:21:57.262481+00:00",
+        "detail": "Low (1.16749) pierced Lower Bollinger Band (1.16751) | Bandwidth=0.0009",
+        "symbol": "EURUSD",
+        "timeframe": "15m"
+      }
+    ],
+    "BTCUSDT": [
+      {
+        "event_type": "vela_impulso",
+        "direction": "bearish",
+        "range": 327.1,
+        "atr": 168.57,
+        "ratio": 1.94,
+        "price": 78831.9,
+        "timestamp": "2026-08-27T00:16:51.535341+00:00",
+        "detail": "Impulse candle detected: range=327.10000 (1.9x ATR)",
+        "symbol": "BTCUSDT",
         "timeframe": "15m"
       }
     ]

@@ -44,7 +44,8 @@ class CascadaEngine:
         radar_snapshot: Dict[str, Any],
         radar_events: List[Dict[str, Any]],
         df_15m: Optional[pd.DataFrame] = None,
-        df_higher_tf: Optional[pd.DataFrame] = None
+        df_higher_tf: Optional[pd.DataFrame] = None,
+        df_5m: Optional[pd.DataFrame] = None
     ) -> CascadaResult:
         """
         Evaluates a single position under CASCADA management.
@@ -65,7 +66,8 @@ class CascadaEngine:
         if radar_snapshot.get('status') == 'sin_datos':
             gb_res = evaluate_giveback(
                 pnl_current, pnl_pico, 
-                threshold_pct=self.params.get('giveback_threshold_pct', 0.50)
+                threshold_pct=self.params.get('giveback_threshold_pct', 0.30),
+                min_peak_usd=self.params.get('giveback_min_peak_usd', 0.50)
             )
             if gb_res['triggered']:
                 return CascadaResult(
@@ -87,7 +89,8 @@ class CascadaEngine:
         # Giveback bypasses cascade_hold and forces closure
         gb_res = evaluate_giveback(
             pnl_current, pnl_pico, 
-            threshold_pct=self.params.get('giveback_threshold_pct', 0.50)
+            threshold_pct=self.params.get('giveback_threshold_pct', 0.30),
+            min_peak_usd=self.params.get('giveback_min_peak_usd', 0.50)
         )
         if gb_res['triggered']:
             return CascadaResult(
@@ -111,18 +114,11 @@ class CascadaEngine:
         current_level = self._detect_level(direction, radar_snapshot, radar_events, prev_level_int)
         level_advanced = current_level > prev_level_int
 
-        # 3. If in N0 (Entry level), hold and wait for N1
-        if current_level == 0:
-            return CascadaResult(
-                position_id=pos_id, symbol=symbol, direction=direction, market_type=market_type,
-                current_level=0, previous_level=prev_level_int, level_advanced=False,
-                check_type='hold', decision='HOLD', cascade_hold=False,
-                pnl_current=pnl_current, pnl_pico=pnl_pico, giveback_pct=gb_res['giveback_pct'],
-                detail="Position in N0 (Extreme entry, waiting for N1 EMA3/EMA9 cross)"
-            )
-
-        # 4. Check Rebote (Section 3.3a)
-        rebote_eval = check_rebote(direction, radar_snapshot, pnl_current, current_level)
+        # 3. Check Rebote / Reversión SIPV & Fibonacci 15m (Section 3.3a)
+        rebote_eval = check_rebote(
+            direction, radar_snapshot, pnl_current, current_level,
+            df_15m=df_15m, position=position, df_5m=df_5m
+        )
         if rebote_eval['is_rebote']:
             return CascadaResult(
                 position_id=pos_id,
@@ -141,6 +137,16 @@ class CascadaEngine:
                 signals={'rebote': rebote_eval},
                 slope_table=radar_snapshot.get('slope_matrix', {}),
                 detail=rebote_eval['detail']
+            )
+
+        # 4. If in N0 (Entry level) and no reversal, hold and wait for N1
+        if current_level == 0:
+            return CascadaResult(
+                position_id=pos_id, symbol=symbol, direction=direction, market_type=market_type,
+                current_level=0, previous_level=prev_level_int, level_advanced=False,
+                check_type='hold', decision='HOLD', cascade_hold=False,
+                pnl_current=pnl_current, pnl_pico=pnl_pico, giveback_pct=gb_res['giveback_pct'],
+                detail="Position in N0 (Extreme entry, waiting for N1 EMA3/EMA9 cross)"
             )
 
         # 5. Check Continuation Support Signals (Section 3.3b & 3.4)

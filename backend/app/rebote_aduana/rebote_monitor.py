@@ -116,6 +116,8 @@ class ReboteMonitor:
         return {
             'df_1d': get_memory_df(symbol, '1d'),
             'df_4h': get_memory_df(symbol, '4h'),
+            'df_1h': get_memory_df(symbol, '1h'),
+            'df_30m': get_memory_df(symbol, '30m'),
             'df_15m': get_memory_df(symbol, '15m'),
             'df_5m': get_memory_df(symbol, '5m'),
             'df_1m': get_memory_df(symbol, '1m'),
@@ -162,13 +164,14 @@ class ReboteMonitor:
 
     def _execute_entry(self, symbol: str, direction: str, result: ReboteResult) -> Any:
         """Execute the entry via the execution service."""
-        reason = f"REBOTE (Score: {result.score_final})"
+        rule_code = result.detail.get('rule_code', 'REBOTE')
+        reason = f"{rule_code} (Score: {result.score_final})"
         if not self.execution_service:
             if self.market_type in ('forex', 'crypto'):
                 lots = result.detail.get('suggested_lots', 0.01)
                 sl = result.detail.get('suggested_sl')
                 tp = result.detail.get('suggested_tp')
-                return {'execute': True, 'direction': direction, 'sl': sl, 'tp': tp, 'lots': lots, 'reason': reason}
+                return {'execute': True, 'direction': direction, 'sl': sl, 'tp': tp, 'lots': lots, 'reason': reason, 'rule_code': rule_code}
             log_warning(MODULE, "No execution service configured for ReboteMonitor")
             return False
             

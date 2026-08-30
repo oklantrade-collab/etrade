@@ -876,10 +876,119 @@ async def check_proactive_exit_crypto(
     return True
 
 
+async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m, provider, sb):
+    """Enruta señal QSHR v5 a ADUANA y ejecuta orden MARKET en Crypto."""
+    try:
+        from app.rebote_aduana.aduana_validator import AduanaValidator
+        from app.core.memory_store import BOT_STATE
+        
+        is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
+        last_price = float(df_5m.iloc[-1]['close'])
+        
+        # Consultar posiciones activas en tiempo real
+        res_open = sb.table('positions').select('*').eq('status', 'open').execute()
+        open_positions = res_open.data or []
+        open_symbols = list(set([r['symbol'] for r in open_positions if r.get('symbol')]))
+        
+        max_active = int(BOT_STATE.config_cache.get('max_active_symbols_crypto') or BOT_STATE.config_cache.get('max_active_symbols') or 3)
+        max_per_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
+        
+        sym_positions = [p for p in open_positions if p.get('symbol') == symbol]
+        current_sym_positions = len(sym_positions)
+        
+        if symbol not in open_symbols and len(open_symbols) >= max_active:
+            log_info(MODULE, f"🛑 [CRYPTO QSHR ACTIVE SYMBOL LIMIT] {symbol}: Máximo de {max_active} monedas activas alcanzado ({len(open_symbols)}/{max_active}: {open_symbols})")
+            return False
+            
+        if current_sym_positions >= max_per_symbol:
+            log_info(MODULE, f"🛑 [CRYPTO QSHR MAX POSITIONS PER SYMBOL] {symbol}: Máximo de {max_per_symbol} posiciones alcanzado ({current_sym_positions}/{max_per_symbol})")
+            return False
+
+        aduana = AduanaValidator()
+        side = signal.get('side', 'long')
+        df_1h = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
+        market_data = {
+            'df_15m': df_15m,
+            'df_5m': df_5m,
+            'df_1h': df_1h,
+            'squeeze_velocity': float(signal.get('velocity', 0.0)),
+            'open_symbols': open_symbols,
+            'max_active_symbols': max_active,
+            'current_symbol_positions': current_sym_positions,
+            'max_positions_per_symbol': max_per_symbol
+        }
+        
+        rule_code = signal.get('rule_code', 'Bb33_QSHR')
+        result = aduana.validate(
+            symbol=symbol,
+            side=side,
+            order_type='MARKET',
+            market_data=market_data,
+            strategy=rule_code
+        )
+        
+        if not result.approved:
+            log_info(MODULE, f"🛑 [ADUANA CRYPTO QSHR REJECT] {symbol} {side.upper()}: {result.rule_triggered} — {result.reason}")
+            return False
+            
+        log_info(MODULE, f"⚡ [ADUANA CRYPTO QSHR APPROVED] {symbol} {side.upper()}: {signal.get('reason')}")
+        
+        # ─── REVERSIÓN DE POSICIÓN OPUESTA (Netting / Clímax Flip) ───
+        # Si vamos a abrir LONG y hay SHORTs abiertos (o viceversa), cerrar las opuestas primero
+        opposite_side = 'short' if side.lower() in ('long', 'buy') else 'long'
+        opp_positions = [p for p in sym_positions if str(p.get('side', '')).lower() in (opposite_side, 'sell' if opposite_side == 'short' else 'buy')]
+        
+        if opp_positions:
+            log_info(MODULE, f"🔄 [QSHR REVERSAL NETTING] {symbol}: Cerrando {len(opp_positions)} posición(es) {opposite_side.upper()} antes de abrir nuevo {side.upper()} por {rule_code}")
+            for opp_pos in opp_positions:
+                try:
+                    if is_paper:
+                        from app.core.position_monitor import _execute_paper_close
+                        await _execute_paper_close(opp_pos, last_price, f"reversal_{rule_code.lower()}", sb)
+                    else:
+                        from app.execution.order_manager import close_position as close_pos_fn
+                        close_pos_fn(opp_pos['id'], reason=f"reversal_{rule_code.lower()}")
+                    
+                    from app.workers.performance_monitor import send_telegram_message
+                    await send_telegram_message(
+                        f"🔄 REVERSIÓN POR CLÍMAX / QSHR [{symbol}]\n"
+                        f"Cerrada posición {opposite_side.upper()} antes de abrir nuevo {side.upper()}.\n"
+                        f"Estrategia: {rule_code}\n"
+                        f"Precio: ${last_price:,.2f}"
+                    )
+                except Exception as close_err:
+                    log_error(MODULE, f"Error cerrando posición opuesta {opp_pos.get('id')} para {symbol}: {close_err}")
+
+        # Ejecución
+        cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+        sizing_usd = max(18.0, cap_op * 0.10) # 10% base
+        qty = sizing_usd / last_price
+        
+        from app.core.position_monitor import _execute_paper_open
+        await _execute_paper_open(
+            symbol=symbol, side=side, price=last_price,
+            size=qty, rule_code=rule_code, regime={'category': 'favorable_trend'}, levels={},
+            vel_config={'adx_val': 30, 'multiplier': 1.0}, supabase=sb
+        )
+
+        from app.workers.performance_monitor import send_telegram_message
+        mode_label = "PAPER" if is_paper else "LIVE REAL"
+        await send_telegram_message(
+            f"🚀 [{mode_label} QSHR ENTRY] {symbol} {side.upper()}\n"
+            f"Estrategia: {rule_code}\n"
+            f"Precio: ${last_price:,.2f} | Cantidad: {qty:.4f}\n"
+            f"Razón: {signal.get('reason')}"
+        )
+        return True
+    except Exception as e:
+        log_error(MODULE, f"Error en _route_crypto_qshr_to_aduana para {symbol}: {e}")
+        return False
+
+
 async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
     """Auxiliar para procesar un símbolo en el ciclo 5m (Paralelo)."""
     # ── Heartbeat ─────────────────────────────
-    register_heartbeat('crypto_scheduler_5m')
+    register_heartbeat('crypto_scheduler')
     
     cycle_start = time.time()
     try:
@@ -975,6 +1084,17 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
             "last_5m_cycle_at": datetime.now(timezone.utc).isoformat(),
             "last_updated": datetime.now(timezone.utc).isoformat()
         }).eq("symbol", symbol).execute()
+
+        # ─── QSHR v5 Scanner Autónomo para Crypto (Entradas Primarias Breakout 5m y Reversiones Clímax) ───
+        try:
+            from app.strategy.quantum_squeeze_hedge import scan_squeeze_opportunities
+            df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+            if df_5m is not None and len(df_5m) >= 20 and df_15m is not None and len(df_15m) >= 20:
+                squeeze_signal = scan_squeeze_opportunities(symbol, df_5m, df_15m, market_type='crypto_futures')
+                if squeeze_signal:
+                    await _route_crypto_qshr_to_aduana(symbol, squeeze_signal, df_5m, df_15m, provider, sb)
+        except Exception as sq_err:
+            log_warning(MODULE, f"Error en QSHR Crypto Scanner para {symbol}: {sq_err}")
 
         # 4.5. SMART EXIT DELAYED (Rebote técnico tras SAR)
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
@@ -1345,16 +1465,12 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
                     effective_sizing = vel_config.get('sizing_pct', 1.0)
                     qty = max(18.0, cap_op * 0.1 * effective_sizing) / current_price
                     
-                    is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
-                    if is_paper:
-                         # Use levels from snapshot for TP calculation
-                         await _execute_paper_open(
-                             symbol=symbol, side=direction, price=current_price,
-                             size=qty, rule_code=result['rule_code'], regime=snap, # snap has regime info
-                             levels=snap, vel_config=vel_config, supabase=sb
-                         )
-                    else:
-                         await provider.place_order(symbol=symbol, side=direction, size=qty, order_type="MARKET", positionSide=direction.upper())
+                    # Use levels from snapshot for TP calculation
+                    await _execute_paper_open(
+                        symbol=symbol, side=direction, price=current_price,
+                        size=qty, rule_code=result['rule_code'], regime=snap, # snap has regime info
+                        levels=snap, vel_config=vel_config, supabase=sb
+                    )
                     
                 if asyncio.iscoroutinefunction(send_telegram_message):
                     await send_telegram_message(
@@ -2046,12 +2162,30 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                 f"Esperando rebote técnico (RSI) para cerrar SHORT."
                             )
 
-            # 2. DETERMINAR DIRECCIÓN PERMITIDA
+            # 2. DETERMINAR DIRECCIÓN PERMITIDA (con EMA Cascade Override)
             allowed_direction = None
             if sar_phase == 'long':
                 allowed_direction = 'long'
             elif sar_phase == 'short':
                 allowed_direction = 'short'
+
+            # ─── EMA CASCADE OVERRIDE (Crypto) ───
+            # Si EMAs 15m están alineadas en cascada clara y MTF apoya, desbloquear la dirección contraria
+            ema3_15m = float(last_row.get('ma3', 0) or last_row.get('ema1', 0) or 0)
+            ema9_15m = float(last_row.get('ma9', 0) or last_row.get('ema2', 0) or 0)
+            ema20_15m = float(last_row.get('basis', 0) or last_row.get('ema3', 0) or 0)
+
+            if ema3_15m > 0 and ema9_15m > 0 and ema20_15m > 0:
+                # Cascada bajista: EMA3 < EMA9 < EMA20 y MTF negativo
+                if ema3_15m < ema9_15m < ema20_15m and cur_mtf_score <= -0.10:
+                    if allowed_direction == 'long':
+                        allowed_direction = None  # Desbloquear evaluación bidireccional (permite SHORT)
+                        log_info('ENTRY_EVAL', f'{symbol}: 🔓 EMA CASCADE OVERRIDE → SHORT desbloqueado (EMA3<EMA9<EMA20 15m, MTF={cur_mtf_score:.2f})')
+                # Cascada alcista: EMA3 > EMA9 > EMA20 y MTF positivo
+                elif ema3_15m > ema9_15m > ema20_15m and cur_mtf_score >= 0.10:
+                    if allowed_direction == 'short':
+                        allowed_direction = None  # Desbloquear evaluación bidireccional (permite LONG)
+                        log_info('ENTRY_EVAL', f'{symbol}: 🔓 EMA CASCADE OVERRIDE → LONG desbloqueado (EMA3>EMA9>EMA20 15m, MTF={cur_mtf_score:.2f})')
 
             from app.core.parameter_guard import get_active_params, get_velocity_config
             base_params = get_active_params(regime['category'], sb)
@@ -2161,7 +2295,13 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                     'mtf_score': cur_mtf_score, 'pinescript_signal': p_signal,
                     'regime': regime['category']
                 })
-                context = engine.build_context(snap=snap_for_context, df_15m=df, df_4h=get_memory_df(symbol, "4h"))
+                context = engine.build_context(
+                    snap=snap_for_context,
+                    df_15m=df,
+                    df_4h=get_memory_df(symbol, "4h"),
+                    df_5m=get_memory_df(symbol, "5m"),
+                    df_1h=get_memory_df(symbol, "1h")
+                )
 
                 new_signal = None
                 if not BOT_STATE.get_positions_by_symbol(symbol):
@@ -2271,10 +2411,22 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 from app.core.memory_store import MARKET_SNAPSHOT_CACHE
                 snap_eval = MARKET_SNAPSHOT_CACHE.get(symbol, {})
                 
+                candle_ts = None
+                if isinstance(df.index, pd.DatetimeIndex):
+                    candle_ts = last_row.name
+                elif 'timestamp' in last_row:
+                    candle_ts = last_row['timestamp']
+                elif 'date' in last_row:
+                    candle_ts = last_row['date']
+                elif 'time' in last_row:
+                    candle_ts = last_row['time']
+                else:
+                    candle_ts = datetime.now(timezone.utc)
+
                 v_signal = validate_signal(
                     symbol=symbol,
                     price=float(last_row['close']),
-                    timestamp=last_row.name if hasattr(last_row, 'name') else None,
+                    timestamp=candle_ts,
                     market_type='crypto_futures',
                     direction=rule_match.get('direction') if rule_match else None,
                     rule_code=rule_match.get('rule', {}).get('rule_code') if rule_match else None,
@@ -2324,7 +2476,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                 pre_res = check_pre_filters(
                     regime, rule_match['market_data'], rule_match['direction'],
                     symbol, float(last_row['close']), fib_levels['basis'],
-                    open_trades_count=len(BOT_STATE.positions), 
+                    open_trades_count=len(BOT_STATE.get_positions_by_market('crypto')), 
                     symbol_positions_count=symbol_positions_count,
                     capital_sufficient=True, warmup_complete=True,
                     max_per_symbol=max_per_symbol,
@@ -2569,27 +2721,13 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                      rule_match['direction'] = struct_authorized
                  
                  if not blocked_by:
-                     for trade in proposed_sizes:
-                         qty = trade['usd'] / current_price
-                         is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
-                         if is_paper:
-                             await _execute_paper_open(
-                                 symbol=symbol, side=rule_match['direction'], price=current_price,
-                                 size=qty, rule_code=rule_eval, regime=regime, levels=fib_levels,
-                                 vel_config=vel_config, supabase=sb
-                             )
-                         else:
-                             # --- SMART LIMIT ORDER FOR CRYPTO ENTRANCE (Maker Fee 0.020%) ---
-                             entry_side = rule_match['direction'].lower()
-                             offset_mult = 0.9998 if entry_side in ('long', 'buy') else 1.0002
-                             limit_entry_px = round(current_price * offset_mult, 4 if ('ADA' in symbol or 'SOL' in symbol) else 2)
-                             
-                             log_info(MODULE, f"Placing Smart LIMIT entry order for {symbol} ({entry_side.upper()}) at price {limit_entry_px:.4f} (Maker Fee 0.020%)")
-                             await provider.place_order(
-                                 symbol=symbol, side=rule_match['direction'],
-                                 size=qty, price=limit_entry_px, order_type="LIMIT",
-                                 positionSide=rule_match['direction'].upper()
-                             )
+                      for trade in proposed_sizes:
+                          qty = trade['usd'] / current_price
+                          await _execute_paper_open(
+                              symbol=symbol, side=rule_match['direction'], price=current_price,
+                              size=qty, rule_code=rule_eval, regime=regime, levels=fib_levels,
+                              vel_config=vel_config, supabase=sb
+                          )
         # --- 2) SWING (LIMIT ORDERS V5.0) ---
         from app.strategy.swing_orders import process_swing_orders
         from app.core.memory_store import MARKET_SNAPSHOT_CACHE
@@ -2691,7 +2829,7 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
                                    qty = (cap_op * 0.1 * vel_config.get('sizing_pct', 1.0)) / current_price
                                    await _execute_paper_open(
                                        symbol=symbol, side=direction, price=current_price,
-                                       size=qty, rule_code="REBOTE_CRYPTO", 
+                                       size=qty, rule_code=res.get("rule_code") or "REBOTE_CRYPTO",
                                        regime=snap_ref, levels=snap_ref, vel_config=vel_config, supabase=sb,
                                        origen='REBOTE'
                                    )
@@ -2838,6 +2976,17 @@ async def main():
     # 4. Sync Config and Positions Periodically
     scheduler.add_job(sync_db_config_to_memory, 'interval', minutes=5, id='sync_cfg')
     scheduler.add_job(sync_positions_to_memory, 'interval', minutes=2, id='sync_pos')
+
+    # 4.1 Sync Live Broker Positions (Binance Futures & cTrader) every 10 seconds
+    async def broker_live_sync_job():
+        try:
+            from app.execution.broker_sync import GLOBAL_BROKER_SYNC
+            await GLOBAL_BROKER_SYNC.sync_binance_futures()
+        except Exception as b_err:
+            log_warning(MODULE, f"Error en broker_live_sync_job: {b_err}")
+
+    scheduler.add_job(broker_live_sync_job, 'interval', seconds=10, id='sync_broker_live', replace_existing=True)
+    asyncio.create_task(broker_live_sync_job()) # Sync inmediata al iniciar
     
     # 5. Schedule Tasks with offsets
     scheduler.add_job(cycle_5m, CronTrigger(minute='*/5', second='10'), id='2a', replace_existing=True)

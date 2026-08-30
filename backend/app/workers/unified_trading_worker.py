@@ -376,8 +376,9 @@ def _process_symbol(
             oco_params['quantity'] = sizing['quantity']
             oco_params['order_value_usdt'] = sizing['nocional']
             
-            # Forzar LIMIT orders para Crypto
-            oco_params['order_type'] = 'LIMIT'
+            # Usar MARKET para ejecución inmediata en crypto
+            # NOTA: LIMIT con precio de cierre 15m no funciona en breakouts (precio ya se movió)
+            oco_params['order_type'] = 'MARKET'
 
             log_info(MODULE, f"{symbol}: OCO params -> qty={oco_params['quantity']} | SL=${oco_params['stop_loss']:,.4f} | TP=${oco_params['take_profit']:,.4f} | Valor=${oco_params['order_value_usdt']:,.2f}", cycle_id=cycle_id)
 

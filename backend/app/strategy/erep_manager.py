@@ -14,6 +14,8 @@ import numpy as np
 from datetime import datetime, timezone
 from app.core.logger import log_info, log_error, log_warning
 
+_erep_p2_notified_set = set()
+
 # ── EREP CONFIGURATION (PASO 1 & 2) ──
 EREP_CONFIG = {
     'crypto_futures': {
@@ -166,6 +168,7 @@ def detect_p2_entry_signal(
     Supports LONG, SHORT, and Stocks.
     """
     cfg   = EREP_CONFIG.get(market_type, {})
+    snap  = snap or {}
     rsi_oversold = int(cfg.get('rsi_oversold', 10))
     signals_found = []
 
@@ -508,6 +511,7 @@ def check_erep_activation_conditions(
     Verifica si el EREP puede activarse.
     """
     cfg    = EREP_CONFIG.get(market_type, {})
+    snap   = snap or {}
     side   = str(position.get('side', 'long'))
     is_long = side.lower() in ('long', 'buy')
 
@@ -679,7 +683,10 @@ def evaluate_erep_phase(
     """
     if position.get('status') == 'closed':
         return {'action': 'none', 'reason': 'Posicion ya cerrada'}
+    snap       = snap or {}
     phase      = int(position.get('erep_phase', 0))
+    if position.get('erep_p2_price') and float(position.get('erep_p2_price') or 0) > 0:
+        phase = 3
     side       = str(position.get('side', 'long'))
     is_long    = side.lower() in ('long', 'buy')
     cfg        = EREP_CONFIG.get(market_type, {})
@@ -895,20 +902,20 @@ def evaluate_erep_phase(
         ema_unfavorable = (is_long and not is_ema_fast_above) or (not is_long and is_ema_fast_above)
 
         if ema_unfavorable:
-            if current_loss > 0:
-                # 🛡️ Evitar cierre por EMA desfavorable
+            if current_loss > target_margin_pct:
+                # 🛡️ Bloquear cierre prematuro: esperar a alcanzar el margen mínimo de ganancia (+min_pips)
                 return {
                     'action':   'wait_p3',
                     'p3_avg':   p3_avg,
                     'distance': round(abs(current_price - p3_avg), 6),
                     'cycles':   cycles,
                     'ema_ok':   False,
-                    'reason':   f'🛡️ EMA DESFAVORABLE EN FASE 3: Bloqueando cierre en pérdida. Esperando P3 (ciclo {cycles}).',
+                    'reason':   f'🛡️ EMA DESFAVORABLE EN FASE 3: Protegiendo trade recuperado. Esperando alcanzar ganancia mínima objetivo {abs(target_margin_pct):.2f}% (ciclo {cycles}).',
                 }
             return {
                 'action':  'close_all',
-                'reason': f'EMA desfavorable en fase 3: precio {current_price:.4f} no llegó a P3 {p3_avg:.4f}. Cerrar con pérdida controlada.',
-                'close_type': 'ema_unfavorable_phase3',
+                'reason': f'✅ Recuperación EREP asegurada en EMA desfavorable: ganancia {abs(current_loss):.2f}% >= {abs(target_margin_pct):.2f}%.',
+                'close_type': 'recovery_success_ema_exit',
                 'last_close': last_close,
             }
 
@@ -941,6 +948,7 @@ def find_target_fibonacci_band(
     """
     Encuentra la banda Fibonacci inmediata en la dirección del recovery.
     """
+    snap = snap or {}
     is_long = side.lower() in ('long', 'buy')
 
     if is_long:
@@ -1231,31 +1239,43 @@ async def execute_erep_action(
             log_error('EREP', f'Error P2: {e}')
             return {'executed': 'error_p2'}
 
-        # Actualizar la posición original
-        supabase.table(table).update({
-            'erep_phase':             3,
-            'erep_p2_price':          current_price,
-            'erep_p2_size':           p2_size,
-            'erep_q2_calculated':     q2_data.get('q2_calculated', p2_size),
-            'erep_q2_rounded':        p2_size,
-            'erep_p3_avg':            round(p3_avg, 6),
-            'erep_p3_recalculated':   round(p3_avg, 6),
-            'erep_target_price':      round(target_price, 6),
-            'erep_target_band':       band_name,
-            'erep_target_band_price': band_price,
-            'erep_target_95pct':      round(target_price, 6),
-            'erep_cycles_elapsed':    0,
-        }).eq('id', pos_id).execute()
+        # Actualizar la posición original en memoria
+        position['erep_phase'] = 3
+        position['erep_p2_price'] = current_price
+        position['erep_p2_size'] = p2_size
+        position['erep_p3_avg'] = round(p3_avg, 6)
 
-        await send_telegram_local(
-            f'🛒 EREP P2 COMPRADO [{symbol}] {side.upper()}\n'
-            f'P1: ${p1_price:.4f} ({p1_size} u)\n'
-            f'P2: ${current_price:.4f} ({p2_size} u)\n'
-            f'P3 (target): ${p3_avg:.4f}\n'
-            f'Banda obj: {band_name}={band_price:.4f}\n'
-            f'Razón: {reason_str}\n'
-            f'⏳ Esperando recuperación a P3...'
-        )
+        # Actualizar la posición original en BD
+        try:
+            supabase.table(table).update({
+                'erep_phase':             3,
+                'erep_p2_price':          current_price,
+                'erep_p2_size':           p2_size,
+                'erep_q2_calculated':     q2_data.get('q2_calculated', p2_size),
+                'erep_q2_rounded':        p2_size,
+                'erep_p3_avg':            round(p3_avg, 6),
+                'erep_p3_recalculated':   round(p3_avg, 6),
+                'erep_target_price':      round(target_price, 6),
+                'erep_target_band':       band_name,
+                'erep_target_band_price': band_price,
+                'erep_target_95pct':      round(target_price, 6),
+                'erep_cycles_elapsed':    0,
+            }).eq('id', pos_id).execute()
+        except Exception as upd_e:
+            log_error('EREP', f"Error actualizando DB EREP P2 para {pos_id}: {upd_e}")
+
+        # Notificar una sola vez por posición
+        if pos_id not in _erep_p2_notified_set:
+            _erep_p2_notified_set.add(pos_id)
+            await send_telegram_local(
+                f'🛒 EREP P2 COMPRADO [{symbol}] {side.upper()}\n'
+                f'P1: ${p1_price:.4f} ({p1_size} u)\n'
+                f'P2: ${current_price:.4f} ({p2_size} u)\n'
+                f'P3 (target): ${p3_avg:.4f}\n'
+                f'Banda obj: {band_name}={band_price:.4f}\n'
+                f'Razón: {reason_str}\n'
+                f'⏳ Esperando recuperación a P3...'
+            )
         return {
             'executed': 'p2_bought',
             'p2_price': current_price,
@@ -1270,7 +1290,7 @@ async def execute_erep_action(
         elif act == 'close_sl':
             close_type = 'sl_normal'
 
-        size = float(position.get('shares_remaining', position.get('shares', position.get('size', 0.01))))
+        size = float(position.get('shares_remaining') or position.get('shares') or position.get('size') or 0.01)
 
         log_info('EREP', f'{"✅" if "success" in close_type else "🔴"} EREP CIERRE [{symbol}] ({side.upper()}): {action.get("reason", "")}')
 

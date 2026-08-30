@@ -169,7 +169,7 @@ def validate_signal(
             .eq('status', 'open') \
             .execute()
             
-        max_per_symbol = int(risk_config.get('max_positions_per_symbol', 4))
+        max_per_symbol = int(risk_config.get('max_positions_per_symbol', 3))
         current_symbol_open = symbol_positions.count if symbol_positions.count is not None else 999
 
         if current_symbol_open >= max_per_symbol:

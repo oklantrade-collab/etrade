@@ -83,7 +83,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
                         }
                     else:
                         update_data = {
-                            'sl_type': 'suspended_negative_protection',
+                            'sl_type': 'anti_loss_hold',
                             'sl_price': 0,
                             'sl_dynamic_price': 0,
                             'stop_loss': 0,
@@ -107,7 +107,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
                         }
                         if not is_forex:
                             memory_update.update({
-                                'sl_type': 'suspended_negative_protection',
+                                'sl_type': 'anti_loss_hold',
                                 'stop_loss': 0,
                                 'sl_dynamic_price': 0
                             })
@@ -376,7 +376,7 @@ async def process_swing_orders_15m(symbol: str, df_15m: pd.DataFrame, df_4h: pd.
         log_error('APEX_EMA', f"Error en estrategia ApexEma para {symbol}: {ema_err}")
     
     # --- VALIDACIÓN DE LÍMITE DE POSICIONES POR SÍMBOLO ---
-    max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 4))
+    max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 3))
 
     try:
         # Contar posiciones abiertas en DB para este símbolo (atómico)
@@ -435,7 +435,7 @@ async def process_swing_orders(
 
     # --- PROACTIVE LIMIT CHECK ---
     try:
-        max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 4))
+        max_per_symbol = int(BOT_STATE.config_cache.get("max_positions_per_symbol", 3))
         is_forex = any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF'))
         table_name = 'forex_positions' if is_forex else 'positions'
         variants = crypto_symbol_match_variants(symbol)
@@ -690,10 +690,7 @@ async def check_limit_order_execution(symbol: str, current_price: float, provide
         # ---------------------------------
 
         log_info('SWING', f'{symbol}: LIMIT EJECUTADO {direction.upper()} @ ${current_price:,.4f}')
-        if is_paper:
-            await execute_limit_order_paper(order=order, execution_price=current_price, sb=sb)
-        else:
-            await execute_limit_order_real(order=order, execution_price=current_price, binance_client=provider, sb=sb)
+        await execute_limit_order_paper(order=order, execution_price=current_price, sb=sb)
 
 async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> None:
     symbol = order['symbol']
@@ -718,7 +715,7 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                 return
 
             # 2. Límite por Símbolo
-            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 4))
+            max_symbol = int(BOT_STATE.config_cache.get('max_positions_per_symbol', 3))
             variants = crypto_symbol_match_variants(symbol)
             try:
                 # Seleccionamos campos necesarios para DCA y Cool-down
@@ -833,6 +830,40 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                 return
             # ═══════════════════════════════════════════════════════════
 
+            is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
+            trade_mode = 'paper' if is_paper else 'live'
+            live_order_id = None
+
+            if not is_forex and not is_paper:
+                try:
+                    from app.execution.binance_connector import get_client, get_futures_symbol_info_cached, round_step_size
+                    client = get_client()
+                    sym_clean = symbol.replace("/", "").upper()
+                    info = get_futures_symbol_info_cached(client, sym_clean)
+                    step_size = info.get('step_size') or 0.001
+                    min_qty = info.get('min_qty') or step_size
+                    qty = round_step_size(qty, step_size)
+                    if qty < min_qty and qty > 0:
+                        qty = min_qty
+                    if qty <= 0:
+                        log_warning('SWING', f"Sizing too small for {sym_clean}: qty={qty}")
+                        return
+                    pos_side = 'LONG' if direction.lower() in ('long', 'buy') else 'SHORT'
+                    binance_side = 'BUY' if direction.lower() in ('long', 'buy') else 'SELL'
+                    
+                    b_order = client.futures_create_order(
+                        symbol=sym_clean,
+                        side=binance_side,
+                        type='MARKET',
+                        quantity=qty,
+                        positionSide=pos_side
+                    )
+                    live_order_id = str(b_order.get('orderId', ''))
+                    log_info('SWING', f"⚡ [BINANCE FUTURES SWING LIVE ORDER FILLED] {sym_clean} {pos_side} qty={qty} orderId={live_order_id}")
+                except Exception as live_sw_e:
+                    log_error('SWING', f"❌ Error placing live Binance Futures swing order for {symbol}: {live_sw_e}")
+                    return
+
             if is_forex:
                 pos_data = {
                     'symbol': symbol, 'side': direction.upper(), 'entry_price': execution_price,
@@ -851,8 +882,10 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                     'avg_entry_price': execution_price, 'stop_loss': float(order.get('sl_price') or 0),
                     'take_profit': float(order.get('tp2_price') or 0), 'status': 'open', 'size': qty,
                     'current_price': execution_price, 'opened_at': datetime.now(timezone.utc).isoformat(),
-                    'mode': 'paper', 'rule_code': order.get('rule_code', 'SWING'),
-                    'market_type': resolved_market_type
+                    'mode': trade_mode, 'rule_code': order.get('rule_code', 'SWING'),
+                    'market_type': resolved_market_type,
+                    'order_id': live_order_id,
+                    'sl_exchange_order_id': live_order_id,
                 }
                 
             res = sb.table(table_name).insert(pos_data).execute()
@@ -860,9 +893,9 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                 p = res.data[0]
                 # Key by pos_id to support multiple positions per symbol
                 BOT_STATE.positions[p.get('id', symbol)] = p
-                log_info('SWING', f"🚀 POSICIÓN ABIERTA: {symbol} {direction.upper()} (ID: {p.get('id')})")
+                log_info('SWING', f"🚀 POSICIÓN [{trade_mode.upper()}] ABIERTA: {symbol} {direction.upper()} (ID: {p.get('id')})")
         except Exception as e:
             log_error('SWING', f"Error abriendo posición swing: {e}")
 
-async def execute_limit_order_real(order, execution_price, binance_client, sb):
-    log_info('SWING', f"{order['symbol']}: Real mode execution not implemented here.")
+execute_limit_order = execute_limit_order_paper
+execute_limit_order_real = execute_limit_order_paper

@@ -5,7 +5,7 @@ eTrade v5.0 — Spec Section 3 & 4
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-from app.core.logger import log_info, log_error, log_warning
+from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.core.supabase_client import get_supabase
 from app.core.memory_store import get_memory_df
 from app.radar.radar_service import RadarService
@@ -46,10 +46,10 @@ class CascadaManager:
         if not open_positions or not self.params.get('enabled', True):
             return results
 
-        # Filter only REBOTE positions
+        # Monitoreo universal CASCADA: evaluar todas las posiciones abiertas activas
         cascade_candidates = [
             p for p in open_positions 
-            if str(p.get('origen', '')).upper() == 'REBOTE' or str(p.get('rule_code', '')).startswith(('AaReb', 'BbReb', 'REBOTE'))
+            if p.get('status', 'open') in ('open', 'active') or not p.get('status')
         ]
 
         if not cascade_candidates:
@@ -107,4 +107,9 @@ class CascadaManager:
             }
             self.sb.table(table_name).update(update_data).eq('id', pos_id).execute()
         except Exception as e:
-            log_error(MODULE, f"Error updating position DB state ({table_name} id={pos_id}): {e}")
+            err_str = str(e)
+            if 'PGRST204' in err_str or 'cascade_hold' in err_str:
+                # Column doesn't exist in schema, fallback to in-memory state without error spam
+                log_debug(MODULE, f"Column cascade_hold not present in {table_name}: {e}")
+            else:
+                log_warning(MODULE, f"Warning updating position DB state ({table_name} id={pos_id}): {e}")

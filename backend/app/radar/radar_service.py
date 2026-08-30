@@ -14,7 +14,9 @@ from app.radar.slope_classifier import classify_slope, get_slope_matrix_interpre
 from app.radar.crossover_detector import (
     detect_ema_crossovers, 
     detect_fibonacci_crossover, 
-    detect_impulse_candle
+    detect_impulse_candle,
+    detect_bollinger_squeeze_pierce,
+    detect_extremo_opportunity
 )
 from app.radar.event_bus import RadarEventBus
 from app.radar.logger import log_radar_event, _sanitize_for_json
@@ -192,6 +194,26 @@ class RadarService:
                 impulse_event['timeframe'] = tf_primary
                 self.event_bus.publish(sym, impulse_event)
                 log_radar_event(sym, impulse_event)
+
+            # 4.5 Detect Bollinger Squeeze & Extreme Piercing
+            bb_events = detect_bollinger_squeeze_pierce(df)
+            for bb_ev in bb_events:
+                bb_ev['symbol'] = sym
+                bb_ev['timeframe'] = tf_primary
+                self.event_bus.publish(sym, bb_ev)
+                log_radar_event(sym, bb_ev)
+
+            # 4.8 Detect Autonomous Extremo Sniper Opportunity (BB_EXTREMO_SNIPER)
+            df_1d_snap = get_memory_df(sym, '1d')
+            is_forex = sym in ('EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD', 'EURGBP', 'EURJPY', 'GBPJPY') or 'XAU' in sym or 'GOLD' in sym or (len(sym) == 6 and not sym.endswith('USDT') and not sym.endswith('USDC'))
+            sniper_op = detect_extremo_opportunity(df, df_1d_snap, symbol=sym, is_forex=is_forex)
+            if sniper_op:
+                sniper_op['event_type'] = 'OPORTUNIDAD_EXTREMO_SNIPER'
+                sniper_op['timeframe'] = tf_primary
+                sniper_op['timestamp'] = datetime.now(timezone.utc).isoformat()
+                self.event_bus.publish(sym, sniper_op)
+                log_radar_event(sym, sniper_op)
+                log_info(MODULE, f"🎯 [RADAR SNIPER] {sym} {sniper_op['side'].upper()} LIMIT @ {sniper_op['limit_price']} | {sniper_op['detail']}")
 
             # 5. Local Regime 15m (Bullish / Bearish / Neutral)
             last_closed = df.iloc[-2]
