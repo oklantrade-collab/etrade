@@ -678,8 +678,8 @@ def evaluate_dynamic_tp_v6(
         curr_pnl_pips = (entry_price - current_price) / pip_size if not is_crypto else 0.0
         curr_pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
 
-    # 🛡️ Blindaje de Take Profit: No activar salidas de toma de ganancias si la posición está en pérdida o breakeven
-    is_in_profit = (curr_pnl_pct > 0.05) if is_crypto else (curr_pnl_pips >= 1.0)
+    # 🛡️ Blindaje de Take Profit: No activar salidas de toma de ganancias con ganancias ínfimas (Forex min 12.0 pips, Crypto min +0.15%)
+    is_in_profit = (curr_pnl_pct >= 0.15) if is_crypto else (curr_pnl_pips >= 12.0)
     if not is_in_profit:
         return res_default
 

@@ -1662,8 +1662,8 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
             # 6b.6 Sistema Dinámico de Take Profit v6 (5 Reglas de Clímax, Reversión SIPV y Anti-Giveback)
             if not position.get('recovery_mode'):
+                # 6. REBOTE & ADUANA: Clímax de Salida en Bandas Extremas Forex (LOWER_5/6 o UPPER_5/6)
                 try:
-                    from app.strategy.profit_capture import evaluate_dynamic_tp_v6
                     entry_pr = float(position.get('avg_entry_price') or position.get('entry_price') or 0)
                     if entry_pr > 0:
                         pip_size_local = PIP_SIZES.get(symbol, 0.0001)
@@ -1673,12 +1673,58 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                         position['max_pnl_pips'] = max_pips_seen
                         
                         df_15m = get_memory_df(symbol, '15m')
+                        df_5m = get_memory_df(symbol, '5m')
+
+                        # ── 6a. Evaluación de Clímax por REBOTE & ADUANA ──
+                        if df_15m is not None and not df_15m.empty:
+                            from app.rebote_aduana.rebote_engine import ReboteEngine
+                            from app.rebote_aduana.aduana_exit_gate import GLOBAL_ADUANA_EXIT_GATE, ExitOrderRequest
+                            _reb_engine = ReboteEngine()
+                            climax_exit, climax_reason, climax_meta = _reb_engine.evaluate_climax_exit(
+                                symbol=symbol,
+                                direction=side,
+                                current_price=current_price,
+                                df_15m=df_15m,
+                                df_5m=df_5m,
+                                position=position,
+                                snap=snap
+                            )
+                            if climax_exit and pnl_pips_local >= 10.0:
+                                req_climax = ExitOrderRequest(
+                                    position_id=str(position.get('id') or position.get('ctrader_pos_id')),
+                                    symbol=symbol,
+                                    side='buy' if side == 'short' else 'sell',
+                                    order_type='MARKET',
+                                    price=current_price,
+                                    volume=float(position.get('lots') or position.get('size') or 0.01),
+                                    classification='ACTIVA',
+                                    module_origin='CLIMAX_REBOTE_EXIT',
+                                    metadata=climax_meta
+                                )
+                                arb_res = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_climax)
+                                if arb_res.get('approved'):
+                                    log_info(MODULE, f"🎯 [FOREX ADUANA / REBOTE EXIT] {climax_reason}")
+                                    await _execute_paper_close(position, current_price, 'rebote_climax'[:20], sb, snap=snap)
+                                    
+                                    from app.workers.alerts_service import send_telegram_message
+                                    await send_telegram_message(
+                                        f"🎯 FOREX REBOTE + ADUANA EXIT [{symbol}]\n"
+                                        f"Dirección: {side.upper()}\n"
+                                        f"Precio Cierre: {current_price:.5f}\n"
+                                        f"PnL: {pnl_pips_local:+.1f} pips (+{climax_meta.get('pnl_pct', 0.0):.2f}%)\n"
+                                        f"Motivo: {climax_reason}"
+                                    )
+                                    continue
+
+                        # ── 6b. Dynamic TP v6 con MTF Trend Guard ──
+                        from app.strategy.profit_capture import evaluate_dynamic_tp_v6
                         tp_res = evaluate_dynamic_tp_v6(
                             symbol=symbol,
                             side=side,
                             current_price=current_price,
                             entry_price=entry_pr,
                             df_15m=df_15m,
+                            df_5m=df_5m,
                             snap=snap,
                             max_pnl_pips=max_pips_seen,
                             partial_already_taken=position.get('partial_closed', False),
@@ -1704,7 +1750,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                                     sb.table('forex_positions').update({'sl_price': new_sl_be, 'sl_type': 'be_after_partial'}).eq('id', position['id']).execute()
                                 except: pass
                             else:
-                                await _execute_paper_close(position, current_price, f"tp_{tp_res['rule_code'].lower()}", sb)
+                                await _execute_paper_close(position, current_price, f"tp_{tp_res['rule_code'].lower()}"[:20], sb)
                                 log_info(MODULE, f"🎯 [DYNAMIC TP v6 CLOSE] [{symbol}]: Cierre total por {tp_res['rule_code']} (+{pnl_pips_local:.1f} pips) - {tp_res['reason']}")
                                 await send_telegram_message(
                                     f"🎯 FOREX TAKE PROFIT v6 [{symbol}]\n"

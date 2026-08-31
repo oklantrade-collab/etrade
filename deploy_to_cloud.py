@@ -60,6 +60,7 @@ files_to_sync = [
     "tests/test_rebote_engine.py",
     "tests/test_aduana_validator.py",
     "tests/test_rebote_climax_exit.py",
+    "tests/test_forex_rebote_climax_guard.py",
     "tests/test_breakpoint_detector.py",
     "app/tests/test_bb_squeeze_confluence.py",
     "app/tests/test_aduana_entry_guards.py",
