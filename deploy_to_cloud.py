@@ -345,7 +345,7 @@ def deploy():
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
         f"root@{SERVER_IP}",
-        "systemctl restart etrade-api etrade-forex etrade-forex-scheduler etrade-crypto etrade-stocks"
+        "systemctl restart --no-block etrade-api etrade-forex etrade-forex-scheduler etrade-crypto etrade-stocks"
     ]
     subprocess.run(restart_cmd, check=True)
     
