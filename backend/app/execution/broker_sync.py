@@ -111,9 +111,8 @@ class BrokerSynchronizer:
                     db_p = db_symbols_map[sym]
                     upd_data = {
                         "current_price": b_pos["mark_price"],
-                        "unrealized_pnl": b_pos["unrealized_pnl"],
+                        "unrealized_pnl": round(b_pos["unrealized_pnl"], 4),
                         "size": b_pos["size"],
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
                     }
                     if b_pos["entry_price"] > 0 and float(db_p.get("entry_price") or 0) == 0:
                         upd_data["entry_price"] = b_pos["entry_price"]
@@ -135,7 +134,7 @@ class BrokerSynchronizer:
                         "take_profit": tp_p,
                         "tp_full_price": tp_p,
                         "tp_partial_price": (entry_p + tp_p) / 2.0,
-                        "unrealized_pnl": b_pos["unrealized_pnl"],
+                        "unrealized_pnl": round(b_pos["unrealized_pnl"], 4),
                         "realized_pnl": 0.0,
                         "status": "open",
                         "mode": "live",
@@ -170,7 +169,7 @@ class BrokerSynchronizer:
                         close_data = {
                             "status": "closed",
                             "closed_at": datetime.now(timezone.utc).isoformat(),
-                            "close_reason": "closed_on_binance_exchange",
+                            "close_reason": "binance_closed"[:20],
                             "unrealized_pnl": 0.0,
                         }
                         sb.table("positions").update(close_data).eq("id", db_p["id"]).execute()

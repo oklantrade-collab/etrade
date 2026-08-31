@@ -1006,8 +1006,8 @@ async def check_open_positions_5m(
                     
                     # Recargar posición local para verificar si EREP ya está activo
                     fresh_pos = supabase.table('positions').select('erep_active', 'erep_phase').eq('id', pos['id']).execute()
-                    if fresh_pos.data and (fresh_pos.data[0].get('erep_active') or fresh_pos.data[0].get('erep_phase', 0) > 0):
-                        # Si EREP está activo, salteamos el resto de las evaluaciones normales
+                    if fresh_pos.data and fresh_pos.data[0].get('erep_active'):
+                        # Si EREP está activamente ejecutándose, salteamos el resto de las evaluaciones normales
                         continue
                 except Exception as erep_err:
                     log_warning(MODULE, f"Error checking EREP for {norm_symbol}: {erep_err}")
@@ -1232,6 +1232,53 @@ async def check_open_positions_5m(
                                 GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_tp)
                 except Exception as ancla_err:
                     log_warning(MODULE, f"ANCLA monitor error for {symbol}: {ancla_err}")
+
+                # ── 1.5 REBOTE & ADUANA: Salida por Clímax en Bandas Extremas (LOWER_5/6 o UPPER_5/6) ──
+                try:
+                    df_15m_reb = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+                    df_5m_reb = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
+                    if df_15m_reb is not None and not df_15m_reb.empty:
+                        from app.rebote_aduana.rebote_engine import ReboteEngine
+                        from app.rebote_aduana.aduana_exit_gate import GLOBAL_ADUANA_EXIT_GATE, ExitOrderRequest
+                        _reb_engine = ReboteEngine()
+                        climax_exit, climax_reason, climax_meta = _reb_engine.evaluate_climax_exit(
+                            symbol=norm_symbol,
+                            direction=side,
+                            current_price=price,
+                            df_15m=df_15m_reb,
+                            df_5m=df_5m_reb,
+                            position=pos,
+                            snap=current_snap_obj
+                        )
+                        if climax_exit:
+                            req_climax = ExitOrderRequest(
+                                position_id=str(pos['id']),
+                                symbol=norm_symbol,
+                                side='buy' if side in ('short', 'sell') else 'sell',
+                                order_type='MARKET',
+                                price=price,
+                                volume=float(pos.get('size') or pos.get('lots') or 0),
+                                classification='ACTIVA',
+                                module_origin='CLIMAX_REBOTE_EXIT',
+                                metadata=climax_meta
+                            )
+                            arb_res = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_climax)
+                            if arb_res.get('approved'):
+                                log_info(MODULE, f"🎯 [ADUANA / REBOTE EXIT] {climax_reason}")
+                                await _execute_paper_close(pos, price, 'rebote_climax'[:20], supabase, snap=current_snap_obj)
+                                events.append({'symbol': symbol, 'event': 'climax_rebote_exit'})
+                                
+                                from app.workers.alerts_service import send_telegram_message
+                                await send_telegram_message(
+                                    f"🎯 REBOTE + ADUANA EXIT [{norm_symbol}]\n"
+                                    f"Dirección: {side.upper()}\n"
+                                    f"Precio Cierre: ${price:.4f}\n"
+                                    f"PnL: +{climax_meta.get('pnl_pct', 0.0):.2f}%\n"
+                                    f"Motivo: {climax_reason}"
+                                )
+                                continue
+                except Exception as reb_climax_err:
+                    log_warning(MODULE, f"Error en evaluación REBOTE/ADUANA Clímax para {symbol}: {reb_climax_err}")
 
                 # 2. TAKE PROFIT PARTIAL (50% Close)
                 is_tp_p = (side == 'long' and price >= tp_p) or (side == 'short' and price <= tp_p) if (tp_p > 0 and not pos.get('partial_closed')) else False
@@ -2158,7 +2205,7 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         pips_calc = ((price - entry) / pip_sz if is_buy else (entry - price) / pip_sz) if (price > 0 and entry > 0 and pip_sz > 0) else 0.0
         close_update = {
             'status': 'closed',
-            'close_reason': reason[:50],
+            'close_reason': reason[:20],
             'current_price': price,
             'closed_at': datetime.now(timezone.utc).isoformat(),
             'pnl_usd': round(total_pnl, 2),
@@ -2167,7 +2214,7 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
     else:
         close_update = {
             'status': 'closed',
-            'close_reason': reason[:50],
+            'close_reason': reason[:20],
             'current_price': price,
             'closed_at': datetime.now(timezone.utc).isoformat(),
             'realized_pnl': round(total_pnl, 4),

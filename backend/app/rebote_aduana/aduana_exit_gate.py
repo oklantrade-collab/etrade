@@ -64,6 +64,8 @@ class AduanaExitGatekeeper:
         "SLV": 1,
         "SLVM": 1,
         "ANCLA_SL": 2,
+        "REBOTE_CLIMAX": 3,
+        "CLIMAX_REBOTE_EXIT": 3,
         "ANCLA_TP1": 3,
         "ANCLA_TP2": 3,
         "CASCADA": 4,

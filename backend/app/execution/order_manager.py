@@ -161,81 +161,54 @@ def execute_trade(
         tick_size
     )
 
-    # PASO 4 — Colocar OCO Order (SL + TP juntos) SOLO SI ESTÁ FILLED
+    # PASO 4 — Colocar STOP LOSS de Resguardo en Binance (Sin TP estático que corte el recorrido)
     oco_side = 'SELL' if oco_params['side'] == 'BUY' else 'BUY'
-    oco_list_id = None
+    sl_placed = False
 
     if is_filled:
         try:
-            oco_order = binance_client.create_oco_order(
+            # Colocar orden de STOP LOSS en Binance para resguardo contra caídas/subidas abruptas
+            sl_order = binance_client.create_order(
                 symbol=sym_norm,
                 side=oco_side,
+                type='STOP_LOSS_LIMIT',
                 quantity=oco_params['quantity'],
-                price=str(tp_price_final),
+                price=str(sl_limit_final),
                 stopPrice=str(sl_price_final),
-                stopLimitPrice=str(sl_limit_final),
-                stopLimitTimeInForce='GTC'
+                timeInForce='GTC'
             )
-            oco_list_id = str(oco_order.get('orderListId', ''))
-            # Actualizar orden con OCO ID
+            sl_exchange_id = str(sl_order.get('orderId', ''))
+            sl_placed = True
+            loguear(logging.INFO, f"🛡️ Stop Loss de protección colocado en Binance para {sym_norm} @ {sl_price_final} (ID: {sl_exchange_id}). TP gestionado dinámicamente por REBOTE/ADUANA.")
+            
+            # Actualizar orden en Supabase
             supabase_client.table('orders').update({
-                'oco_list_client_id': oco_list_id,
                 'stop_loss_price': sl_price_final,
                 'take_profit_price': tp_price_final,
                 'status': 'open'
             }).eq('id', order_id).execute()
-            
         except BinanceAPIException as e:
-            loguear(logging.CRITICAL, 
-                f'⚠️ OCO FAILED para {sym_norm}. Posición abierta SIN SL/TP: {e}')
-            
+            loguear(logging.CRITICAL, f"⚠️ Error colocando SL de protección en Binance para {sym_norm}: {e}")
             supabase_client.table('alert_events').insert({
-                'event_type': 'oco_failed',
+                'event_type': 'sl_placement_failed',
                 'symbol': sym_norm,
-                'message': f'OCO ORDER FAILED - posición sin protección: {str(e)}',
+                'message': f'SL Placement Failed: {str(e)}',
                 'severity': 'critical',
                 'data': { 'order_id': order_id, 'error': str(e) }
             }).execute()
-        
-        # Intentar colocar solo el stop loss como fallback
-        try:
-            if oco_side == 'SELL':
-                binance_client.create_order(
-                    symbol=sym_norm,
-                    side='SELL',
-                    type='STOP_LOSS_LIMIT',
-                    quantity=oco_params['quantity'],
-                    price=str(sl_limit_final),
-                    stopPrice=str(sl_price_final),
-                    timeInForce='GTC'
-                )
-                loguear(logging.WARNING, 'Fallback SL colocado exitosamente')
-            else:
-                binance_client.create_order(
-                    symbol=sym_norm,
-                    side='BUY',
-                    type='STOP_LOSS_LIMIT',
-                    quantity=oco_params['quantity'],
-                    price=str(sl_limit_final),
-                    stopPrice=str(sl_price_final),
-                    timeInForce='GTC'
-                )
-                loguear(logging.WARNING, 'Fallback SL colocado exitosamente')
-        except:
-            loguear(logging.CRITICAL, 'Fallback SL también falló. Intervención manual requerida.')
     else:
-        loguear(logging.INFO, f'Orden {order_id} LIMIT {sym_norm} colocada. Esperando a que se llene (pending_fill) para colocar OCO.')
+        loguear(logging.INFO, f'Orden {order_id} LIMIT {sym_norm} colocada. Esperando fill (pending_fill) para colocar SL.')
 
-    # PASO 5 — Obtener niveles Fibonacci finales de market_snapshot
+    # PASO 5 — Obtener niveles Fibonacci extremos (UPPER_5/6 o LOWER_5/6) de market_snapshot para REBOTE
     try:
         snap_res = supabase_client.table('market_snapshot').select('*').eq('symbol', sym_norm).single().execute()
         snap = snap_res.data or {}
         if oco_params['side'] == 'BUY':
-            tp_partial = snap.get('upper_5', tp_price_final * 0.98) # fallback if snap missing
-            tp_full    = snap.get('upper_6', tp_price_final)
+            tp_partial = float(snap.get('upper_5') or (tp_price_final * 0.98))
+            tp_full    = float(snap.get('upper_6') or tp_price_final)
         else:
-            tp_partial = snap.get('lower_5', tp_price_final * 1.02)
-            tp_full    = snap.get('lower_6', tp_price_final)
+            tp_partial = float(snap.get('lower_5') or (tp_price_final * 1.02))
+            tp_full    = float(snap.get('lower_6') or tp_price_final)
     except:
         tp_partial = tp_price_final * (0.98 if oco_params['side'] == 'BUY' else 1.02)
         tp_full    = tp_price_final

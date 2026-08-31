@@ -300,3 +300,84 @@ class ReboteEngine:
         result.tp_price = tp
         
         return result
+
+    def evaluate_climax_exit(
+        self,
+        symbol: str,
+        direction: str,
+        current_price: float,
+        df_15m: pd.DataFrame,
+        df_5m: Optional[pd.DataFrame] = None,
+        position: Optional[dict] = None,
+        snap: Optional[dict] = None
+    ) -> tuple:
+        """
+        Evalúa si una posición abierta ha alcanzado el clímax de recorrido banda a banda
+        (LOWER_5/6 para SHORT o UPPER_5/6 para LONG) y presenta confirmación técnica de rebote
+        para emitir la orden de cierre con máxima ganancia.
+        Retorna: (should_exit: bool, reason: str, metadata: dict)
+        """
+        if df_15m is None or df_15m.empty or len(df_15m) < 20 or current_price <= 0:
+            return False, "Datos insuficientes para evaluar clímax", {}
+
+        pos = position or {}
+        entry_p = float(pos.get('entry_price') or pos.get('avg_entry_price') or current_price)
+        dir_clean = str(direction).lower()
+        is_long = dir_clean in ('long', 'buy')
+        
+        pnl_pct = ((current_price - entry_p) / entry_p * 100.0) if is_long else ((entry_p - current_price) / entry_p * 100.0)
+        
+        # 1. Obtener niveles de Bollinger y Fibonacci
+        col = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else None)
+        closes = pd.to_numeric(df_15m[col], errors='coerce').dropna()
+        sma20 = closes.rolling(20).mean()
+        std20 = closes.rolling(20).std()
+        upper_bb = float((sma20 + 2.0 * std20).iloc[-1]) if len(sma20) > 0 else 0.0
+        lower_bb = float((sma20 - 2.0 * std20).iloc[-1]) if len(sma20) > 0 else 0.0
+
+        snap_data = snap or {}
+        upper_5 = float(snap_data.get('upper_5') or upper_bb)
+        upper_6 = float(snap_data.get('upper_6') or (upper_bb * 1.01))
+        lower_5 = float(snap_data.get('lower_5') or lower_bb)
+        lower_6 = float(snap_data.get('lower_6') or (lower_bb * 0.99))
+
+        # 2. Calcular pendiente de EMA3
+        ema3_series = closes.ewm(span=3, adjust=False).mean()
+        slope_ema3 = (float(ema3_series.iloc[-1]) - float(ema3_series.iloc[-2])) / float(ema3_series.iloc[-2]) * 100.0 if len(ema3_series) >= 2 else 0.0
+
+        # 3. Evaluar clímax para SHORT
+        if not is_long:
+            # SHORT: Buscamos piso extremo (LOWER_5, LOWER_6 o Banda Inferior)
+            is_lower_reached = (current_price <= lower_5) or (current_price <= lower_6) or (lower_bb > 0 and current_price <= lower_bb * 1.002)
+            
+            # Confirmación de rebote: giro alcista de EMA3 o mecha de absorción en 5m/15m
+            wick_confirmed, _ = self._check_wick_rejection(df_15m, df_5m, 'long') # vela de rechazo alcista
+            has_rebound_turn = (slope_ema3 > 0.01) or wick_confirmed
+            
+            if is_lower_reached and has_rebound_turn and pnl_pct > 0.3:
+                return True, f"🎯 REBOTE Clímax SHORT confirmado: Precio en zona LOWER ({current_price:.4f} <= {lower_5:.4f}) con rebote alcista detectado (+{pnl_pct:.2f}% PnL)", {
+                    "climax_type": "SHORT_LOWER_REBOUND",
+                    "price": current_price,
+                    "target_lower": lower_5,
+                    "pnl_pct": pnl_pct
+                }
+
+        # 4. Evaluar clímax para LONG
+        else:
+            # LONG: Buscamos techo extremo (UPPER_5, UPPER_6 o Banda Superior)
+            is_upper_reached = (current_price >= upper_5) or (current_price >= upper_6) or (upper_bb > 0 and current_price >= upper_bb * 0.998)
+            
+            # Confirmación de giro: giro bajista de EMA3 o mecha de rechazo superior
+            wick_confirmed, _ = self._check_wick_rejection(df_15m, df_5m, 'short') # vela de rechazo bajista
+            has_exhaustion_turn = (slope_ema3 < -0.01) or wick_confirmed
+            
+            if is_upper_reached and has_exhaustion_turn and pnl_pct > 0.3:
+                return True, f"🎯 REBOTE Clímax LONG confirmado: Precio en zona UPPER ({current_price:.4f} >= {upper_5:.4f}) con agotamiento/giro detectado (+{pnl_pct:.2f}% PnL)", {
+                    "climax_type": "LONG_UPPER_EXHAUSTION",
+                    "price": current_price,
+                    "target_upper": upper_5,
+                    "pnl_pct": pnl_pct
+                }
+
+        return False, "Acompañando recorrido hacia bandas extremas", {}
+
