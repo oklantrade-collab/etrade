@@ -33,8 +33,14 @@ def get_client() -> BinanceClient:
         _client = BinanceClient(api_key, api_secret, testnet=testnet)
         try:
             _client.ping()
+            import time
+            srv_time = _client.futures_time()
+            local_time = int(time.time() * 1000)
+            _client.TIME_OFFSET = int(srv_time['serverTime'] - local_time)
         except BinanceAPIException as e:
             raise ConnectionError(f'Binance connection failed: {e}')
+        except Exception:
+            pass
     return _client
 
 def get_account_balance(client: BinanceClient, asset: str = 'USDT') -> float:

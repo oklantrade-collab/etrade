@@ -69,8 +69,8 @@ class BrokerSynchronizer:
             )
             client = await provider._get_async_client()
 
-            # 1. Obtener todas las posiciones de Binance Futures
-            positions_raw = await client.futures_position_information()
+            # 1. Obtener todas las posiciones de Binance Futures (con recvWindow ampliado de 60s)
+            positions_raw = await client.futures_position_information(recvWindow=60000)
             active_binance_map: Dict[str, Dict[str, Any]] = {}
 
             for p in positions_raw:
@@ -174,7 +174,7 @@ class BrokerSynchronizer:
                         # Intentar obtener el PnL y precio de ejecución exacto del último trade en Binance
                         realized_pnl = 0.0
                         try:
-                            trades = await client.futures_account_trades(symbol=sym, limit=5)
+                            trades = await client.futures_account_trades(symbol=sym, limit=5, recvWindow=60000)
                             if trades:
                                 recent_trades = [t for t in trades if float(t.get('realizedPnl', 0)) != 0]
                                 if recent_trades:
@@ -229,7 +229,7 @@ class BrokerSynchronizer:
         """
         cancelled = []
         try:
-            open_orders = await client.futures_get_open_orders()
+            open_orders = await client.futures_get_open_orders(recvWindow=60000)
             now_ts = datetime.now(timezone.utc).timestamp() * 1000
             for o in open_orders:
                 sym = o.get('symbol', '')
@@ -240,7 +240,7 @@ class BrokerSynchronizer:
                 # Si el símbolo no tiene posición abierta o la orden lleva más de 15 minutos sin llenarse
                 if sym not in active_binance_symbols or age_minutes > 15:
                     try:
-                        await client.futures_cancel_order(symbol=sym, orderId=oid)
+                        await client.futures_cancel_order(symbol=sym, orderId=oid, recvWindow=60000)
                         cancelled.append(f"{sym}_{oid}")
                         log_info(f"🧹 [ZOMBIE ORDER CLEANER] Orden huérfana cancelada en Binance: {sym} (ID={oid}, edad={age_minutes:.1f}m)", MODULE)
                     except Exception as c_err:
