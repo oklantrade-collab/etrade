@@ -808,6 +808,7 @@ async def check_protections(
             current_price=current_price,
             entry_price=entry_px,
             df_15m=df_15m,
+            df_5m=df_5m,
             snap=snap,
             max_pnl_pct=max_pct_seen,
             partial_already_taken=position.get('partial_closed', False),

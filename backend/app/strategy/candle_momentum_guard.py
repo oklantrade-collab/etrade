@@ -252,8 +252,13 @@ def should_allow_exit(
         pnl_pct = ((entry_p - current_price) / entry_p) * 100.0
         pnl_pips = (entry_p - current_price) / pip_sz if pip_sz > 0 else 0.0
 
+    # Si la regla de salida es de Toma de Beneficio / Holding y el trade está en pérdida, BLOQUEAR
+    is_take_profit_or_hold = any(exit_rule_id.lower().startswith(pfx) for pfx in ('tp_', 'hold_', 'range_', 'bb33_', 'sipv_'))
+    if is_take_profit_or_hold and pnl_pct <= 0:
+        return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': No se permite toma de ganancia con PnL <= 0 ({pnl_pct:.2f}%)."
+
     if pnl_pct <= 0:
-        return True, f"Posición en pérdida ({pnl_pct:.2f}%); el guardián de momentum no bloquea salidas de control de riesgo."
+        return True, f"Posición en pérdida ({pnl_pct:.2f}%); el guardián de momentum no bloquea salidas de control de riesgo (SL)."
 
     if df_15m is None or len(df_15m) < 20:
         return True, "Datos de 15M insuficientes para evaluar momentum; permitir salida."
@@ -281,7 +286,6 @@ def should_allow_exit(
     # ── PROTECCIÓN ESPECIAL PARA REBOTE BANDA A BANDA ──
     if is_rebote_strategy:
         if is_long:
-            # En LONG Rebote: proteger el recorrido hasta tocar la Banda Superior o sobrecompra
             is_target_reached = (upper_bb_val > 0 and current_price >= upper_bb_val * 0.998) or (pnl_pct >= 8.0)
             if is_target_reached:
                 return True, f"Rebote Traversal LONG: Objetivo alcanzado en Banda Superior ({current_price:.4f} >= {upper_bb_val:.4f}). Salida con beneficio permitida."
@@ -289,7 +293,6 @@ def should_allow_exit(
                 _handle_blocked_exit(symbol, pos_id, exit_rule_id, "LONG_REBOTE", pnl_pct, ema3_15, ema9_15, ema20_15, slope_ema20)
                 return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': Acompañando Rebote Traversal hacia Bollinger Superior (PnL: +{pnl_pct:.2f}%)."
         else:
-            # En SHORT Rebote: proteger el recorrido hasta tocar la Banda Inferior o sobreventa
             is_target_reached = (lower_bb_val > 0 and current_price <= lower_bb_val * 1.002) or (pnl_pct >= 8.0)
             if is_target_reached:
                 return True, f"Rebote Traversal SHORT: Objetivo alcanzado en Banda Inferior ({current_price:.4f} <= {lower_bb_val:.4f}). Salida con beneficio permitida."
@@ -297,8 +300,8 @@ def should_allow_exit(
                 _handle_blocked_exit(symbol, pos_id, exit_rule_id, "SHORT_REBOTE", pnl_pct, ema3_15, ema9_15, ema20_15, slope_ema20)
                 return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': Acompañando Rebote Traversal hacia Bollinger Inferior (PnL: +{pnl_pct:.2f}%)."
 
-    # ── PROTECCIÓN ANTI-ROUND TRIP V2 PURO (+4.0% en Crypto / 25 pips en Forex) ──
-    art_threshold = 25.0 if is_forex else 4.0
+    # ── PROTECCIÓN ANTI-ROUND TRIP V2 ADAPTATIVO (BTC/ETH: +3%, ALTS: +1.8%, FOREX: 15p / 40p) ──
+    art_threshold = get_anti_round_trip_threshold(symbol, is_forex)
     is_art_triggered = (pnl_pips >= art_threshold) if is_forex else (pnl_pct >= art_threshold)
     if is_art_triggered:
         if is_long and current_price < ema9_15:
@@ -310,11 +313,13 @@ def should_allow_exit(
     has_div, div_msg = detect_rsi_divergence(df_15m, is_long, lookback=15)
 
     # ════════════════════════════════════════════════════════════════════════
-    # EVALUACIÓN PARA POSICIONES LONG
+    # EVALUACIÓN PARA POSICIONES LONG (15M y 5M)
     # ════════════════════════════════════════════════════════════════════════
     if is_long:
         is_strong_trend = (slope_ema20 > 0.02) and (ema3_15 > ema9_15 > ema20_15)
-        if is_strong_trend:
+        is_5m_bullish_cascade = (ema3_5 > 0 and ema9_5 > 0 and ema20_5 > 0) and (ema3_5 > ema9_5 > ema20_5)
+
+        if is_strong_trend or is_5m_bullish_cascade:
             # 1.1.1 Debilitamiento en 5M
             if (ema3_5 > 0 and ema9_5 > 0 and ema20_5 > 0) and (ema3_5 < ema9_5 < ema20_5):
                 return True, f"Long 1.1.1: Debilitamiento rápido en 5M confirmado (EMA3={ema3_5:.4f} < EMA9={ema9_5:.4f} < EMA20={ema20_5:.4f}). Salida permitida."
@@ -332,7 +337,7 @@ def should_allow_exit(
                 return True, f"Long 1.1.4: {div_msg}. Salida por divergencia técnica permitida."
 
             _handle_blocked_exit(symbol, pos_id, exit_rule_id, "LONG", pnl_pct, ema3_15, ema9_15, ema20_15, slope_ema20)
-            return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': Tendencia 15M fuerte para LONG. Dejando correr ganancias (+{pnl_pct:.2f}%)."
+            return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': Tendencia 15M/5M fuerte para LONG. Dejando correr ganancias (+{pnl_pct:.2f}%)."
 
         if (slope_ema20 <= 0.02) or is_compressed or has_div:
             return True, f"Long 1.2: Mercado lateral en 15M. Salida permitida."
@@ -340,14 +345,16 @@ def should_allow_exit(
             return True, f"Long 1.3: Tendencia 15M giró a la baja. Salida permitida."
 
     # ════════════════════════════════════════════════════════════════════════
-    # EVALUACIÓN PARA POSICIONES SHORT (INVERSO)
+    # EVALUACIÓN PARA POSICIONES SHORT (15M y 5M)
     # ════════════════════════════════════════════════════════════════════════
     else:
         is_strong_trend_short = (slope_ema20 < -0.02) and (ema3_15 < ema9_15 < ema20_15)
-        if is_strong_trend_short:
-            # 2.1.1 Debilitamiento en 5M
+        is_5m_bearish_cascade = (ema3_5 > 0 and ema9_5 > 0 and ema20_5 > 0) and (ema3_5 < ema9_5 < ema20_5)
+
+        if is_strong_trend_short or is_5m_bearish_cascade:
+            # 2.1.1 Debilitamiento en 5M (Rebote alcista)
             if (ema3_5 > 0 and ema9_5 > 0 and ema20_5 > 0) and (ema3_5 > ema9_5 > ema20_5):
-                return True, f"Short 2.1.1: Rebote rápido en 5M confirmado. Salida permitida."
+                return True, f"Short 2.1.1: Rebote rápido en 5M confirmado (EMA3={ema3_5:.4f} > EMA9={ema9_5:.4f} > EMA20={ema20_5:.4f}). Salida permitida."
 
             # 2.1.2 Bollinger Inferior + Rebote EMA3
             if (lower_bb_val > 0 and current_price < lower_bb_val) and (slope_ema3 > 0):
@@ -362,14 +369,12 @@ def should_allow_exit(
                 return True, f"Short 2.1.4: {div_msg}. Salida por divergencia técnica permitida."
 
             _handle_blocked_exit(symbol, pos_id, exit_rule_id, "SHORT", pnl_pct, ema3_15, ema9_15, ema20_15, slope_ema20)
-            return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': Tendencia 15M fuerte para SHORT. Dejando correr ganancias (+{pnl_pct:.2f}%)."
+            return False, f"MOMENTUM_GUARD BLOQUEA '{exit_rule_id}': Tendencia 15M/5M fuerte para SHORT. Dejando correr ganancias (+{pnl_pct:.2f}%)."
 
         if (slope_ema20 >= -0.02) or is_compressed or has_div:
             return True, f"Short 2.2: Mercado lateral en 15M. Salida permitida."
         if (slope_ema20 > 0.02) or (ema3_15 > ema9_15):
             return True, f"Short 2.3: Tendencia 15M giró al alza. Salida permitida."
-
-    return True, "Condición neutral; permitir salida."
 
     return True, "Condición neutral; permitir salida."
 

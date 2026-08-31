@@ -554,7 +554,7 @@ def evaluate_mtf_trend_guard(
 
         # ── 2. Evaluación para LONG ──
         if is_long:
-            # Caso 1: Tendencia 15m alcista fuerte (EMA3 > EMA9 y Slope > 0) -> BLINDAJE
+            # Caso 1: Tendencia 15m alcista fuerte (EMA3 > EMA9 y Slope > 0) -> BLINDAJE DIRECTO
             if ema3_15m > ema9_15m and slope_15m > 0:
                 return {
                     'should_block': True,
@@ -579,10 +579,16 @@ def evaluate_mtf_trend_guard(
                         'should_block': True,
                         'reason': f"Transición 5m LONG: Pendiente 15m aplanada pero microestructura 5m sobre EMA20 ({ema20_5m:.5f}). Mantener posición."
                     }
+            elif ema3_15m > ema9_15m:
+                # Sin 5m, si 15m EMA3 > EMA9 mantener blindaje
+                return {
+                    'should_block': True,
+                    'reason': f"Blindaje 15m LONG Activo: EMA3_15m ({ema3_15m:.5f}) > EMA9_15m ({ema9_15m:.5f}). Mantener Runner."
+                }
 
         # ── 3. Evaluación para SHORT ──
         else:
-            # Caso 1: Tendencia 15m bajista fuerte (EMA3 < EMA9 y Slope < 0) -> BLINDAJE
+            # Caso 1: Tendencia 15m bajista fuerte (EMA3 < EMA9 y Slope < 0) -> BLINDAJE DIRECTO
             if ema3_15m < ema9_15m and slope_15m < 0:
                 return {
                     'should_block': True,
@@ -607,6 +613,12 @@ def evaluate_mtf_trend_guard(
                         'should_block': True,
                         'reason': f"Transición 5m SHORT: Pendiente 15m aplanada pero microestructura 5m bajo EMA20 ({ema20_5m:.5f}). Mantener posición."
                     }
+            elif ema3_15m < ema9_15m:
+                # Sin 5m, si 15m EMA3 < EMA9 mantener blindaje
+                return {
+                    'should_block': True,
+                    'reason': f"Blindaje 15m SHORT Activo: EMA3_15m ({ema3_15m:.5f}) < EMA9_15m ({ema9_15m:.5f}). Mantener Runner."
+                }
 
         return {'should_block': False, 'reason': 'Sin bloqueo activo'}
     except Exception as e:
