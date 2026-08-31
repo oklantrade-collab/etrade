@@ -166,15 +166,43 @@ class BrokerSynchronizer:
                     # Solo cerrar si es posición live de crypto
                     is_paper = db_p.get("is_paper") or (db_p.get("mode") == "paper")
                     if not is_paper:
+                        entry_p = float(db_p.get("entry_price") or db_p.get("avg_entry_price") or 0)
+                        close_p = float(db_p.get("current_price") or entry_p)
+                        side_p = str(db_p.get("side") or "").lower()
+                        size_p = float(db_p.get("size") or 0)
+
+                        # Intentar obtener el PnL y precio de ejecución exacto del último trade en Binance
+                        realized_pnl = 0.0
+                        try:
+                            trades = await client.futures_account_trades(symbol=sym, limit=5)
+                            if trades:
+                                recent_trades = [t for t in trades if float(t.get('realizedPnl', 0)) != 0]
+                                if recent_trades:
+                                    last_t = recent_trades[-1]
+                                    realized_pnl = float(last_t.get('realizedPnl', 0))
+                                    close_p = float(last_t.get('price', close_p))
+                        except Exception as tr_err:
+                            log_warning(f"No se pudo consultar trades de Binance para {sym}: {tr_err}", MODULE)
+
+                        if realized_pnl == 0.0 and entry_p > 0 and close_p > 0 and size_p > 0:
+                            is_long_p = side_p in ('long', 'buy')
+                            realized_pnl = ((close_p - entry_p) * size_p) if is_long_p else ((entry_p - close_p) * size_p)
+
+                        pnl_pct = ((realized_pnl / (entry_p * size_p)) * 100.0) if (entry_p > 0 and size_p > 0) else 0.0
+
                         close_data = {
                             "status": "closed",
                             "closed_at": datetime.now(timezone.utc).isoformat(),
                             "close_reason": "binance_closed"[:20],
+                            "current_price": close_p,
+                            "realized_pnl": round(realized_pnl, 4),
+                            "realized_pnl_usd": round(realized_pnl, 4),
+                            "realized_pnl_pct": round(pnl_pct, 4),
                             "unrealized_pnl": 0.0,
                         }
                         sb.table("positions").update(close_data).eq("id", db_p["id"]).execute()
                         result["closed"].append(sym)
-                        log_info(f"🔄 Posición de {sym} ya cerrada en Binance -> Marcada como 'closed' en Supabase.", MODULE)
+                        log_info(f"🔄 Posición de {sym} cerrada en Binance -> PnL Realizado: ${realized_pnl:+.4f} ({pnl_pct:+.2f}%)", MODULE)
 
             # 5. LIMPIEZA DE ÓRDENES ZOMBI / HUÉRFANAS EN BINANCE FUTURES
             cleaned = await self.cleanup_zombie_orders(client, list(active_binance_map.keys()))
