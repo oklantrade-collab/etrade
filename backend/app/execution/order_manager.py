@@ -161,43 +161,20 @@ def execute_trade(
         tick_size
     )
 
-    # PASO 4 — Colocar STOP LOSS de Resguardo en Binance (Sin TP estático que corte el recorrido)
+    # PASO 4 — Registro de Orden y Protección en Software (ADUANA gestiona SL y TP)
     oco_side = 'SELL' if oco_params['side'] == 'BUY' else 'BUY'
-    sl_placed = False
 
     if is_filled:
-        try:
-            # Colocar orden de STOP LOSS en Binance para resguardo contra caídas/subidas abruptas
-            sl_order = binance_client.create_order(
-                symbol=sym_norm,
-                side=oco_side,
-                type='STOP_LOSS_LIMIT',
-                quantity=oco_params['quantity'],
-                price=str(sl_limit_final),
-                stopPrice=str(sl_price_final),
-                timeInForce='GTC'
-            )
-            sl_exchange_id = str(sl_order.get('orderId', ''))
-            sl_placed = True
-            loguear(logging.INFO, f"🛡️ Stop Loss de protección colocado en Binance para {sym_norm} @ {sl_price_final} (ID: {sl_exchange_id}). TP gestionado dinámicamente por REBOTE/ADUANA.")
-            
-            # Actualizar orden en Supabase
-            supabase_client.table('orders').update({
-                'stop_loss_price': sl_price_final,
-                'take_profit_price': tp_price_final,
-                'status': 'open'
-            }).eq('id', order_id).execute()
-        except BinanceAPIException as e:
-            loguear(logging.CRITICAL, f"⚠️ Error colocando SL de protección en Binance para {sym_norm}: {e}")
-            supabase_client.table('alert_events').insert({
-                'event_type': 'sl_placement_failed',
-                'symbol': sym_norm,
-                'message': f'SL Placement Failed: {str(e)}',
-                'severity': 'critical',
-                'data': { 'order_id': order_id, 'error': str(e) }
-            }).execute()
+        loguear(logging.INFO, f"🛡️ [ADUANA GATE] Posición abierta para {sym_norm} @ {avg_fill_price:.4f}. SLV ({sl_price_final}) y TP gestionados 100% en software por ADUANA. Ninguna orden pendiente enviada al broker.")
+        
+        # Actualizar orden en Supabase
+        supabase_client.table('orders').update({
+            'stop_loss_price': sl_price_final,
+            'take_profit_price': tp_price_final,
+            'status': 'open'
+        }).eq('id', order_id).execute()
     else:
-        loguear(logging.INFO, f'Orden {order_id} LIMIT {sym_norm} colocada. Esperando fill (pending_fill) para colocar SL.')
+        loguear(logging.INFO, f'Orden {order_id} LIMIT {sym_norm} colocada en el broker. Esperando fill para seguimiento de ADUANA.')
 
     # PASO 5 — Obtener niveles Fibonacci extremos (UPPER_5/6 o LOWER_5/6) de market_snapshot para REBOTE
     try:

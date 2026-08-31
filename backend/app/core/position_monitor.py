@@ -1159,17 +1159,8 @@ async def check_open_positions_5m(
                             'sl_activation_reason': sipv.get('pattern', 'sipv'),
                             'stop_loss':     sl_dynamic_price,
                         }).eq('id', pos['id']).execute()
-                        if pos.get('mode') != 'paper' and not pos.get('is_paper'):
-                            from app.strategy.dynamic_sl_manager import send_sl_to_exchange
-                            await send_sl_to_exchange(
-                                symbol      = norm_symbol,
-                                side        = side,
-                                sl_price    = sl_dynamic_price,
-                                quantity    = pos.get('size'),
-                                position_id = pos['id'],
-                                supabase    = supabase,
-                                market_type = 'crypto_futures'
-                            )
+                        # Stop Loss dinámico registrado en Supabase para control y monitoreo continuo por ADUANA
+                        log_info(MODULE, f"🛡️ [ADUANA] Dynamic SL actualizado para {norm_symbol} @ {sl_dynamic_price:.6f} en software.")
                     except Exception as upd_e:
                         log_warning(MODULE, f"Silent dynamic SL update fail for {symbol}: {upd_e}")
 
