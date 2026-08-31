@@ -1072,19 +1072,32 @@ def build_market_data_dict(
     ema200 = float(last.get("ema5", last.get("ema_200", last.get("ema200", 0)))) if pd.notna(last.get("ema5")) or pd.notna(last.get("ema_200")) or pd.notna(last.get("ema200")) else 0.0
     
     bb_upper_slope_positive = False
+    bb_upper_slope_negative = False
     bb_lower_slope_negative = False
     bb_lower_slope_positive = False
-    bb_upper_col = "bb_upper" if "bb_upper" in df.columns else ("upper_6" if "upper_6" in df.columns else None)
-    bb_lower_col = "bb_lower" if "bb_lower" in df.columns else ("lower_6" if "lower_6" in df.columns else None)
-    if bb_upper_col and len(df) >= 2:
+    bb_upper_col = "bb_upper" if "bb_upper" in df.columns else ("upper_6" if "upper_6" in df.columns else ("upper_band" if "upper_band" in df.columns else None))
+    bb_lower_col = "bb_lower" if "bb_lower" in df.columns else ("lower_6" if "lower_6" in df.columns else ("lower_band" if "lower_band" in df.columns else None))
+    if bb_upper_col and len(df) >= 3:
+        bb_upper_s = pd.to_numeric(df[bb_upper_col], errors="coerce")
+        if pd.notna(bb_upper_s.iloc[-1]) and pd.notna(bb_upper_s.iloc[-2]) and pd.notna(bb_upper_s.iloc[-3]):
+            bb_upper_slope_positive = bb_upper_s.iloc[-1] > bb_upper_s.iloc[-2]
+            bb_upper_slope_negative = (bb_upper_s.iloc[-1] <= bb_upper_s.iloc[-2]) and (bb_upper_s.iloc[-2] <= bb_upper_s.iloc[-3])
+    elif bb_upper_col and len(df) >= 2:
         bb_upper_s = pd.to_numeric(df[bb_upper_col], errors="coerce")
         if pd.notna(bb_upper_s.iloc[-1]) and pd.notna(bb_upper_s.iloc[-2]):
             bb_upper_slope_positive = bb_upper_s.iloc[-1] > bb_upper_s.iloc[-2]
+            bb_upper_slope_negative = bb_upper_s.iloc[-1] < bb_upper_s.iloc[-2]
+
     if bb_lower_col and len(df) >= 3:
         bb_lower_s = pd.to_numeric(df[bb_lower_col], errors="coerce")
         if pd.notna(bb_lower_s.iloc[-1]) and pd.notna(bb_lower_s.iloc[-2]) and pd.notna(bb_lower_s.iloc[-3]):
             bb_lower_slope_negative = bb_lower_s.iloc[-1] < bb_lower_s.iloc[-2]
             bb_lower_slope_positive = (bb_lower_s.iloc[-1] >= bb_lower_s.iloc[-2]) and (bb_lower_s.iloc[-2] >= bb_lower_s.iloc[-3])
+    elif bb_lower_col and len(df) >= 2:
+        bb_lower_s = pd.to_numeric(df[bb_lower_col], errors="coerce")
+        if pd.notna(bb_lower_s.iloc[-1]) and pd.notna(bb_lower_s.iloc[-2]):
+            bb_lower_slope_negative = bb_lower_s.iloc[-1] < bb_lower_s.iloc[-2]
+            bb_lower_slope_positive = bb_lower_s.iloc[-1] > bb_lower_s.iloc[-2]
 
     ema3_ema9_trend_ok = (ema9 > ema20) or (ema3 > ema20)
     
@@ -1159,6 +1172,7 @@ def build_market_data_dict(
             and (float(last["close"]) <= ema3 * 1.002)
         ),
         "bb_upper_slope_positive": bb_upper_slope_positive,
+        "bb_upper_slope_negative": bb_upper_slope_negative,
         "bb_lower_slope_negative": bb_lower_slope_negative,
         "bb_lower_slope_positive": bb_lower_slope_positive,
         "ema_alignment_long": (ema3 > ema9) and (ema9 > ema20),
