@@ -58,7 +58,7 @@ class BrokerSynchronizer:
             api_secret = os.getenv("BINANCE_SECRET") or os.getenv("BINANCE_API_SECRET") or settings.binance_secret
 
             if not api_key or not api_secret:
-                log_warning("No hay credenciales configuradas para Binance Futures.", MODULE)
+                log_warning(MODULE, "No hay credenciales configuradas para Binance Futures.")
                 return {"status": "error", "message": "No credentials"}
 
             provider = BinanceCryptoProvider(
@@ -144,7 +144,7 @@ class BrokerSynchronizer:
                     }
                     ins_res = sb.table("positions").insert(new_pos_data).execute()
                     result["created"].append(sym)
-                    log_info(f"🔄 Posición externa de Binance detectada e importada a eTrade: {b_pos['side']} {b_pos['size']} {sym} @ {entry_p}", MODULE)
+                    log_info(MODULE, f"🔄 Posición externa de Binance detectada e importada a eTrade: {b_pos['side']} {b_pos['size']} {sym} @ {entry_p}")
 
                     # Notificar a Telegram si está activo
                     try:
@@ -158,7 +158,7 @@ class BrokerSynchronizer:
                             f"PnL: {b_pos['unrealized_pnl']:+.4f} USDT"
                         )
                     except Exception as tel_e:
-                        log_warning(f"No se pudo enviar alerta Telegram: {tel_e}", MODULE)
+                        log_warning(MODULE, f"No se pudo enviar alerta Telegram: {tel_e}")
 
             # 4. Detectar posiciones que estaban 'open' en Supabase pero ya NO existen en Binance (Cerradas en exchange)
             for sym, db_p in db_symbols_map.items():
@@ -182,7 +182,7 @@ class BrokerSynchronizer:
                                     realized_pnl = float(last_t.get('realizedPnl', 0))
                                     close_p = float(last_t.get('price', close_p))
                         except Exception as tr_err:
-                            log_warning(f"No se pudo consultar trades de Binance para {sym}: {tr_err}", MODULE)
+                            log_warning(MODULE, f"No se pudo consultar trades de Binance para {sym}: {tr_err}")
 
                         if realized_pnl == 0.0 and entry_p > 0 and close_p > 0 and size_p > 0:
                             is_long_p = side_p in ('long', 'buy')
@@ -202,7 +202,7 @@ class BrokerSynchronizer:
                         }
                         sb.table("positions").update(close_data).eq("id", db_p["id"]).execute()
                         result["closed"].append(sym)
-                        log_info(f"🔄 Posición de {sym} cerrada en Binance -> PnL Realizado: ${realized_pnl:+.4f} ({pnl_pct:+.2f}%)", MODULE)
+                        log_info(MODULE, f"🔄 Posición de {sym} cerrada en Binance -> PnL Realizado: ${realized_pnl:+.4f} ({pnl_pct:+.2f}%)")
 
             # 5. LIMPIEZA DE ÓRDENES ZOMBI / HUÉRFANAS EN BINANCE FUTURES
             cleaned = await self.cleanup_zombie_orders(client, list(active_binance_map.keys()))
@@ -214,9 +214,12 @@ class BrokerSynchronizer:
 
             await client.close_connection()
 
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            log_error(f"Error en sync_binance_futures: {e}", MODULE)
-            result["error"] = str(e)
+            err_msg = str(e) or repr(e)
+            log_error(MODULE, f"Error en sync_binance_futures: {err_msg}")
+            result["error"] = err_msg
         finally:
             self._is_running_crypto = False
 
@@ -242,11 +245,14 @@ class BrokerSynchronizer:
                     try:
                         await client.futures_cancel_order(symbol=sym, orderId=oid, recvWindow=60000)
                         cancelled.append(f"{sym}_{oid}")
-                        log_info(f"🧹 [ZOMBIE ORDER CLEANER] Orden huérfana cancelada en Binance: {sym} (ID={oid}, edad={age_minutes:.1f}m)", MODULE)
+                        log_info(MODULE, f"🧹 [ZOMBIE ORDER CLEANER] Orden huérfana cancelada en Binance: {sym} (ID={oid}, edad={age_minutes:.1f}m)")
                     except Exception as c_err:
-                        log_warning(f"No se pudo cancelar orden zombi {sym} {oid}: {c_err}", MODULE)
+                        log_warning(MODULE, f"No se pudo cancelar orden zombi {sym} {oid}: {c_err}")
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            log_error(f"Error en cleanup_zombie_orders: {e}", MODULE)
+            err_msg = str(e) or repr(e)
+            log_error(MODULE, f"Error en cleanup_zombie_orders: {err_msg}")
         return cancelled
 
 
