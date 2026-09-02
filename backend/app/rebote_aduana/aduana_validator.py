@@ -250,7 +250,81 @@ class AduanaValidator:
         
         norm_side = self._normalize_side(side)
         df_15m = market_data.get('df_15m')
-        
+        df_5m = market_data.get('df_5m')
+        is_test = 'PYTEST_CURRENT_TEST' in os.environ or 'pytest' in sys.modules
+
+        # Step 0.1: Check Integridad y Frescura de Datos del Broker (Candle Integrity & Staleness)
+        if not market_data.get('is_test', False) and not market_data.get('bypass_data_integrity', False):
+            for tf_name, df_check in [('5m', df_5m), ('15m', df_15m)]:
+                if df_check is not None:
+                    if len(df_check) < 20:
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='INSUFFICIENT_CANDLE_DATA',
+                            reason=f'Datos incompletos de velas {tf_name} ({len(df_check)} < 20 velas necesarias)',
+                            step=0
+                        )
+                    last_5 = df_check.iloc[-5:]
+                    for col in ['open', 'high', 'low', 'close']:
+                        if col in last_5.columns and last_5[col].isna().any():
+                            return AduanaResult(
+                                approved=False,
+                                rule_triggered='CANDLE_DATA_CORRUPTED',
+                                reason=f'Velas {tf_name} contienen valores nulos (NaN) en columna {col}',
+                                step=0
+                            )
+                    # Comprobación de antigüedad (Staleness)
+                    ts_val = None
+                    if 'timestamp' in df_check.columns:
+                        ts_val = df_check['timestamp'].iloc[-1]
+                    elif 'datetime' in df_check.columns:
+                        ts_val = df_check['datetime'].iloc[-1]
+                    elif isinstance(df_check.index, pd.DatetimeIndex):
+                        ts_val = df_check.index[-1]
+
+                    if ts_val is not None:
+                        try:
+                            if isinstance(ts_val, (int, float)):
+                                # Si viene en millisegundos
+                                if ts_val > 1e11:
+                                    ts_val = ts_val / 1000.0
+                                dt_candle = datetime.fromtimestamp(ts_val, timezone.utc)
+                            elif isinstance(ts_val, str):
+                                dt_candle = datetime.fromisoformat(ts_val.replace('Z', '+00:00'))
+                            elif hasattr(ts_val, 'to_pydatetime'):
+                                dt_candle = ts_val.to_pydatetime()
+                                if dt_candle.tzinfo is None:
+                                    dt_candle = dt_candle.replace(tzinfo=timezone.utc)
+                            else:
+                                dt_candle = ts_val
+
+                            now_utc = datetime.now(timezone.utc)
+                            age_sec = (now_utc - dt_candle).total_seconds()
+                            max_age = 900 if tf_name == '5m' else 2700  # 15m para 5m, 45m para 15m
+                            if age_sec > max_age:
+                                return AduanaResult(
+                                    approved=False,
+                                    rule_triggered='STALE_CANDLE_DATA_BLOCKED',
+                                    reason=f'Velas de {tf_name} desactualizadas (antigüedad={age_sec/60:.1f} min > límite {max_age/60:.0f} min)',
+                                    step=0
+                                )
+                        except Exception as e_ts:
+                            log_warning(MODULE, f"Error validando timestamp de velas {tf_name}: {e_ts}")
+
+        # Step 0.2: Check Discrepancia de Precio con Ticker en Vivo del Broker
+        broker_ticker_px = float(market_data.get('broker_ticker_price') or market_data.get('ticker_price') or market_data.get('live_price') or 0.0)
+        if broker_ticker_px > 0:
+            ref_px = float(market_data.get('price') or (df_5m['close'].iloc[-1] if df_5m is not None and not df_5m.empty else (df_15m['close'].iloc[-1] if df_15m is not None and not df_15m.empty else 0.0)))
+            if ref_px > 0:
+                disc_pct = abs(ref_px - broker_ticker_px) / broker_ticker_px
+                if disc_pct > 0.0040: # > 0.40%
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='PRICE_DISCREPANCY_BLOCKED',
+                        reason=f'Discrepancia de precio entre vela ({ref_px:.4f}) y Ticker del Broker ({broker_ticker_px:.4f}) es {disc_pct*100:.2f}% (> 0.40%)',
+                        step=0
+                    )
+
         # Step 0: Check Cant. Monedas Activas (Forex & Crypto)
         step = 0
         open_symbols = market_data.get('open_symbols')
@@ -258,7 +332,6 @@ class AduanaValidator:
         
         sym_clean = symbol.replace('/', '').replace('_', '').upper()
         is_forex = sym_clean in ('EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD', 'EURGBP', 'EURJPY', 'GBPJPY') or 'XAU' in sym_clean or 'GOLD' in sym_clean
-        is_test = 'PYTEST_CURRENT_TEST' in os.environ or 'pytest' in sys.modules
 
         if not is_test and (open_symbols is None or max_active_symbols is None):
             try:
@@ -427,7 +500,7 @@ class AduanaValidator:
                     rsi_series = 100 - (100 / (1 + rs))
                     rsi_15m = float(rsi_series.iloc[-1])
 
-        is_trend_strategy = any(k in strategy for k in ('Aa61', 'AaHot', 'BbHot', 'Aa13', 'Bb13', 'Aa21', 'Bb25', 'Aa33', 'Bb33', 'AaApexEma', 'BbApexEma', 'Breakout', 'breakout', 'Trend', 'trend', 'Momentum', 'momentum'))
+        is_trend_strategy = any(k in strategy for k in ('Aa61', 'AaHot', 'BbHot', 'Aa13', 'Bb13', 'Aa21', 'Bb25', 'Aa33', 'Bb33', 'Bb41', 'Bb12', 'Bb40', 'Bb11', 'AaApexEma', 'BbApexEma', 'Breakout', 'breakout', 'Trend', 'trend', 'Momentum', 'momentum'))
 
         if not is_trend_strategy and not is_qshr_strategy and not is_erep_strategy and rsi_15m is not None and not is_squeeze:
             # 1. No-Trade Deadzone Check (RSI 40 - 60)
@@ -577,7 +650,23 @@ class AduanaValidator:
                                 reason=f'Booster rechazado: Ganancia flotante insuficiente ({unrealized_profit:.1f} < 3.0 pips)',
                                 step=2
                             )
-                rule_name = 'QSHR_BOOSTER_APPROVED' if 'BOOSTER' in strategy else 'QSHR_SQUEEZE_OVERRIDE'
+                    rule_name = 'QSHR_BOOSTER_APPROVED'
+                    log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity} >= {min_squeeze_vel}")
+                    return AduanaResult(approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity})', step=2)
+
+                # Si es Ruptura Directa o Momentum, exigir validación de Pullback (evitar venta en piso / compra en techo)
+                if any(k in strategy for k in ('DIRECT', 'direct', 'MOMENTUM', 'momentum')):
+                    pb_ok, pb_reason = self._check_pullback_to_ema(df_15m, norm_side, market_data)
+                    if not pb_ok:
+                        log_info(MODULE, f"⛔ [ADUANA REJECT] {symbol} {norm_side.upper()} QSHR Breakout bloqueado por falta de pullback: {pb_reason}")
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='NO_PULLBACK_OVEREXTENDED',
+                            reason=f'QSHR Breakout rechazado: {pb_reason}',
+                            step=2
+                        )
+
+                rule_name = 'QSHR_SQUEEZE_OVERRIDE'
                 log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity} >= {min_squeeze_vel}")
                 return AduanaResult(approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity})', step=2)
             else:
@@ -611,8 +700,8 @@ class AduanaValidator:
             return AduanaResult(approved=False, rule_triggered='SAME_DIR_EXTREME', reason=f'Short at lower extreme (fib {fib_zone})', step=step)
 
         # Step 2.5: Candados Universales para Estrategias de Tendencia / Breakout
-        is_rebound_strategy = any(k in strategy for k in ('Dd11', 'Dd12', 'Reb', 'rebote', 'rebound', 'ERE_P2', 'EREP')) or is_qshr_strategy
-        if not is_rebound_strategy:
+        is_rebound_strategy = any(k in strategy for k in ('Dd11', 'Dd12', 'Reb', 'rebote', 'rebound', 'ERE_P2', 'EREP', 'CLIMAX', 'climax'))
+        if is_trend_strategy and not is_rebound_strategy:
             # Candado 1: Agotamiento de RSI en 15m
             rsi_15m = self._extract_rsi_15m(df_15m, market_data)
             if norm_side == 'short' and rsi_15m < 35.0:

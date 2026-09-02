@@ -253,6 +253,32 @@ def should_block_close(
             'trend': None,
         }
 
+    # 2.5 Regla Maestra de Momentum 15M: NUNCA cerrar LONG si EMA3 > EMA9 en 15m, ni SHORT si EMA3 < EMA9 en 15m
+    if symbol:
+        from app.core.memory_store import MEMORY_STORE
+        df_15m_guard = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+        if df_15m_guard is not None and not df_15m_guard.empty and len(df_15m_guard) >= 10:
+            c15 = df_15m_guard['close'] if 'close' in df_15m_guard.columns else df_15m_guard.get('c', pd.Series())
+            if len(c15) >= 10:
+                ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15m = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                is_long = side.lower() in ('long', 'buy')
+                
+                if is_long and ema3_15m > ema9_15m:
+                    log_warning(MODULE, f"Smart Guard: Bloqueando cierre de LONG en {symbol} ({reason}) porque EMA3_15m ({ema3_15m:.4f}) > EMA9_15m ({ema9_15m:.4f}) (momento alcista 15m activo)")
+                    return {
+                        'block': True,
+                        'reason': f'Smart Guard: Bloqueando cierre de LONG en {symbol} ({reason}) porque EMA3_15m ({ema3_15m:.4f}) > EMA9_15m ({ema9_15m:.4f}) (momento alcista 15m activo)',
+                        'trend': None,
+                    }
+                elif not is_long and ema3_15m < ema9_15m:
+                    log_warning(MODULE, f"Smart Guard: Bloqueando cierre de SHORT en {symbol} ({reason}) porque EMA3_15m ({ema3_15m:.4f}) < EMA9_15m ({ema9_15m:.4f}) (momento bajista 15m activo)")
+                    return {
+                        'block': True,
+                        'reason': f'Smart Guard: Bloqueando cierre de SHORT en {symbol} ({reason}) porque EMA3_15m ({ema3_15m:.4f}) < EMA9_15m ({ema9_15m:.4f}) (momento bajista 15m activo)',
+                        'trend': None,
+                    }
+
     # 3. Timeout dinámico: evaluar periodo de 5 minutos (5m)
     if symbol:
         from app.core.memory_store import MEMORY_STORE

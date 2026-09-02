@@ -885,6 +885,19 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
         is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
         last_price = float(df_5m.iloc[-1]['close'])
         
+        # ── OBTENER PRECIO DE TICKER EN TIEMPO REAL DEL BROKER ──
+        live_ticker_px = 0.0
+        try:
+            from app.execution.binance_connector import get_client
+            client = get_client()
+            sym_clean = symbol.replace("/", "").upper()
+            t_info = client.futures_symbol_ticker(symbol=sym_clean)
+            live_ticker_px = float(t_info.get('price', 0.0))
+            if live_ticker_px > 0:
+                last_price = live_ticker_px
+        except Exception as t_err:
+            log_warning(MODULE, f"No se pudo consultar Ticker en vivo para {symbol}: {t_err}")
+
         # Consultar posiciones activas en tiempo real
         res_open = sb.table('positions').select('*').eq('status', 'open').execute()
         open_positions = res_open.data or []
@@ -911,6 +924,8 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
             'df_15m': df_15m,
             'df_5m': df_5m,
             'df_1h': df_1h,
+            'price': last_price,
+            'broker_ticker_price': live_ticker_px,
             'squeeze_velocity': float(signal.get('velocity', 0.0)),
             'open_symbols': open_symbols,
             'max_active_symbols': max_active,

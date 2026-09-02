@@ -723,10 +723,19 @@ def evaluate_fib_band_virtual_sl(
         basis = levels['basis_15m']
         buffer_pct = get_fib_buffer_pct(symbol)
         
+        # Calcular EMA3 y EMA9 de 15m para validación de momento
+        c15 = df_15m['close'] if 'close' in df_15m.columns else df_15m.get('c', pd.Series())
+        ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1]) if len(c15) >= 10 else 0.0
+        ema9_15m = float(c15.ewm(span=9, adjust=False).mean().iloc[-1]) if len(c15) >= 10 else 0.0
+
         # ─── POSICIONES LONG ───
         if side in ('long', 'buy'):
             # Solo activar si la posición está en drawdown (precio < entry)
             if current_price >= entry_price:
+                return None
+            
+            # REGLA MAESTRA 15M: NUNCA ejecutar Stop Loss Virtual de LONG si EMA3 > EMA9 en 15m (momento alcista activo)
+            if ema3_15m > 0 and ema9_15m > 0 and ema3_15m > ema9_15m:
                 return None
             
             # Determinar la banda Fibonacci inferior activa según la zona de entrada
@@ -766,7 +775,7 @@ def evaluate_fib_band_virtual_sl(
                     "reason": (
                         f"SL Virtual Fibonacci LONG: Precio ({current_price:.5f}) perforó "
                         f"Fib Floor ({fib_floor:.5f}) con buffer {buffer_pct*100:.2f}% "
-                        f"(SL Virtual: {sl_virtual_level:.5f}). Pérdida: -{loss_pct:.2f}%"
+                        f"(SL Virtual: {sl_virtual_level:.5f}, EMA3_15m={ema3_15m:.5f} < EMA9_15m={ema9_15m:.5f}). Pérdida: -{loss_pct:.2f}%"
                     )
                 }
         
@@ -774,6 +783,10 @@ def evaluate_fib_band_virtual_sl(
         elif side in ('short', 'sell'):
             # Solo activar si la posición está en drawdown (precio > entry)
             if current_price <= entry_price:
+                return None
+            
+            # REGLA MAESTRA 15M: NUNCA ejecutar Stop Loss Virtual de SHORT si EMA3 < EMA9 en 15m (momento bajista activo)
+            if ema3_15m > 0 and ema9_15m > 0 and ema3_15m < ema9_15m:
                 return None
             
             # Determinar la banda Fibonacci superior activa según la zona de entrada
@@ -812,7 +825,7 @@ def evaluate_fib_band_virtual_sl(
                     "reason": (
                         f"SL Virtual Fibonacci SHORT: Precio ({current_price:.5f}) perforó "
                         f"Fib Ceiling ({fib_ceiling:.5f}) con buffer {buffer_pct*100:.2f}% "
-                        f"(SL Virtual: {sl_virtual_level:.5f}). Pérdida: -{loss_pct:.2f}%"
+                        f"(SL Virtual: {sl_virtual_level:.5f}, EMA3_15m={ema3_15m:.5f} > EMA9_15m={ema9_15m:.5f}). Pérdida: -{loss_pct:.2f}%"
                     )
                 }
         

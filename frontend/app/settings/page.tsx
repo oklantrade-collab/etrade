@@ -561,6 +561,82 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
             <div style={{ padding: '4px 12px', borderRadius: '20px', background: '#55522', border: '1px solid #55544', color: '#555', fontSize: '10px', fontWeight: 900, letterSpacing:'1px' }}>PENDIENTE</div>
         )}
       </div>
+
+      {/* Selector de Modo: PAPER vs LIVE REAL */}
+      {(() => {
+        const isPaper = config.paper_trading !== false && config.regime_params?.paper_trading_forex !== false;
+        return (
+          <div style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'space-between', 
+            padding: '14px 18px', 
+            background: isPaper ? 'rgba(59, 130, 246, 0.08)' : 'rgba(239, 68, 68, 0.08)', 
+            borderRadius: '10px', 
+            border: `1px solid ${isPaper ? '#3B82F6' : '#EF4444'}44` 
+          }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ color: '#FFF', fontWeight: 700, fontSize: '14px' }}>Modo de Operación Forex</span>
+                <span style={{ 
+                  fontSize: '11px', 
+                  fontWeight: 800, 
+                  padding: '3px 9px', 
+                  borderRadius: '6px', 
+                  background: isPaper ? '#3B82F622' : '#EF444422', 
+                  color: isPaper ? '#60A5FA' : '#F87171',
+                  border: `1px solid ${isPaper ? '#3B82F6' : '#EF4444'}55`
+                }}>
+                  {isPaper ? '📝 MODO PAPER (Simulación)' : '🔥 MODO LIVE (cTrader Real)'}
+                </span>
+              </div>
+              <div style={{ color: '#888', fontSize: '11px', marginTop: '4px' }}>
+                {isPaper 
+                  ? 'Las operaciones se ejecutan de forma virtual en eTrade sin enviar órdenes a cTrader.' 
+                  : 'Las operaciones se envían en vivo a la cuenta conectada en cTrader / IC Markets.'}
+              </div>
+            </div>
+            
+            {/* Toggle Switch Paper / Live */}
+            <div 
+              onClick={() => {
+                const nextPaper = !isPaper;
+                onSave({
+                  paper_trading: nextPaper,
+                  mode: nextPaper ? 'paper' : 'live',
+                  regime_params: {
+                    ...config.regime_params,
+                    paper_trading_forex: nextPaper
+                  }
+                });
+              }}
+              style={{ 
+                width: '50px', 
+                height: '26px', 
+                borderRadius: '13px', 
+                background: isPaper ? '#3B82F6' : '#EF4444', 
+                position: 'relative', 
+                cursor: 'pointer',
+                transition: 'background 0.2s ease',
+                boxShadow: `0 0 10px ${isPaper ? '#3B82F655' : '#EF444455'}`
+              }}
+              title={isPaper ? "Cambiar a Modo LIVE" : "Cambiar a Modo PAPER"}
+            >
+              <div style={{ 
+                position: 'absolute', 
+                top: '3px', 
+                left: isPaper ? '27px' : '3px', 
+                width: '20px', 
+                height: '20px', 
+                borderRadius: '50%', 
+                background: '#FFF', 
+                transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)' 
+              }} />
+            </div>
+          </div>
+        );
+      })()}
+
       <SettingsSection title="💰 Gestión Forex">
         <SettingRow label="Capital asignado (Base)" value={config.capital_forex_futures} type="number" prefix="$" disabled={!isConnected} onChange={(v: any) => onSave({ capital_forex_futures: v })} />
         <SettingRow label="Ganancia o Profit de la cuenta" value={config.accumulated_profit_forex || 0} type="number" prefix="$" onChange={(v: any) => onSave({ accumulated_profit_forex: v })} />

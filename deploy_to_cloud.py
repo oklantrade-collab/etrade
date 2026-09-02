@@ -63,6 +63,7 @@ files_to_sync = [
     "tests/test_forex_rebote_climax_guard.py",
     "tests/test_breakpoint_detector.py",
     "app/tests/test_bb_squeeze_confluence.py",
+    "app/tests/test_data_integrity_and_sl_shield.py",
     "app/tests/test_aduana_entry_guards.py",
     "app/tests/test_cascada_universal_sipv.py",
     "app/tests/test_fkr_kinetic_trailing.py",
@@ -221,7 +222,8 @@ frontend_files = [
     ("frontend/components/widgets/HalconCentinelaWidget.tsx", "frontend/components/widgets/HalconCentinelaWidget.tsx"),
     ("frontend/components/widgets/QshrWidget.tsx", "frontend/components/widgets/QshrWidget.tsx"),
     ("frontend/app/forex/dashboard/page.tsx", "frontend/app/forex/dashboard/page.tsx"),
-    ("frontend/app/dashboard/page.tsx", "frontend/app/dashboard/page.tsx")
+    ("frontend/app/dashboard/page.tsx", "frontend/app/dashboard/page.tsx"),
+    ("frontend/app/settings/page.tsx", "frontend/app/settings/page.tsx")
 ]
 
 def check_syntax():

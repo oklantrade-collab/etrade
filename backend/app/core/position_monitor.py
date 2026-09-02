@@ -1894,9 +1894,32 @@ async def _execute_paper_open_unlocked(
             elif order_res.get('avgPrice') and float(order_res.get('avgPrice')) > 0:
                 execution_fill_price = float(order_res.get('avgPrice'))
             else:
-                execution_fill_price = price
+                # Consultar ticker en vivo inmediato para no usar precio desfasado de vela
+                try:
+                    ticker_info = client.futures_symbol_ticker(symbol=sym_clean)
+                    execution_fill_price = float(ticker_info.get('price', price))
+                except Exception:
+                    execution_fill_price = price
 
-            log_info(MODULE, f"⚡ [BINANCE FUTURES LIVE ORDER FILLED] {sym_clean} {pos_side} qty={executed_size} avgPx={execution_fill_price} orderId={live_exchange_order_id}")
+            # ── ESCUDO DE COHERENCIA PRE-EXCHANGE DE SL Y TP ──
+            # Recalcular SL y TP sobre el fill real para evitar SL invertidos o ejecuciones instantáneas
+            if execution_fill_price > 0:
+                if side.lower() in ('short', 'sell'):
+                    if sl_final <= execution_fill_price:
+                        sl_final = execution_fill_price * 1.015
+                        log_warning(MODULE, f"🛡️ [SL SHIELD SHORT] {sym_clean}: SL original menor a Fill ({execution_fill_price}). Reajustado a {sl_final:.4f}")
+                    if tp_full >= execution_fill_price:
+                        sl_dist = sl_final - execution_fill_price
+                        tp_full = execution_fill_price - (sl_dist * 1.25)
+                elif side.lower() in ('long', 'buy'):
+                    if sl_final >= execution_fill_price:
+                        sl_final = execution_fill_price * 0.985
+                        log_warning(MODULE, f"🛡️ [SL SHIELD LONG] {sym_clean}: SL original mayor a Fill ({execution_fill_price}). Reajustado a {sl_final:.4f}")
+                    if tp_full <= execution_fill_price:
+                        sl_dist = execution_fill_price - sl_final
+                        tp_full = execution_fill_price + (sl_dist * 1.25)
+
+            log_info(MODULE, f"⚡ [BINANCE FUTURES LIVE ORDER FILLED] {sym_clean} {pos_side} qty={executed_size} avgPx={execution_fill_price} SL={sl_final:.4f} TP={tp_full:.4f} orderId={live_exchange_order_id}")
         except Exception as live_err:
             err_msg = str(live_err)
             if "-2019" in err_msg or "Margin is insufficient" in err_msg:
@@ -1915,7 +1938,7 @@ async def _execute_paper_open_unlocked(
             'quantity': executed_size,
             'limit_price': execution_fill_price,
             'entry_price': execution_fill_price,
-            'stop_loss_price': sl_dict['sl_price'],
+            'stop_loss_price': sl_final,
             'take_profit_price': tp_full,
             'status': 'open',
             'is_paper': is_paper,

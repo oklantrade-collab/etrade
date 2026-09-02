@@ -69,14 +69,28 @@ class ForexExecutionService:
     def __init__(self, worker, supabase_client, state_ref, symbols_ref):
         self.worker   = worker
         self.sb       = supabase_client
-        self.state    = state_ref
-        self.symbols  = symbols_ref
-        self.log      = worker.log
         self.protection_states = {} # Cache de estados de proteccion
-        # Usar variable de entorno directamente para el modo
-        self.mode     = os.getenv('FOREX_MODE', 'paper')
+        self._mode = os.getenv('FOREX_MODE', 'paper')
         self._open_positions_list = []
         self._load_open_positions()
+
+    @property
+    def is_paper(self) -> bool:
+        try:
+            from app.core.memory_store import BOT_STATE
+            if BOT_STATE.config_cache and BOT_STATE.config_cache.get("paper_trading") is not None:
+                return bool(BOT_STATE.config_cache.get("paper_trading"))
+        except Exception:
+            pass
+        return str(self._mode or os.getenv('FOREX_MODE', 'paper')).lower() == 'paper'
+
+    @property
+    def mode(self) -> str:
+        return 'paper' if self.is_paper else 'live'
+
+    @mode.setter
+    def mode(self, val: str):
+        self._mode = val
 
         # ── HALCÓN CENTINELA: Proactive Close System ──
         try:
@@ -1286,6 +1300,8 @@ class ForexExecutionService:
             
             if self.mode == 'live': 
                 self._execute_live_order(symbol, direction, order_lots, price, sl, tp, signal['rule_code'], order_type=exec_type, limit_price=limit_px)
+            else:
+                self._execute_paper_order(symbol, direction, order_lots, exec_px, sl, tp, signal['rule_code'])
 
     def _calculate_primary_limit_price(self, symbol, direction, snap):
         """
@@ -1544,8 +1560,8 @@ class ForexExecutionService:
         except Exception as e: self.log(f'Error live: {e}')
 
     def _execute_paper_order(self, symbol, direction, lots, entry, sl, tp, rule_code):
-        self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='paper')
-        self._send_telegram(f'[PAPER] {direction.upper()} {symbol} (Rule: {rule_code})')
+        self._save_position(symbol, direction, lots, entry, sl, tp, rule_code, mode='paper', is_limit=False)
+        self._send_telegram(f'📄 [PAPER FOREX] {direction.upper()} {symbol} @ {entry:.5f} | Lots: {lots} | SL: {sl} | TP: {tp} (Regla: {rule_code})')
 
     def _classify_entry_profile(self, symbol: str) -> str:
         """Classifies entry profile for HALCÓN CENTINELA based on current ADX/ATR%."""
@@ -1609,8 +1625,8 @@ class ForexExecutionService:
             res = self.sb.table('forex_positions').insert(pos).execute()
 
             if res.data: 
-                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots} (Origen: {origen}) [Status: {"pending" if is_limit else "open"}]')
-                if not is_limit:
+                self.log(f'Guardada posicion {symbol} {direction.upper()} Lots: {final_lots} (Origen: {origen}) [Status: {"pending" if is_limit else "open"}] [Modo: {mode}]')
+                if not is_limit or mode == 'paper':
                     self._open_positions_list.append(res.data[0])
         except Exception as e: self.log(f'Error guardando: {e}')
 
@@ -2096,7 +2112,7 @@ class ForexExecutionService:
                 combined_price = (p1 * q1 + price * size) / combined_size
                 db_lots = -combined_size if str(side).lower() in ('short', 'sell') else combined_size
                 
-                if pos.get('mode') == 'live':
+                if pos.get('mode') == 'live' and not self.is_paper:
                     try:
                         from app.workers.forex_worker_standalone import ACCOUNT_ID, get_divisor
                         sid = self.state['symbol_ids'].get(symbol)

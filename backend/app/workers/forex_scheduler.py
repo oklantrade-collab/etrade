@@ -1042,7 +1042,7 @@ async def open_forex_position(
             limit_price = None
 
     # Paper trading check
-    is_paper = cfg.get('paper_trading', False) is not False
+    is_paper = (cfg.get('paper_trading', False) is not False) or (os.getenv('FOREX_MODE', 'paper').lower() == 'paper')
 
     limit_list = limit_price if isinstance(limit_price, list) else ([limit_price] if limit_price else [None])
     num_orders = len(limit_list)

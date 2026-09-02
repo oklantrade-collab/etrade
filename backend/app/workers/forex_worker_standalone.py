@@ -351,17 +351,31 @@ class StandaloneForexWorker:
                 symbol = cmd.get("symbol")
                 if action == "open":
                     self.log(f"⚡ [MANUAL OPEN] {symbol} {cmd.get('direction').upper()} lots: {cmd.get('lots')}")
-                    self.execution._execute_live_order(
-                        symbol=symbol,
-                        direction=cmd.get("direction"),
-                        lots=cmd.get("lots"),
-                        entry=0, # Market order o base para Limit si se deja as 
-                        sl=cmd.get("sl", 0),
-                        tp=cmd.get("tp", 0),
-                        rule_code="MANUAL",
-                        order_type=cmd.get("order_type", "market"),
-                        limit_price=cmd.get("limit_price", 0)
-                    )
+                    mode_val = os.getenv('FOREX_MODE', 'paper').lower()
+                    if mode_val == 'live':
+                        self.execution._execute_live_order(
+                            symbol=symbol,
+                            direction=cmd.get("direction"),
+                            lots=cmd.get("lots"),
+                            entry=0, # Market order o base para Limit si se deja as 
+                            sl=cmd.get("sl", 0),
+                            tp=cmd.get("tp", 0),
+                            rule_code="MANUAL",
+                            order_type=cmd.get("order_type", "market"),
+                            limit_price=cmd.get("limit_price", 0)
+                        )
+                    else:
+                        price_data = STATE['prices'].get(symbol, {})
+                        cur_px = float(price_data.get('mid', 0)) if price_data else 0
+                        self.execution._execute_paper_order(
+                            symbol=symbol,
+                            direction=cmd.get("direction"),
+                            lots=cmd.get("lots"),
+                            entry=cur_px,
+                            sl=cmd.get("sl", 0),
+                            tp=cmd.get("tp", 0),
+                            rule_code="MANUAL"
+                        )
                 elif action == "close":
                     pos_id = cmd.get("pos_id")
                     self.log(f"⚡ [MANUAL CLOSE] Cerrando posicion {symbol} (id: {pos_id})")
@@ -413,11 +427,11 @@ class StandaloneForexWorker:
             err = Protobuf.extract(message)
             self.log(f"ERROR DE CTRADER: {err.errorCode} - {err.description}", "ERROR")
             try:
-                # Limpiar cualquier posición fantasma reciente sin ID cTrader
+                # Limpiar cualquier posición fantasma reciente sin ID cTrader (solo en modo live)
                 sb.table('forex_positions').update({
                     'status': 'closed',
                     'close_reason': f"ctrader_error_{err.errorCode}"
-                }).eq('status', 'open').is_('ctrader_pos_id', 'null').execute()
+                }).eq('status', 'open').eq('mode', 'live').is_('ctrader_pos_id', 'null').execute()
             except Exception as clean_err:
                 self.log(f"Error limpiando posicion fantasma: {clean_err}", "ERROR")
         elif pt == ProtoOAOrderErrorEvent().payloadType:
@@ -427,7 +441,7 @@ class StandaloneForexWorker:
                 sb.table('forex_positions').update({
                     'status': 'closed',
                     'close_reason': f"ctrader_error_{err.errorCode}"
-                }).eq('status', 'open').is_('ctrader_pos_id', 'null').execute()
+                }).eq('status', 'open').eq('mode', 'live').is_('ctrader_pos_id', 'null').execute()
             except Exception as clean_err:
                 self.log(f"Error limpiando posicion fantasma: {clean_err}", "ERROR")
         elif pt == ProtoOASymbolsListRes().payloadType:

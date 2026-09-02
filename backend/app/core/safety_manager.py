@@ -1122,3 +1122,165 @@ def send_telegram_sync(message: str):
             threading.Thread(target=run_sync, daemon=True).start()
     except Exception as e:
         log_error('SAFETY', f"Error enviando Telegram síncrono: {e}")
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════
+# GUARDIÁN DE EMERGENCIA ANTE PÉRDIDA DE DATOS (BROKER FAIL-SAFE BRACKET CON RR > 1.0)
+# ════════════════════════════════════════════════════════════════════════════════════════════
+
+def calculate_emergency_bracket(
+    entry_price: float,
+    side: str,
+    symbol: str,
+    market_type: str = 'crypto_futures',
+    min_rr: float = 1.25,
+    sl_distance_pct: float = 0.015,
+    sl_distance_pips: float = 25.0
+) -> dict:
+    """
+    Calcula niveles de Stop Loss y Take Profit de Emergencia con Ratio Beneficio/Riesgo garantizado RR > 1.0.
+    Funciona simétricamente para LONG y SHORT en Crypto y Forex.
+    """
+    side_norm = (side or '').lower()
+    is_forex = 'forex' in market_type.lower() or any(x in symbol.upper() for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF', 'NZD'))
+    is_jpy = 'JPY' in symbol.upper()
+    pip_factor = 0.01 if is_jpy else (0.1 if 'XAU' in symbol.upper() else 0.0001)
+
+    if is_forex:
+        dist = sl_distance_pips * pip_factor
+    else:
+        dist = entry_price * sl_distance_pct
+
+    tp_dist = dist * max(1.25, min_rr)  # Asegura Beneficio > 1R
+
+    if side_norm in ('long', 'buy'):
+        sl_price = entry_price - dist
+        tp_price = entry_price + tp_dist
+    else:  # short
+        sl_price = entry_price + dist
+        tp_price = entry_price - tp_dist
+
+    # Formateo de precisión
+    if 'JPY' in symbol.upper() or 'XAU' in symbol.upper():
+        sl_price = round(sl_price, 3)
+        tp_price = round(tp_price, 3)
+    elif is_forex:
+        sl_price = round(sl_price, 5)
+        tp_price = round(tp_price, 5)
+    else:
+        sl_price = round(sl_price, 4 if entry_price < 10 else 2)
+        tp_price = round(tp_price, 4 if entry_price < 10 else 2)
+
+    return {
+        "symbol": symbol,
+        "side": side_norm,
+        "entry_price": entry_price,
+        "sl_price": sl_price,
+        "tp_price": tp_price,
+        "rr_ratio": round(tp_dist / dist, 2),
+        "sl_dist": dist,
+        "tp_dist": tp_dist,
+        "is_forex": is_forex
+    }
+
+
+async def enforce_emergency_broker_bracket(position: dict, market_type: str = 'crypto_futures') -> dict | None:
+    """
+    Guardián ADUANA de Emergencia:
+    Si se detecta que los datos están caídos o desactualizados en una posición abierta,
+    calcula y coloca un bracket de protección nativo en el Broker (Binance Futures / cTrader)
+    con RR > 1.0 (Take Profit en ganancia real y Stop Loss protector).
+    """
+    if not position or position.get('status') != 'open':
+        return None
+
+    symbol = str(position.get('symbol', '')).upper()
+    side = str(position.get('side', '')).lower()
+    entry_p = float(position.get('avg_entry_price') or position.get('entry_price') or 0.0)
+    pos_id = position.get('id')
+    is_paper = position.get('is_paper') or (position.get('mode') == 'paper')
+
+    if entry_p <= 0:
+        return None
+
+    # Si ya tiene bracket de emergencia colocado en exchange, omitir duplicados
+    if position.get('emergency_bracket_set'):
+        return None
+
+    bracket = calculate_emergency_bracket(entry_p, side, symbol, market_type=market_type)
+    sl_price = bracket['sl_price']
+    tp_price = bracket['tp_price']
+
+    log_info('SAFETY', f"🛡️ [ADUANA EMERGENCY GUARDIAN] {symbol} {side.upper()}: Feed de datos no disponible. Colocando Bracket de Emergencia (TP={tp_price} con RR={bracket['rr_ratio']}, SL={sl_price})")
+
+    # Enviar al broker si es modo live
+    if not is_paper and 'crypto' in market_type.lower():
+        try:
+            from app.execution.binance_connector import get_client
+            client = get_client()
+            sym_clean = symbol.replace('/', '')
+            pos_side = 'LONG' if side in ('long', 'buy') else 'SHORT'
+            close_side = 'SELL' if pos_side == 'LONG' else 'BUY'
+
+            # 1. Colocar Take Profit Market en Binance
+            try:
+                client.futures_create_order(
+                    symbol=sym_clean,
+                    side=close_side,
+                    type='TAKE_PROFIT_MARKET',
+                    stopPrice=tp_price,
+                    closePosition='true',
+                    positionSide=pos_side
+                )
+                log_info('SAFETY', f"✅ [BINANCE EMERGENCY TP SET] {sym_clean} {pos_side} TP @ {tp_price} (RR={bracket['rr_ratio']})")
+            except Exception as tp_e:
+                log_warning('SAFETY', f"No se pudo colocar Emergency TP en Binance: {tp_e}")
+
+            # 2. Colocar Stop Market en Binance (validando no-colisión)
+            try:
+                client.futures_create_order(
+                    symbol=sym_clean,
+                    side=close_side,
+                    type='STOP_MARKET',
+                    stopPrice=sl_price,
+                    closePosition='true',
+                    positionSide=pos_side
+                )
+                log_info('SAFETY', f"✅ [BINANCE EMERGENCY SL SET] {sym_clean} {pos_side} SL @ {sl_price}")
+            except Exception as sl_e:
+                log_warning('SAFETY', f"No se pudo colocar Emergency SL en Binance: {sl_e}")
+
+        except Exception as b_err:
+            log_error('SAFETY', f"Error interactuando con Binance para Emergency Bracket {symbol}: {b_err}")
+
+    # Actualizar estado en Supabase
+    try:
+        from app.core.supabase_client import get_supabase
+        sb = get_supabase()
+        tbl = 'forex_positions' if bracket['is_forex'] else 'positions'
+        sb.table(tbl).update({
+            'stop_loss': sl_price,
+            'take_profit': tp_price,
+            'sl_price': sl_price,
+            'tp_full_price': tp_price,
+            'emergency_bracket_set': True
+        }).eq('id', pos_id).execute()
+    except Exception as db_e:
+        log_warning('SAFETY', f"Error actualizando bracket en DB para {symbol}: {db_e}")
+
+    # Notificar alerta
+    try:
+        await _send_telegram(
+            f"🛡️ *[ADUANA EMERGENCY GUARDIAN]*\n"
+            f"Símbolo: {symbol} ({side.upper()})\n"
+            f"Motivo: Pérdida o desactualización del flujo de datos.\n"
+            f"Nivel Entrada: ${entry_p:,.4f}\n"
+            f"🎯 TP Emergencia (RR {bracket['rr_ratio']}): ${tp_price:,.4f}\n"
+            f"🛑 SL Emergencia: ${sl_price:,.4f}\n"
+            f"Posición protegida nativamente en Broker."
+        )
+    except Exception:
+        pass
+
+    return bracket
+

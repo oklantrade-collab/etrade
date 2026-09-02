@@ -80,33 +80,50 @@ class TestVirtualFibSL(unittest.TestCase):
     # ── LONG: SL Virtual se activa cuando el precio perfora la banda Fibonacci ──
 
     def test_long_sl_triggers_below_fib_floor_eurusd(self):
-        """LONG EURUSD: Precio cae debajo de Fib Floor + buffer → cierre virtual."""
+        """LONG EURUSD: Precio cae debajo de Fib Floor + buffer con cruce bajista EMA3 < EMA9 → cierre virtual."""
+        # Crear serie con caída final para que EMA3 < EMA9
+        df_down = self.df_15m_eur.copy()
+        df_down['close'] = [1.1050 - i * 0.0003 for i in range(30)]
         entry_price = 1.1030
-        levels = calculate_15m_fibonacci_levels(self.df_15m_eur, entry_price)
-        # Entry > upper_1 -> floor es basis
+        levels = calculate_15m_fibonacci_levels(df_down, entry_price)
         fib_floor = levels['basis_15m']
         buffer = get_fib_buffer_pct('EURUSD')
         trigger_price = fib_floor * (1.0 - buffer) - 0.0005  # Debajo del SL virtual
 
         pos = {'side': 'long', 'entry_price': entry_price, 'lots': 0.05}
-        result = evaluate_fib_band_virtual_sl(pos, self.df_15m_eur, trigger_price, 'EURUSD')
+        result = evaluate_fib_band_virtual_sl(pos, df_down, trigger_price, 'EURUSD')
 
         self.assertIsNotNone(result)
         self.assertEqual(result['action'], 'close_virtual_fib_sl')
         self.assertEqual(result['rule_code'], 'Bb33_QSHR_FIB_VIRTUAL_SL')
         self.assertIn('Fib Floor', result['reason'])
 
-    def test_long_no_trigger_above_fib_floor(self):
-        """LONG EURUSD: Precio testea la banda pero no la perfora con buffer → no se activa."""
+    def test_long_no_trigger_when_ema3_above_ema9(self):
+        """LONG EURUSD: Si EMA3 > EMA9 en 15m, el SL Virtual NUNCA se activa (momento alcista protegido)."""
         entry_price = 1.1030
         levels = calculate_15m_fibonacci_levels(self.df_15m_eur, entry_price)
+        fib_floor = levels['basis_15m']
+        buffer = get_fib_buffer_pct('EURUSD')
+        trigger_price = fib_floor * (1.0 - buffer) - 0.0005
+
+        pos = {'side': 'long', 'entry_price': entry_price, 'lots': 0.05}
+        result = evaluate_fib_band_virtual_sl(pos, self.df_15m_eur, trigger_price, 'EURUSD')
+        # Debe ser None porque self.df_15m_eur tiene EMA3 > EMA9
+        self.assertIsNone(result)
+
+    def test_long_no_trigger_above_fib_floor(self):
+        """LONG EURUSD: Precio testea la banda pero no la perfora con buffer → no se activa."""
+        df_down = self.df_15m_eur.copy()
+        df_down['close'] = [1.1050 - i * 0.0003 for i in range(30)]
+        entry_price = 1.1030
+        levels = calculate_15m_fibonacci_levels(df_down, entry_price)
         fib_floor = levels['basis_15m']
         buffer = get_fib_buffer_pct('EURUSD')
         safe_price = fib_floor * (1.0 - buffer) + 0.0010  # Por encima del SL virtual pero menor que entry
 
         pos = {'side': 'long', 'entry_price': entry_price, 'lots': 0.05}
         if safe_price < entry_price:
-            result = evaluate_fib_band_virtual_sl(pos, self.df_15m_eur, safe_price, 'EURUSD')
+            result = evaluate_fib_band_virtual_sl(pos, df_down, safe_price, 'EURUSD')
             self.assertIsNone(result)
 
     def test_long_no_trigger_when_in_profit(self):
@@ -118,7 +135,7 @@ class TestVirtualFibSL(unittest.TestCase):
     # ── SHORT: SL Virtual se activa cuando el precio perfora la banda Fibonacci ──
 
     def test_short_sl_triggers_above_fib_ceiling_gbpusd(self):
-        """SHORT GBPUSD: Precio sube por encima de Fib Ceiling + buffer → cierre virtual."""
+        """SHORT GBPUSD: Precio sube por encima de Fib Ceiling + buffer con EMA3 > EMA9 → cierre virtual."""
         entry_price = 1.2680  # Entry < lower_1 -> ceiling es basis
         levels = calculate_15m_fibonacci_levels(self.df_15m_gbp, entry_price)
         fib_ceiling = levels['basis_15m']
@@ -133,6 +150,20 @@ class TestVirtualFibSL(unittest.TestCase):
         self.assertEqual(result['rule_code'], 'Bb33_QSHR_FIB_VIRTUAL_SL')
         self.assertIn('Fib Ceiling', result['reason'])
 
+    def test_short_no_trigger_when_ema3_below_ema9(self):
+        """SHORT GBPUSD: Si EMA3 < EMA9 en 15m, el SL Virtual NUNCA se activa (momento bajista protegido)."""
+        df_down = self.df_15m_gbp.copy()
+        df_down['close'] = [1.2800 - i * 0.0004 for i in range(30)]
+        entry_price = 1.2680
+        levels = calculate_15m_fibonacci_levels(df_down, entry_price)
+        fib_ceiling = levels['basis_15m']
+        buffer = get_fib_buffer_pct('GBPUSD')
+        trigger_price = fib_ceiling * (1.0 + buffer) + 0.0010
+
+        pos = {'side': 'short', 'entry_price': entry_price, 'lots': 0.05}
+        result = evaluate_fib_band_virtual_sl(pos, df_down, trigger_price, 'GBPUSD')
+        self.assertIsNone(result)
+
     def test_short_no_trigger_when_in_profit(self):
         """SHORT GBPUSD: Si el precio está en ganancia (debajo del entry), no se activa."""
         pos = {'side': 'short', 'entry_price': 1.2900, 'lots': 0.05}
@@ -142,21 +173,23 @@ class TestVirtualFibSL(unittest.TestCase):
     # ── CRYPTO: Funciona igual con BTC ──
 
     def test_long_sl_triggers_btcusdt(self):
-        """LONG BTC: Precio cae debajo de Fib Floor + buffer crypto → cierre virtual."""
+        """LONG BTC: Precio cae debajo de Fib Floor + buffer crypto con EMA3 < EMA9 → cierre virtual."""
+        df_down = self.df_15m_btc.copy()
+        df_down['close'] = [62000 - i * 50 for i in range(30)]
         entry_price = 61800  # Entry > upper_1 -> floor es basis
-        levels = calculate_15m_fibonacci_levels(self.df_15m_btc, entry_price)
+        levels = calculate_15m_fibonacci_levels(df_down, entry_price)
         fib_floor = levels['basis_15m']
         buffer = get_fib_buffer_pct('BTCUSDT')
         trigger_price = fib_floor * (1.0 - buffer) - 50  # Bien debajo del SL virtual
 
         pos = {'side': 'long', 'entry_price': entry_price, 'lots': 0.01}
-        result = evaluate_fib_band_virtual_sl(pos, self.df_15m_btc, trigger_price, 'BTCUSDT')
+        result = evaluate_fib_band_virtual_sl(pos, df_down, trigger_price, 'BTCUSDT')
 
         self.assertIsNotNone(result)
         self.assertEqual(result['action'], 'close_virtual_fib_sl')
 
     def test_short_sl_triggers_btcusdt(self):
-        """SHORT BTC: Precio sube por encima de Fib Ceiling + buffer crypto → cierre virtual."""
+        """SHORT BTC: Precio sube por encima de Fib Ceiling + buffer crypto con EMA3 > EMA9 → cierre virtual."""
         entry_price = 60800  # Entry < lower_1 -> ceiling es basis
         levels = calculate_15m_fibonacci_levels(self.df_15m_btc, entry_price)
         fib_ceiling = levels['basis_15m']

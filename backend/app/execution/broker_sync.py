@@ -216,6 +216,9 @@ class BrokerSynchronizer:
 
         except asyncio.CancelledError:
             pass
+        except (TimeoutError, asyncio.TimeoutError) as te:
+            log_warning(MODULE, f"Timeout temporal consultando Binance Futures (reintentará en el próximo ciclo): {te}")
+            result["error"] = "TimeoutError (transient)"
         except Exception as e:
             err_msg = str(e) or repr(e)
             log_error(MODULE, f"Error en sync_binance_futures: {err_msg}")
