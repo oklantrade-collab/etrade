@@ -34,6 +34,25 @@ class BrokerSynchronizer:
     def __init__(self):
         self._is_running_crypto = False
         self._is_running_forex = False
+        self._crypto_provider = None
+        self._crypto_client = None
+
+    async def _get_crypto_client(self):
+        if self._crypto_client is None:
+            api_key = os.getenv("BINANCE_API_KEY") or settings.binance_api_key
+            api_secret = os.getenv("BINANCE_SECRET") or os.getenv("BINANCE_API_SECRET") or settings.binance_secret
+
+            if not api_key or not api_secret:
+                return None
+
+            self._crypto_provider = BinanceCryptoProvider(
+                api_key=api_key,
+                api_secret=api_secret,
+                market="futures",
+                testnet=settings.binance_testnet,
+            )
+            self._crypto_client = await self._crypto_provider._get_async_client()
+        return self._crypto_client
 
     async def sync_binance_futures(self) -> Dict[str, Any]:
         """
@@ -54,36 +73,35 @@ class BrokerSynchronizer:
         }
 
         try:
-            api_key = os.getenv("BINANCE_API_KEY") or settings.binance_api_key
-            api_secret = os.getenv("BINANCE_SECRET") or os.getenv("BINANCE_API_SECRET") or settings.binance_secret
-
-            if not api_key or not api_secret:
+            client = await self._get_crypto_client()
+            if client is None:
                 log_warning(MODULE, "No hay credenciales configuradas para Binance Futures.")
                 return {"status": "error", "message": "No credentials"}
 
-            provider = BinanceCryptoProvider(
-                api_key=api_key,
-                api_secret=api_secret,
-                market="futures",
-                testnet=settings.binance_testnet,
-            )
-            client = await provider._get_async_client()
-
             # 1. Obtener todas las posiciones de Binance Futures (con recvWindow ampliado de 60s y auto-resync)
             try:
-                positions_raw = await client.futures_position_information(recvWindow=60000)
+                positions_raw = await asyncio.wait_for(
+                    client.futures_position_information(recvWindow=60000),
+                    timeout=10.0
+                )
             except Exception as pos_e:
-                if "-1021" in str(pos_e) or "recvWindow" in str(pos_e):
+                if "-1021" in str(pos_e) or "recvWindow" in str(pos_e) or isinstance(pos_e, (TimeoutError, asyncio.TimeoutError)):
                     try:
                         import time
                         srv_time = await client.futures_time()
                         local_time = int(time.time() * 1000)
                         client.TIME_OFFSET = int(srv_time['serverTime'] - local_time)
-                        positions_raw = await client.futures_position_information(recvWindow=60000)
+                        positions_raw = await asyncio.wait_for(
+                            client.futures_position_information(recvWindow=60000),
+                            timeout=10.0
+                        )
                     except Exception:
+                        self._crypto_client = None # Reconnect on next cycle
                         raise pos_e
                 else:
+                    self._crypto_client = None
                     raise pos_e
+
             active_binance_map: Dict[str, Dict[str, Any]] = {}
 
             for p in positions_raw:
@@ -110,63 +128,53 @@ class BrokerSynchronizer:
             db_symbols_map = {}
 
             for p in db_positions:
-                sym_norm = str(p.get("symbol", "")).replace("/", "").upper()
-                db_symbols_map[sym_norm] = p
+                s = p.get("symbol", "").upper()
+                if s:
+                    db_symbols_map[s] = p
 
-            # 3. Procesar posiciones activas de Binance
+            # 3. Sincronizar Binance -> Supabase
             for sym, b_pos in active_binance_map.items():
-                entry_p = b_pos["entry_price"] or b_pos["mark_price"]
-                sl_p = entry_p * 0.95 if b_pos["side"] == "LONG" else entry_p * 1.05
-                tp_p = entry_p * 1.05 if b_pos["side"] == "LONG" else entry_p * 0.95
-
                 if sym in db_symbols_map:
-                    # Actualizar posición existente en Supabase con datos en vivo
+                    # Posición ya existe -> actualizar mark_price y unrealized_pnl en Supabase
                     db_p = db_symbols_map[sym]
-                    upd_data = {
+                    update_data = {
                         "current_price": b_pos["mark_price"],
-                        "unrealized_pnl": round(b_pos["unrealized_pnl"], 4),
+                        "unrealized_pnl": b_pos["unrealized_pnl"],
                         "size": b_pos["size"],
                     }
-                    if b_pos["entry_price"] > 0 and float(db_p.get("entry_price") or 0) == 0:
-                        upd_data["entry_price"] = b_pos["entry_price"]
-                        upd_data["avg_entry_price"] = b_pos["entry_price"]
+                    if b_pos.get("liquidation_price"):
+                        update_data["liquidation_price"] = b_pos["liquidation_price"]
 
-                    sb.table("positions").update(upd_data).eq("id", db_p["id"]).execute()
+                    sb.table("positions").update(update_data).eq("id", db_p["id"]).execute()
                     result["updated"].append(sym)
                 else:
-                    # Posición abierta en Binance pero NO existente en Supabase (ej. SOLUSDT manual o externo)
-                    new_pos_data = {
+                    # Posición existe en Binance pero no en Supabase (ej. abierta externamente) -> Registrarla
+                    new_pos = {
                         "symbol": sym,
                         "side": b_pos["side"],
-                        "entry_price": entry_p,
-                        "avg_entry_price": entry_p,
-                        "current_price": b_pos["mark_price"],
                         "size": b_pos["size"],
-                        "stop_loss": sl_p,
-                        "sl_price": sl_p,
-                        "take_profit": tp_p,
-                        "tp_full_price": tp_p,
-                        "tp_partial_price": (entry_p + tp_p) / 2.0,
-                        "unrealized_pnl": round(b_pos["unrealized_pnl"], 4),
-                        "realized_pnl": 0.0,
+                        "entry_price": b_pos["entry_price"],
+                        "avg_entry_price": b_pos["entry_price"],
+                        "current_price": b_pos["mark_price"],
+                        "unrealized_pnl": b_pos["unrealized_pnl"],
                         "status": "open",
                         "mode": "live",
-                        "rule_code": "MANUAL_BINANCE",
-                        "rule_entry": "MANUAL_BINANCE",
+                        "rule_code": "Binance_External",
+                        "market_type": "crypto_futures",
+                        "leverage": b_pos["leverage"],
+                        "liquidation_price": b_pos["liquidation_price"],
                         "opened_at": datetime.now(timezone.utc).isoformat(),
                     }
-                    ins_res = sb.table("positions").insert(new_pos_data).execute()
+                    insert_res = sb.table("positions").insert(new_pos).execute()
                     result["created"].append(sym)
-                    log_info(MODULE, f"🔄 Posición externa de Binance detectada e importada a eTrade: {b_pos['side']} {b_pos['size']} {sym} @ {entry_p}")
-
-                    # Notificar a Telegram si está activo
+                    log_info(MODULE, f"📥 Posición externa detectada en Binance y registrada en eTrade: {sym} {b_pos['side']} (Size: {b_pos['size']})")
+                    
                     try:
-                        from app.workers.alerts_service import send_telegram_message
+                        from app.workers.performance_monitor import send_telegram_message
                         await send_telegram_message(
-                            f"🔄 [BROKER SYNC] Posición Binance Detectada\n"
-                            f"Símbolo: {sym} ({b_pos['side']})\n"
-                            f"Tamaño: {b_pos['size']}\n"
-                            f"Entrada: {entry_p:.4f}\n"
+                            f"📥 POSICIÓN EXTERNA SINCRONIZADA [{sym}]\n"
+                            f"Lado: {b_pos['side']} | Tamaño: {b_pos['size']}\n"
+                            f"Entrada: {b_pos['entry_price']:.4f}\n"
                             f"Marca: {b_pos['mark_price']:.4f}\n"
                             f"PnL: {b_pos['unrealized_pnl']:+.4f} USDT"
                         )
@@ -187,7 +195,10 @@ class BrokerSynchronizer:
                         # Intentar obtener el PnL y precio de ejecución exacto del último trade en Binance
                         realized_pnl = 0.0
                         try:
-                            trades = await client.futures_account_trades(symbol=sym, limit=5, recvWindow=60000)
+                            trades = await asyncio.wait_for(
+                                client.futures_account_trades(symbol=sym, limit=5, recvWindow=60000),
+                                timeout=5.0
+                            )
                             if trades:
                                 recent_trades = [t for t in trades if float(t.get('realizedPnl', 0)) != 0]
                                 if recent_trades:
@@ -225,8 +236,6 @@ class BrokerSynchronizer:
             from app.workers.scheduler import sync_positions_to_memory
             await sync_positions_to_memory()
 
-            await client.close_connection()
-
         except asyncio.CancelledError:
             pass
         except (TimeoutError, asyncio.TimeoutError) as te:
@@ -234,7 +243,10 @@ class BrokerSynchronizer:
             result["error"] = "TimeoutError (transient)"
         except Exception as e:
             err_msg = str(e) or repr(e)
-            log_error(MODULE, f"Error en sync_binance_futures: {err_msg}")
+            if "-1021" in err_msg or "recvWindow" in err_msg or "Timeout" in err_msg:
+                log_warning(MODULE, f"Aviso de sincronización temporal con Binance (auto-reintento): {err_msg}")
+            else:
+                log_error(MODULE, f"Error en sync_binance_futures: {err_msg}")
             result["error"] = err_msg
         finally:
             self._is_running_crypto = False
@@ -248,7 +260,10 @@ class BrokerSynchronizer:
         """
         cancelled = []
         try:
-            open_orders = await client.futures_get_open_orders(recvWindow=60000)
+            open_orders = await asyncio.wait_for(
+                client.futures_get_open_orders(recvWindow=60000),
+                timeout=8.0
+            )
             now_ts = datetime.now(timezone.utc).timestamp() * 1000
             for o in open_orders:
                 sym = o.get('symbol', '')
@@ -259,16 +274,24 @@ class BrokerSynchronizer:
                 # Si el símbolo no tiene posición abierta o la orden lleva más de 15 minutos sin llenarse
                 if sym not in active_binance_symbols or age_minutes > 15:
                     try:
-                        await client.futures_cancel_order(symbol=sym, orderId=oid, recvWindow=60000)
+                        await asyncio.wait_for(
+                            client.futures_cancel_order(symbol=sym, orderId=oid, recvWindow=60000),
+                            timeout=5.0
+                        )
                         cancelled.append(f"{sym}_{oid}")
                         log_info(MODULE, f"🧹 [ZOMBIE ORDER CLEANER] Orden huérfana cancelada en Binance: {sym} (ID={oid}, edad={age_minutes:.1f}m)")
                     except Exception as c_err:
                         log_warning(MODULE, f"No se pudo cancelar orden zombi {sym} {oid}: {c_err}")
         except asyncio.CancelledError:
             pass
+        except (TimeoutError, asyncio.TimeoutError) as te:
+            log_warning(MODULE, f"Timeout temporal en cleanup_zombie_orders: {te}")
         except Exception as e:
             err_msg = str(e) or repr(e)
-            log_error(MODULE, f"Error en cleanup_zombie_orders: {err_msg}")
+            if "-1021" in err_msg or "recvWindow" in err_msg or "Timeout" in err_msg:
+                log_warning(MODULE, f"Aviso en cleanup_zombie_orders: {err_msg}")
+            else:
+                log_error(MODULE, f"Error en cleanup_zombie_orders: {err_msg}")
         return cancelled
 
 
