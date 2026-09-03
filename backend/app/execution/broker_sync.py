@@ -123,7 +123,7 @@ class BrokerSynchronizer:
 
             # 2. Consultar posiciones abiertas en Supabase
             sb = get_supabase()
-            res_db = sb.table("positions").select("id, symbol, side, size, entry_price, avg_entry_price, current_price, is_paper, mode, unrealized_pnl, liquidation_price").eq("status", "open").execute()
+            res_db = sb.table("positions").select("id, symbol, side, size, entry_price, avg_entry_price, current_price, mode, unrealized_pnl, liquidation_price").eq("status", "open").execute()
             db_positions = res_db.data or []
             db_symbols_map = {}
 
@@ -185,7 +185,7 @@ class BrokerSynchronizer:
             for sym, db_p in db_symbols_map.items():
                 if sym not in active_binance_map:
                     # Solo cerrar si es posición live de crypto
-                    is_paper = db_p.get("is_paper") or (db_p.get("mode") == "paper")
+                    is_paper = (db_p.get("mode") == "paper")
                     if not is_paper:
                         entry_p = float(db_p.get("entry_price") or db_p.get("avg_entry_price") or 0)
                         close_p = float(db_p.get("current_price") or entry_p)
