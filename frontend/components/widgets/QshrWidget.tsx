@@ -1,4 +1,4 @@
-﻿use client
+'use client';
 import React from 'react'
 
 interface QshrWidgetProps {
@@ -64,7 +64,7 @@ export default function QshrWidget({ symbol, position, snap }: QshrWidgetProps) 
           fontWeight: 900,
           background: badgeBg,
           color: badgeColor,
-          border: 1px solid 
+          border: `1px solid ${badgeColor}44`,
         }}>
           {icon} {stateLabel}
         </div>
