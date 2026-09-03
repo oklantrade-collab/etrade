@@ -442,12 +442,13 @@ const CryptoSettings = ({ config, onSave }: any) => {
       {/* Status Badge Crypto */}
       {(() => {
         const isPaperCrypto = config.paper_trading !== false && config.regime_params?.paper_trading_crypto !== false;
+        const mainColor = isPaperCrypto ? '#F7931A' : '#00C896';
         return (
           <>
             <StatusBadge 
               label="Binance Futures" 
               status="ACTIVO" 
-              color="#F7931A" 
+              color={mainColor} 
               detail={isPaperCrypto ? "Modo Paper Trading (Simulación)" : "Modo Live Real (Binance Futures)"} 
             />
 
@@ -457,9 +458,9 @@ const CryptoSettings = ({ config, onSave }: any) => {
               alignItems: 'center', 
               justifyContent: 'space-between', 
               padding: '14px 18px', 
-              background: isPaperCrypto ? 'rgba(59, 130, 246, 0.08)' : 'rgba(247, 147, 26, 0.08)', 
+              background: isPaperCrypto ? 'rgba(247, 147, 26, 0.08)' : 'rgba(0, 200, 150, 0.08)', 
               borderRadius: '10px', 
-              border: `1px solid ${isPaperCrypto ? '#3B82F6' : '#F7931A'}44` 
+              border: `1px solid ${isPaperCrypto ? '#F7931A' : '#00C896'}44` 
             }}>
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -469,9 +470,9 @@ const CryptoSettings = ({ config, onSave }: any) => {
                     fontWeight: 800, 
                     padding: '3px 9px', 
                     borderRadius: '6px', 
-                    background: isPaperCrypto ? '#3B82F622' : '#F7931A22', 
-                    color: isPaperCrypto ? '#60A5FA' : '#F7931A',
-                    border: `1px solid ${isPaperCrypto ? '#3B82F6' : '#F7931A'}55`
+                    background: isPaperCrypto ? '#F7931A22' : '#00C89622', 
+                    color: isPaperCrypto ? '#F7931A' : '#00C896',
+                    border: `1px solid ${isPaperCrypto ? '#F7931A' : '#00C896'}55`
                   }}>
                     {isPaperCrypto ? '📝 MODO PAPER (Simulación)' : '🔥 MODO LIVE (Binance Futures Real)'}
                   </span>
@@ -500,18 +501,18 @@ const CryptoSettings = ({ config, onSave }: any) => {
                   width: '50px', 
                   height: '26px', 
                   borderRadius: '13px', 
-                  background: isPaperCrypto ? '#3B82F6' : '#F7931A', 
+                  background: isPaperCrypto ? '#F7931A' : '#00C896', 
                   position: 'relative', 
                   cursor: 'pointer',
                   transition: 'background 0.2s ease',
-                  boxShadow: `0 0 10px ${isPaperCrypto ? '#3B82F655' : '#F7931A55'}`
+                  boxShadow: `0 0 10px ${isPaperCrypto ? '#F7931A55' : '#00C89655'}`
                 }}
                 title={isPaperCrypto ? "Cambiar a Modo LIVE (Binance)" : "Cambiar a Modo PAPER (Simulación)"}
               >
                 <div style={{ 
                   position: 'absolute', 
                   top: '3px', 
-                  left: isPaperCrypto ? '27px' : '3px', 
+                  left: isPaperCrypto ? '3px' : '27px', 
                   width: '20px', 
                   height: '20px', 
                   borderRadius: '50%', 
@@ -654,9 +655,9 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
             alignItems: 'center', 
             justifyContent: 'space-between', 
             padding: '14px 18px', 
-            background: isPaperForex ? 'rgba(59, 130, 246, 0.08)' : 'rgba(239, 68, 68, 0.08)', 
+            background: isPaperForex ? 'rgba(247, 147, 26, 0.08)' : 'rgba(0, 200, 150, 0.08)', 
             borderRadius: '10px', 
-            border: `1px solid ${isPaperForex ? '#3B82F6' : '#EF4444'}44` 
+            border: `1px solid ${isPaperForex ? '#F7931A' : '#00C896'}44` 
           }}>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -666,9 +667,9 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
                   fontWeight: 800, 
                   padding: '3px 9px', 
                   borderRadius: '6px', 
-                  background: isPaperForex ? '#3B82F622' : '#EF444422', 
-                  color: isPaperForex ? '#60A5FA' : '#F87171',
-                  border: `1px solid ${isPaperForex ? '#3B82F6' : '#EF4444'}55`
+                  background: isPaperForex ? '#F7931A22' : '#00C89622', 
+                  color: isPaperForex ? '#F7931A' : '#00C896',
+                  border: `1px solid ${isPaperForex ? '#F7931A' : '#00C896'}55`
                 }}>
                   {isPaperForex ? '📝 MODO PAPER (Simulación)' : '🔥 MODO LIVE (cTrader Real)'}
                 </span>
@@ -695,18 +696,18 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
                 width: '50px', 
                 height: '26px', 
                 borderRadius: '13px', 
-                background: isPaperForex ? '#3B82F6' : '#EF4444', 
+                background: isPaperForex ? '#F7931A' : '#00C896', 
                 position: 'relative', 
                 cursor: 'pointer',
                 transition: 'background 0.2s ease',
-                boxShadow: `0 0 10px ${isPaperForex ? '#3B82F655' : '#EF444455'}`
+                boxShadow: `0 0 10px ${isPaperForex ? '#F7931A55' : '#00C89655'}`
               }}
               title={isPaperForex ? "Cambiar a Modo LIVE (cTrader)" : "Cambiar a Modo PAPER (Simulación)"}
             >
               <div style={{ 
                 position: 'absolute', 
                 top: '3px', 
-                left: isPaperForex ? '27px' : '3px', 
+                left: isPaperForex ? '3px' : '27px', 
                 width: '20px', 
                 height: '20px', 
                 borderRadius: '50%', 

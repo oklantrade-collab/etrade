@@ -69,8 +69,21 @@ class BrokerSynchronizer:
             )
             client = await provider._get_async_client()
 
-            # 1. Obtener todas las posiciones de Binance Futures (con recvWindow ampliado de 60s)
-            positions_raw = await client.futures_position_information(recvWindow=60000)
+            # 1. Obtener todas las posiciones de Binance Futures (con recvWindow ampliado de 60s y auto-resync)
+            try:
+                positions_raw = await client.futures_position_information(recvWindow=60000)
+            except Exception as pos_e:
+                if "-1021" in str(pos_e) or "recvWindow" in str(pos_e):
+                    try:
+                        import time
+                        srv_time = await client.futures_time()
+                        local_time = int(time.time() * 1000)
+                        client.TIME_OFFSET = int(srv_time['serverTime'] - local_time)
+                        positions_raw = await client.futures_position_information(recvWindow=60000)
+                    except Exception:
+                        raise pos_e
+                else:
+                    raise pos_e
             active_binance_map: Dict[str, Dict[str, Any]] = {}
 
             for p in positions_raw:

@@ -119,12 +119,21 @@ class BinanceCryptoProvider(DataProvider):
                     pass
                 if self.market == "futures":
                     try:
-                        await self._async_client.futures_change_position_mode(dualSidePosition='true')
+                        await self._async_client.futures_change_position_mode(dualSidePosition='true', recvWindow=60000)
                         from app.core.logger import log_info
                         log_info('BINANCE', 'Hedge Mode (dualSidePosition) activado correctamente.')
                     except Exception as e:
                         err_str = str(e)
-                        if "No need to change" not in err_str:
+                        if "-1021" in err_str or "recvWindow" in err_str:
+                            try:
+                                import time
+                                srv_time = await self._async_client.futures_time()
+                                local_time = int(time.time() * 1000)
+                                self._async_client.TIME_OFFSET = int(srv_time['serverTime'] - local_time)
+                                await self._async_client.futures_change_position_mode(dualSidePosition='true', recvWindow=60000)
+                            except Exception:
+                                pass
+                        elif "No need to change" not in err_str:
                             from app.core.logger import log_warning
                             log_warning('BINANCE', f'No se pudo activar Hedge Mode: {err_str} (Asegúrate de no tener posiciones abiertas).')
         return self._async_client
