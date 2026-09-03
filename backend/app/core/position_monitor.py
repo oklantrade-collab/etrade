@@ -1856,7 +1856,8 @@ async def _execute_paper_open_unlocked(
         log_warning(MODULE, f"Error calculando tamaño dinámico en _execute_paper_open_unlocked: {sizing_e}. Usando size original: {size}")
 
     # Determinar si el modo es Paper o Live
-    is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
+    regime_p = BOT_STATE.config_cache.get("regime_params") or {}
+    is_paper = bool(regime_p.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading", False))))
     trade_mode = "paper" if is_paper else "live"
     live_exchange_order_id = None
     execution_fill_price = price

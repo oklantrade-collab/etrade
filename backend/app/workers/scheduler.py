@@ -882,7 +882,8 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
         from app.rebote_aduana.aduana_validator import AduanaValidator
         from app.core.memory_store import BOT_STATE
         
-        is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
+        regime_p = BOT_STATE.config_cache.get("regime_params") or {}
+        is_paper = bool(regime_p.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading", False))))
         last_price = float(df_5m.iloc[-1]['close'])
         
         # ── OBTENER PRECIO DE TICKER EN TIEMPO REAL DEL BROKER ──
@@ -1708,14 +1709,19 @@ def load_config_to_memory():
         res = sb.table("trading_config").select("*").eq("id", 1).maybe_single().execute()
         if res and res.data:
             tc = res.data
-            is_paper = bool(tc.get("paper_trading", False))
+            regime_p = tc.get("regime_params") or {}
+            is_paper = bool(regime_p.get("paper_trading_crypto", tc.get("paper_trading_crypto", tc.get("paper_trading", False))))
             BOT_STATE.config_cache = {
                 "paper_trading": is_paper,
+                "paper_trading_crypto": is_paper,
                 "observe_only": False,
-                "mode": tc.get("mode", "live"),
-                "regime_params": tc.get("regime_params", {})
+                "mode": "paper" if is_paper else "live",
+                "regime_params": regime_p,
+                "capital_crypto_futures": tc.get("capital_crypto_futures", 500),
+                "leverage_crypto": tc.get("leverage_crypto", 15),
+                "active_symbols": tc.get("active_symbols", ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT"])
             }
-            log_info(MODULE, f"Configuración de Crypto sincronizada desde Supabase trading_config (paper_trading={is_paper}).")
+            log_info(MODULE, f"Configuración de Crypto sincronizada desde Supabase trading_config (paper_trading_crypto={is_paper}).")
             return
     except Exception as sb_err:
         log_error(MODULE, f"Error sincronizando trading_config desde Supabase: {sb_err}")
@@ -2877,7 +2883,8 @@ async def cycle_15m():
     # Create LOCAL provider for this cycle
     provider = BinanceCryptoProvider(settings.binance_api_key, settings.binance_secret, testnet=settings.binance_testnet)
     # Check paper mode
-    is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
+    regime_p = BOT_STATE.config_cache.get("regime_params") or {}
+    is_paper = bool(regime_p.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading", False))))
     if is_paper:
         provider = PaperTradingProvider(provider)
 

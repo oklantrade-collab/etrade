@@ -439,7 +439,90 @@ const CryptoSettings = ({ config, onSave }: any) => {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
-      <StatusBadge label="Binance Futures" status="ACTIVO" color="#F7931A" detail="Paper Trading" />
+      {/* Status Badge Crypto */}
+      {(() => {
+        const isPaperCrypto = config.paper_trading !== false && config.regime_params?.paper_trading_crypto !== false;
+        return (
+          <>
+            <StatusBadge 
+              label="Binance Futures" 
+              status="ACTIVO" 
+              color="#F7931A" 
+              detail={isPaperCrypto ? "Modo Paper Trading (Simulación)" : "Modo Live Real (Binance Futures)"} 
+            />
+
+            {/* Selector de Modo Crypto: PAPER vs LIVE REAL */}
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'space-between', 
+              padding: '14px 18px', 
+              background: isPaperCrypto ? 'rgba(59, 130, 246, 0.08)' : 'rgba(247, 147, 26, 0.08)', 
+              borderRadius: '10px', 
+              border: `1px solid ${isPaperCrypto ? '#3B82F6' : '#F7931A'}44` 
+            }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ color: '#FFF', fontWeight: 700, fontSize: '14px' }}>Modo de Operación Crypto</span>
+                  <span style={{ 
+                    fontSize: '11px', 
+                    fontWeight: 800, 
+                    padding: '3px 9px', 
+                    borderRadius: '6px', 
+                    background: isPaperCrypto ? '#3B82F622' : '#F7931A22', 
+                    color: isPaperCrypto ? '#60A5FA' : '#F7931A',
+                    border: `1px solid ${isPaperCrypto ? '#3B82F6' : '#F7931A'}55`
+                  }}>
+                    {isPaperCrypto ? '📝 MODO PAPER (Simulación)' : '🔥 MODO LIVE (Binance Futures Real)'}
+                  </span>
+                </div>
+                <div style={{ color: '#888', fontSize: '11px', marginTop: '4px' }}>
+                  {isPaperCrypto 
+                    ? 'Las operaciones se ejecutan de forma virtual en eTrade sin enviar órdenes a Binance.' 
+                    : 'Las operaciones se envían en vivo a la cuenta conectada en Binance Futures.'}
+                </div>
+              </div>
+              
+              {/* Toggle Switch Paper / Live Crypto */}
+              <div 
+                onClick={() => {
+                  const nextPaper = !isPaperCrypto;
+                  onSave({
+                    paper_trading: nextPaper,
+                    mode: nextPaper ? 'paper' : 'live',
+                    regime_params: {
+                      ...config.regime_params,
+                      paper_trading_crypto: nextPaper
+                    }
+                  });
+                }}
+                style={{ 
+                  width: '50px', 
+                  height: '26px', 
+                  borderRadius: '13px', 
+                  background: isPaperCrypto ? '#3B82F6' : '#F7931A', 
+                  position: 'relative', 
+                  cursor: 'pointer',
+                  transition: 'background 0.2s ease',
+                  boxShadow: `0 0 10px ${isPaperCrypto ? '#3B82F655' : '#F7931A55'}`
+                }}
+                title={isPaperCrypto ? "Cambiar a Modo LIVE (Binance)" : "Cambiar a Modo PAPER (Simulación)"}
+              >
+                <div style={{ 
+                  position: 'absolute', 
+                  top: '3px', 
+                  left: isPaperCrypto ? '27px' : '3px', 
+                  width: '20px', 
+                  height: '20px', 
+                  borderRadius: '50%', 
+                  background: '#FFF', 
+                  transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)' 
+                }} />
+              </div>
+            </div>
+          </>
+        );
+      })()}
       <SettingsSection title="💰 Capital & Activos">
         <SettingRow label="Capital asignado (Base)" value={form.capital_crypto_futures} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, capital_crypto_futures: v })} />
         <SettingRow label="Ganancia o Profit de la cuenta" value={form.accumulated_profit_crypto} type="number" prefix="$" onChange={(v: any) => setForm({ ...form, accumulated_profit_crypto: v })} />
@@ -562,18 +645,18 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
         )}
       </div>
 
-      {/* Selector de Modo: PAPER vs LIVE REAL */}
+      {/* Selector de Modo Forex: PAPER vs LIVE REAL */}
       {(() => {
-        const isPaper = config.paper_trading !== false && config.regime_params?.paper_trading_forex !== false;
+        const isPaperForex = config.regime_params?.paper_trading_forex !== false;
         return (
           <div style={{ 
             display: 'flex', 
             alignItems: 'center', 
             justifyContent: 'space-between', 
             padding: '14px 18px', 
-            background: isPaper ? 'rgba(59, 130, 246, 0.08)' : 'rgba(239, 68, 68, 0.08)', 
+            background: isPaperForex ? 'rgba(59, 130, 246, 0.08)' : 'rgba(239, 68, 68, 0.08)', 
             borderRadius: '10px', 
-            border: `1px solid ${isPaper ? '#3B82F6' : '#EF4444'}44` 
+            border: `1px solid ${isPaperForex ? '#3B82F6' : '#EF4444'}44` 
           }}>
             <div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -583,27 +666,25 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
                   fontWeight: 800, 
                   padding: '3px 9px', 
                   borderRadius: '6px', 
-                  background: isPaper ? '#3B82F622' : '#EF444422', 
-                  color: isPaper ? '#60A5FA' : '#F87171',
-                  border: `1px solid ${isPaper ? '#3B82F6' : '#EF4444'}55`
+                  background: isPaperForex ? '#3B82F622' : '#EF444422', 
+                  color: isPaperForex ? '#60A5FA' : '#F87171',
+                  border: `1px solid ${isPaperForex ? '#3B82F6' : '#EF4444'}55`
                 }}>
-                  {isPaper ? '📝 MODO PAPER (Simulación)' : '🔥 MODO LIVE (cTrader Real)'}
+                  {isPaperForex ? '📝 MODO PAPER (Simulación)' : '🔥 MODO LIVE (cTrader Real)'}
                 </span>
               </div>
               <div style={{ color: '#888', fontSize: '11px', marginTop: '4px' }}>
-                {isPaper 
+                {isPaperForex 
                   ? 'Las operaciones se ejecutan de forma virtual en eTrade sin enviar órdenes a cTrader.' 
                   : 'Las operaciones se envían en vivo a la cuenta conectada en cTrader / IC Markets.'}
               </div>
             </div>
             
-            {/* Toggle Switch Paper / Live */}
+            {/* Toggle Switch Paper / Live Forex */}
             <div 
               onClick={() => {
-                const nextPaper = !isPaper;
+                const nextPaper = !isPaperForex;
                 onSave({
-                  paper_trading: nextPaper,
-                  mode: nextPaper ? 'paper' : 'live',
                   regime_params: {
                     ...config.regime_params,
                     paper_trading_forex: nextPaper
@@ -614,18 +695,18 @@ const ForexSettings = ({ config, onSave, forexEnabled, setForexEnabled }: any) =
                 width: '50px', 
                 height: '26px', 
                 borderRadius: '13px', 
-                background: isPaper ? '#3B82F6' : '#EF4444', 
+                background: isPaperForex ? '#3B82F6' : '#EF4444', 
                 position: 'relative', 
                 cursor: 'pointer',
                 transition: 'background 0.2s ease',
-                boxShadow: `0 0 10px ${isPaper ? '#3B82F655' : '#EF444455'}`
+                boxShadow: `0 0 10px ${isPaperForex ? '#3B82F655' : '#EF444455'}`
               }}
-              title={isPaper ? "Cambiar a Modo LIVE" : "Cambiar a Modo PAPER"}
+              title={isPaperForex ? "Cambiar a Modo LIVE (cTrader)" : "Cambiar a Modo PAPER (Simulación)"}
             >
               <div style={{ 
                 position: 'absolute', 
                 top: '3px', 
-                left: isPaper ? '27px' : '3px', 
+                left: isPaperForex ? '27px' : '3px', 
                 width: '20px', 
                 height: '20px', 
                 borderRadius: '50%', 

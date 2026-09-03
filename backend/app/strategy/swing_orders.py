@@ -830,7 +830,11 @@ async def execute_limit_order_paper(order: dict, execution_price: float, sb) -> 
                 return
             # ═══════════════════════════════════════════════════════════
 
-            is_paper = bool(BOT_STATE.config_cache.get("paper_trading", False))
+            reg_params = tc_data.get('regime_params', {}) or {}
+            if is_forex:
+                is_paper = bool(reg_params.get("paper_trading_forex", True))
+            else:
+                is_paper = bool(reg_params.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading_crypto", BOT_STATE.config_cache.get("paper_trading", False))))
             trade_mode = 'paper' if is_paper else 'live'
             live_order_id = None
 
