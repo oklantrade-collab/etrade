@@ -123,7 +123,7 @@ class BrokerSynchronizer:
 
             # 2. Consultar posiciones abiertas en Supabase
             sb = get_supabase()
-            res_db = sb.table("positions").select("*").eq("status", "open").execute()
+            res_db = sb.table("positions").select("id, symbol, side, size, entry_price, avg_entry_price, current_price, is_paper, mode, unrealized_pnl, liquidation_price").eq("status", "open").execute()
             db_positions = res_db.data or []
             db_symbols_map = {}
 
