@@ -1328,6 +1328,92 @@ def calculate_cluster_stop_loss(symbol: str, breakout_candle: pd.Series, side: s
 
     return format_price_precision(symbol, sl)
 
+def detect_bollinger_regime_15m(df_15m: pd.DataFrame) -> dict:
+    """
+    Analiza el régimen de las Bandas de Bollinger en temporalidad de 15m.
+    Distingue entre:
+    1. MODO EXPANSIÓN: Banda Superior con pendiente > 0, Banda Inferior con pendiente < 0,
+       y ancho de banda (Bandwidth) creciente.
+    2. MODO TUBO / CANAL LATERAL: Bandas paralelas o contrayéndose, EMA20 plana.
+    """
+    result = {
+        "is_expansion": False,
+        "is_tube": True,
+        "upper_slope": 0.0,
+        "lower_slope": 0.0,
+        "bandwidth_current": 0.0,
+        "bandwidth_ratio": 1.0,
+        "ema20_slope": 0.0,
+        "ema3": 0.0,
+        "ema9": 0.0,
+        "ema20": 0.0,
+        "is_ema_bullish_aligned": False,
+        "is_ema_bearish_aligned": False,
+    }
+    if df_15m is None or len(df_15m) < 4:
+        return result
+
+    try:
+        upper_series = df_15m['upper_2'] if 'upper_2' in df_15m.columns else df_15m.get('bb_upper', pd.Series())
+        lower_series = df_15m['lower_2'] if 'lower_2' in df_15m.columns else df_15m.get('bb_lower', pd.Series())
+        basis_series = df_15m['basis'] if 'basis' in df_15m.columns else df_15m.get('sma_20', df_15m.get('ema_20', pd.Series()))
+
+        if upper_series.empty or lower_series.empty or basis_series.empty:
+            return result
+
+        u_0 = float(upper_series.iloc[-1])
+        u_1 = float(upper_series.iloc[-2])
+        l_0 = float(lower_series.iloc[-1])
+        l_1 = float(lower_series.iloc[-2])
+        b_0 = float(basis_series.iloc[-1])
+        b_1 = float(basis_series.iloc[-2])
+
+        if b_0 <= 0 or b_1 <= 0:
+            return result
+
+        upper_slope = u_0 - u_1
+        lower_slope = l_0 - l_1
+        ema20_slope = b_0 - b_1
+
+        bw_0 = (u_0 - l_0) / b_0
+        bw_1 = (u_1 - l_1) / b_1
+        bw_ratio = (bw_0 / bw_1) if bw_1 > 0 else 1.0
+
+        ema3_s = df_15m.get('ema_3', df_15m.get('ema_4', df_15m.get('close', pd.Series())))
+        ema9_s = df_15m.get('ema_9', pd.Series())
+        ema20_s = basis_series
+
+        ema3 = float(ema3_s.iloc[-1]) if not ema3_s.empty else b_0
+        ema9 = float(ema9_s.iloc[-1]) if not ema9_s.empty else b_0
+        ema20 = b_0
+
+        ema_bullish = (ema3 > ema9) and (ema9 > ema20)
+        ema_bearish = (ema3 < ema9) and (ema9 < ema20)
+
+        # Regla de Expansión: Banda Superior abriendo hacia arriba y Banda Inferior abriendo hacia abajo
+        is_expansion = (upper_slope > 0) and (lower_slope < 0) and (bw_ratio > 1.02)
+        is_tube = not is_expansion
+
+        result.update({
+            "is_expansion": is_expansion,
+            "is_tube": is_tube,
+            "upper_slope": upper_slope,
+            "lower_slope": lower_slope,
+            "bandwidth_current": bw_0,
+            "bandwidth_ratio": bw_ratio,
+            "ema20_slope": ema20_slope,
+            "ema3": ema3,
+            "ema9": ema9,
+            "ema20": ema20,
+            "is_ema_bullish_aligned": ema_bullish,
+            "is_ema_bearish_aligned": ema_bearish,
+        })
+        return result
+    except Exception as e:
+        log_warning(MODULE, f"Error calculando régimen de Bollinger 15m: {e}")
+        return result
+
+
 def evaluate_cluster_exit(
     symbol: str,
     active_positions: list[dict],
@@ -1340,6 +1426,7 @@ def evaluate_cluster_exit(
     """
     Evalúa si se debe ejecutar un Take Profit en Bloque (Cluster Take Profit)
     para TODAS las posiciones activas en la misma dirección al alcanzar el clímax SIPV en 15m.
+    Distingue dinámicamente entre MODO TUBO / LATERAL (TP inmediato) y MODO EXPANSIÓN (dejar correr tendencia).
     """
     if not active_positions or df_15m is None or df_15m.empty:
         return None
@@ -1347,25 +1434,57 @@ def evaluate_cluster_exit(
     try:
         sipv = calculate_sipv_indicator(df_15m)
         levels_15m = calculate_15m_fibonacci_levels(df_15m, current_price)
+        bb_regime = detect_bollinger_regime_15m(df_15m)
         side = (active_positions[0].get('side') or '').lower()
 
         if side in ('long', 'buy'):
-            if (current_price >= levels_15m['upper_5_15m'] or current_price >= levels_15m['upper_band_15m']) and sipv['is_bullish_climax']:
+            # 1. En MODO EXPANSIÓN con tendencia activa: NO cerrar prematuramente
+            if bb_regime['is_expansion'] and bb_regime['is_ema_bullish_aligned']:
+                upper_6 = levels_15m.get('upper_6_15m', float('inf'))
+                if upper_6 and current_price >= upper_6:
+                    return {
+                        "action": "cluster_take_profit",
+                        "side": "long",
+                        "position_ids": [p.get('id') for p in active_positions if p.get('id')],
+                        "rule_code": "Bb33_QSHR_CLUSTER_TP",
+                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico Extremo en Upper_6 ({len(active_positions)} posiciones cerradas)"
+                    }
+                log_info(MODULE, f"🚀 [QSHR CLUSTER TP SKIP] [{symbol} LONG]: Modo Expansión 15m activo con EMA3>EMA9>EMA20. Dejando correr tendencia.")
+                return None
+
+            # 2. En MODO TUBO / CANAL LATERAL: Take Profit al tocar la banda superior
+            if (current_price >= levels_15m['upper_5_15m'] or current_price >= levels_15m['upper_band_15m']):
                 return {
                     "action": "cluster_take_profit",
                     "side": "long",
                     "position_ids": [p.get('id') for p in active_positions if p.get('id')],
                     "rule_code": "Bb33_QSHR_CLUSTER_TP",
-                    "reason": f"QSHR Cluster TP 15m: Clímax SIPV alcista en sobre-extensión ({len(active_positions)} posiciones cerradas)"
+                    "reason": f"QSHR Cluster TP 15m: Take Profit en Banda Superior (Modo Tubo / Rango Lateral) ({len(active_positions)} posiciones cerradas)"
                 }
+
         elif side in ('short', 'sell'):
-            if (current_price <= levels_15m['lower_5_15m'] or current_price <= levels_15m['lower_band_15m']) and sipv['is_bearish_climax']:
+            # 1. En MODO EXPANSIÓN con tendencia activa: NO cerrar prematuramente
+            if bb_regime['is_expansion'] and bb_regime['is_ema_bearish_aligned']:
+                lower_6 = levels_15m.get('lower_6_15m', 0.0)
+                if lower_6 and current_price <= lower_6:
+                    return {
+                        "action": "cluster_take_profit",
+                        "side": "short",
+                        "position_ids": [p.get('id') for p in active_positions if p.get('id')],
+                        "rule_code": "Bb33_QSHR_CLUSTER_TP",
+                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico Extremo en Lower_6 ({len(active_positions)} posiciones cerradas)"
+                    }
+                log_info(MODULE, f"🚀 [QSHR CLUSTER TP SKIP] [{symbol} SHORT]: Modo Expansión 15m activo con EMA3<EMA9<EMA20. Dejando correr tendencia.")
+                return None
+
+            # 2. En MODO TUBO / CANAL LATERAL: Take Profit al tocar la banda inferior
+            if (current_price <= levels_15m['lower_5_15m'] or current_price <= levels_15m['lower_band_15m']):
                 return {
                     "action": "cluster_take_profit",
                     "side": "short",
                     "position_ids": [p.get('id') for p in active_positions if p.get('id')],
                     "rule_code": "Bb33_QSHR_CLUSTER_TP",
-                    "reason": f"QSHR Cluster TP 15m: Clímax SIPV bajista en sobre-extensión ({len(active_positions)} posiciones cerradas)"
+                    "reason": f"QSHR Cluster TP 15m: Take Profit en Banda Inferior (Modo Tubo / Rango Lateral) ({len(active_positions)} posiciones cerradas)"
                 }
 
         return None

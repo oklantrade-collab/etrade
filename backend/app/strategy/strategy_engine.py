@@ -431,6 +431,28 @@ class StrategyEngine:
         ema3_below_ema9_15m = (ema3_15m_val < ema9_15m_val) if ema3_15m_val and ema9_15m_val else False
         ema9_below_ema20_15m = (ema9_15m_val < ema20_15m_val) if ema9_15m_val and ema20_15m_val else False
 
+        # Aa13 / Bb13 EMA20 Touch and Separation Gap
+        price_touches_ema20_15m_long = False
+        price_touches_ema20_15m_short = False
+        ema3_ema9_gap_sufficient_15m = False
+        ema20_slope_positive_15m = ema20_ascending_15m
+        ema20_slope_negative_15m = ema20_descending_15m
+
+        if ema20_15m_val and low_15m and close_15m:
+            # LONG: Low toca o penetra EMA20, y close o precio se sostiene en la zona de rebote
+            price_touches_ema20_15m_long = (low_15m <= ema20_15m_val) and (close_15m >= ema20_15m_val * 0.999 or current_price >= ema20_15m_val * 0.999)
+        if ema20_15m_val and high_15m and close_15m:
+            # SHORT: High toca o penetra EMA20, y close o precio se sostiene en la zona de rebote
+            price_touches_ema20_15m_short = (high_15m >= ema20_15m_val) and (close_15m <= ema20_15m_val * 1.001 or current_price <= ema20_15m_val * 1.001)
+
+        if ema3_15m_val and ema9_15m_val:
+            gap = abs(ema3_15m_val - ema9_15m_val)
+            atr_val = safe_float(last_15m.get('atr_14') or last_15m.get('atr') or 0)
+            if atr_val > 0:
+                ema3_ema9_gap_sufficient_15m = gap >= (0.15 * atr_val)
+            else:
+                ema3_ema9_gap_sufficient_15m = (gap / (ema9_15m_val or 1.0)) >= 0.00015
+
         ema3_above_ema9_5m = False
         ema9_above_ema20_5m = False
         ema3_below_ema9_5m = False
@@ -619,6 +641,15 @@ class StrategyEngine:
             'close_below_ema20_15m': close_below_ema20_15m,
             'low_below_ema9_or_ema20_15m': low_below_ema9_or_ema20_15m,
             'high_above_ema9_or_ema20_15m': high_above_ema9_or_ema20_15m,
+            'price_touches_ema20_15m_long': price_touches_ema20_15m_long,
+            'price_touches_ema20_15m_short': price_touches_ema20_15m_short,
+            'ema3_above_ema9_15m': ema3_above_ema9_15m,
+            'ema9_above_ema20_15m': ema9_above_ema20_15m,
+            'ema3_below_ema9_15m': ema3_below_ema9_15m,
+            'ema9_below_ema20_15m': ema9_below_ema20_15m,
+            'ema3_ema9_gap_sufficient_15m': ema3_ema9_gap_sufficient_15m,
+            'ema20_slope_positive_15m': ema20_slope_positive_15m,
+            'ema20_slope_negative_15m': ema20_slope_negative_15m,
 
             # Referencia al DataFrame original para reglas personalizadas avanzadas
             'df_15m': df_15m
