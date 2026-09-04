@@ -633,16 +633,17 @@ async def check_protections(
             log_error(MODULE, f"Error actualizando BE para {symbol}: {e}")
 
     # ── CHECK 1.4.5: STOP LOSS VIRTUAL FIBONACCI (eTrade 100% Control, Crypto & Forex) ──
-    try:
-        from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
-        fib_sl_res = evaluate_fib_band_virtual_sl(position, df_15m, current_price, symbol)
-        if fib_sl_res and fib_sl_res.get('action') == 'close_virtual_fib_sl':
-            log_info('PROTECTION', f"🛡️ [VIRTUAL FIB SL TRIGGERED] [{symbol}]: {fib_sl_res.get('reason')}")
-            closed = await _execute_paper_close(position, current_price, 'qshr_fib_band_virtual_sl', supabase)
-            if closed:
-                return
-    except Exception as fib_sl_e:
-        log_error(MODULE, f"Error evaluando SL Virtual Fibonacci Crypto {symbol}: {fib_sl_e}")
+    if not position.get('erep_active') and not position.get('recovery_mode') and position.get('sl_type') not in ('erep_recovery_wait', 'erep_suspended', 'aduana_software'):
+        try:
+            from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
+            fib_sl_res = evaluate_fib_band_virtual_sl(position, df_15m, current_price, symbol)
+            if fib_sl_res and fib_sl_res.get('action') == 'close_virtual_fib_sl':
+                log_info('PROTECTION', f"🛡️ [VIRTUAL FIB SL TRIGGERED] [{symbol}]: {fib_sl_res.get('reason')}")
+                closed = await _execute_paper_close(position, current_price, 'qshr_fib_band_virtual_sl', supabase)
+                if closed:
+                    return
+        except Exception as fib_sl_e:
+            log_error(MODULE, f"Error evaluando SL Virtual Fibonacci Crypto {symbol}: {fib_sl_e}")
 
     # ── CHECK 1.5: Motor Dual de Salida (Bollinger Exhaustion & CASCADA Fib Stagnation) ──
     try:

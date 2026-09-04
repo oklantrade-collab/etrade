@@ -305,11 +305,13 @@ def check_triple_ema_alignment(df_5m: pd.DataFrame, direction: str) -> bool:
         log_error(MODULE, f"Error verificando alineación Triple EMA: {e}")
         return False
 
-def calculate_5m_velocity(df_5m: pd.DataFrame) -> dict:
+def calculate_5m_velocity(df_5m: pd.DataFrame, market_type: str = 'crypto_futures', symbol: str = '') -> dict:
     """
-    Calcula la velocidad y aceleración del mercado directamente en velas de 5m.
+    Calcula la velocidad y aceleración del mercado directamente en velas de 5m con umbral adaptativo (Crypto vs Forex).
     Fórmula: V_5m = ((body_ratio + range_ratio) / 2.0) * volume_ratio
-    Umbral de alta velocidad: V_5m >= 2.5
+    Umbrales:
+      - Crypto: V_5m >= 3.0 (Alta aceleración / inyección de libro)
+      - Forex:  V_5m >= 2.5 o desplazamiento >= 1.5 * ATR_5m
     """
     if df_5m is None or len(df_5m) < 20:
         return {"v_5m_score": 0.0, "is_high_velocity": False, "direction": "NEUTRAL", "volume_ratio": 1.0}
@@ -344,7 +346,15 @@ def calculate_5m_velocity(df_5m: pd.DataFrame) -> dict:
         vol_ratio = vol_curr / vol_sma20 if vol_sma20 > 0 else 1.0
 
         v_5m = v_base * min(vol_ratio, 3.0)
-        is_high_velocity = v_5m >= 2.5
+
+        # ── UMBRAL ADAPTATIVO (Mejora 3: Crypto vs Forex) ──
+        is_crypto = 'crypto' in (market_type or '').lower() or 'USDT' in (symbol or '').upper()
+        if is_crypto:
+            is_high_velocity = v_5m >= 3.0 or (v_5m >= 2.5 and vol_ratio >= 2.0)
+        else:
+            # Forex: considerar también ATR displacement
+            is_high_velocity = v_5m >= 2.5 or (avg_range_5m > 0 and rng >= 1.5 * avg_range_5m)
+
         direction = "BEARISH_SURGE" if c < o else "BULLISH_SURGE"
 
         return {
@@ -358,6 +368,130 @@ def calculate_5m_velocity(df_5m: pd.DataFrame) -> dict:
     except Exception as e:
         log_error(MODULE, f"Error calculando velocidad 5m: {e}")
         return {"v_5m_score": 0.0, "is_high_velocity": False, "direction": "NEUTRAL", "volume_ratio": 1.0}
+
+def evaluate_fullspan_velocity_breakout(
+    symbol: str,
+    df_5m: pd.DataFrame,
+    df_15m: pd.DataFrame = None,
+    current_price: float = 0.0,
+    market_type: str = 'crypto_futures'
+) -> dict | None:
+    """
+    Regla Bb33_QSHR_FULLSPAN: Captura movimientos direccionales violentos en punto cero (Full-Span Breakdown/Breakout).
+    
+    Condiciones Clave:
+    1. SHORT (Flash Dump):
+       - Open_5m >= EMA20_5m (o Basis_5m)
+       - Current_Price <= Lower_BB_5m
+       - Aceleración (Condición OR): V_5m >= 3.0 (Crypto) / 2.5 (Forex) OR Expansión Divergente BB (Upper_Slope > 0 y Lower_Slope < 0)
+       - Mejora 1 (Anti-Mecha de Absorción): Precio en el 15% inferior de la vela (Current_Price <= Low + 0.15 * Range)
+       - Mejora 2 (Anti-Agotamiento): Extensión de vela <= 2.5 * ATR_15m
+    
+    2. LONG (Flash Pump / Squeeze):
+       - Open_5m <= EMA20_5m (o Basis_5m)
+       - Current_Price >= Upper_BB_5m
+       - Aceleración (Condición OR): V_5m >= 3.0 (Crypto) / 2.5 (Forex) OR Expansión Divergente BB (Upper_Slope > 0 y Lower_Slope < 0)
+       - Mejora 1 (Anti-Mecha de Absorción): Precio en el 15% superior de la vela (Current_Price >= High - 0.15 * Range)
+       - Mejora 2 (Anti-Agotamiento): Extensión de vela <= 2.5 * ATR_15m
+    """
+    if df_5m is None or len(df_5m) < 20:
+        return None
+
+    try:
+        last_5m = df_5m.iloc[-1]
+        c = float(current_price or last_5m['close'])
+        o = float(last_5m['open'])
+        h = float(last_5m['high'])
+        l = float(last_5m['low'])
+        rng_5m = h - l if (h - l) > 0 else 0.0001
+
+        # Bollinger 5m
+        c_series = df_5m['close']
+        basis_5m = float(last_5m.get('basis') or c_series.rolling(20, min_periods=1).mean().iloc[-1])
+        std_5m = float(c_series.rolling(20, min_periods=1).std().iloc[-1]) or (basis_5m * 0.002)
+        upper_bb_5m = float(last_5m.get('upper_1') or last_5m.get('upper_bollinger') or (basis_5m + 2.0 * std_5m))
+        lower_bb_5m = float(last_5m.get('lower_1') or last_5m.get('lower_bollinger') or (basis_5m - 2.0 * std_5m))
+
+        # EMA20 5m
+        ema20_5m = float(last_5m.get('ema20') or c_series.ewm(span=20, adjust=False).mean().iloc[-1])
+        mean_reference = max(basis_5m, ema20_5m) if c < o else min(basis_5m, ema20_5m)
+
+        # Expansión de bandas y velocidad
+        squeeze_5m = detect_bollinger_squeeze_expansion(df_5m)
+        is_divergent = squeeze_5m.get('is_divergent', False)
+        vel_info = calculate_5m_velocity(df_5m, market_type=market_type, symbol=symbol)
+        v_score = float(vel_info.get('v_5m_score', 0.0))
+        is_high_velocity = vel_info.get('is_high_velocity', False)
+
+        # Condición OR de Aceleración: Alta Velocidad V_5m >= 3.0 (o 2.5 Forex) OR Bandas Divergentes
+        passes_acceleration_or = is_high_velocity or is_divergent or (squeeze_5m.get('bandwidth_ratio', 1.0) >= 1.25)
+
+        # ATR 15m para Escudo Anti-Agotamiento (Mejora 2)
+        atr_15m = 0.0010
+        if df_15m is not None and len(df_15m) >= 14:
+            tr_15m = np.maximum(df_15m['high'] - df_15m['low'], np.maximum(abs(df_15m['high'] - df_15m['close'].shift(1)), abs(df_15m['low'] - df_15m['close'].shift(1))))
+            atr_15m = float(tr_15m.rolling(14, min_periods=1).mean().iloc[-1]) or (c * 0.005)
+        else:
+            atr_15m = rng_5m * 1.5
+
+        # ── 1. EVALUACIÓN FULLSPAN SHORT (Flash Dump) ──
+        # Nació en o sobre la media móvil/basis y perforó la banda inferior en la misma vela
+        if o >= (mean_reference * 0.999) and c <= lower_bb_5m and passes_acceleration_or:
+            # Mejora 1: Anti-Mecha de Absorción (Precio en el 15% inferior de la vela)
+            max_allowed_rebound_price = l + (0.15 * rng_5m)
+            passes_anti_wick = c <= max_allowed_rebound_price or (rng_5m > 0 and (h - c) / rng_5m >= 0.80)
+
+            if passes_anti_wick:
+                # Mejora 2: Escudo Anti-Agotamiento (Climax Guard)
+                is_exhausted = rng_5m > (2.5 * atr_15m)
+                order_type = "LIMIT" if is_exhausted else "MARKET"
+                limit_entry = (h - (0.382 * rng_5m)) if is_exhausted else c
+                sl_price = calculate_hedge_sl(last_5m, 'short', symbol)
+
+                log_info(MODULE, f"⚡ [FULLSPAN VELOCITY SHORT] {symbol} detectado: Open={o:.4f} >= Mean={mean_reference:.4f}, Close={c:.4f} <= LowerBB={lower_bb_5m:.4f} (V_5m={v_score:.2f}, Type={order_type})")
+                return {
+                    "action": "open_fullspan_velocity_short",
+                    "side": "short",
+                    "rule_code": "Bb33_QSHR_FULLSPAN_SHORT",
+                    "order_type": order_type,
+                    "entry_price": limit_entry,
+                    "sl_price": sl_price,
+                    "velocity": v_score,
+                    "bandwidth_ratio": squeeze_5m.get('bandwidth_ratio', 1.0),
+                    "reason": f"QSHR FullSpan SHORT: Open>=EMA20 con rotura Lower BB y aceleración V_5m={v_score:.2f} (OR BB Divergence)"
+                }
+
+        # ── 2. EVALUACIÓN FULLSPAN LONG (Flash Pump / Short Squeeze) ──
+        # Nació en o bajo la media móvil/basis y perforó la banda superior en la misma vela
+        if o <= (mean_reference * 1.001) and c >= upper_bb_5m and passes_acceleration_or:
+            # Mejora 1: Anti-Mecha de Absorción (Precio en el 15% superior de la vela)
+            min_allowed_push_price = h - (0.15 * rng_5m)
+            passes_anti_wick = c >= min_allowed_push_price or (rng_5m > 0 and (c - l) / rng_5m >= 0.80)
+
+            if passes_anti_wick:
+                # Mejora 2: Escudo Anti-Agotamiento (Climax Guard)
+                is_exhausted = rng_5m > (2.5 * atr_15m)
+                order_type = "LIMIT" if is_exhausted else "MARKET"
+                limit_entry = (l + (0.382 * rng_5m)) if is_exhausted else c
+                sl_price = calculate_hedge_sl(last_5m, 'long', symbol)
+
+                log_info(MODULE, f"⚡ [FULLSPAN VELOCITY LONG] {symbol} detectado: Open={o:.4f} <= Mean={mean_reference:.4f}, Close={c:.4f} >= UpperBB={upper_bb_5m:.4f} (V_5m={v_score:.2f}, Type={order_type})")
+                return {
+                    "action": "open_fullspan_velocity_long",
+                    "side": "long",
+                    "rule_code": "Bb33_QSHR_FULLSPAN_LONG",
+                    "order_type": order_type,
+                    "entry_price": limit_entry,
+                    "sl_price": sl_price,
+                    "velocity": v_score,
+                    "bandwidth_ratio": squeeze_5m.get('bandwidth_ratio', 1.0),
+                    "reason": f"QSHR FullSpan LONG: Open<=EMA20 con rotura Upper BB y aceleración V_5m={v_score:.2f} (OR BB Divergence)"
+                }
+
+    except Exception as e:
+        log_error(MODULE, f"Error evaluando FullSpan Velocity Breakout para {symbol}: {e}")
+
+    return None
 
 def calculate_sipv_indicator(df_15m: pd.DataFrame) -> dict:
     """
@@ -456,22 +590,27 @@ def scan_squeeze_opportunities(
         current_price = float(last_5m['close'])
         open_price = float(last_5m['open'])
 
-        # ─── FILTRO MAESTRO: Expansión de Bandas de Bollinger en 15m ───
-        # No se ejecuta ninguna entrada hasta ver expansión activa de bandas en 15m
-        if df_15m is not None and len(df_15m) >= 20:
-            squeeze_15m = detect_bollinger_squeeze_expansion(df_15m)
-            is_15m_expanding = squeeze_15m['is_expanding'] or (squeeze_15m['bandwidth_ratio'] >= 1.15)
-            if not is_15m_expanding:
-                return None
-        elif df_15m is not None and len(df_15m) < 20:
-            return None
+        # ─── 0. TOP PRIORITY: FULLSPAN VELOCITY BREAKOUT (Mejora Instantánea Punto Cero) ───
+        fullspan_res = evaluate_fullspan_velocity_breakout(symbol, df_5m, df_15m, current_price, market_type)
+        if fullspan_res:
+            return fullspan_res
 
         squeeze = detect_bollinger_squeeze_expansion(df_5m)
-        vel_info = calculate_5m_velocity(df_5m)
+        vel_info = calculate_5m_velocity(df_5m, market_type=market_type, symbol=symbol)
         v_score = float(vel_info.get('v_5m_score', 0.0))
 
+        # ─── FILTRO MAESTRO: Expansión de Bandas de Bollinger en 15m (con Bypass por Alta Velocidad) ───
+        # Si la velocidad extrema V_5m >= 3.0 está activa, se autoriza bypass del cálculo rezagado de 15m
+        if df_15m is not None and len(df_15m) >= 20:
+            squeeze_15m = detect_bollinger_squeeze_expansion(df_15m)
+            is_15m_expanding = squeeze_15m['is_expanding'] or (squeeze_15m['bandwidth_ratio'] >= 1.15) or (v_score >= 3.0)
+            if not is_15m_expanding:
+                return None
+        elif df_15m is not None and len(df_15m) < 20 and v_score < 3.0:
+            return None
+
         # Squeeze breakout 5m: compresión previa, expansión divergente, o expansión activa con alta velocidad
-        is_breakout_active = squeeze['is_squeeze_breakout'] or squeeze['is_expanding'] or (squeeze['bandwidth_ratio'] >= 1.15)
+        is_breakout_active = squeeze['is_squeeze_breakout'] or squeeze['is_expanding'] or (squeeze['bandwidth_ratio'] >= 1.15) or (v_score >= 3.0)
 
         # Anti-Fakeout adaptativo según velocidad y mercado:
         # Alta velocidad institucional (V_5m >= 4.0): 25% de cuerpo suficiente (captura velas BTC con mecha)

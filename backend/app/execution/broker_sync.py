@@ -36,6 +36,7 @@ class BrokerSynchronizer:
         self._is_running_forex = False
         self._crypto_provider = None
         self._crypto_client = None
+        self._missing_confirmation_counts: Dict[str, int] = {}
 
     async def _get_crypto_client(self):
         if self._crypto_client is None:
@@ -57,7 +58,7 @@ class BrokerSynchronizer:
     async def sync_binance_futures(self) -> Dict[str, Any]:
         """
         Sincroniza posiciones de Binance Futures con la tabla 'positions' de Supabase
-        y limpia órdenes zombi en el orderbook de Binance.
+        y limpia órdenes zombi en el orderbook de Binance con períodos de gracia y doble confirmación.
         """
         if self._is_running_crypto:
             return {"status": "already_running"}
@@ -123,7 +124,7 @@ class BrokerSynchronizer:
 
             # 2. Consultar posiciones abiertas en Supabase
             sb = get_supabase()
-            res_db = sb.table("positions").select("id, symbol, side, size, entry_price, avg_entry_price, current_price, mode, unrealized_pnl, liquidation_price").eq("status", "open").execute()
+            res_db = sb.table("positions").select("id, symbol, side, size, entry_price, avg_entry_price, current_price, mode, unrealized_pnl, liquidation_price, opened_at").eq("status", "open").execute()
             db_positions = res_db.data or []
             db_symbols_map = {}
 
@@ -134,6 +135,7 @@ class BrokerSynchronizer:
 
             # 3. Sincronizar Binance -> Supabase
             for sym, b_pos in active_binance_map.items():
+                self._missing_confirmation_counts.pop(sym, None) # Reiniciar contador si está activa
                 if sym in db_symbols_map:
                     # Posición ya existe -> actualizar mark_price y unrealized_pnl en Supabase
                     db_p = db_symbols_map[sym]
@@ -148,31 +150,42 @@ class BrokerSynchronizer:
                     sb.table("positions").update(update_data).eq("id", db_p["id"]).execute()
                     result["updated"].append(sym)
                 else:
-                    # Posición existe en Binance pero no en Supabase (ej. abierta externamente) -> Registrarla
+                    # Posición existe en Binance pero no en Supabase (ej. abierta externamente o recuperada) -> Registrarla sin SL/TP rígido (gestionada por ADUANA)
+                    entry_p = b_pos["entry_price"]
+
                     new_pos = {
                         "symbol": sym,
                         "side": b_pos["side"],
                         "size": b_pos["size"],
-                        "entry_price": b_pos["entry_price"],
-                        "avg_entry_price": b_pos["entry_price"],
+                        "entry_price": entry_p,
+                        "avg_entry_price": entry_p,
                         "current_price": b_pos["mark_price"],
                         "unrealized_pnl": b_pos["unrealized_pnl"],
+                        "stop_loss": 0.0,
+                        "sl_price": 0.0,
+                        "take_profit": 0.0,
+                        "tp_full_price": 0.0,
+                        "tp_partial_price": 0.0,
                         "status": "open",
                         "mode": "live",
                         "rule_code": "Binance_External",
+                        "rule_entry": "Binance_External",
                         "market_type": "crypto_futures",
                         "leverage": b_pos["leverage"],
                         "liquidation_price": b_pos["liquidation_price"],
                         "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "sl_type": "aduana_software",
+                        "recovery_mode": False,
+                        "recovery_cycles": 0,
                     }
                     insert_res = sb.table("positions").insert(new_pos).execute()
                     result["created"].append(sym)
-                    log_info(MODULE, f"📥 Posición externa detectada en Binance y registrada en eTrade: {sym} {b_pos['side']} (Size: {b_pos['size']})")
+                    log_info(MODULE, f"📥 Posición detectada en Binance y re-sincronizada en eTrade: {sym} {b_pos['side']} (Size: {b_pos['size']})")
                     
                     try:
                         from app.workers.performance_monitor import send_telegram_message
                         await send_telegram_message(
-                            f"📥 POSICIÓN EXTERNA SINCRONIZADA [{sym}]\n"
+                            f"📥 POSICIÓN SINCRONIZADA [{sym}]\n"
                             f"Lado: {b_pos['side']} | Tamaño: {b_pos['size']}\n"
                             f"Entrada: {b_pos['entry_price']:.4f}\n"
                             f"Marca: {b_pos['mark_price']:.4f}\n"
@@ -182,8 +195,27 @@ class BrokerSynchronizer:
                         log_warning(MODULE, f"No se pudo enviar alerta Telegram: {tel_e}")
 
             # 4. Detectar posiciones que estaban 'open' en Supabase pero ya NO existen en Binance (Cerradas en exchange)
+            now_dt = datetime.now(timezone.utc)
             for sym, db_p in db_symbols_map.items():
                 if sym not in active_binance_map:
+                    # ── PERÍODO DE GRACIA (60s) PARA EVITAR CIERRES PREMATUROS POR LATENCIA ──
+                    opened_at_str = db_p.get("opened_at")
+                    if opened_at_str:
+                        try:
+                            op_dt = datetime.fromisoformat(opened_at_str.replace("Z", "+00:00"))
+                            if (now_dt - op_dt).total_seconds() < 60:
+                                log_info(MODULE, f"⏳ Posición {sym} recién abierta ({int((now_dt - op_dt).total_seconds())}s). En período de gracia para sync.")
+                                continue
+                        except Exception:
+                            pass
+
+                    # ── DOBLE CONFIRMACIÓN (Requiere al menos 2 ciclos consecutivos missing) ──
+                    missing_count = self._missing_confirmation_counts.get(sym, 0) + 1
+                    self._missing_confirmation_counts[sym] = missing_count
+                    if missing_count < 2:
+                        log_info(MODULE, f"🔍 Posición {sym} no reportada en Binance (ciclo {missing_count}/2). Esperando confirmación...")
+                        continue
+
                     # Solo cerrar si es posición live de crypto
                     is_paper = (db_p.get("mode") == "paper")
                     if not is_paper:
@@ -225,8 +257,9 @@ class BrokerSynchronizer:
                             "unrealized_pnl": 0.0,
                         }
                         sb.table("positions").update(close_data).eq("id", db_p["id"]).execute()
+                        self._missing_confirmation_counts.pop(sym, None)
                         result["closed"].append(sym)
-                        log_info(MODULE, f"🔄 Posición de {sym} cerrada en Binance -> PnL Realizado: ${realized_pnl:+.4f} ({pnl_pct:+.2f}%)")
+                        log_info(MODULE, f"🔄 Posición de {sym} confirmada cerrada en Binance -> PnL Realizado: ${realized_pnl:+.4f} ({pnl_pct:+.2f}%)")
 
             # 5. LIMPIEZA DE ÓRDENES ZOMBI / HUÉRFANAS EN BINANCE FUTURES
             cleaned = await self.cleanup_zombie_orders(client, list(active_binance_map.keys()))
@@ -256,7 +289,8 @@ class BrokerSynchronizer:
     async def cleanup_zombie_orders(self, client, active_binance_symbols: List[str]) -> List[str]:
         """
         Revisa todas las órdenes abiertas en Binance Futures y cancela órdenes zombi/huérfanas
-        (órdenes abiertas de símbolos que ya no tienen posición activa o que llevan más de 15 minutos pendientes).
+        (órdenes abiertas de símbolos que ya no tienen posición activa y llevan más de 15 minutos pendientes).
+        NUNCA cancela órdenes Stop Loss o Take Profit de posiciones que siguen activas.
         """
         cancelled = []
         try:
@@ -271,8 +305,8 @@ class BrokerSynchronizer:
                 created_ts = o.get('time', now_ts)
                 age_minutes = (now_ts - created_ts) / (1000 * 60)
                 
-                # Si el símbolo no tiene posición abierta o la orden lleva más de 15 minutos sin llenarse
-                if sym not in active_binance_symbols or age_minutes > 15:
+                # Solo cancelar si el símbolo NO tiene posición activa y lleva más de 15 minutos
+                if sym not in active_binance_symbols and age_minutes > 15:
                     try:
                         await asyncio.wait_for(
                             client.futures_cancel_order(symbol=sym, orderId=oid, recvWindow=60000),
