@@ -438,16 +438,18 @@ class StrategyEngine:
         ema20_slope_positive_15m = ema20_ascending_15m
         ema20_slope_negative_15m = ema20_descending_15m
 
-        if ema20_15m_val and low_15m and close_15m:
+        curr_px = safe_float(snap.get('current_price') if snap else 0) or close_15m or 0
+
+        if ema20_15m_val and low_15m:
             # LONG: Low toca o penetra EMA20, y close o precio se sostiene en la zona de rebote
-            price_touches_ema20_15m_long = (low_15m <= ema20_15m_val) and (close_15m >= ema20_15m_val * 0.999 or current_price >= ema20_15m_val * 0.999)
-        if ema20_15m_val and high_15m and close_15m:
+            price_touches_ema20_15m_long = (low_15m <= ema20_15m_val) and (close_15m >= ema20_15m_val * 0.999 or curr_px >= ema20_15m_val * 0.999)
+        if ema20_15m_val and high_15m:
             # SHORT: High toca o penetra EMA20, y close o precio se sostiene en la zona de rebote
-            price_touches_ema20_15m_short = (high_15m >= ema20_15m_val) and (close_15m <= ema20_15m_val * 1.001 or current_price <= ema20_15m_val * 1.001)
+            price_touches_ema20_15m_short = (high_15m >= ema20_15m_val) and (close_15m <= ema20_15m_val * 1.001 or curr_px <= ema20_15m_val * 1.001)
 
         if ema3_15m_val and ema9_15m_val:
             gap = abs(ema3_15m_val - ema9_15m_val)
-            atr_val = safe_float(last_15m.get('atr_14') or last_15m.get('atr') or 0)
+            atr_val = safe_float(last_15m.get('atr_14') if last_15m else 0) or safe_float(last_15m.get('atr') if last_15m else 0)
             if atr_val > 0:
                 ema3_ema9_gap_sufficient_15m = gap >= (0.15 * atr_val)
             else:
