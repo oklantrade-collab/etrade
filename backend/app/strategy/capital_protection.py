@@ -20,14 +20,14 @@ from app.core.logger import log_info, log_error
 PROTECTION_CONFIG = {
     'crypto_futures': {
         'be_trigger_pct':    0.008,  # +0.8% (Break-Even Relámpago)
-        'be_buffer_pct':     0.0015, # +0.15% (Cobertura comisiones)
+        'be_buffer_pct':     0.0028, # +0.28% (Cobertura comisiones Binance Market Taker + Slippage)
         'trailing_levels': [
             # (trigger_pct, new_sl_pct)
-            (0.008,  0.0015),  # +0.8% → SL a +0.15% (BE)
-            (0.015,  0.006),   # +1.5% → SL a +0.6%
-            (0.025,  0.012),   # +2.5% → SL a +1.2%
-            (0.040,  0.020),   # +4.0% → SL a +2.0%
-            (0.060,  0.035),   # +6.0% → SL a +3.5%
+            (0.008,  0.0028),  # +0.8% → SL a +0.28% (BE con ganancia neta garantizada)
+            (0.015,  0.0080),  # +1.5% → SL a +0.80%
+            (0.025,  0.0150),  # +2.5% → SL a +1.50%
+            (0.040,  0.0250),  # +4.0% → SL a +2.50%
+            (0.060,  0.0380),  # +6.0% → SL a +3.80%
         ],
         'min_time_before_inverse_close': 2,
         # ciclos de 5m = 10 minutos

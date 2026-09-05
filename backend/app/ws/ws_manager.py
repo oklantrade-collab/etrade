@@ -176,14 +176,16 @@ class WebSocketManager:
                             activated_dt = erep_activated_at
                         elapsed = (datetime.now(timezone.utc) - activated_dt).total_seconds()
                         if elapsed >= 3600:  # 60 minutos
-                            if pnl_pct > 0:
+                            # Solo cerramos por timeout si cubre el costo total de comisiones Binance Market (0.20% + slippage)
+                            MIN_TIMEOUT_FEE_BUFFER_PCT = 0.28
+                            if pnl_pct >= MIN_TIMEOUT_FEE_BUFFER_PCT:
                                 log_warning(MODULE, 
                                     f"EREP TIMEOUT for {symbol}! {elapsed:.0f}s elapsed (>3600s). "
-                                    f"PnL={pnl_pct:.2f}%. Forcing closure (PNL>0).")
+                                    f"PnL={pnl_pct:.2f}% >= {MIN_TIMEOUT_FEE_BUFFER_PCT}%. Forcing closure with covered Binance fees.")
                                 await _execute_paper_close(pos, price, 'erep_timeout_60m', sb)
                                 continue
                             else:
-                                # No cerramos en pérdida por timeout si es EREP
+                                # No cerramos si el PnL es inferior a la comisión para evitar pérdidas netas
                                 pass
                     except Exception as dt_err:
                         log_warning(MODULE, f"Error parsing erep_activated_at for {symbol}: {dt_err}")

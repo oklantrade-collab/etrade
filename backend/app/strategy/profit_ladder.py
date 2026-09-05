@@ -457,9 +457,10 @@ def evaluate_profit_ladder(
 
     # CIERRE por pérdida de momentum (EMA)
     if ema_check['momentum_lost']:
-        # Solo permitimos el cierre defensivo de la escalera si estamos en ganancia.
-        # Si el trade está en pérdida, dejamos que el SL o Smart Exit actúe, no el Profit Ladder.
-        if pnl_pct > 0:
+        # Solo permitimos el cierre defensivo de la escalera si cubre comisiones de Binance (>= 0.28%).
+        # Si el trade está en ganancia marginal o pérdida, dejamos que el SL o Smart Exit actúe.
+        MIN_FEE_BUFFER_PCT = 0.28
+        if pnl_pct >= MIN_FEE_BUFFER_PCT:
             if price_action_exit:
                 mode = 'defensivo' if not bb_check['valid'] \
                        else 'normal'
@@ -480,11 +481,12 @@ def evaluate_profit_ladder(
             else:
                 log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: EMA {"<" if is_long else ">"} EMA9 pero Accion de Precio sostiene ({"Low" if is_long else "High"} actual >= anterior). Esperando...')
         else:
-            log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: EMA {"<" if is_long else ">"} EMA9 pero PNL ({pnl_pct:.2f}%) <= 0. Profit Ladder exige ganancia.')
+            log_info('PROFIT', f'📊 EXIT FILTRADO [{symbol}]: EMA {"<" if is_long else ">"} EMA9 pero PNL ({pnl_pct:.2f}%) < {MIN_FEE_BUFFER_PCT}%. Profit Ladder exige cobertura de comisiones.')
 
     # CIERRE por violación del Profit Floor
     if floor_breached:
-        if pnl_pct > 0:
+        MIN_FEE_BUFFER_PCT = 0.28
+        if pnl_pct >= MIN_FEE_BUFFER_PCT:
             return {
                 'action':      'close',
                 'reason': (

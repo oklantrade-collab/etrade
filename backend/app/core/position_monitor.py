@@ -89,8 +89,8 @@ async def check_signal_reversal(
         elif side in ('short', 'sell') and ema3 > ema9:
             ema_reversed_5m = True
 
-    # 3. Regla estricta con Fee-Net Guard: Solo salir si PnL >= min_profit_pct (cobertura de comisión Binance)
-    min_profit_pct = float(config.get('min_profit_exit_pct', 0.25))
+    # 3. Regla estricta con Fee-Net Guard: Solo salir si PnL >= min_profit_pct (cobertura de comisión Binance 0.20% + slippage)
+    min_profit_pct = float(config.get('min_profit_exit_pct', 0.28))
     
     # Check if position is a cascade/rebote position
     origen = str(position.get('origen', '')).upper()

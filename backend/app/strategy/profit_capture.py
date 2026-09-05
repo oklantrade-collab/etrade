@@ -764,9 +764,10 @@ def evaluate_dynamic_tp_v6(
                     }
         else:
             guaranteed_pct = max_pnl_pct * 0.70
+            MIN_FEE_SAFE_PNL = 0.28  # Binance round-trip fees (0.20%) + buffer
             if is_long:
                 trail_sl = entry_price * (1.0 + guaranteed_pct / 100.0)
-                if current_price <= trail_sl and curr_pnl_pct > 0:
+                if current_price <= trail_sl and curr_pnl_pct >= MIN_FEE_SAFE_PNL:
                     return {
                         'should_close': True,
                         'is_partial': False,
@@ -777,7 +778,7 @@ def evaluate_dynamic_tp_v6(
                     }
             else:
                 trail_sl = entry_price * (1.0 - guaranteed_pct / 100.0)
-                if current_price >= trail_sl and curr_pnl_pct > 0:
+                if current_price >= trail_sl and curr_pnl_pct >= MIN_FEE_SAFE_PNL:
                     return {
                         'should_close': True,
                         'is_partial': False,
