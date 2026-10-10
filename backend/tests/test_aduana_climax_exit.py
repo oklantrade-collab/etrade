@@ -149,20 +149,224 @@ def test_evaluate_position_climax_macro_1d():
     assert res['action'] == 'FULL'
     assert res['target_close_ratio'] == 1.0
 
+def test_climax_full_close_macro_confluence_short():
+    # Posición SHORT en SOL. Precio cae a $108.59 (toca LOWER_5 en 5m)
+    # En 1h la EMA3 tiene pendiente positiva y toca Banda Inferior
+    pos = {
+        'symbol': 'SOLUSDT',
+        'side': 'SHORT',
+        'entry_price': 109.06,
+        'size': 1.0,
+        'climax_stage': 0,
+        'market_type': 'crypto_futures'
+    }
+    # 1h dataframe con EMA3 alcista / soporte
+    df_1h = pd.DataFrame([
+        {'open': 109.5, 'high': 109.6, 'low': 108.8, 'close': 108.9},
+        {'open': 108.9, 'high': 109.0, 'low': 108.7, 'close': 108.8},
+        {'open': 108.8, 'high': 109.3, 'low': 108.59, 'close': 109.2}  # Cierre verde, pendiente EMA3 > 0
+    ])
+    df_5m = pd.DataFrame([
+        {'open': 109.0, 'high': 109.1, 'low': 108.59, 'close': 108.65,
+         'basis': 109.0, 'upper_5': 109.8, 'upper_6': 110.0, 'lower_5': 108.60, 'lower_6': 108.20}
+    ] * 5)
+    memory_mock = {
+        'SOLUSDT': {
+            '5m': {'df': df_5m},
+            '1h': {'df': df_1h}
+        }
+    }
+    # Precio actual $108.59 (PnL = (109.06 - 108.59)/109.06 = +0.43% >= +0.40%)
+    res = AduanaClimaxManager.evaluate_position_climax(pos, current_price=108.59, memory_store=memory_mock)
+    assert res['triggered'] is True
+    assert res['action'] == 'FULL'
+    assert res['target_close_ratio'] == 1.0
+    assert res['sar_eligible'] is True
+    assert res['sar_direction'] == 'long'
+    assert 'soporte/confluencia macro' in res['reason']
+
+def test_climax_partial_close_no_macro_confluence_short():
+    # Posición SHORT en SOL. Precio cae a $108.59, pero 1h está cayendo libremente sin soporte
+    pos = {
+        'symbol': 'SOLUSDT',
+        'side': 'SHORT',
+        'entry_price': 109.06,
+        'size': 1.0,
+        'climax_stage': 0,
+        'market_type': 'crypto_futures'
+    }
+    # 1h dataframe bajista continuo
+    df_1h = pd.DataFrame([
+        {'open': 110.5, 'high': 110.6, 'low': 109.8, 'close': 110.0},
+        {'open': 110.0, 'high': 110.1, 'low': 109.2, 'close': 109.4},
+        {'open': 109.4, 'high': 109.4, 'low': 108.0, 'close': 108.1}  # Vela roja sólida, sin soporte
+    ])
+    df_5m = pd.DataFrame([
+        {'open': 109.0, 'high': 109.1, 'low': 108.59, 'close': 108.59,
+         'basis': 109.0, 'upper_5': 109.8, 'upper_6': 110.0, 'lower_5': 108.60, 'lower_6': 108.20}
+    ] * 5)
+    memory_mock = {
+        'SOLUSDT': {
+            '5m': {'df': df_5m},
+            '1h': {'df': df_1h}
+        }
+    }
+    res = AduanaClimaxManager.evaluate_position_climax(pos, current_price=108.59, memory_store=memory_mock)
+    assert res['triggered'] is True
+    assert res['action'] == 'PARTIAL'
+    assert res['target_close_ratio'] == 0.40
+    assert res['sar_eligible'] is False
+
+def test_climax_sipv_signal_long_sar():
+    # Prueba de señal de Giro a LONG con mecha de absorción y SIPV tras cierre de SHORT
+    df_1h = pd.DataFrame([
+        {'open': 109.0, 'high': 109.2, 'low': 108.6, 'close': 108.7},
+        {'open': 108.7, 'high': 109.0, 'low': 108.6, 'close': 108.8},
+        {'open': 108.8, 'high': 109.4, 'low': 108.59, 'close': 109.2}  # EMA3 slope > 0
+    ])
+    # 5m con mecha inferior larga (open 109.0, low 108.59, close 108.95 -> lower wick 0.36 / 0.41 = 87%)
+    df_5m = pd.DataFrame([
+        {'open': 109.0, 'high': 109.0, 'low': 108.59, 'close': 108.95,
+         'basis': 109.0, 'lower_5': 108.60, 'lower_6': 108.20, 'upper_5': 109.8, 'upper_6': 110.0}
+    ] * 5)
+    df_15m = pd.DataFrame([
+        {'open': 109.1, 'high': 109.2, 'low': 108.59, 'close': 108.90,
+         'basis': 109.2, 'lower_5': 108.60, 'lower_6': 108.10, 'upper_5': 109.9, 'upper_6': 110.2}
+    ] * 5)
+    memory_mock = {
+        'SOLUSDT': {
+            '5m': {'df': df_5m},
+            '15m': {'df': df_15m},
+            '1h': {'df': df_1h}
+        }
+    }
+    sig = AduanaClimaxManager.evaluate_climax_sipv_signal(
+        symbol='SOLUSDT',
+        direction='long',
+        current_price=108.90,
+        memory_store=memory_mock,
+        is_sar=True,
+        climax_extreme=108.59
+    )
+    assert sig['triggered'] is True
+    assert sig['direction'] == 'long'
+    assert sig['rule_code'] == 'REB_CLIMAX_SAR'
+    assert sig['suggested_sl'] < 108.59  # SL protegido bajo la mecha
+    assert sig['suggested_tp'] >= 109.20  # TP en Basis
+
+def test_climax_sipv_signal_falling_knife_rejected():
+    # Prueba del filtro de cuchillo cayendo: vela sólida bajista sin mecha (< 25%)
+    df_1h = pd.DataFrame([
+        {'open': 109.0, 'high': 109.2, 'low': 108.6, 'close': 108.7},
+        {'open': 108.7, 'high': 109.0, 'low': 108.6, 'close': 108.8},
+        {'open': 108.8, 'high': 109.4, 'low': 108.59, 'close': 109.2}
+    ])
+    # 5m vela roja sólida: open 109.0, high 109.0, low 108.59, close 108.60 (mecha inferior = 0.01 / 0.41 = 2.4%)
+    df_5m = pd.DataFrame([
+        {'open': 109.0, 'high': 109.0, 'low': 108.59, 'close': 108.60,
+         'basis': 109.0, 'lower_5': 108.60, 'lower_6': 108.20, 'upper_5': 109.8, 'upper_6': 110.0}
+    ] * 5)
+    df_15m = pd.DataFrame([
+        {'open': 109.1, 'high': 109.1, 'low': 108.59, 'close': 108.60,
+         'basis': 109.2, 'lower_5': 108.60, 'lower_6': 108.10, 'upper_5': 109.9, 'upper_6': 110.2}
+    ] * 5)
+    memory_mock = {
+        'SOLUSDT': {
+            '5m': {'df': df_5m},
+            '15m': {'df': df_15m},
+            '1h': {'df': df_1h}
+        }
+    }
+    sig = AduanaClimaxManager.evaluate_climax_sipv_signal(
+        symbol='SOLUSDT',
+        direction='long',
+        current_price=108.60,
+        memory_store=memory_mock,
+        is_sar=False
+    )
+    # Debe ser rechazado por filtro de cuchillo cayendo
+    assert sig['triggered'] is False
+    assert 'cuchillo cayendo' in sig['reason']
+
+def test_climax_sipv_signal_flat_direct():
+    # Símbolo en estado FLAT (sin posición previa): toca LOWER_5 con mecha y soporte macro
+    df_1h = pd.DataFrame([
+        {'open': 109.0, 'high': 109.2, 'low': 108.6, 'close': 108.7},
+        {'open': 108.7, 'high': 109.0, 'low': 108.6, 'close': 108.8},
+        {'open': 108.8, 'high': 109.4, 'low': 108.59, 'close': 109.2}
+    ])
+    df_5m = pd.DataFrame([
+        {'open': 108.8, 'high': 109.0, 'low': 108.59, 'close': 108.95,
+         'basis': 109.0, 'lower_5': 108.60, 'lower_6': 108.20, 'upper_5': 109.8, 'upper_6': 110.0}
+    ] * 5)
+    df_15m = pd.DataFrame([
+        {'open': 109.1, 'high': 109.2, 'low': 108.59, 'close': 108.95,
+         'basis': 109.2, 'lower_5': 108.60, 'lower_6': 108.10, 'upper_5': 109.9, 'upper_6': 110.2}
+    ] * 5)
+    memory_mock = {
+        'SOLUSDT': {
+            '5m': {'df': df_5m},
+            '15m': {'df': df_15m},
+            '1h': {'df': df_1h}
+        }
+    }
+    sig = AduanaClimaxManager.evaluate_climax_sipv_signal(
+        symbol='SOLUSDT',
+        direction='long',
+        current_price=108.95,
+        memory_store=memory_mock,
+        is_sar=False
+    )
+    assert sig['triggered'] is True
+    assert sig['rule_code'] == 'REB_CLIMAX_DIRECT'
+    assert sig['suggested_sl'] > 0
+    assert sig['suggested_tp'] > sig['suggested_sl']
+
+def test_forex_climax_full_close_and_sar():
+    # Forex: Posición SHORT en EURUSD abierta a 1.0850. Precio cae a 1.0800 (+50 pips >= +5 pips)
+    pos = {
+        'symbol': 'EURUSD',
+        'side': 'SHORT',
+        'entry_price': 1.0850,
+        'lots': 0.10,
+        'climax_stage': 0,
+        'market_type': 'forex_futures'
+    }
+    df_1h = pd.DataFrame([
+        {'open': 1.0820, 'high': 1.0830, 'low': 1.0795, 'close': 1.0800},
+        {'open': 1.0800, 'high': 1.0815, 'low': 1.0795, 'close': 1.0805},
+        {'open': 1.0805, 'high': 1.0840, 'low': 1.0795, 'close': 1.0830}  # EMA3 creciente
+    ])
+    df_5m = pd.DataFrame([
+        {'open': 1.0810, 'high': 1.0815, 'low': 1.0798, 'close': 1.0800,
+         'basis': 1.0825, 'lower_5': 1.0800, 'lower_6': 1.0780, 'upper_5': 1.0860, 'upper_6': 1.0880}
+    ] * 5)
+    memory_mock = {
+        'EURUSD': {
+            '5m': {'df': df_5m},
+            '1h': {'df': df_1h}
+        }
+    }
+    res = AduanaClimaxManager.evaluate_position_climax(pos, current_price=1.0800, memory_store=memory_mock)
+    assert res['triggered'] is True
+    assert res['action'] == 'FULL'
+    assert res['sar_eligible'] is True
+    assert res['sar_direction'] == 'long'
+
 if __name__ == '__main__':
     test_adaptive_lot_scale_crypto_large()
-    print("✓ test_adaptive_lot_scale_crypto_large passed")
     test_adaptive_lot_scale_crypto_fallback_50()
-    print("✓ test_adaptive_lot_scale_crypto_fallback_50 passed")
     test_adaptive_lot_scale_crypto_indivisible()
-    print("✓ test_adaptive_lot_scale_crypto_indivisible passed")
     test_adaptive_lot_scale_forex()
-    print("✓ test_adaptive_lot_scale_forex passed")
     test_evaluate_position_climax_5m_short_proposal_b()
-    print("✓ test_evaluate_position_climax_5m_short_proposal_b passed")
     test_evaluate_position_climax_15m_long_proposal_b()
-    print("✓ test_evaluate_position_climax_15m_long_proposal_b passed")
     test_evaluate_position_climax_macro_1d()
-    print("✓ test_evaluate_position_climax_macro_1d passed")
-    print("\n🎉 ALL TESTS PASSED SUCCESSFULLY! (7/7)")
+    test_climax_full_close_macro_confluence_short()
+    test_climax_partial_close_no_macro_confluence_short()
+    test_climax_sipv_signal_long_sar()
+    test_climax_sipv_signal_falling_knife_rejected()
+    test_climax_sipv_signal_flat_direct()
+    test_forex_climax_full_close_and_sar()
+    print("\n🎉 ALL UNIT TESTS PASSED SUCCESSFULLY! (13/13)")
+
 

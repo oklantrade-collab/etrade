@@ -2731,6 +2731,50 @@ class ForexExecutionService:
                         f"Precio: {price}\n"
                         f"Cierre Total 100% ({scale_res.get('reason')})"
                     )
+
+                    # ── PASO 2: EVALUACIÓN DE GIRO A CONTRARIO EN FOREX (SAR / REBOTE + SIPV) ──
+                    if climax_eval.get('sar_eligible'):
+                        sar_dir = climax_eval.get('sar_direction', 'long' if pos.get('side', '').lower() in ('short', 'sell') else 'short')
+                        sar_sig = AduanaClimaxManager.evaluate_climax_sipv_signal(
+                            symbol=symbol,
+                            direction=sar_dir,
+                            current_price=price,
+                            is_sar=True,
+                            climax_extreme=price
+                        )
+                        if sar_sig.get('triggered'):
+                            self.log(f"🔄 [ADUANA FOREX GIRO SAR INMEDIATO] [{symbol} {sar_dir.upper()}]: {sar_sig.get('reason')}")
+                            try:
+                                from app.workers.forex_scheduler import open_forex_position
+                                import asyncio
+                                signal_to_pass = {
+                                    'direction': sar_dir,
+                                    'rule_code': sar_sig.get('rule_code', 'REB_CLIMAX_SAR'),
+                                    'sl': sar_sig.get('suggested_sl'),
+                                    'tp': sar_sig.get('suggested_tp')
+                                }
+                                asyncio.create_task(open_forex_position(
+                                    symbol=symbol,
+                                    signal=signal_to_pass,
+                                    price=price,
+                                    provider=getattr(self, 'provider', None),
+                                    sb=self.sb
+                                ))
+                            except Exception as sar_fx_e:
+                                self.log(f"Error abriendo posición SAR forex: {sar_fx_e}")
+                        else:
+                            from app.core.memory_store import BOT_STATE
+                            BOT_STATE.sar_watchers[symbol] = {
+                                'target_direction': sar_dir,
+                                'climax_tf': c_tf,
+                                'climax_band': c_band,
+                                'climax_extreme': price,
+                                'market_type': 'forex',
+                                'created_cycle': getattr(BOT_STATE, 'current_cycle', 0),
+                                'expires_cycle': getattr(BOT_STATE, 'current_cycle', 0) + 6
+                            }
+                            self.log(f"⏳ [ADUANA FOREX SAR WATCHER] [{symbol}]: Esperando confirmación SIPV para {sar_dir.upper()} ({sar_sig.get('reason')})")
+
                     return
                 elif scale_res['action'] == 'PARTIAL':
                     curr_lots = self._safe_float(pos.get('lots'))

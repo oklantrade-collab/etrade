@@ -735,6 +735,51 @@ async def check_protections(
                         f"Precio Cierre: ${current_price:,.4f}\n"
                         f"Cierre Total: 100% ({scale_res.get('reason')})"
                     )
+
+                    # ── PASO 2: EVALUACIÓN DE GIRO A CONTRARIO (SAR / REBOTE + SIPV) ──
+                    if climax_eval.get('sar_eligible'):
+                        sar_dir = climax_eval.get('sar_direction', 'long' if position.get('side', '').lower() in ('short', 'sell') else 'short')
+                        sar_sig = AduanaClimaxManager.evaluate_climax_sipv_signal(
+                            symbol=symbol,
+                            direction=sar_dir,
+                            current_price=current_price,
+                            is_sar=True,
+                            climax_extreme=current_price
+                        )
+                        if sar_sig.get('triggered'):
+                            log_info('ADUANA_CLIMAX', f"🔄 [ADUANA GIRO SAR INMEDIATO] [{symbol} {sar_dir.upper()}]: {sar_sig.get('reason')}")
+                            cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+                            qty = (cap_op * 0.1) / current_price
+                            await _execute_paper_open(
+                                symbol=symbol,
+                                side=sar_dir,
+                                price=current_price,
+                                size=qty,
+                                rule_code=sar_sig.get('rule_code', 'REB_CLIMAX_SAR'),
+                                regime={'sl_price': sar_sig.get('suggested_sl'), 'tp_price': sar_sig.get('suggested_tp')},
+                                levels={'sl_price': sar_sig.get('suggested_sl'), 'tp_price': sar_sig.get('suggested_tp')},
+                                supabase=supabase,
+                                origen='REBOTE'
+                            )
+                            await send_telegram_message(
+                                f"🔄 ADUANA GIRO SAR EJECUTADO [{symbol}]\n"
+                                f"Dirección: {sar_dir.upper()}\n"
+                                f"Precio: ${current_price:,.4f}\n"
+                                f"SL: ${sar_sig.get('suggested_sl'):,.4f} | TP: ${sar_sig.get('suggested_tp'):,.4f}\n"
+                                f"Regla: {sar_sig.get('rule_code')}"
+                            )
+                        else:
+                            BOT_STATE.sar_watchers[symbol] = {
+                                'target_direction': sar_dir,
+                                'climax_tf': c_tf,
+                                'climax_band': c_band,
+                                'climax_extreme': current_price,
+                                'market_type': 'crypto',
+                                'created_cycle': getattr(BOT_STATE, 'current_cycle', 0),
+                                'expires_cycle': getattr(BOT_STATE, 'current_cycle', 0) + 6
+                            }
+                            log_info('ADUANA_CLIMAX', f"⏳ [ADUANA SAR WATCHER REGISTRADO] [{symbol}]: Esperando confirmación SIPV para {sar_dir.upper()} ({sar_sig.get('reason')})")
+
                     return
             elif scale_res['action'] == 'PARTIAL':
                 close_qty = scale_res['close_qty']

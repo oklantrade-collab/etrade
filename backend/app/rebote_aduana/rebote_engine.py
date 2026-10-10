@@ -223,6 +223,33 @@ class ReboteEngine:
         if s9.get('triggered', False) and 'rule_code' not in result.detail:
             result.detail['rule_code'] = 'REB_CASCADA_15M'
             result.contra_trend_confirmed = True
+
+        # S10: Clímax SIPV Direct (Bandas 5/6 + Macro 1h/4h + SIPV + Mecha Rechazo)
+        try:
+            from app.rebote_aduana.aduana_climax_manager import AduanaClimaxManager
+            c_price = float(closed_15m.iloc[-1].get('close', 0)) if not closed_15m.empty else 0.0
+            s10_res = AduanaClimaxManager.evaluate_climax_sipv_signal(
+                symbol=symbol,
+                direction=direction,
+                current_price=c_price,
+                memory_store=market_data,
+                is_sar=False
+            )
+            s10 = {
+                'name': 'climax_sipv_direct',
+                'score': 60.0 if s10_res.get('triggered') else 0.0,
+                'triggered': s10_res.get('triggered', False),
+                'detail': s10_res.get('reason', '')
+            }
+            result.signals.append(s10)
+            if s10.get('triggered', False):
+                result.detail['rule_code'] = s10_res.get('rule_code', 'REB_CLIMAX_DIRECT')
+                result.detail['suggested_sl'] = s10_res.get('suggested_sl')
+                result.detail['suggested_tp'] = s10_res.get('suggested_tp')
+                result.contra_trend_confirmed = True
+        except Exception as s10_e:
+            from app.core.logger import log_warning
+            log_warning(MODULE, f"Error evaluando s10 climax_sipv para {symbol}: {s10_e}")
         
         # Score raw
         score_raw = 0.0

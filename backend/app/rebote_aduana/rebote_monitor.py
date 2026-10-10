@@ -32,6 +32,51 @@ class ReboteMonitor:
         if not symbols:
             return results
 
+        # ── Procesar SAR Watchers activos (Giro tras Cierre 100% Clímax) ──
+        for symbol in symbols:
+            watcher = getattr(BOT_STATE, 'sar_watchers', {}).get(symbol)
+            if watcher:
+                curr_cycle = getattr(BOT_STATE, 'current_cycle', 0)
+                if curr_cycle > watcher.get('expires_cycle', 0):
+                    del BOT_STATE.sar_watchers[symbol]
+                    continue
+
+                target_dir = watcher.get('target_direction')
+                m_data = self._gather_market_data(symbol)
+                c_price = float(m_data.get('snapshot', {}).get('mark_price') or m_data.get('snapshot', {}).get('price') or 0.0)
+                if c_price <= 0 and m_data.get('df_5m') is not None and not m_data['df_5m'].empty:
+                    c_price = float(m_data['df_5m']['close'].iloc[-1])
+
+                from app.rebote_aduana.aduana_climax_manager import AduanaClimaxManager
+                sar_eval = AduanaClimaxManager.evaluate_climax_sipv_signal(
+                    symbol=symbol,
+                    direction=target_dir,
+                    current_price=c_price,
+                    memory_store=m_data,
+                    is_sar=True,
+                    climax_extreme=watcher.get('climax_extreme')
+                )
+                if sar_eval.get('triggered'):
+                    log_info(MODULE, f"🔄 [SAR WATCHER ACTIVADO] [{symbol} {target_dir.upper()}]: {sar_eval.get('reason')}")
+                    del BOT_STATE.sar_watchers[symbol]
+                    res = ReboteResult(symbol=symbol, direction=target_dir)
+                    res.score_final = 85.0
+                    res.decision = 'ENTER'
+                    res.detail = {
+                        'rule_code': 'REB_CLIMAX_SAR',
+                        'suggested_sl': sar_eval.get('suggested_sl'),
+                        'suggested_tp': sar_eval.get('suggested_tp'),
+                        'reason': sar_eval.get('reason')
+                    }
+                    exec_res = self._execute_entry(symbol, target_dir, res)
+                    results.append(exec_res if isinstance(exec_res, dict) else {
+                        'symbol': symbol,
+                        'direction': target_dir,
+                        'decision': 'ENTERED' if exec_res else 'FAILED',
+                        'score_final': 85.0,
+                        'executed': exec_res
+                    })
+
         for symbol in symbols:
             try:
                 market_data = self._gather_market_data(symbol)
