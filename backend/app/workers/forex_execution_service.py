@@ -1475,6 +1475,19 @@ class ForexExecutionService:
         }
         offset_pips = SL_OFFSET_PIPS.get(symbol, 10)
         
+        # Mandato de usuario: Operaciones Clímax (15m y 5m) entran SIN STOP LOSS (retención a Basis y gestión EREP)
+        is_climax_rule = rule_code in (
+            'Bb33_QSHR_CLIMAX_LOWER6_LONG', 'Bb33_QSHR_CLIMAX_UPPER6_SHORT',
+            'Bb33_QSHR_CLIMAX_5M_LOWER6_LONG', 'Bb33_QSHR_CLIMAX_5M_UPPER6_SHORT'
+        )
+        if is_climax_rule:
+            basis_tp = self._safe_float(snap.get('basis_15m') or snap.get('basis'))
+            if direction == 'long':
+                tp = basis_tp if basis_tp > entry else self._safe_float(snap.get('upper_2'), entry + (2 * atr))
+            else:
+                tp = basis_tp if (basis_tp > 0 and basis_tp < entry) else self._safe_float(snap.get('lower_2'), entry - (2 * atr))
+            return None, round(tp, 6), 0.0
+
         if direction == 'long':
             # SL dinámico: offset_pips por debajo de la EMA20 (si está disponible)
             if ema20 > 0:
@@ -1606,6 +1619,7 @@ class ForexExecutionService:
             except Exception as slv_e:
                 self.log(f'SLVM calc error for {symbol}: {slv_e}')
 
+            is_climax_entry = any(x in str(rule_code).lower() for x in ('climax', 'lower6', 'upper6', 'reversal'))
             pos = {
                 'symbol': symbol, 
                 'side': direction, 
@@ -1620,7 +1634,13 @@ class ForexExecutionService:
                 #    SLVM Fields   
                 'slv_price': slv_price,
                 'recovery_mode': False,
-                'recovery_cycles': 0
+                'recovery_cycles': 0,
+                #    EREP Fields
+                'erep_active': True if is_climax_entry else False,
+                'erep_phase': 1 if is_climax_entry else 0,
+                'erep_p1_price': float(entry) if is_climax_entry else None,
+                'erep_q1': abs(float(lots)) if is_climax_entry else None,
+                'erep_market_type': 'forex_futures' if is_climax_entry else None
             }
             res = self.sb.table('forex_positions').insert(pos).execute()
 
@@ -2684,24 +2704,69 @@ class ForexExecutionService:
             )
             return
 
-        #    TP Band Exit   
-        if snap:
-            u6 = self._safe_float(snap.get('upper_6'))
-            l6 = self._safe_float(snap.get('lower_6'))
-            u5 = self._safe_float(snap.get('upper_5'))
-            l5 = self._safe_float(snap.get('lower_5'))
-            
-            if pips_pnl > 0 and ((side in ['long', 'buy'] and u6 > 0 and price >= u6) or (side in ['short', 'sell'] and l6 > 0 and price <= l6)):
-                self._close_position(pos, price, 'tp_band', pips_pnl, snap=snap)
-                return
-                
-            if not pos.get('partial_closed_band5') and pips_pnl > 0:
-                if (side in ['long', 'buy'] and u5 > 0 and price >= u5) or (side in ['short', 'sell'] and l5 > 0 and price <= l5):
-                    self.log(f"[{symbol}] Tocó Banda 5. Ejecutando Scale-Out (50%).")
-                    self._partial_close_position(pos, price, 0.5, pips_pnl, snap=snap)
-                    entry_price = self._safe_float(pos.get('entry_price'))
-                    self.sb.table('forex_positions').update({'sl_price': entry_price}).eq('id', pos['id']).execute()
-                    pos['sl_price'] = entry_price
+        # ── ADUANAS MULTI-TF CLIMAX EXIT (Propuesta B en 5m/15m + Macro) ──
+        try:
+            from app.rebote_aduana.aduana_climax_manager import AduanaClimaxManager
+            climax_eval = AduanaClimaxManager.evaluate_position_climax(pos, price)
+            if climax_eval.get('triggered'):
+                c_stage = climax_eval.get('stage')
+                c_action = climax_eval.get('action')
+                c_tf = climax_eval.get('timeframe')
+                c_band = climax_eval.get('band_name')
+                c_target_ratio = climax_eval.get('target_close_ratio', 0.40)
+
+                scale_res = AduanaClimaxManager.calculate_adaptive_close_size(
+                    pos=pos,
+                    target_ratio=c_target_ratio,
+                    current_price=price,
+                    market_type='forex'
+                )
+
+                if scale_res['action'] == 'FULL' or c_action == 'FULL':
+                    self.log(f"[{symbol}] Clímax Macro ({c_tf} {c_band}). Ejecutando Full Close.")
+                    self._close_position(pos, price, f"climax_{c_tf}_{c_band}"[:20], pips_pnl, snap=snap)
+                    self._send_telegram(
+                        f"🎯 ADUANA CLÍMAX FULL EXIT [{symbol}]\n"
+                        f"Nivel: Etapa {c_stage} ({c_tf} {c_band})\n"
+                        f"Precio: {price}\n"
+                        f"Cierre Total 100% ({scale_res.get('reason')})"
+                    )
+                    return
+                elif scale_res['action'] == 'PARTIAL':
+                    curr_lots = self._safe_float(pos.get('lots'))
+                    close_lots = scale_res['close_qty']
+                    pct_to_close = close_lots / curr_lots if curr_lots > 0 else 0.5
+                    new_sl_be = climax_eval.get('new_sl_be', price)
+
+                    self.log(f"[{symbol}] ADUANA Clímax TP ({c_tf} {c_band}). Scale-Out ({scale_res.get('pct_closed')}%, {close_lots} lotes).")
+                    self._partial_close_position(pos, price, pct_to_close, pips_pnl, snap=snap)
+
+                    # Blindaje SL a Break-Even
+                    self.sb.table('forex_positions').update({
+                        'sl_price': new_sl_be,
+                        'stop_loss': new_sl_be,
+                        'climax_stage': c_stage
+                    }).eq('id', pos['id']).execute()
+                    pos['sl_price'] = new_sl_be
+                    pos['stop_loss'] = new_sl_be
+                    pos['climax_stage'] = c_stage
+
+                    # Modificar en cTrader si es live
+                    if pos.get('mode') == 'live' and pos.get('ctrader_pos_id') and hasattr(self.worker, 'modify_position_sl'):
+                        try:
+                            self.worker.modify_position_sl(pos['ctrader_pos_id'], new_sl_be)
+                        except Exception as m_sl_e:
+                            self.log(f"Error modificando SL en cTrader: {m_sl_e}")
+
+                    self._send_telegram(
+                        f"🎯 ADUANA CLÍMAX TP [{symbol}]\n"
+                        f"Nivel: Etapa {c_stage} ({c_tf} {c_band})\n"
+                        f"Precio: {price}\n"
+                        f"Cierre Parcial: {scale_res.get('pct_closed')}% ({close_lots} lotes)\n"
+                        f"🛡️ SL Blindado a Break-Even: {new_sl_be}"
+                    )
+        except Exception as fx_clim_err:
+            self.log(f"Error evaluando Aduana Climax Forex {symbol}: {fx_clim_err}")
 
         #    Verificación estricta de SL/TP   
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))

@@ -38,14 +38,17 @@ files_to_sync = [
     "migration_034_rebote_aduana.sql",
     "tests/test_radar_service.py",
     "tests/test_cascada_engine.py",
+    "tests/test_panic_recovery_and_shield.py",
 
     # REBOTE / ADUANA
     "app/rebote_aduana/__init__.py",
     "app/rebote_aduana/config.py",
     "app/rebote_aduana/rebote_engine.py",
     "app/rebote_aduana/aduana_validator.py",
+    "app/rebote_aduana/aduana_climax_manager.py",
     "app/rebote_aduana/rebote_monitor.py",
     "app/rebote_aduana/logger.py",
+    "tests/test_aduana_climax_exit.py",
     "app/rebote_aduana/scoring/__init__.py",
     "app/rebote_aduana/scoring/signal_fib_extreme.py",
     "app/rebote_aduana/scoring/signal_double_bottom.py",
@@ -69,6 +72,9 @@ files_to_sync = [
     "app/tests/test_fkr_kinetic_trailing.py",
     "app/tests/test_rebote_kinetic_trailing.py",
     "app/tests/test_range_band_and_anti_chop.py",
+    "app/tests/test_climax_erep_lifecycle.py",
+    "app/tests/test_climax_sl_and_microexit_fixes.py",
+    "app/tests/test_pnl_zero_and_precision_fixes.py",
 
     # HALCÓN CENTINELA
     "app/halcon_centinela/__init__.py",
@@ -110,6 +116,7 @@ files_to_sync = [
     "app/core/symbol_state.py",
     "app/core/memory_store.py",
     "app/core/logger.py",
+    "app/core/supabase_client.py",
 
     # Otros módulos de la plataforma
     "app/strategy/candle_momentum_guard.py",
@@ -120,12 +127,14 @@ files_to_sync = [
     "app/strategy/erep_recovery_engine.py",
     "app/strategy/crypto_multi_asset_calibrations.py",
     "app/strategy/smart_loss_guard.py",
+    "app/strategy/panic_recovery_gate.py",
     "app/strategy/dca_manager.py",
     "app/strategy/profit_capture.py",
     "app/strategy/profit_ladder.py",
     "app/strategy/erep_manager.py",
     "app/strategy/bollinger_exhaustion.py",
     "app/strategy/macro_filter.py",
+    "app/workers/alerts_service.py",
     "app/workers/scheduler.py",
     "app/analysis/indicators_v2.py",
     "app/analysis/swing_detector.py",
@@ -160,6 +169,12 @@ files_to_sync = [
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/stocks/stocks_tp_manager.py",
     "app/stocks/position_monitor.py",
+    "app/stocks/aduana_stocks_exit_engine.py",
+    "app/stocks/adr_volatility_gate.py",
+    "tests/test_aduana_stocks_exit.py",
+    "tests/test_adr_volatility_gate.py",
+    "tests/test_maturation_and_multi_tf_exit.py",
+    "scripts/update_hot_rules_volatility.py",
     "app/tests/test_qshr_booster.py",
     "app/tests/test_qshr_v5.py",
     "app/tests/test_qshr_early_invalidation.py",
@@ -222,7 +237,9 @@ frontend_files = [
     ("frontend/components/widgets/HalconCentinelaWidget.tsx", "frontend/components/widgets/HalconCentinelaWidget.tsx"),
     ("frontend/components/widgets/QshrWidget.tsx", "frontend/components/widgets/QshrWidget.tsx"),
     ("frontend/app/forex/dashboard/page.tsx", "frontend/app/forex/dashboard/page.tsx"),
+    ("frontend/app/forex/positions/page.tsx", "frontend/app/forex/positions/page.tsx"),
     ("frontend/app/dashboard/page.tsx", "frontend/app/dashboard/page.tsx"),
+    ("frontend/app/portfolio/page.tsx", "frontend/app/portfolio/page.tsx"),
     ("frontend/app/settings/page.tsx", "frontend/app/settings/page.tsx")
 ]
 

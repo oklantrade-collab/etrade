@@ -42,10 +42,39 @@ async def check_signal_reversal(
     Nunca cierra con pérdida por esta regla (para pérdidas -> SL).
     No cierra por titubeos de MTF o 15M si la EMA3 en 5m sigue a favor.
     """
+def is_trade_mature(position: dict, min_minutes: int = 20) -> bool:
+    """Verifica si la posición ha cumplido su ventana mínima de maduración (por defecto 20m)."""
+    ts_str = position.get('opened_at') or position.get('created_at')
+    if not ts_str:
+        return True
+    try:
+        from app.core.safety_manager import _safe_parse_iso
+        op_dt = _safe_parse_iso(ts_str)
+        now_dt = datetime.now(timezone.utc)
+        return (now_dt - op_dt).total_seconds() >= (min_minutes * 60)
+    except Exception:
+        return True
+
+async def check_early_profit_protect_ema_5m(
+    position:      dict,
+    current_price: float,
+    config:        dict,
+    snap:          dict | None = None
+) -> dict:
+    """
+    Early Profit Protect (5M):
+    Cierra la posición si la EMA3 de 5m cruza en contra de la EMA9 de 5m
+    ÚNICAMENTE si la posición está madura (>=20 min), superó el umbral neto (>=1.5%)
+    y la tendencia madre de 15m no sigue a favor.
+    """
     if not config.get('exit_on_signal_reversal', True):
         return {'should_exit': False}
 
     if not position:
+        return {'should_exit': False}
+
+    # Guard de Maduración: Prohibir cierres en los primeros 20 min de vida
+    if not is_trade_mature(position, min_minutes=20):
         return {'should_exit': False}
 
     side  = (position.get('side') or '').lower()
@@ -77,7 +106,6 @@ async def check_signal_reversal(
         else:
             ema9 = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
     elif snap:
-        # Fallback si no hay df_5m
         ema3 = float(snap.get('ema_3') or 0)
         ema9 = float(snap.get('ema_9') or 0)
 
@@ -89,13 +117,29 @@ async def check_signal_reversal(
         elif side in ('short', 'sell') and ema3 > ema9:
             ema_reversed_5m = True
 
-    # 3. Regla estricta con Fee-Net Guard: Solo salir si PnL >= min_profit_pct (cobertura de comisión Binance 0.20% + slippage)
-    min_profit_pct = float(config.get('min_profit_exit_pct', 0.28))
+    # 2.1 Verificar si la tendencia madre de 15M sigue viva (EMA3 vs EMA9 en 15m)
+    df_15m = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df') if symbol else None
+    if df_15m is not None and len(df_15m) >= 2:
+        c15 = df_15m['close']
+        e3_15 = float(df_15m.iloc[-1].get('ema1') or df_15m.iloc[-1].get('ema_3') or c15.ewm(span=3, adjust=False).mean().iloc[-1])
+        e9_15 = float(df_15m.iloc[-1].get('ema2') or df_15m.iloc[-1].get('ema_9') or c15.ewm(span=9, adjust=False).mean().iloc[-1])
+        trend_alive_15m = (side in ('long', 'buy') and e3_15 > e9_15) or (side in ('short', 'sell') and e3_15 < e9_15)
+        if trend_alive_15m:
+            log_info(MODULE, f"Early profit protect 5M suprimido para {symbol}: Tendencia madre 15M sigue viva (EMA3={e3_15:.5f}, EMA9={e9_15:.5f}).")
+            return {'should_exit': False}
+
+    # 3. Regla estricta con Fee-Net Guard: Exigir al menos 1.50% de ganancia neta para evitar centavos
+    is_crypto = any(c in str(symbol).upper() for c in ('USDT', 'BTC', 'ETH', 'SOL', 'ADA')) or position.get('market_type') == 'crypto_futures'
+    if is_crypto:
+        min_profit_pct = float(config.get('min_profit_exit_pct_crypto', config.get('min_profit_exit_pct', 1.50)))
+    else:
+        min_profit_pct = float(config.get('min_profit_exit_pct', 1.20))
     
     # Check if position is a cascade/rebote position
     origen = str(position.get('origen', '')).upper()
     rule_code = str(position.get('rule_code', ''))
-    if origen == 'REBOTE' or rule_code.startswith(('AaReb', 'BbReb', 'REBOTE', 'Aa12')):
+    is_climax_or_erep = any(x in rule_code.lower() for x in ('climax', 'lower6', 'upper6', 'reversal')) or position.get('erep_active') or (position.get('erep_phase', 0) > 0)
+    if origen == 'REBOTE' or rule_code.startswith(('AaReb', 'BbReb', 'REBOTE', 'Aa12')) or is_climax_or_erep:
         return {'should_exit': False}
         
     if pnl_pct >= min_profit_pct and ema_reversed_5m:
@@ -227,8 +271,25 @@ async def check_margin_call_alert(
         alert_pct = float(config.get('margin_call_alert_pct', 20.0))
         
         regime_params = config.get('regime_params') or {}
-        # Obtener el balance del broker (usaremos el de crypto o forex según haya disponible)
-        balance = float(regime_params.get('broker_balance') or regime_params.get('broker_balance_forex') or 1000.0)
+        is_crypto = 'USDT' in symbol.upper() or 'BUSD' in symbol.upper() or 'BTC' in symbol.upper()
+        if is_crypto:
+            balance = 0.0
+            if hasattr(BOT_STATE, 'crypto_balance') and getattr(BOT_STATE, 'crypto_balance', 0) > 0:
+                balance = float(BOT_STATE.crypto_balance)
+            else:
+                try:
+                    from app.execution.binance_connector import get_client
+                    client = get_client()
+                    f_acc = client.futures_account()
+                    balance = float(f_acc.get('totalMarginBalance') or f_acc.get('totalWalletBalance') or 0.0)
+                    if balance > 0:
+                        BOT_STATE.crypto_balance = balance
+                except Exception:
+                    pass
+            if balance <= 0:
+                balance = float(regime_params.get('broker_balance_crypto') or regime_params.get('broker_balance') or 50.0)
+        else:
+            balance = float(regime_params.get('broker_balance_forex') or regime_params.get('broker_balance') or 1000.0)
         
         if balance <= 0:
             return
@@ -282,7 +343,7 @@ async def check_sl_with_erep(
 
     Se llama en el ciclo de 15m SOLO cuando el precio está cerca o en el SL.
     """
-    from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action
+    from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action, get_fibonacci_erep_target
     
     sl_price = float(position.get('stop_loss_price') or
                      position.get('sl_dynamic_price') or
@@ -290,19 +351,26 @@ async def check_sl_with_erep(
                      position.get('stop_loss') or 0)
     side     = str(position.get('side', 'long'))
     is_long  = side.lower() in ('long', 'buy')
+    entry_p  = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
 
-    if sl_price <= 0 and not bool(position.get('erep_active')):
-        return False
+    # ¿Tocó el SL? Solo evaluar si sl_price es positivo para evitar falsos positivos con sl_price <= 0 en SHORT/LONG
+    sl_touched = False
+    if sl_price > 0:
+        sl_touched = (
+            (is_long  and current_price <= sl_price) or
+            (not is_long and current_price >= sl_price)
+        )
 
-    # ¿Tocó el SL?
-    sl_touched = (
-        (is_long  and current_price <= sl_price) or
-        (not is_long and current_price >= sl_price)
-    )
+    erep_active = bool(position.get('erep_active')) or (int(position.get('erep_phase', 0)) > 0)
 
-    erep_active = bool(position.get('erep_active'))
+    # ¿Posición en pérdida que alcanzó la siguiente banda Fibonacci de menor grado?
+    is_in_loss = (current_price < entry_p) if is_long else (current_price > entry_p)
+    fib_ladder_reached = False
+    if not erep_active and is_in_loss and snap:
+        fib_eval = get_fibonacci_erep_target(entry_p, current_price, side, snap)
+        fib_ladder_reached = bool(fib_eval.get('reached', False))
 
-    if not sl_touched and not erep_active:
+    if not sl_touched and not erep_active and not fib_ladder_reached:
         return False  # Normal, sin acción
 
     async def open_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
@@ -378,8 +446,10 @@ async def check_sl_with_erep(
         )
         return result.get('executed') == 'closed'
 
-    # ── SL RECIÉN TOCADO ───────────────────────
-    if sl_touched:
+    # ── SL TOCADO O BANDA FIBONACCI EREP ALCANZADA ──
+    if sl_touched or fib_ladder_reached:
+        trigger_src = "SL Tocado" if sl_touched else "Banda Fibonacci EREP Alcanzada"
+        log_info(MODULE, f"🔄 {symbol}: Activando evaluación EREP ({trigger_src}). Entry={entry_p:.4f}, Price={current_price:.4f}")
         sl_type = str(position.get('sl_type') or '')
         if sl_type.startswith('trailing'):
             entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
@@ -632,8 +702,166 @@ async def check_protections(
         except Exception as e:
             log_error(MODULE, f"Error actualizando BE para {symbol}: {e}")
 
+    # ── CHECK 1.35: ADUANAS MULTI-TF FIBONACCI CLIMAX EXIT (Propuesta B en 5m/15m + Macro) ──
+    try:
+        from app.rebote_aduana.aduana_climax_manager import AduanaClimaxManager
+        climax_eval = AduanaClimaxManager.evaluate_position_climax(
+            pos=position,
+            current_price=current_price
+        )
+        if climax_eval.get('triggered'):
+            c_stage = climax_eval.get('stage')
+            c_action = climax_eval.get('action')
+            c_tf = climax_eval.get('timeframe')
+            c_band = climax_eval.get('band_name')
+            c_target_ratio = climax_eval.get('target_close_ratio', 0.40)
+            
+            # Calcular tamaño adaptativo respetando minQty, stepSize y minNotional
+            scale_res = AduanaClimaxManager.calculate_adaptive_close_size(
+                pos=position,
+                target_ratio=c_target_ratio,
+                current_price=current_price,
+                market_type='crypto'
+            )
+            
+            if scale_res['action'] == 'FULL' or c_action == 'FULL':
+                log_info('ADUANA_CLIMAX', f"🎯 [ADUANA CLÍMAX FULL EXIT] [{symbol}]: {climax_eval.get('reason')} ({scale_res.get('reason')})")
+                closed = await _execute_paper_close(position, current_price, f"climax_{c_tf}_{c_band}"[:20], supabase)
+                if closed:
+                    from app.workers.alerts_service import send_telegram_message
+                    await send_telegram_message(
+                        f"🎯 ADUANA CLÍMAX FULL EXIT [{symbol}]\n"
+                        f"Nivel: Etapa {c_stage} ({c_tf} {c_band})\n"
+                        f"Precio Cierre: ${current_price:,.4f}\n"
+                        f"Cierre Total: 100% ({scale_res.get('reason')})"
+                    )
+                    return
+            elif scale_res['action'] == 'PARTIAL':
+                close_qty = scale_res['close_qty']
+                rem_qty = scale_res['remaining_qty']
+                new_sl_be = climax_eval.get('new_sl_be', current_price)
+                
+                log_info('ADUANA_CLIMAX', f"🎯 [ADUANA CLÍMAX PARTIAL TP] [{symbol}]: {climax_eval.get('reason')} | Qty={close_qty}, Rem={rem_qty}")
+                
+                # Ejecutar orden real en Binance si es LIVE
+                if position.get('mode') == 'live':
+                    try:
+                        from app.execution.binance_connector import get_client
+                        client = get_client()
+                        sym_clean = symbol.replace("/", "").upper()
+                        close_side = 'SELL' if position.get('side', '').lower() in ('long', 'buy') else 'BUY'
+                        pos_side = 'LONG' if position.get('side', '').lower() in ('long', 'buy') else 'SHORT'
+                        client.futures_create_order(
+                            symbol=sym_clean,
+                            side=close_side,
+                            type='MARKET',
+                            quantity=close_qty,
+                            positionSide=pos_side
+                        )
+                    except Exception as bin_err:
+                        log_error('ADUANA_CLIMAX', f"Error enviando parcial Binance Live {symbol}: {bin_err}")
+                
+                # Actualizar DB y blindar Stop Loss a Break-Even
+                supabase.table('positions').update({
+                    'size': rem_qty,
+                    'partial_closed': True,
+                    'partial_close_price': current_price,
+                    'partial_close_at': datetime.now(timezone.utc).isoformat(),
+                    'sl_price': new_sl_be,
+                    'stop_loss': new_sl_be,
+                    'be_activated': True,
+                    'protection_activated': True,
+                    'climax_stage': c_stage
+                }).eq('id', pos_id).execute()
+                
+                position['size'] = rem_qty
+                position['partial_closed'] = True
+                position['sl_price'] = new_sl_be
+                position['stop_loss'] = new_sl_be
+                position['climax_stage'] = c_stage
+                position['be_activated'] = True
+                state.current_sl = new_sl_be
+                
+                from app.workers.alerts_service import send_telegram_message
+                await send_telegram_message(
+                    f"🎯 ADUANA CLÍMAX TP [{symbol}]\n"
+                    f"Nivel: Etapa {c_stage} ({c_tf} {c_band})\n"
+                    f"Precio Ejecución: ${current_price:,.4f}\n"
+                    f"Cierre Parcial: {scale_res.get('pct_closed')}% ({close_qty})\n"
+                    f"Remanente: {rem_qty}\n"
+                    f"🛡️ SL Blindado a Break-Even: ${new_sl_be:,.4f}"
+                )
+    except Exception as clim_err:
+        log_error(MODULE, f"Error evaluando Aduana Climax Exit Crypto {symbol}: {clim_err}")
+
+    # ── CHECK 1.4: CLIMAX & EREP TRANSITION & TP (Escalera de Giro EMA y TP Basis) ──
+    try:
+        from app.strategy.erep_recovery_engine import evaluate_climax_ema_transition
+        climax_trans = evaluate_climax_ema_transition(
+            position=position,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            current_price=current_price,
+            symbol=symbol,
+            market_type='crypto_futures'
+        )
+        if climax_trans:
+            c_action = climax_trans.get('action')
+            if c_action == 'climax_tp_partial_basis':
+                # TP1 50% en Basis
+                c_size = float(position.get('size') or position.get('lots') or 0.01) * 0.50
+                log_info('PROTECTION', f"🎯 [CLIMAX BASIS TP1] [{symbol}]: {climax_trans.get('reason')}")
+                supabase.table('positions').update({
+                    'size': round(c_size, 8),
+                    'partial_closed': True,
+                    'partial_close_price': current_price,
+                    'partial_close_at': datetime.now(timezone.utc).isoformat(),
+                    'sl_price': float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+                }).eq('id', pos_id).execute()
+                position['size'] = round(c_size, 8)
+                position['partial_closed'] = True
+                position['sl_price'] = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+                
+                from app.workers.alerts_service import send_telegram_message
+                await send_telegram_message(
+                    f"🎯 CLÍMAX BASIS TP1 ALCANZADO [{symbol}]\n"
+                    f"{climax_trans.get('reason')}\n"
+                    f"Precio Cierre Parcial: ${current_price:,.2f}\n"
+                    f"SL asegurado en Breakeven."
+                )
+            elif c_action == 'climax_tp_full':
+                log_info('PROTECTION', f"🎯 [CLIMAX RUNNER TP FULL] [{symbol}]: {climax_trans.get('reason')}")
+                closed = await _execute_paper_close(position, current_price, climax_trans.get('rule_code', 'climax_tp_full'), supabase)
+                if closed:
+                    return
+            elif c_action == 'adjust_sl_be':
+                new_sl = float(climax_trans.get('new_sl', current_price))
+                supabase.table('positions').update({
+                    'sl_price': new_sl,
+                    'stop_loss': new_sl,
+                    'sl_type': 'be_climax_microturn',
+                    'protection_activated': True
+                }).eq('id', pos_id).execute()
+                position['sl_price'] = new_sl
+                position['stop_loss'] = new_sl
+                position['be_activated'] = True
+                log_info('PROTECTION', f"🛡️ [CLIMAX BE ACTIVADO] [{symbol}]: {climax_trans.get('reason')}")
+            elif c_action == 'confirm_trend':
+                supabase.table('positions').update({
+                    'trend_confirmed': True,
+                    'sl_price': float(climax_trans.get('new_sl', current_price))
+                }).eq('id', pos_id).execute()
+                position['trend_confirmed'] = True
+                position['sl_price'] = float(climax_trans.get('new_sl', current_price))
+                log_info('PROTECTION', f"🚀 [CLIMAX ROTACIÓN MACRO CONFIRMADA] [{symbol}]: {climax_trans.get('reason')}")
+    except Exception as c_trans_e:
+        log_error(MODULE, f"Error evaluando Climax Transition Crypto {symbol}: {c_trans_e}")
+
     # ── CHECK 1.4.5: STOP LOSS VIRTUAL FIBONACCI (eTrade 100% Control, Crypto & Forex) ──
-    if not position.get('erep_active') and not position.get('recovery_mode') and position.get('sl_type') not in ('erep_recovery_wait', 'erep_suspended', 'aduana_software'):
+    pos_rule_lower = (position.get('rule_code') or '').lower()
+    is_non_qshr_rule = any(x in pos_rule_lower for x in ('apex', 'aa13', 'aa21', 'bb13', 'bb21', 'swing', 'rebote', 'cascada', 'halcon', 'aduana'))
+    is_climax_rule = any(x in pos_rule_lower for x in ('climax', 'lower6', 'upper6', 'reversal'))
+    if not is_non_qshr_rule and not is_climax_rule and not position.get('erep_active') and not position.get('recovery_mode') and position.get('sl_type') not in ('erep_recovery_wait', 'erep_suspended', 'aduana_software'):
         try:
             from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
             fib_sl_res = evaluate_fib_band_virtual_sl(position, df_15m, current_price, symbol)
@@ -652,26 +880,52 @@ async def check_protections(
         if dual_exit:
             action = dual_exit.get('action')
             if action in ('close_bollinger_exhaustion', 'close_cascada_fib_stagnation'):
-                log_info('PROTECTION', f"🎯 [DUAL EXIT {action.upper()}] [{symbol}]: {dual_exit.get('reason')}")
-                closed = await _execute_paper_close(position, current_price, dual_exit.get('rule_code', 'dual_exit'), supabase)
-                if closed:
-                    return
+                # ── GUARDIA DE MADURACIÓN & TENDENCIA 15M (EMA3 vs EMA9) ──
+                # 1. Ventana de maduración (20 min): Prohibir cierres por estancamiento o agotamiento
+                if not is_trade_mature(position, min_minutes=20):
+                    log_info('PROTECTION', f"🛡️ [MADURACIÓN ACTIVA] [{symbol}]: Salida ({action}) bloqueada en primeros 20 min para permitir desarrollo de la orden.")
+                else:
+                    # 2. Guardia de Tendencia 15m: Prohibir cierres si EMA3 vs EMA9 en 15m sigue a favor
+                    trend_alive_15m = False
+                    if df_15m is not None and len(df_15m) >= 2:
+                        c15 = df_15m['close']
+                        e3_15 = float(df_15m.iloc[-1].get('ema1') or df_15m.iloc[-1].get('ema_3') or c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                        e9_15 = float(df_15m.iloc[-1].get('ema2') or df_15m.iloc[-1].get('ema_9') or c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                        trend_alive_15m = (side.lower() in ('long', 'buy') and e3_15 > e9_15) or (side.lower() in ('short', 'sell') and e3_15 < e9_15)
+
+                    # Calcular PnL actual
+                    curr_entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+                    pnl_calc_pct = ((current_price - curr_entry) / curr_entry * 100) if (side.lower() in ('long', 'buy') and curr_entry > 0) else (((curr_entry - current_price) / curr_entry * 100) if curr_entry > 0 else 0)
+
+                    if trend_alive_15m and pnl_calc_pct < 2.50:
+                        log_info('PROTECTION', f"🛡️ [15M TREND GUARD] [{symbol}]: Salida ({action}) bloqueada porque la tendencia 15m sigue viva (EMA3={e3_15:.5f}, EMA9={e9_15:.5f}) y PnL ({pnl_calc_pct:.2f}% < 2.50%).")
+                    else:
+                        log_info('PROTECTION', f"🎯 [DUAL EXIT {action.upper()}] [{symbol}]: {dual_exit.get('reason')}")
+                        closed = await _execute_paper_close(position, current_price, dual_exit.get('rule_code', 'dual_exit'), supabase)
+                        if closed:
+                            return
             elif action == 'adjust_trailing_sl':
-                new_sl = float(dual_exit.get('sl_price', 0))
-                if new_sl > 0:
-                    try:
-                        supabase.table('positions').update({
-                            'sl_price': new_sl,
-                            'stop_loss': new_sl,
-                            'trailing_sl_price': new_sl,
-                            'sl_type': 'cascada_fib_trail',
-                            'protection_activated': True
-                        }).eq('id', pos_id).execute()
-                        state.current_sl = new_sl
-                        position['sl_price'] = new_sl
-                        log_info('PROTECTION', f"📈 [CASCADA FIB SL SYNC] [{symbol}]: SL ceñido a {new_sl}")
-                    except Exception as sl_e:
-                        log_error(MODULE, f"Error actualizando Fib SL Crypto {pos_id}: {sl_e}")
+                # Solo ceñir trailing stop si la posición está madura (>= 15 min) o tiene ganancia >= 1.2%
+                curr_entry = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
+                pnl_calc_pct = ((current_price - curr_entry) / curr_entry * 100) if (side.lower() in ('long', 'buy') and curr_entry > 0) else (((curr_entry - current_price) / curr_entry * 100) if curr_entry > 0 else 0)
+                if not is_trade_mature(position, min_minutes=15) and pnl_calc_pct < 1.20:
+                    log_info('PROTECTION', f"🛡️ [TRAILING SKIP / MADURACIÓN] [{symbol}]: No ceñir SL prematuramente en primeros 15 min sin ganancia (+{pnl_calc_pct:.2f}% < 1.2%).")
+                else:
+                    new_sl = float(dual_exit.get('sl_price', 0))
+                    if new_sl > 0:
+                        try:
+                            supabase.table('positions').update({
+                                'sl_price': new_sl,
+                                'stop_loss': new_sl,
+                                'trailing_sl_price': new_sl,
+                                'sl_type': 'cascada_fib_trail',
+                                'protection_activated': True
+                            }).eq('id', pos_id).execute()
+                            state.current_sl = new_sl
+                            position['sl_price'] = new_sl
+                            log_info('PROTECTION', f"📈 [CASCADA FIB SL SYNC] [{symbol}]: SL ceñido a {new_sl}")
+                        except Exception as sl_e:
+                            log_error(MODULE, f"Error actualizando Fib SL Crypto {pos_id}: {sl_e}")
     except Exception as dual_e:
         log_error(MODULE, f"Error evaluando Dual Exit Crypto {symbol}: {dual_e}")
 
@@ -681,10 +935,14 @@ async def check_protections(
         sym_positions = [p for p in BOT_STATE.positions.values() if p.get('symbol') == symbol and p.get('status') == 'open']
         cluster_res = evaluate_cluster_exit(symbol, sym_positions, df_5m, df_15m, current_price, market_type='crypto_futures')
         if cluster_res and cluster_res.get('action') == 'cluster_take_profit':
-            log_info('PROTECTION', f"🎯 [CRYPTO QSHR CLUSTER TAKE PROFIT] [{symbol}]: {cluster_res.get('reason')}")
-            for p_pos in sym_positions:
-                await _execute_paper_close(p_pos, current_price, 'qshr_cluster_tp_15m', supabase)
-            return
+            target_pos_ids = set(cluster_res.get('position_ids') or [])
+            target_cl_pos = [p for p in sym_positions if p.get('id') in target_pos_ids] if target_pos_ids else [p for p in sym_positions if 'qshr' in str(p.get('rule_code', '')).lower()]
+            if target_cl_pos:
+                log_info('PROTECTION', f"🎯 [CRYPTO QSHR CLUSTER TAKE PROFIT] [{symbol}]: {cluster_res.get('reason')} ({len(target_cl_pos)} posiciones)")
+                for p_pos in target_cl_pos:
+                    await _execute_paper_close(p_pos, current_price, 'qshr_cluster_tp_15m', supabase)
+                if position.get('id') in [p.get('id') for p in target_cl_pos]:
+                    return
     except Exception as cl_e:
         log_error(MODULE, f"Error evaluando Cluster Exit Crypto {symbol}: {cl_e}")
 
@@ -746,27 +1004,39 @@ async def check_protections(
                                     try:
                                         supabase.table('positions').update({'sl_price': cluster_sl, 'stop_loss': cluster_sl}).eq('id', p['id']).execute()
                                     except: pass
-            elif q_action in ('close_and_flip_long', 'close_and_flip_short'):
-                flip_side = qshr_res['flip_side']
-                flip_rule = qshr_res.get('flip_rule', 'Bb33_QSHR_FLIP')
-                log_info('QSHR_CRYPTO', f"🔄 [CRYPTO CUT & FLIP TRIGGER] {symbol}: Cerrando {position.get('side', '').upper()} y girando a {flip_side.upper()} ({q_reason})")
-                is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
-                if is_paper:
-                    await _execute_paper_close(position, current_price, 'qshr_cut_and_flip', supabase)
-                    cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
-                    sizing_usd = max(18.0, cap_op * 0.15)
-                    qty = sizing_usd / current_price
-                    await _execute_paper_open(
-                        symbol=symbol, side=flip_side, price=current_price,
-                        size=qty, rule_code=flip_rule,
-                        regime={'category': 'favorable_trend'}, levels={},
-                        vel_config={'adx_val': 30, 'multiplier': 1.5}, supabase=supabase
-                    )
-            elif q_action in ('close_original_long', 'close_original_short'):
-                log_info('QSHR_CRYPTO', f"🛡️ [CRYPTO QSHR EMERGENCY CUT] {symbol}: {q_reason}")
-                is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
-                if is_paper:
-                    await _execute_paper_close(position, current_price, 'qshr_early_invalidation', supabase)
+            elif q_action in ('close_and_flip_long', 'close_and_flip_short', 'close_original_long', 'close_original_short'):
+                # 1. Solo aplicar a posiciones que pertenezcan a la familia QSHR
+                is_qshr_pos = any(x in pos_rule_lower for x in ('qshr', 'booster', 'hedge', 'squeeze'))
+                if not is_qshr_pos:
+                    log_info('QSHR_CRYPTO', f"🛡️ [NON-QSHR SKIP] {symbol}: Posición ({position.get('rule_code')}) no es QSHR. Omitiendo early invalidation/cut.")
+                else:
+                    # Inmunidad TOTAL para operaciones Clímax / EREP: Nunca aplicar cortes de breakout fallido (early invalidation) ni flips
+                    is_climax_pos = any(x in pos_rule_lower for x in ('climax', 'lower6', 'upper6', 'reversal')) or position.get('erep_active') or (position.get('erep_phase', 0) > 0)
+                    if is_climax_pos:
+                        log_info('QSHR_CRYPTO', f"🛡️ [CLIMAX/EREP INMUNIDAD TOTAL] {symbol}: Omitiendo flip/early cut en operación de reversión Clímax/EREP. Gestión exclusiva por reversión a Basis.")
+                    elif q_action in ('close_and_flip_long', 'close_and_flip_short'):
+                        flip_side = qshr_res['flip_side']
+                        flip_rule = qshr_res.get('flip_rule', 'Bb33_QSHR_FLIP')
+                        log_info('QSHR_CRYPTO', f"🔄 [CRYPTO CUT & FLIP TRIGGER] {symbol}: Cerrando {position.get('side', '').upper()} y girando a {flip_side.upper()} ({q_reason})")
+                        await _execute_paper_close(position, current_price, 'qshr_cut_and_flip', supabase)
+                        
+                        is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
+                        if is_paper:
+                            cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
+                            sizing_usd = max(18.0, cap_op * 0.15)
+                            qty = sizing_usd / current_price
+                            await _execute_paper_open(
+                                symbol=symbol, side=flip_side, price=current_price,
+                                size=qty, rule_code=flip_rule,
+                                regime={'category': 'favorable_trend'}, levels={},
+                                vel_config={'adx_val': 30, 'multiplier': 1.5}, supabase=supabase
+                            )
+                        return 'closed'
+
+                    elif q_action in ('close_original_long', 'close_original_short'):
+                        log_info('QSHR_CRYPTO', f"🛡️ [CRYPTO QSHR EARLY INVALIDATION CUT] {symbol}: {q_reason}")
+                        await _execute_paper_close(position, current_price, 'qshr_early_invalidation', supabase)
+                        return 'closed'
     except Exception as boost_e:
         log_error(MODULE, f"Error evaluando Crypto QSHR / Booster {symbol}: {boost_e}")
 
@@ -998,6 +1268,44 @@ async def check_open_positions_5m(
                 # 0.1 SISTEMA DE PROTECCIÓN DE CAPITAL (4 Pasos)
                 # Inyectamos el monitor de protecciones dinámicas (BE, Trailing, Backstop)
                 current_snap_obj = next((r for r in snap_res.data if r['symbol'].replace("/", "") == norm_symbol), {})
+
+                # ── PANIC RECOVERY GATE & EREP EVALUATION ──
+                try:
+                    from app.strategy.panic_recovery_gate import evaluate_panic_and_erep_status
+                    from app.core.memory_store import get_memory_df
+                    df_5m_p = get_memory_df(norm_symbol, "5m")
+                    df_15m_p = get_memory_df(norm_symbol, "15m")
+                    df_1h_p = get_memory_df(norm_symbol, "1h")
+                    df_4h_p = get_memory_df(norm_symbol, "4h")
+                    
+                    panic_eval = evaluate_panic_and_erep_status(
+                        position=pos,
+                        current_price=price,
+                        df_5m=df_5m_p,
+                        df_15m=df_15m_p,
+                        df_1h=df_1h_p,
+                        df_4h=df_4h_p,
+                        snap=current_snap_obj
+                    )
+                    
+                    if panic_eval.get('should_exit'):
+                        p_action = panic_eval.get('action', 'panic_exit')
+                        p_reason = panic_eval.get('reason', 'Panic Gate Exit')
+                        log_warning(MODULE, f"🚨 [PANIC GATE TRIGGER] {norm_symbol}: {p_reason}")
+                        await _execute_paper_close(pos, price, p_action, supabase, snap=current_snap_obj)
+                        events.append({'symbol': norm_symbol, 'event': p_action})
+                        continue
+                    elif panic_eval.get('in_extreme_zone') and panic_eval.get('immunity_active'):
+                        sug_sl = panic_eval.get('suggested_sl')
+                        if sug_sl and sug_sl > 0:
+                            supabase.table('positions').update({
+                                'sl_price': sug_sl,
+                                'stop_loss': sug_sl,
+                                'sl_dynamic_price': sug_sl,
+                                'sl_type': 'erep_structural_shield'
+                            }).eq('id', pos['id']).execute()
+                except Exception as p_err:
+                    log_warning(MODULE, f"Error in Panic Recovery Gate evaluation for {norm_symbol}: {p_err}")
 
                 # ── EREP Integration ──
                 try:
@@ -1665,6 +1973,18 @@ async def _execute_paper_open(
                     log_warning(MODULE, f"DCA_BLOCK: {symbol} SHORT price {price} <= {last_entry}. No mejora costo.")
                     return None
 
+            # 3.1.3 Volatility Range Gate ("Gasolina Filter" en 15m)
+            from app.core.memory_store import MEMORY_STORE
+            df_15m_entry = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
+            if df_15m_entry is not None and len(df_15m_entry) >= 10:
+                highs = df_15m_entry['high'].tail(10)
+                lows = df_15m_entry['low'].tail(10)
+                closes = df_15m_entry['close'].tail(10)
+                avg_range_pct = float(((highs - lows) / closes * 100).mean())
+                if avg_range_pct < 0.25:
+                    log_warning(MODULE, f"VOLATILITY_BLOCK: {symbol} rango promedio 15m {avg_range_pct:.2f}% < 0.25%. Mercado horizontal sin volatilidad ('sin gasolina').")
+                    return None
+
             # 4. EJECUCIÓN
             log_info(MODULE, f"✅ LÍMITES OK: Abriendo {side.upper()} en {symbol} (Global: {current_global}/{max_global}, Sym: {current_sym}/{max_symbol})")
             res = await _execute_paper_open_unlocked(
@@ -1769,47 +2089,65 @@ async def _execute_paper_open_unlocked(
     )
     
     # ── VALIDACIÓN DE COHERENCIA Y BLINDAJE SL vs ENTRY (V2 Engine) ──
-    sl_final = sl_dict['sl_price']
-    
-    # 1. Blindaje de Distancia Mínima
-    # BTC y ETH: 0.5%, Altcoins: 1.0%
-    is_major = any(x in symbol for x in ['BTC', 'ETH'])
-    min_sl_dist_pct = 0.005 if is_major else 0.010
-    
-    # 2. Blindaje de Distancia Máxima (1% para scalp, 2% para swing)
-    max_sl_dist_pct = 0.010 if is_scalp else 0.020
-    
-    if side.lower() in ['long', 'buy']:
-        min_safe_sl = price * (1 - min_sl_dist_pct)
-        if sl_final > min_safe_sl:
-            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Mínimo activado para LONG. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
-            sl_final = min_safe_sl
-            
-        if sl_final >= price and sl_final > 0:
-            sl_final = price * (1 - min_sl_dist_pct)
-            log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
-            
-        max_safe_sl = price * (1 - max_sl_dist_pct)
-        if sl_final < max_safe_sl:
-            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Máximo activado para LONG. SL original={sl_final:.6f} movido a {max_safe_sl:.6f} (max {max_sl_dist_pct*100}%)")
-            sl_final = max_safe_sl
-            
-    elif side.lower() in ['short', 'sell']:
-        min_safe_sl = price * (1 + min_sl_dist_pct)
-        if sl_final < min_safe_sl:
-            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Mínimo activado para SHORT. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
-            sl_final = min_safe_sl
-            
-        if sl_final <= price and sl_final > 0:
-            sl_final = price * (1 + min_sl_dist_pct)
-            log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
-            
-        max_safe_sl = price * (1 + max_sl_dist_pct)
-        if sl_final > max_safe_sl:
-            log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Máximo activado para SHORT. SL original={sl_final:.6f} movido a {max_safe_sl:.6f} (max {max_sl_dist_pct*100}%)")
-            sl_final = max_safe_sl
-            
-    sl_dict['sl_price'] = sl_final
+    is_climax_entry = rule_code in (
+        'Bb33_QSHR_CLIMAX_LOWER6_LONG', 'Bb33_QSHR_CLIMAX_UPPER6_SHORT',
+        'Bb33_QSHR_CLIMAX_5M_LOWER6_LONG', 'Bb33_QSHR_CLIMAX_5M_UPPER6_SHORT'
+    )
+    if is_climax_entry:
+        # Blindaje Estructural EREP: Stop Loss anclado tras la banda extrema (LOWER_6 - 1.2 ATR o UPPER_6 + 1.2 ATR)
+        atr_val = float(levels.get('atr', price * atr_fallback_pct))
+        if side.lower() in ('long', 'buy'):
+            l6_val = float(levels.get('lower_6', 0))
+            sl_structural = (l6_val - 1.2 * atr_val) if l6_val > 0 else (price - 1.5 * atr_val)
+            sl_final = min(sl_structural, price * 0.985)
+        else:
+            u6_val = float(levels.get('upper_6', 0))
+            sl_structural = (u6_val + 1.2 * atr_val) if u6_val > 0 else (price + 1.5 * atr_val)
+            sl_final = max(sl_structural, price * 1.015)
+        sl_dict['sl_price'] = sl_final
+        log_info(MODULE, f"🛡️ {symbol}: Entrada Clímax ({rule_code}) con Stop Loss Estructural EREP en {sl_final:.6f}")
+    else:
+        sl_final = sl_dict['sl_price']
+        
+        # 1. Blindaje de Distancia Mínima
+        # BTC y ETH: 0.5%, Altcoins: 1.0%
+        is_major = any(x in symbol for x in ['BTC', 'ETH'])
+        min_sl_dist_pct = 0.005 if is_major else 0.010
+        
+        # 2. Blindaje de Distancia Máxima (1% para scalp, 2% para swing)
+        max_sl_dist_pct = 0.010 if is_scalp else 0.020
+        
+        if side.lower() in ['long', 'buy']:
+            min_safe_sl = price * (1 - min_sl_dist_pct)
+            if sl_final > min_safe_sl:
+                log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Mínimo activado para LONG. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
+                sl_final = min_safe_sl
+                
+            if sl_final >= price and sl_final > 0:
+                sl_final = price * (1 - min_sl_dist_pct)
+                log_warning(MODULE, f"{symbol}: SL V2 corregido para LONG. SL={sl_final:.6f} < Entry={price:.6f}")
+                
+            max_safe_sl = price * (1 - max_sl_dist_pct)
+            if sl_final < max_safe_sl:
+                log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Máximo activado para LONG. SL original={sl_final:.6f} movido a {max_safe_sl:.6f} (max {max_sl_dist_pct*100}%)")
+                sl_final = max_safe_sl
+                
+        elif side.lower() in ['short', 'sell']:
+            min_safe_sl = price * (1 + min_sl_dist_pct)
+            if sl_final < min_safe_sl:
+                log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Mínimo activado para SHORT. SL original={sl_final:.6f} movido a {min_safe_sl:.6f} (dist min {min_sl_dist_pct*100}%)")
+                sl_final = min_safe_sl
+                
+            if sl_final <= price and sl_final > 0:
+                sl_final = price * (1 + min_sl_dist_pct)
+                log_warning(MODULE, f"{symbol}: SL V2 corregido para SHORT. SL={sl_final:.6f} > Entry={price:.6f}")
+                
+            max_safe_sl = price * (1 + max_sl_dist_pct)
+            if sl_final > max_safe_sl:
+                log_warning(MODULE, f"🛡️ {symbol}: Blindaje SL Máximo activado para SHORT. SL original={sl_final:.6f} movido a {max_safe_sl:.6f} (max {max_sl_dist_pct*100}%)")
+                sl_final = max_safe_sl
+                
+        sl_dict['sl_price'] = sl_final
 
     # ── SLVM: Calcular Stop Loss Virtual ──
     try:
@@ -1905,7 +2243,7 @@ async def _execute_paper_open_unlocked(
 
             # ── ESCUDO DE COHERENCIA PRE-EXCHANGE DE SL Y TP ──
             # Recalcular SL y TP sobre el fill real para evitar SL invertidos o ejecuciones instantáneas
-            if execution_fill_price > 0:
+            if execution_fill_price > 0 and not is_climax_entry:
                 if side.lower() in ('short', 'sell'):
                     if sl_final <= execution_fill_price:
                         sl_final = execution_fill_price * 1.015
@@ -1952,6 +2290,8 @@ async def _execute_paper_open_unlocked(
     except Exception as e:
         log_warning(MODULE, f"Failed to log order to orders table: {e}")
 
+    is_climax_entry = any(x in str(rule_code).lower() for x in ('climax', 'lower6', 'upper6', 'reversal'))
+
     # Persistir
     data = {
         'symbol':           symbol,
@@ -1974,11 +2314,16 @@ async def _execute_paper_open_unlocked(
         'mode':             trade_mode,
         'order_id':         order_db_uuid,
         'sl_exchange_order_id': live_exchange_order_id,
-        # ── SLVM Fields ──
+        # ── SLVM & EREP Fields ──
         'slv_price':        slv_price,
         'slv_hard_stop_pips': slv_hs_pips if slv_price else None,
         'recovery_mode':    False,
         'recovery_cycles':  0,
+        'erep_active':      True if is_climax_entry else False,
+        'erep_phase':       1 if is_climax_entry else 0,
+        'erep_p1_price':    round(execution_fill_price, 8) if is_climax_entry else None,
+        'erep_q1':          round(executed_size, 8) if is_climax_entry else None,
+        'erep_market_type': 'crypto_futures' if is_climax_entry else None,
     }
 
     # ═══════════════════════════════════════════════════════════════
@@ -2057,6 +2402,27 @@ async def _execute_paper_partial_close(pos, price, supabase):
         'partial_close_usd': round(partial_pnl_usd, 4),
         size_key: original_size - partial_qty
     }).eq(db_key_name, db_record_id).execute()
+
+    # 🛡️ BLINDAJE MANDATORIO DE STOP LOSS A BREAK-EVEN TRAS CIERRE PARCIAL
+    entry_val = float(pos.get('avg_entry_price') or pos.get('entry_price') or entry)
+    if entry_val > 0:
+        is_buy = side in ('long', 'buy')
+        if is_forex:
+            pip_sz = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
+            be_sl = round(entry_val + (2.0 * pip_sz) if is_buy else entry_val - (2.0 * pip_sz), 5)
+        else:
+            be_sl = round(entry_val * 1.0015 if is_buy else entry_val * 0.9985, 4)
+            
+        supabase.table(table_name).update({
+            'sl_price': be_sl,
+            'stop_loss': be_sl,
+            'sl_type': 'break_even_partial',
+            'be_activated': True,
+            'protection_activated': True
+        }).eq(db_key_name, db_record_id).execute()
+        pos['sl_price'] = be_sl
+        pos['stop_loss'] = be_sl
+        pos['be_activated'] = True
 
     # 🛡️ Si es una posición de Crypto LIVE, enviar orden de cierre parcial real a Binance Futures
     if not is_forex and pos.get('mode') == 'live':
@@ -2167,6 +2533,9 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         )
         try:
             # Columnas comunes (existen en ambas tablas)
+            is_buy = side in ('long', 'buy')
+            # Hard Backstop estructural del 5% (NUNCA 0)
+            sl_shield = round((entry * 0.95) if is_buy else (entry * 1.05), 5)
             guard_update = {
                 'erep_active': True,
                 'erep_phase': 2,
@@ -2175,13 +2544,13 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
                 'erep_market_type': market_type,
                 'erep_cycles_elapsed': 0,
                 'erep_activated_at': datetime.now(timezone.utc).isoformat(),
-                'sl_price': 0,
+                'sl_price': sl_shield,
             }
             # Columnas exclusivas de crypto (NO existen en forex_positions)
             if not is_forex:
-                guard_update['sl_type'] = 'erep_recovery_wait'
-                guard_update['stop_loss'] = 0
-                guard_update['sl_dynamic_price'] = 0
+                guard_update['sl_type'] = 'erep_structural_shield'
+                guard_update['stop_loss'] = sl_shield
+                guard_update['sl_dynamic_price'] = sl_shield
 
             supabase.table(table_name).update(guard_update).eq(db_key_name, db_record_id).execute()
 
@@ -2376,9 +2745,9 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         # Fallback for symbol-only entries
         BOT_STATE.positions.pop(symbol, None)
 
-    # Register SL cooldown if closed by any SL mechanism (Corrección #2)
-    sl_reasons = ('sl', 'backstop', 'dynamic_sl', 'time_sl', 'stop_loss')
-    if any(r in reason.lower() for r in sl_reasons):
+    # Register SL cooldown if closed by any SL mechanism or invalidation loss (Corrección #2 & Opción A)
+    sl_reasons = ('sl', 'backstop', 'dynamic_sl', 'time_sl', 'stop_loss', 'early_invalidation', 'invalidation', 'cut_and_flip')
+    if any(r in str(reason).lower() for r in sl_reasons) or (total_pnl < 0 and 'tp' not in str(reason).lower() and 'profit' not in str(reason).lower()):
         register_sl_event(symbol, side)
 
     log_info(MODULE, f"🏁 FULL CLOSE [{symbol}] ({reason}) at ${price:,.2f} | Total PnL: ${total_pnl:.2f}")
