@@ -161,6 +161,14 @@ async def get_stocks_opportunities():
 
                     merged["is_overbought_queue"] = q_info.get("is_overbought", False)
 
+                    # Campos de Alto Crecimiento y Fuerza de Compra (1H Swing)
+                    merged["buying_force_score"] = int(sigs.get("buying_force_score") or item.get("buying_force_score") or 0)
+                    merged["is_high_growth_opp"] = bool(sigs.get("is_high_growth_opp") or item.get("is_high_growth_opp") or False)
+                    merged["is_high_priority"] = bool(sigs.get("is_high_priority") or item.get("is_high_priority") or False)
+                    merged["entry_route_1h"] = sigs.get("entry_route_1h") or item.get("entry_route_1h")
+                    merged["entry_support_1h"] = sigs.get("entry_support_1h") or item.get("entry_support_1h")
+                    merged["entry_reason_1h"] = sigs.get("entry_reason_1h") or item.get("entry_reason_1h")
+
                     flattened.append(merged)
                 except Exception as item_e:
                     log_warning("stocks_api", f"Error processing item {item.get('ticker')}: {item_e}")

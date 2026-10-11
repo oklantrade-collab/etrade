@@ -132,7 +132,12 @@ function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital
                   </div>
 
                   <div style={{ minWidth: '60px' }}>
-                    <div style={{ fontWeight: 900, fontSize: '15px', color: isOB ? '#EF4444' : '#FFF' }}>{item.ticker}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <span style={{ fontWeight: 900, fontSize: '15px', color: isOB ? '#EF4444' : '#FFF' }}>{item.ticker}</span>
+                      {item.entry_reason?.includes('high_growth') && (
+                        <span style={{ fontSize: '7px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 3px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
+                      )}
+                    </div>
                     <div style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>RANK {rank.toFixed(1)}</div>
                   </div>
 
@@ -611,6 +616,9 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
           <span style={{ fontWeight: 900, color: '#FFF', fontSize: '14px', letterSpacing: '-0.5px' }}>{opp.ticker}</span>
           {(opp.intrinsic_value > opp.price && opp.intrinsic_value > 0) && (
             <span style={{ fontSize: '8px', background: '#22C55E', color: '#000', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>VAL</span>
+          )}
+          {opp.is_high_growth_opp && (
+            <span title={`Buying Force: ${opp.buying_force_score || 0}/100 | ${opp.entry_route_1h || 'Swing 1H'} ${opp.entry_support_1h || ''}`} style={{ fontSize: '8px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
           )}
       </div>
       

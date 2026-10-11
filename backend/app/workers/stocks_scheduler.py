@@ -254,8 +254,23 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         # 1. DOWNLOAD MULTI-TIMEFRAME DATA (Optimized periods)
         df_5m  = await provider.get_ohlcv(ticker, interval="5m",  period="5d")
         df_15m = await provider.get_ohlcv(ticker, interval="15m", period="60d")
+        df_1h  = await provider.get_ohlcv(ticker, interval="1h",  period="60d")
         df_4h  = await provider.get_ohlcv(ticker, interval="4h",  period="120d")
         df_1d  = await provider.get_ohlcv(ticker, interval="1d",  period="365d")
+
+        # Fallback de resample para 1h si vino vacío
+        if (df_1h is None or df_1h.empty or len(df_1h) < 5) and df_15m is not None and len(df_15m) >= 8:
+            try:
+                df_c = df_15m.copy()
+                t_col = 'open_time' if 'open_time' in df_c.columns else ('date' if 'date' in df_c.columns else None)
+                if t_col:
+                    df_c[t_col] = pd.to_datetime(df_c[t_col])
+                    df_c = df_c.set_index(t_col)
+                df_1h = df_c.resample('1h').agg({
+                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                }).dropna().reset_index()
+            except Exception:
+                pass
 
         # ROBUST NULL CHECK — skip ticker entirely if any timeframe fails
         if df_5m is None or df_5m.empty or len(df_5m) < 10:
@@ -555,6 +570,82 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         bb_lower_1d = float(df_1d.iloc[-1].get("bb_lower", current_price * 0.95))
         ind_15m["bb_lower"] = bb_lower_1d
         
+        # ── NUEVO: ADR & Volatility Fuel Gate ──
+        from app.stocks.adr_volatility_gate import evaluate_adr_and_volatility_gate
+        adr_gate_res = evaluate_adr_and_volatility_gate(
+            df_1d=df_1d,
+            df_15m=df_15m,
+            current_price=current_price,
+            rvol_15m_override=ind_15m.get("rvol")
+        )
+        ind_15m["adr_14_pct"] = adr_gate_res['adr_pct']
+        ind_15m["adr_consumed_pct"] = adr_gate_res['consumed_pct']
+        ind_15m["bandwidth_15m"] = adr_gate_res['bandwidth_pct']
+        ind_15m["is_dead_compression"] = adr_gate_res['is_dead_compression']
+        ind_15m["candle_vol_15m"] = adr_gate_res['candle_vol_15m']
+        ind_15m["breakout_prob"] = adr_gate_res['breakout_prob']
+        ind_15m["adr_gate_summary"] = adr_gate_res['summary']
+
+        # ── NUEVO: BUYING FORCE & GATILLOS 1H (Swing High Growth) ──
+        from app.stocks.buying_force_detector import (
+            evaluate_macro_1d_alignment,
+            calculate_buying_force_score,
+            detect_pullback_and_climax_1h
+        )
+        macro_1d_info = evaluate_macro_1d_alignment(df_1d)
+        rvol_1h_val = float(ind_15m.get("rvol") or 1.0)
+        buying_force_info = calculate_buying_force_score(
+            adr_pct=float(adr_gate_res['adr_pct']),
+            consumed_pct=float(adr_gate_res['consumed_pct']),
+            rvol_1h=rvol_1h_val,
+            df_1h=df_1h,
+            macro_aligned=macro_1d_info['aligned'],
+            bandwidth_1h=float(adr_gate_res.get('bandwidth_pct', 3.0))
+        )
+        entry_1h_info = detect_pullback_and_climax_1h(
+            current_price=current_price,
+            df_1h=df_1h,
+            macro_aligned=macro_1d_info['aligned']
+        )
+
+        ind_15m["macro_1d_aligned"] = macro_1d_info['aligned']
+        ind_15m["macro_1d_reason"] = macro_1d_info['reason']
+        ind_15m["ema_20_1d"] = macro_1d_info.get('ema20', 0.0)
+        ind_15m["ema_50_1d"] = macro_1d_info.get('ema50', 0.0)
+        ind_15m["ema_200_1d"] = macro_1d_info.get('ema200', 0.0)
+        ind_15m["buying_force_score"] = buying_force_info['score']
+        ind_15m["is_high_growth_opp"] = buying_force_info['is_qualified']
+        ind_15m["is_high_priority"] = buying_force_info['is_high_priority']
+        ind_15m["entry_route_1h"] = entry_1h_info.get('route')
+        ind_15m["entry_support_1h"] = entry_1h_info.get('support_level')
+        ind_15m["entry_reason_1h"] = entry_1h_info.get('reason')
+
+        # Si califica como oportunidad de alto crecimiento y tiene entrada activa en 1H:
+        # Asignar ALTA PRIORIDAD inmediata en stocks_priority_queue
+        if buying_force_info['is_qualified'] and entry_1h_info.get('triggered'):
+            try:
+                rank_boost = min(99.0, 92.0 + (buying_force_info['score'] * 0.07))
+                sb.table("stocks_priority_queue").upsert({
+                    'ticker': ticker,
+                    'group_name': ind_15m.get('pool_type', 'HOT'),
+                    'price_at_rank': current_price,
+                    'apex_score_4h': float(ind_15m.get('apex_4h') or 85.0),
+                    'apex_score_1d': float(ind_15m.get('apex_1d') or 85.0),
+                    'return_expected': 6.5,
+                    'confidence': 'high',
+                    'composite_rank': round(rank_boost, 2),
+                    'status': 'pending',
+                    'entry_reason': f"high_growth_{entry_1h_info.get('route', '1h')}_{entry_1h_info.get('support_level', '')}",
+                    'triggered_rule': f"LONG_{entry_1h_info.get('route', 'PULLBACK')}_1H",
+                    'is_overbought': False,
+                    'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                    'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                    'last_updated': datetime.now(timezone.utc).isoformat()
+                }, on_conflict='ticker').execute()
+                log_info(MODULE, f"🔥 ALTA PRIORIDAD EN COLA: {ticker} (Score={buying_force_info['score']}, Entrada={entry_1h_info.get('route')} en {entry_1h_info.get('support_level')})")
+            except Exception as q_err:
+                log_warning(MODULE, f"Error asignando alta prioridad en cola para {ticker}: {q_err}")
+
         # 8. SAVE TO DB
         from app.analysis.stocks_indicators import upsert_technical_score
         is_acceptable = t01_confirmed and t02_confirmed and candle_4h_green
@@ -771,6 +862,20 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         rule_ctx["piotroski_score"] = ind_15m.get("piotroski_score", 0)
         rule_ctx["sipv_signal"] = sipv_signal_15m
         
+        # Inyectar métricas de Volatilidad y ADR
+        rule_ctx['adr_14_pct'] = float(ind_15m.get("adr_14_pct") or 0.0)
+        rule_ctx['adr_consumed_pct'] = float(ind_15m.get("adr_consumed_pct") or 0.0)
+        rule_ctx['bandwidth_15m'] = float(ind_15m.get("bandwidth_15m") or 2.5)
+        rule_ctx['is_dead_compression'] = bool(ind_15m.get("is_dead_compression", False))
+        rule_ctx['candle_vol_15m'] = float(ind_15m.get("candle_vol_15m") or 0.0)
+        rule_ctx['breakout_prob'] = int(ind_15m.get("breakout_prob", 50))
+        rule_ctx['macro_1d_aligned'] = bool(ind_15m.get("macro_1d_aligned", False))
+        rule_ctx['buying_force_score'] = int(ind_15m.get("buying_force_score", 0))
+        rule_ctx['is_high_growth_opp'] = bool(ind_15m.get("is_high_growth_opp", False))
+        rule_ctx['entry_route_1h'] = ind_15m.get("entry_route_1h")
+        rule_ctx['entry_support_1h'] = ind_15m.get("entry_support_1h")
+        rule_ctx['rvol_1h'] = float(ind_15m.get("rvol") or 1.0)
+        
         # Use 15m PineScript Signal for rules that require it (like HOT_SENTMARKET_BUY)
         ps_signal_15m = ind_15m.get("last_pinescript_signal")
         ps_age_15m = ind_15m.get("signal_age", 999)
@@ -791,6 +896,20 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             buying_results = re.evaluate_all(rule_ctx, direction="buy")
             for res in buying_results:
                 if res["triggered"]:
+                    # Cutoff 15:15 ET (últimas 3 velas de 15m)
+                    try:
+                        from datetime import time as dt_time
+                        nyc_now = get_nyc_now()
+                        if nyc_now.time() >= dt_time(15, 15):
+                            rule_obj = re.rules.get(res["rule_code"], {})
+                            grp = str(rule_obj.get("group_name", "")).lower()
+                            rc = str(res["rule_code"]).lower()
+                            if "hot" in grp or "scalp" in grp or "hot" in rc or "scalp" in rc or res["rule_code"] in ('Aa30_STK', 'S05', 'S06', 'S07', 'S08'):
+                                log_info(MODULE, f"⛔ Cutoff 15:15 ET ({nyc_now.strftime('%H:%M')} ET): Saltando compra HOT {res['rule_code']} para {ticker}")
+                                continue
+                    except Exception as e_cut:
+                        log_warning(MODULE, f"Error validando cutoff 15:15 ET en scheduler: {e_cut}")
+
                     # Check State Machine
                     max_pos = int(config.get("max_per_symbol", 4))
                     sm.sync_single_symbol(ticker, table_name="stocks_positions")
@@ -860,6 +979,14 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 "fib_zone_15m": movement_15m["fib_zone_current"],
                 "movement_1d": movement_1d["movement_type"] if movement_1d else "unknown",
                 "fib_zone_1d": movement_1d["fib_zone_current"] if movement_1d else 0,
+                "macro_1d_aligned": bool(ind_15m.get("macro_1d_aligned", False)),
+                "macro_1d_reason": ind_15m.get("macro_1d_reason", ""),
+                "buying_force_score": int(ind_15m.get("buying_force_score", 0)),
+                "is_high_growth_opp": bool(ind_15m.get("is_high_growth_opp", False)),
+                "is_high_priority": bool(ind_15m.get("is_high_priority", False)),
+                "entry_route_1h": ind_15m.get("entry_route_1h"),
+                "entry_support_1h": ind_15m.get("entry_support_1h"),
+                "entry_reason_1h": ind_15m.get("entry_reason_1h"),
             }
             # Append APEX data for UI
             if apex_result:
@@ -1188,28 +1315,6 @@ async def close_stock_position(symbol: str, side: str, size: float, price: float
         
         pnl_usd = round((price - entry_price) * shares, 2)
         pnl_pct = round(((price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0.0
-        
-        # 🛡️ GUARDIA MAESTRA ANTI-PÉRDIDAS EN CIERRE EREP 🛡️
-        if pnl_usd < 0 and 'tp' not in str(reason).lower():
-            log_warning("stocks_scheduler", f"🛡️ [ANTI-LOSS EREP] Bloqueando intento de cierre EREP para {symbol} ({reason}) con P&L negativo: ${pnl_usd:.2f} ({pnl_pct:.2f}%). La posición permanece ABIERTA.")
-            
-            # Suspendemos el Stop Loss físico y forzamos/mantenemos EREP en Fase 2 para seguir esperando
-            try:
-                supabase.table('stocks_positions').update({
-                    'sl_type': 'anti_loss_hold',
-                    'stop_loss': 0,
-                    'sl_dynamic_price': 0,
-                    'sl_price': 0,
-                    'erep_active': True,
-                    'erep_phase': 2,
-                    'erep_p1_price': entry_price,
-                    'erep_q1': shares,
-                    'erep_market_type': 'stocks_spot',
-                    'erep_cycles_elapsed': 0
-                }).eq('id', pos['id']).execute()
-            except Exception as upd_e:
-                log_error("stocks_scheduler", f"Error actualizando estado anti-loss EREP para {symbol}: {upd_e}")
-            return
 
     from app.stocks.stocks_order_executor import _close_all_positions
     _close_all_positions(symbol, price)
@@ -1354,13 +1459,6 @@ async def check_sl_with_erep(
             snap, df_15m, df_4h, market_type, df_5m
         )
 
-        if action['action'] == 'close_sl':
-            # 🛡️ FORZAR EREP FASE 2 POR PROTECCIÓN ANTI-PÉRDIDAS 🛡️
-            log_warning("stocks_scheduler", f"🛡️ [ANTI-LOSS SL] {symbol} tocó SL y EREP falló (cierre sugerido). Forzando Activación de EREP Fase 2 para buscar recuperación.")
-            action = {
-                'action': 'activate_phase2',
-                'reason': 'Forced EREP Phase 2 by Anti-Loss Guard'
-            }
 
         await execute_erep_action(
             action, position, current_price,
@@ -1406,6 +1504,11 @@ async def run_stocks_tp_v2_cycle():
     Ciclo principal de TP v2 para Stocks.
     Corre cada 5m en horario de mercado.
     """
+    nyc_now = get_nyc_now()
+    # Si es fin de semana, el mercado bursátil está completamente cerrado
+    if nyc_now.weekday() > 4:
+        return
+
     sb = get_supabase()
     pos_res = sb\
         .table('stocks_positions')\
@@ -1426,7 +1529,10 @@ async def run_stocks_tp_v2_cycle():
                 continue
 
             df_15m = await _get_timeframe_df_for_tp(ticker, '15m', '60d')
-            
+            if df_15m is None or (isinstance(df_15m, pd.DataFrame) and df_15m.empty):
+                log_warning('TP_v2', f'{ticker}: Sin datos 15m disponibles en este ciclo, posponiendo evaluación')
+                continue
+
             df_5m  = await _get_timeframe_df_for_tp(ticker, '5m', '5d')
             
             # ── Integración EREP para Stocks ──

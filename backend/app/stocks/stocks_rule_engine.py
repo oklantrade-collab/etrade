@@ -91,6 +91,19 @@ class StocksRuleEngine:
         ema_50: float = None,
         psar_direction: int = 0,
         psar_trend_age: int = 0,
+        adr_14_pct: float = 0.0,
+        adr_consumed_pct: float = 0.0,
+        bandwidth_15m: float = 2.5,
+        is_dead_compression: bool = False,
+        candle_vol_15m: float = 0.0,
+        breakout_prob: int = 50,
+        macro_1d_aligned: bool = False,
+        ema_200_1d: float = 0.0,
+        buying_force_score: int = 0,
+        rvol_1h: float = 1.0,
+        entry_route_1h: str = None,
+        entry_support_1h: str = None,
+        is_high_growth_opp: bool = False,
     ) -> dict:
         """
         Construye el contexto de evaluación para un ticker.
@@ -142,9 +155,22 @@ class StocksRuleEngine:
             "ema_9_1d": float(snap.get("ema_9_1d", 0.0)),
             "ema_20_1d": float(snap.get("ema_20_1d", 0.0)),
             "ema_50_1d": float(snap.get("ema_50_1d", 0.0)),
+            "ema_200_1d": ema_200_1d or float(snap.get("ema_200_1d", 0.0)),
             "ema_3_4h": float(snap.get("ema_3_4h", 0.0)),
             "ema_9_4h": float(snap.get("ema_9_4h", 0.0)),
             "ema_20_4h": float(snap.get("ema_20_4h", 0.0)),
+            "adr_14_pct": adr_14_pct or float(snap.get("adr_14_pct", 0.0)),
+            "adr_consumed_pct": adr_consumed_pct or float(snap.get("adr_consumed_pct", 0.0)),
+            "bandwidth_15m": bandwidth_15m or float(snap.get("bandwidth_15m", 2.5)),
+            "is_dead_compression": is_dead_compression or bool(snap.get("is_dead_compression", False)),
+            "candle_vol_15m": candle_vol_15m or float(snap.get("candle_vol_15m", 0.0)),
+            "breakout_prob": breakout_prob or int(snap.get("breakout_prob", 50)),
+            "macro_1d_aligned": macro_1d_aligned or bool(snap.get("macro_1d_aligned", False)),
+            "buying_force_score": buying_force_score or int(snap.get("buying_force_score", 0)),
+            "rvol_1h": rvol_1h or float(snap.get("rvol_1h", 1.0)),
+            "entry_route_1h": entry_route_1h or snap.get("entry_route_1h"),
+            "entry_support_1h": entry_support_1h or snap.get("entry_support_1h"),
+            "is_high_growth_opp": is_high_growth_opp or bool(snap.get("is_high_growth_opp", False)),
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -520,6 +546,54 @@ class StocksRuleEngine:
             if len(failures) == 0:
                 smart_limit_price = current_price # Comprar ya si está barato
 
+        # ── CHECK 6.5: GUARDIA TRANSVERSAL DE VOLATILIDAD ADR Y RUPTURA (REGLAS HOT) ──
+        is_hot_rule = (
+            "hot" in str(rule.get("group_name", "")).lower() or
+            "scalp" in str(rule.get("group_name", "")).lower() or
+            "hot" in rule_code.lower() or
+            "bb_pullback" in rule_code.lower() or
+            "dip_buy" in rule_code.lower()
+        )
+        if direction == "buy" and is_hot_rule:
+            adr_pct = float(context.get("adr_14_pct") or 0.0)
+            consumed_pct = float(context.get("adr_consumed_pct") or 0.0)
+            rvol_val = float(context.get("rvol") or 1.0)
+            bw_15m = float(context.get("bandwidth_15m") or 2.5)
+            is_dead_comp = bool(context.get("is_dead_compression", False))
+            bb_exp = bool(context.get("bb_expanding", False) or context.get("bb_expanding_5m", False))
+            candle_vol = float(context.get("candle_vol_15m") or 0.0)
+            mov_type = str(context.get("movement_type", "")).lower()
+
+            # 1. Prohibir movimiento estrictamente lateral en compras HOT
+            if mov_type in ("lateral", "lateral_at_top"):
+                failures.append(
+                    f"Filtro Anti-Lateralidad: Activo en movimiento '{mov_type}' sin inercia direccional."
+                )
+
+            # 2. Piso de Volatilidad Diaria: ADR 14D >= 3.50%
+            if adr_pct > 0 and adr_pct < 3.50:
+                failures.append(
+                    f"ADR 14D insuficiente ({adr_pct:.2f}% < 3.50%): Activo aletargado sin volatilidad intradía rentable (tipo SBS/NU)."
+                )
+
+            # 3. Consumo del Rango Diario (Espacio Remanente)
+            if consumed_pct >= 80.0 and rvol_val < 2.0:
+                failures.append(
+                    f"Rango diario agotado ({consumed_pct:.1f}% >= 80.0%): Sin espacio estadístico para correr sin RVOL institucional (RVOL {rvol_val:.1f}x < 2.0x)."
+                )
+
+            # 4. Anti-Compresión Muerta (Bandwidth 15m)
+            if (bw_15m < 2.0 or is_dead_comp) and not bb_exp and rvol_val < 1.8:
+                failures.append(
+                    f"Compresión muerta en 15m (Bandwidth {bw_15m:.2f}% < 2.00% y bandas planas): Activo horizontal estancado."
+                )
+
+            # 5. Anti-Vela Fantasma (Mínimo 5,000 acciones por vela de 15m)
+            if candle_vol > 0 and candle_vol < 5000:
+                failures.append(
+                    f"Volumen de vela anémico ({int(candle_vol)} < 5,000 acciones en 15m): Falta de liquidez institucional."
+                )
+
         # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5.3) ──
         # Normalizar rule_code para capturar variaciones con sufijos (_BUY, _SELL)
         normalized_code = rule_code.replace("_BUY", "").replace("_SELL", "")
@@ -840,6 +914,43 @@ class StocksRuleEngine:
             pnl_pct = context.get("unrealized_pnl_pct")
             if pnl_pct is not None and float(pnl_pct) <= 0:
                 failures.append(f"PRO_CANDLE_SELL Bloqueado: Posición en pérdida ({float(pnl_pct):.2f}% <= 0)")
+
+        # ── CHECK 14: LONG_PULLBACK_1H (Swing Pullback en 1 HORA) ──
+        if "pullback_1h" in normalized_code.lower() or normalized_code in ("LONG_PULLBACK_1H", "HOT_PULLBACK_1H", "PRO_PULLBACK_1H"):
+            # 1. Macro 1D estricta: EMA20 > EMA50 > EMA200
+            if not context.get("macro_1d_aligned", False):
+                failures.append("Macro 1D Desalineada: Se exige EMA20 > EMA50 > EMA200 en diario.")
+
+            # 2. Buying Force Score >= 70 (o ADR >= 3.5%)
+            bf_score = int(context.get("buying_force_score", 0))
+            adr_pct = float(context.get("adr_14_pct", 0.0))
+            if bf_score > 0 and bf_score < 70:
+                failures.append(f"Buying Force Insuficiente: {bf_score}/100 < 70 (Activo no dinámico).")
+            elif adr_pct > 0 and adr_pct < 3.5:
+                failures.append(f"ADR 14D insuficiente: {adr_pct:.2f}% < 3.50%.")
+
+            # 3. Gatillo de Entrada en 1H (EMA3, EMA9 o EMA20)
+            entry_route = str(context.get("entry_route_1h") or "").upper()
+            entry_sup = str(context.get("entry_support_1h") or "").upper()
+            if entry_route != "PULLBACK" or entry_sup not in ("EMA3", "EMA9", "EMA20"):
+                failures.append(f"Sin Pullback activo en 1H: Route={entry_route}, Support={entry_sup} (Se requiere EMA3, EMA9 o EMA20 en 1H).")
+
+        # ── CHECK 15: LONG_CLIMAX_1H (Rebote Clímax LOWER_5/6 en 1 HORA) ──
+        if "climax_1h" in normalized_code.lower() or normalized_code in ("LONG_CLIMAX_1H", "HOT_CLIMAX_1H", "PRO_CLIMAX_1H"):
+            # 1. Macro 1D estricta
+            if not context.get("macro_1d_aligned", False):
+                failures.append("Macro 1D Desalineada: Se exige EMA20 > EMA50 > EMA200 en diario para compras clímax.")
+
+            # 2. Buying Force Score >= 70
+            bf_score = int(context.get("buying_force_score", 0))
+            if bf_score > 0 and bf_score < 70:
+                failures.append(f"Buying Force Insuficiente: {bf_score}/100 < 70.")
+
+            # 3. Gatillo Clímax LOWER_5 / LOWER_6 en 1H
+            entry_route = str(context.get("entry_route_1h") or "").upper()
+            entry_sup = str(context.get("entry_support_1h") or "").upper()
+            if entry_route != "CLIMAX" or entry_sup not in ("LOWER_5", "LOWER_6"):
+                failures.append(f"Sin Clímax activo en 1H: Route={entry_route}, Support={entry_sup} (Se requiere LOWER_5 o LOWER_6 en 1H).")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

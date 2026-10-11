@@ -95,43 +95,51 @@ def calculate_composite_rank(
     cfg:        dict,
     trade_score: float = None,
     etv:         float = None,
+    buying_force_score: float = None,
+    is_high_priority_growth: bool = False,
 ) -> float:
     """
     Calcula el Composite Rank — métrica única
     para ordenar la cola de Alta Prioridad.
     Si Trade Score y ETV están disponibles (APEX v2.0), usa:
        Rank = Trade_Score × 0.70 + ETV_normalized × 0.30
+    Si califica con alto crecimiento / Buying Force, recibe boost de alta prioridad.
     """
     if trade_score is not None and etv is not None:
         # Normalizar ETV a 0-100 (ETV típico: -5% a +15%)
         etv_norm = min(100, max(0, (etv + 5) / 20 * 100))
         rank = trade_score * 0.70 + etv_norm * 0.30
-        return round(min(100, max(0, rank)), 2)
+    else:
+        w_4h   = 0.30  # Ajustado de 0.40 para dar espacio a RVOL
+        w_1d   = 0.25  # Ajustado de 0.30
+        w_gain = 0.15  # Ajustado de 0.20
+        w_conf = 0.05  # Ajustado de 0.10
+        w_rvol = 0.25  # Nuevo peso RVOL (25%)
 
-    w_4h   = 0.30  # Ajustado de 0.40 para dar espacio a RVOL
-    w_1d   = 0.25  # Ajustado de 0.30
-    w_gain = 0.15  # Ajustado de 0.20
-    w_conf = 0.05  # Ajustado de 0.10
-    w_rvol = 0.25  # Nuevo peso RVOL (25%)
+        gain_norm = min(100, max(0, return_pct * 10))
+        rvol_norm = min(100, max(0, rvol * 20)) # 5x = 100 pts
 
-    gain_norm = min(100, max(0, return_pct * 10))
-    rvol_norm = min(100, max(0, rvol * 20)) # 5x = 100 pts
+        conf_score = {
+            'high':   90,
+            'medium': 60,
+            'low':    30,
+        }.get(confidence, 50)
 
-    conf_score = {
-        'high':   90,
-        'medium': 60,
-        'low':    30,
-    }.get(confidence, 50)
+        rank = (
+            apex_4h    * w_4h  +
+            apex_1d    * w_1d  +
+            gain_norm  * w_gain +
+            conf_score * w_conf +
+            rvol_norm  * w_rvol
+        )
 
-    rank = (
-        apex_4h    * w_4h  +
-        apex_1d    * w_1d  +
-        gain_norm  * w_gain +
-        conf_score * w_conf +
-        rvol_norm  * w_rvol
-    )
+    # ── BOOST DE ALTA PRIORIDAD PARA ALTO CRECIMIENTO & BUYING FORCE ──
+    if is_high_priority_growth or (buying_force_score is not None and buying_force_score >= 85):
+        rank = max(rank, 92.0) + 6.0
+    elif (buying_force_score is not None and buying_force_score >= 70):
+        rank = max(rank, 85.0) + 5.0
 
-    return round(min(100, max(0, rank)), 2)
+    return round(min(99.0, max(0.0, rank)), 2)
 
 
 
@@ -662,6 +670,10 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                     pass
 
             # Criterios de entrada a la cola de alta prioridad
+            bf_score = float(snap.get('buying_force_score') or 0)
+            is_high_growth = bool(snap.get('is_high_growth_opp', False)) or (bf_score >= 70 and not overbought['blocked'])
+            enters_by_growth = is_high_growth and bool(snap.get('entry_route_1h'))
+
             enters_by_apex = (apex_4h >= min_score) and macro_bonus_trigger_ok
             enters_by_rule = rule_signal['has_signal']
 
@@ -673,17 +685,27 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 
             if enters_by_breakout:
                 log_info(MODULE, f'🎯 {ticker}: {breakout_5m["reason"]}')
+            elif enters_by_growth:
+                log_info(MODULE, f'🔥 {ticker}: High Growth Swing 1H ({snap.get("entry_route_1h")} en {snap.get("entry_support_1h")}) | BF Score={bf_score}')
 
             # Definir estado inicial
-            # Si tiene señal de regla o score alto -> pending (lista para comprar)
+            # Si tiene señal de regla, alto crecimiento o score alto -> pending (lista para comprar)
             # Si no -> watching (solo monitoreo)
-            status = 'pending' if (enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
+            status = 'pending' if (enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
 
-            # Verificar sobrecompra
-            overbought = is_overbought(snap, cfg)
+            # Recalcular rank con boost si es alto crecimiento
+            if enters_by_growth:
+                rank = calculate_composite_rank(
+                    apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
+                    trade_score=trade_s, etv=etv_val,
+                    buying_force_score=bf_score,
+                    is_high_priority_growth=True
+                )
 
             entry_reason = 'apex_auto'
-            if enters_by_breakout:
+            if enters_by_growth:
+                entry_reason = f'high_growth_1h_{snap.get("entry_route_1h", "pullback")}_{snap.get("entry_support_1h", "")}'
+            elif enters_by_breakout:
                 entry_reason = 'breakout_5m_Aa30_STK'
             elif enters_by_rule:
                 entry_reason = f'rule_{rule_signal.get("rule_code", "")}'
@@ -700,8 +722,10 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 'overbought_reason': overbought.get('reason', ''),
                 'rsi':               overbought['rsi'],
                 'fib_zone':          overbought['fib_zone'],
-                'has_rule_signal':   enters_by_rule or enters_by_breakout,
+                'has_rule_signal':   enters_by_rule or enters_by_breakout or enters_by_growth,
                 'is_breakout_5m':    enters_by_breakout,
+                'is_high_growth_opp': enters_by_growth,
+                'buying_force_score': bf_score,
                 'rule_signal':       rule_signal,
                 'entry_reason':      entry_reason,
                 'price':             float(snap.get('price', 0)),
@@ -719,13 +743,14 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             log_warning(MODULE, f'{ticker}: {e}')
             continue
 
-    # Ordenar la cola (Breakout 5m tiene máxima prioridad)
+    # Ordenar la cola (Alto Crecimiento 1H y Breakout tienen máxima prioridad)
     def sort_key(c):
+        is_growth      = c.get('is_high_growth_opp', False)
         is_breakout    = c.get('is_breakout_5m', False)
         has_rule       = c['has_rule_signal']
         not_overbought = not c['is_overbought']
         rank           = c['composite_rank']
-        return (is_breakout, has_rule and not_overbought, not_overbought, rank)
+        return (is_growth and not_overbought, is_breakout, has_rule and not_overbought, not_overbought, rank)
 
     queue_candidates.sort(key=sort_key, reverse=True)
 
