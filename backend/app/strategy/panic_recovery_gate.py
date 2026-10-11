@@ -270,7 +270,7 @@ def evaluate_panic_and_erep_status(
         elif not is_long and current_price >= (bb_upper_1h - buf_1h):
             in_extreme_zone = True
 
-    # ── ESCUDO MACRO 1D (Tendencia Diaria Dominante) ──
+    # ── ESCUDO MACRO (Tendencia Diaria 1D o Estructural 4H) ──
     macro_1d_aligned = False
     macro_1d_detail = ""
     if df_1d is not None and len(df_1d) >= 2:
@@ -297,6 +297,55 @@ def evaluate_panic_and_erep_status(
         elif not is_long and ('bear' in trend_1d or (ema3_1d > 0 and ema3_1d <= ema9_1d)):
             macro_1d_aligned = True
             macro_1d_detail = f"1D Bajista (Snapshot={trend_1d})"
+
+    macro_4h_aligned = False
+    macro_4h_detail = ""
+    if df_4h is not None and len(df_4h) >= 2:
+        c4h = df_4h['close'] if 'close' in df_4h.columns else df_4h.get('c', pd.Series())
+        if len(c4h) >= 2:
+            ema3_4h_curr = float(c4h.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema3_4h_prev = float(c4h.ewm(span=3, adjust=False).mean().iloc[-2])
+            ema9_4h_curr = float(c4h.ewm(span=9, adjust=False).mean().iloc[-1])
+            ema20_4h_curr = float(c4h.ewm(span=20, adjust=False).mean().iloc[-1]) if len(c4h) >= 20 else ema9_4h_curr
+            c4h_last = float(c4h.iloc[-1])
+            if is_long:
+                if (ema3_4h_curr >= ema9_4h_curr) or (ema3_4h_curr >= ema3_4h_prev) or (c4h_last >= ema20_4h_curr):
+                    macro_4h_aligned = True
+                    macro_4h_detail = f"4H Alcista (EMA3={ema3_4h_curr:.4f} vs prev={ema3_4h_prev:.4f}, EMA9={ema9_4h_curr:.4f})"
+            else:
+                if (ema3_4h_curr <= ema9_4h_curr) or (ema3_4h_curr <= ema3_4h_prev) or (c4h_last <= ema20_4h_curr):
+                    macro_4h_aligned = True
+                    macro_4h_detail = f"4H Bajista (EMA3={ema3_4h_curr:.4f} vs prev={ema3_4h_prev:.4f}, EMA9={ema9_4h_curr:.4f})"
+    elif snap:
+        trend_4h = str(snap.get('trend_4h') or snap.get('regime_4h') or snap.get('mtf_4h_trend') or '').lower()
+        sar_4h_val = int(snap.get('sar_trend_4h', 0))
+        ema3_4h = float(snap.get('ema3_4h') or snap.get('ema_3_4h') or 0.0)
+        ema9_4h = float(snap.get('ema9_4h') or snap.get('ema_9_4h') or 0.0)
+        if is_long and ('bull' in trend_4h or 'long' in trend_4h or sar_4h_val >= 0 or (ema3_4h > 0 and ema3_4h >= ema9_4h)):
+            macro_4h_aligned = True
+            macro_4h_detail = f"4H Alcista (Snapshot={trend_4h or f'SAR={sar_4h_val}'})"
+        elif not is_long and ('bear' in trend_4h or 'short' in trend_4h or sar_4h_val <= 0 or (ema3_4h > 0 and ema3_4h <= ema9_4h)):
+            macro_4h_aligned = True
+            macro_4h_detail = f"4H Bajista (Snapshot={trend_4h or f'SAR={sar_4h_val}'})"
+
+    # Confluencia: 1D "o" 4H respaldan la posición
+    macro_shield_active = macro_1d_aligned or macro_4h_aligned
+    macro_details = []
+    if macro_1d_aligned:
+        macro_details.append(macro_1d_detail)
+    if macro_4h_aligned:
+        macro_details.append(macro_4h_detail)
+    macro_trend_detail = " | ".join(macro_details) if macro_details else "Sin respaldo macro"
+
+    if macro_1d_aligned and not macro_4h_aligned:
+        macro_shield_rule_code = 'MACRO_1D_SHIELD_ACTIVE'
+    elif macro_4h_aligned and not macro_1d_aligned:
+        macro_shield_rule_code = 'MACRO_4H_SHIELD_ACTIVE'
+    else:
+        macro_shield_rule_code = 'MACRO_CONFLUENCE_SHIELD_ACTIVE' if macro_shield_active else 'NO_SHIELD'
+
+    # Compatibilidad interna
+    macro_1d_aligned = macro_shield_active
 
     # ── CASO A: SI LA POSICIÓN ESTÁ EN GANANCIA (PnL > 0) ──
     if pnl_usd >= 0:
@@ -439,8 +488,8 @@ def evaluate_panic_and_erep_status(
                         'in_extreme_zone': in_extreme_zone,
                         'immunity_active': True,
                         'route_to_erep_1h': True,
-                        'rule_code': 'MACRO_1D_SHIELD_ACTIVE',
-                        'reason': f"Escape MTF suspendido por Escudo Macro 1D: {macro_1d_detail}. Se mantiene SHORT para absorción/rescate EREP en resistencias 1H."
+                        'rule_code': macro_shield_rule_code,
+                        'reason': f"Escape MTF suspendido por Escudo Macro 1D/4H: {macro_trend_detail}. Se mantiene SHORT para absorción/rescate EREP en resistencias 1H."
                     }
                 return {
                     'should_exit': True,
@@ -448,7 +497,7 @@ def evaluate_panic_and_erep_status(
                     'in_extreme_zone': False,
                     'immunity_active': False,
                     'rule_code': 'EMA_MTF_REVERSAL_CUT',
-                    'reason': f"Escape por Momentum MTF en contra: EMA3 > EMA9 tanto en 15m como en 1h para posición SHORT."
+                    'reason': f"Escape por Momentum MTF en contra: EMA3 > EMA9 tanto en 15m como en 1h para posición SHORT sin respaldo Macro 1D o 4H."
                 }
             elif is_long and (ema3_15m < ema9_15m) and (ema3_1h < ema9_1h):
                 if macro_1d_aligned:
@@ -458,8 +507,8 @@ def evaluate_panic_and_erep_status(
                         'in_extreme_zone': in_extreme_zone,
                         'immunity_active': True,
                         'route_to_erep_1h': True,
-                        'rule_code': 'MACRO_1D_SHIELD_ACTIVE',
-                        'reason': f"Escape MTF suspendido por Escudo Macro 1D: {macro_1d_detail}. Se mantiene LONG para absorción/rescate EREP en soportes 1H."
+                        'rule_code': macro_shield_rule_code,
+                        'reason': f"Escape MTF suspendido por Escudo Macro 1D/4H: {macro_trend_detail}. Se mantiene LONG para absorción/rescate EREP en soportes 1H."
                     }
                 return {
                     'should_exit': True,
@@ -467,7 +516,7 @@ def evaluate_panic_and_erep_status(
                     'in_extreme_zone': False,
                     'immunity_active': False,
                     'rule_code': 'EMA_MTF_REVERSAL_CUT',
-                    'reason': f"Escape por Momentum MTF en contra: EMA3 < EMA9 tanto en 15m como en 1h para posición LONG."
+                    'reason': f"Escape por Momentum MTF en contra: EMA3 < EMA9 tanto en 15m como en 1h para posición LONG sin respaldo Macro 1D o 4H."
                 }
 
         # Si aún no toca corte, permanece en pánico buscando micro-breakeven

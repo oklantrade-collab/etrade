@@ -201,7 +201,7 @@ def evaluate_erep_entry_trigger(
 
         ema_tolerance = 0.0020 if is_crypto else 0.0006
 
-        # ── VERIFICAR TENDENCIA MACRO 1D ──
+        # ── VERIFICAR TENDENCIA MACRO (1D o 4H) ──
         macro_1d_aligned = False
         if df_1d is not None and len(df_1d) >= 2:
             c1d = df_1d['close'] if 'close' in df_1d.columns else df_1d.get('c', pd.Series())
@@ -219,6 +219,27 @@ def evaluate_erep_entry_trigger(
                 macro_1d_aligned = True
             elif side in ('short', 'sell') and 'bear' in trend_1d:
                 macro_1d_aligned = True
+
+        macro_4h_aligned = False
+        if df_4h is not None and len(df_4h) >= 2:
+            c4h = df_4h['close'] if 'close' in df_4h.columns else df_4h.get('c', pd.Series())
+            if len(c4h) >= 2:
+                e3_4h = float(c4h.ewm(span=3, adjust=False).mean().iloc[-1])
+                e3_4h_prev = float(c4h.ewm(span=3, adjust=False).mean().iloc[-2])
+                e9_4h = float(c4h.ewm(span=9, adjust=False).mean().iloc[-1])
+                if side in ('long', 'buy') and (e3_4h >= e9_4h or e3_4h >= e3_4h_prev):
+                    macro_4h_aligned = True
+                elif side in ('short', 'sell') and (e3_4h <= e9_4h or e3_4h <= e3_4h_prev):
+                    macro_4h_aligned = True
+        elif snap:
+            trend_4h = str(snap.get('trend_4h') or snap.get('regime_4h') or snap.get('mtf_4h_trend') or '').lower()
+            sar_4h_val = int(snap.get('sar_trend_4h', 0))
+            if side in ('long', 'buy') and ('bull' in trend_4h or 'long' in trend_4h or sar_4h_val >= 0):
+                macro_4h_aligned = True
+            elif side in ('short', 'sell') and ('bear' in trend_4h or 'short' in trend_4h or sar_4h_val <= 0):
+                macro_4h_aligned = True
+
+        macro_trend_aligned = macro_1d_aligned or macro_4h_aligned
 
         # ── 3. CASCADA DE GRADOS FIBONACCI (LOWER_3 a LOWER_6 / UPPER_3 a UPPER_6) ──
         snap_levels = {
@@ -254,7 +275,7 @@ def evaluate_erep_entry_trigger(
                 or tested_ema_resistance
                 or tested_1h_bollinger
             )
-            radar_pullback = (ema3_curr <= ema3_prev) or (sipv['upper_wick_ratio'] >= 0.20) or tested_1h_bollinger or macro_1d_aligned
+            radar_pullback = (ema3_curr <= ema3_prev) or (sipv['upper_wick_ratio'] >= 0.20) or tested_1h_bollinger or macro_trend_aligned
             
             if at_upper_extreme and (sipv['is_bullish_climax'] or radar_pullback):
                 q2_size = round(p1_size * 1.5, 4) if is_crypto else calculate_erep_p2_sizing(p1_size, dist_pips, halcon_score=0.0)
@@ -301,7 +322,7 @@ def evaluate_erep_entry_trigger(
                 or tested_ema_support
                 or tested_1h_bollinger
             )
-            radar_pullback = (ema3_curr >= ema3_prev) or (sipv['lower_wick_ratio'] >= 0.20) or tested_1h_bollinger or macro_1d_aligned
+            radar_pullback = (ema3_curr >= ema3_prev) or (sipv['lower_wick_ratio'] >= 0.20) or tested_1h_bollinger or macro_trend_aligned
 
             if at_lower_extreme and (sipv['is_bearish_climax'] or radar_pullback):
                 q2_size = round(p1_size * 1.5, 4) if is_crypto else calculate_erep_p2_sizing(p1_size, dist_pips, halcon_score=0.0)

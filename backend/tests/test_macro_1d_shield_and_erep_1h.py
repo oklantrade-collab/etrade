@@ -221,3 +221,83 @@ def test_erep_p2_triggered_at_1h_bollinger_upper_short():
     assert trigger['side'] == 'short'
     assert 'UPPER_BB_1H' in trigger['target_band']
     assert trigger['p3_avg'] > pos['entry_price'] # Promedio P3 mejorado para SHORT
+
+
+def test_panic_gate_long_shielded_by_macro_4h_alone():
+    """
+    LONG con retroceso intradía:
+    15m y 1h tienen EMA3 < EMA9.
+    1D no está disponible o neutral, pero 4H tiene EMA3 ascendente / sobre EMA20.
+    El escape debe SUSPENDERSE por Escudo Macro 4H.
+    """
+    pos = {
+        'symbol': 'SOLUSDT',
+        'side': 'long',
+        'entry_price': 150.0,
+        'unrealized_pnl': -1.2,
+        'total_investment': 100.0,
+        'size': 1.0,
+    }
+    current_price = 148.0
+
+    # 15m cayendo (EMA3 < EMA9)
+    df_15m = create_df([152.0 - i * 0.2 for i in range(25)])
+    # 1h cayendo (EMA3 < EMA9)
+    df_1h = create_df([153.0 - i * 0.3 for i in range(25)])
+    # 4H fuerte y ascendente (Macro alcista en 4H)
+    df_4h = create_df([135.0, 140.0, 145.0, 148.0, 150.0])
+
+    res = evaluate_panic_and_erep_status(
+        position=pos,
+        current_price=current_price,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        df_4h=df_4h
+    )
+
+    assert res['should_exit'] is False
+    assert res['action'] == 'WAIT_MACRO_RECOVERY'
+    assert res['immunity_active'] is True
+    assert res['route_to_erep_1h'] is True
+    assert res['rule_code'] == 'MACRO_4H_SHIELD_ACTIVE'
+    assert '4H' in res['reason']
+
+
+def test_panic_gate_short_shielded_by_macro_4h_alone():
+    """
+    SHORT con rebote intradía en contra:
+    15m y 1h tienen EMA3 > EMA9.
+    1D no está disponible, pero 4H tiene EMA3 descendente.
+    El escape debe SUSPENDERSE por Escudo Macro 4H.
+    """
+    pos = {
+        'symbol': 'USDJPY',
+        'side': 'short',
+        'entry_price': 155.00,
+        'unrealized_pnl': -10.0,
+        'total_investment': 1000.0,
+        'size': 0.1,
+    }
+    current_price = 155.30
+
+    # 15m subiendo en contra (EMA3 > EMA9)
+    df_15m = create_df([154.50 + i * 0.05 for i in range(25)])
+    # 1h subiendo en contra (EMA3 > EMA9)
+    df_1h = create_df([154.30 + i * 0.06 for i in range(25)])
+    # 4H cayendo (Macro bajista en 4H)
+    df_4h = create_df([158.00, 157.00, 156.00, 155.50, 155.00])
+
+    res = evaluate_panic_and_erep_status(
+        position=pos,
+        current_price=current_price,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        df_4h=df_4h
+    )
+
+    assert res['should_exit'] is False
+    assert res['action'] == 'WAIT_MACRO_RECOVERY'
+    assert res['immunity_active'] is True
+    assert res['route_to_erep_1h'] is True
+    assert res['rule_code'] == 'MACRO_4H_SHIELD_ACTIVE'
+    assert '4H' in res['reason']

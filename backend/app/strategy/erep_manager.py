@@ -165,11 +165,12 @@ def detect_p2_entry_signal(
     entry_price: float = 0.0,
     df_1h:     pd.DataFrame = None,
     df_1d:     pd.DataFrame = None,
+    df_4h:     pd.DataFrame = None,
 ) -> dict:
     """
     Detecta la señal para comprar P2.
     Supports LONG, SHORT, Crypto, Forex, and Stocks.
-    Incluye detección de soporte/resistencia en Bollinger 1H y alineación Macro 1D.
+    Incluye detección de soporte/resistencia en Bollinger 1H y alineación Macro 1D / 4H.
     """
     cfg   = EREP_CONFIG.get(market_type, {})
     snap  = snap or {}
@@ -232,6 +233,30 @@ def detect_p2_entry_signal(
                     })
         except Exception as e:
             log_error('EREP_MACRO_1D', f"Error calculando Macro 1D: {e}")
+
+    # ── SEÑAL MACRO 4H: Alineación con Tendencia Estructural 4H ──────────
+    if df_4h is not None and len(df_4h) >= 2:
+        try:
+            col_close_4h = 'close' if 'close' in df_4h.columns else ('c' if 'c' in df_4h.columns else '')
+            if col_close_4h:
+                c4h = pd.to_numeric(df_4h[col_close_4h], errors='coerce').ffill()
+                e3_4h = float(c4h.ewm(span=3, adjust=False).mean().iloc[-1])
+                e3_4h_prev = float(c4h.ewm(span=3, adjust=False).mean().iloc[-2])
+                e9_4h = float(c4h.ewm(span=9, adjust=False).mean().iloc[-1])
+                if is_long and (e3_4h >= e9_4h or e3_4h >= e3_4h_prev):
+                    signals_found.append({
+                        'type':     'macro_4h_aligned',
+                        'strength': 0.90,
+                        'reason':   f'Tendencia Macro 4H Alcista (EMA3={e3_4h:.4f} ascendente)',
+                    })
+                elif not is_long and (e3_4h <= e9_4h or e3_4h <= e3_4h_prev):
+                    signals_found.append({
+                        'type':     'macro_4h_aligned',
+                        'strength': 0.90,
+                        'reason':   f'Tendencia Macro 4H Bajista (EMA3={e3_4h:.4f} descendente)',
+                    })
+        except Exception as e:
+            log_error('EREP_MACRO_4H', f"Error calculando Macro 4H: {e}")
 
     # ── SEÑAL A: SIPV (vela del 15m) & Bollinger / Fibonacci extremas ──────────
     if df_15m is not None and len(df_15m) >= 2:
@@ -707,8 +732,8 @@ def check_erep_activation_conditions(
         sar_ok = True
         mtf_ok = True
     else:
-        # Si Macro 1D está alineado con la posición, anula bloqueos de SAR 4H / MTF
-        macro_1d_aligned = False
+        # Si Macro 1D o 4H está alineado con la posición, anula bloqueos de SAR 4H / MTF
+        macro_aligned = False
         if df_1d is not None and len(df_1d) >= 2:
             col_c1d = 'close' if 'close' in df_1d.columns else ('c' if 'c' in df_1d.columns else '')
             if col_c1d:
@@ -717,11 +742,23 @@ def check_erep_activation_conditions(
                 e3_prev = float(c1d.ewm(span=3, adjust=False).mean().iloc[-2])
                 e9_1d = float(c1d.ewm(span=9, adjust=False).mean().iloc[-1])
                 if is_long and (e3_1d >= e9_1d or e3_1d >= e3_prev):
-                    macro_1d_aligned = True
+                    macro_aligned = True
                 elif not is_long and (e3_1d <= e9_1d or e3_1d <= e3_prev):
-                    macro_1d_aligned = True
+                    macro_aligned = True
 
-        if macro_1d_aligned:
+        if not macro_aligned and df_4h is not None and len(df_4h) >= 2:
+            col_c4h = 'close' if 'close' in df_4h.columns else ('c' if 'c' in df_4h.columns else '')
+            if col_c4h:
+                c4h = pd.to_numeric(df_4h[col_c4h], errors='coerce').ffill()
+                e3_4h = float(c4h.ewm(span=3, adjust=False).mean().iloc[-1])
+                e3_4h_prev = float(c4h.ewm(span=3, adjust=False).mean().iloc[-2])
+                e9_4h = float(c4h.ewm(span=9, adjust=False).mean().iloc[-1])
+                if is_long and (e3_4h >= e9_4h or e3_4h >= e3_4h_prev):
+                    macro_aligned = True
+                elif not is_long and (e3_4h <= e9_4h or e3_4h <= e3_4h_prev):
+                    macro_aligned = True
+
+        if macro_aligned:
             sar_ok = True
             mtf_ok = True
         else:
@@ -965,7 +1002,7 @@ def evaluate_erep_phase(
 
         signal = detect_p2_entry_signal(
             df_15m, snap, side, '', market_type, df_5m, entry_price=p1,
-            df_1h=df_1h, df_1d=df_1d
+            df_1h=df_1h, df_1d=df_1d, df_4h=df_4h
         )
 
         if signal['has_signal']:
