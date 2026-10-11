@@ -1492,6 +1492,9 @@ class StandaloneForexWorker:
             else:
                 lots = 0.05
                 
+            if signal.get('size_factor'):
+                lots = max(0.01, round(lots * float(signal['size_factor']), 2))
+                
             price_data = STATE['prices'].get(symbol, {})
             current_price = price_data.get('mid', 0)
             if current_price <= 0:
@@ -1586,10 +1589,12 @@ class StandaloneForexWorker:
             res = self.safe_db_execute(sb.table('forex_positions').select('*').eq('symbol', symbol).eq('status', 'open'))
             positions = res.data or []
 
-            # 2. Obtener dataframes (15m, 5m y 4h)
+            # 2. Obtener dataframes (15m, 5m, 1h, 4h y 1d)
             df_15m = self._get_candles_df(symbol, '15m')
             df_5m  = self._get_candles_df(symbol, '5m')
+            df_1h  = self._get_candles_df(symbol, '1h')
             df_4h  = self._get_candles_df(symbol, '4h')
+            df_1d  = self._get_candles_df(symbol, '1d')
 
             # ─── TTL 90M: Cancelación automática de órdenes limit huérfanas ───
             try:
@@ -1660,15 +1665,25 @@ class StandaloneForexWorker:
                 cluster_res = evaluate_cluster_exit(symbol, positions, df_5m, df_15m, current_price)
                 if cluster_res and cluster_res.get('action') == 'cluster_take_profit':
                     cl_side = cluster_res.get('side', '').lower()
-                    target_cl_pos = [p for p in positions if p.get('side', '').lower() in (cl_side, 'buy' if cl_side == 'long' else 'sell')]
-                    self.log(f"🎯 [QSHR CLUSTER TAKE PROFIT] {symbol} {cl_side.upper()}: {cluster_res['reason']} ({len(target_cl_pos)} posiciones)")
-                    for p in target_cl_pos:
-                        c_id = p.get('ctrader_pos_id')
-                        if c_id:
-                            self.close_position(c_id, symbol=symbol)
-                        from app.core.position_monitor import _execute_paper_close
-                        reactor.callInThread(lambda pos_to_close=p: asyncio.run(_execute_paper_close(pos_to_close, current_price, 'qshr_cluster_tp_15m', sb)))
-                    return
+                    target_pos_ids = set(cluster_res.get('position_ids') or [])
+                    if target_pos_ids:
+                        target_cl_pos = [p for p in positions if p.get('id') in target_pos_ids]
+                    else:
+                        target_cl_pos = [p for p in positions if p.get('side', '').lower() in (cl_side, 'buy' if cl_side == 'long' else 'sell') and 'qshr' in str(p.get('rule_code', '')).lower()]
+
+                    if target_cl_pos:
+                        self.log(f"🎯 [QSHR CLUSTER TAKE PROFIT] {symbol} {cl_side.upper()}: {cluster_res['reason']} ({len(target_cl_pos)} posiciones QSHR)")
+                        closed_ids = set()
+                        for p in target_cl_pos:
+                            c_id = p.get('ctrader_pos_id')
+                            if c_id:
+                                self.close_position(c_id, symbol=symbol)
+                            from app.core.position_monitor import _execute_paper_close
+                            reactor.callInThread(lambda pos_to_close=p: asyncio.run(_execute_paper_close(pos_to_close, current_price, 'qshr_cluster_tp_15m', sb)))
+                            if p.get('id'):
+                                closed_ids.add(p.get('id'))
+                        # Excluir las posiciones cerradas para que el resto continúe su evaluación normal
+                        positions = [p for p in positions if p.get('id') not in closed_ids]
             except Exception as cl_err:
                 self.log(f"Error evaluando cluster exit {symbol}: {cl_err}", "DEBUG")
 
@@ -1677,36 +1692,89 @@ class StandaloneForexWorker:
                     side = pos['side'].lower()
                     is_short = side in ('short', 'sell')
                     
-                    # ─── EVALUACIÓN PROFIT TARGET: PnL >= $1.00 USD ───
+                    # ─── GESTIÓN DINÁMICA DE BENEFICIOS Y TRAILING STOP ESCALONADO (Sin techo rígido de $1) ───
                     entry_px = float(pos.get('entry_price') or 0)
                     lots_qty = abs(float(pos.get('lots') or 0.01))
-                    pip_val_usd = 10.0
                     from app.strategy.capital_protection import PIP_SIZES
-                    pip_size_val = PIP_SIZES.get(symbol, 0.0001)
+                    pip_size_val = PIP_SIZES.get(symbol, 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001)
+                    pip_val_usd = 1.0 if 'XAU' in symbol else (6.5 if 'JPY' in symbol else 10.0)
                     pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short else (current_price - entry_px) / pip_size_val
                     pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
 
-                    if pnl_usd_calc >= 1.00:
-                        self.log(f"🎯 [TAKE PROFIT $1.00 REACHED] {symbol} {side.upper()} @ {current_price:.5f} | PnL: +${pnl_usd_calc:.2f} (+{pips_pnl_calc:.1f} pips) >= $1.00 USD. Cerrando posición para asegurar ganancias.", "WARNING")
-                        c_id = pos.get('ctrader_pos_id')
-                        if c_id:
-                            self.close_position(c_id, symbol=symbol)
-                        upd_fields = {
-                            'status': 'closed',
-                            'current_price': current_price,
-                            'pnl_pips': round(pips_pnl_calc, 1),
-                            'pnl_usd': round(pnl_usd_calc, 2),
-                            'closed_at': datetime.now(timezone.utc).isoformat(),
-                            'close_reason': 'take_profit_target_1usd'
-                        }
+                    # 1. Trailing Escalonado en lugar de corte prematuro en $1.00:
+                    current_sl = float(pos.get('sl_price') or 0)
+                    new_sl_fx = None
+                    sl_action_label = None
+
+                    # Tier 3: Ganancia fuerte >= 35 pips -> Proteger 65% de la ganancia
+                    if pips_pnl_calc >= 35.0:
+                        locked_pips = pips_pnl_calc * 0.65
+                        cand_sl = entry_px - (locked_pips * pip_size_val) if is_short else entry_px + (locked_pips * pip_size_val)
+                        if is_short and (current_sl == 0 or cand_sl < current_sl):
+                            new_sl_fx = cand_sl
+                            sl_action_label = f"Tier 3 Runner Lock (+{locked_pips:.1f} pips asegurados de {pips_pnl_calc:.1f})"
+                        elif not is_short and (current_sl == 0 or cand_sl > current_sl):
+                            new_sl_fx = cand_sl
+                            sl_action_label = f"Tier 3 Runner Lock (+{locked_pips:.1f} pips asegurados de {pips_pnl_calc:.1f})"
+                    # Tier 2: Ganancia moderada >= 22 pips -> Asegurar 10 pips
+                    elif pips_pnl_calc >= 22.0:
+                        locked_pips = 10.0
+                        cand_sl = entry_px - (locked_pips * pip_size_val) if is_short else entry_px + (locked_pips * pip_size_val)
+                        if is_short and (current_sl == 0 or cand_sl < current_sl):
+                            new_sl_fx = cand_sl
+                            sl_action_label = f"Tier 2 Trailing (+10.0 pips asegurados de {pips_pnl_calc:.1f})"
+                        elif not is_short and (current_sl == 0 or cand_sl > current_sl):
+                            new_sl_fx = cand_sl
+                            sl_action_label = f"Tier 2 Trailing (+10.0 pips asegurados de {pips_pnl_calc:.1f})"
+                    # Tier 1: Break-Even Protegido >= 14 pips -> Mover SL a Entrada + 2 pips
+                    elif pips_pnl_calc >= 14.0:
+                        locked_pips = 2.0
+                        cand_sl = entry_px - (locked_pips * pip_size_val) if is_short else entry_px + (locked_pips * pip_size_val)
+                        if is_short and (current_sl == 0 or cand_sl < current_sl):
+                            new_sl_fx = cand_sl
+                            sl_action_label = f"Tier 1 Break-Even Protegido (+2.0 pips asegurados de {pips_pnl_calc:.1f})"
+                        elif not is_short and (current_sl == 0 or cand_sl > current_sl):
+                            new_sl_fx = cand_sl
+                            sl_action_label = f"Tier 1 Break-Even Protegido (+2.0 pips asegurados de {pips_pnl_calc:.1f})"
+
+                    if new_sl_fx:
+                        new_sl_fx = round(new_sl_fx, 5)
+                        self.log(f"🛡️ [FOREX TRAILING SL SYNC] {symbol} {side.upper()}: {sl_action_label} -> Nuevo SL {new_sl_fx} (Actual: {current_sl})", "INFO")
+                        pos['sl_price'] = new_sl_fx
+                        pos['protection_activated'] = True
                         try:
-                            self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
-                            from app.core.capital_manager import register_realized_pnl
-                            register_realized_pnl('forex', round(pnl_usd_calc, 2))
-                        except Exception as upd_err:
-                            self.log(f"Error actualizando DB en TP $1.00 Close: {upd_err}", "ERROR")
-                        continue
-                    
+                            self.safe_db_execute(sb.table('forex_positions').update({
+                                'sl_price': new_sl_fx,
+                                'protection_activated': True
+                            }).eq('id', pos['id']))
+                        except Exception as e_sl:
+                            self.log(f"Error actualizando SL Forex en DB: {e_sl}", "DEBUG")
+
+                    # ─── EVALUACIÓN PANIC RECOVERY GATE & EREP ZONES ───
+                    try:
+                        from app.strategy.panic_recovery_gate import evaluate_panic_and_erep_status
+                        panic_eval_fx = evaluate_panic_and_erep_status(
+                            position=pos,
+                            current_price=current_price,
+                            df_5m=df_5m,
+                            df_15m=df_15m,
+                            df_1h=df_1h,
+                            df_4h=df_4h,
+                            snap=snap,
+                            df_1d=df_1d
+                        )
+                        if panic_eval_fx.get('should_exit'):
+                            exit_act = panic_eval_fx.get('action') or 'panic_recovery_exit'
+                            self.log(f"🚨 [FOREX PANIC GATE EXIT] {symbol} {side.upper()}: {panic_eval_fx.get('reason')}", "WARNING")
+                            c_id = pos.get('ctrader_pos_id')
+                            if c_id:
+                                self.close_position(c_id, symbol=symbol)
+                            from app.core.position_monitor import _execute_paper_close
+                            reactor.callInThread(lambda p_close=pos, act=exit_act: asyncio.run(_execute_paper_close(p_close, current_price, act, sb)))
+                            continue
+                    except Exception as panic_fx_err:
+                        self.log(f"Error evaluando Panic Gate en Forex {symbol}: {panic_fx_err}", "DEBUG")
+
                     # ─── Evaluacion EREP v2.0 (Rescate por Escalamiento Asimétrico) ───
                     try:
                         from app.strategy.erep_recovery_engine import evaluate_erep_entry_trigger, evaluate_erep_exit_trigger
@@ -1726,8 +1794,19 @@ class StandaloneForexWorker:
                             return
 
                         # 2. Chequear entrada P2 de Rescate si la posición está en drawdown
-                        erep_entry = evaluate_erep_entry_trigger(pos, df_5m, df_15m, current_price, snap)
-                        if erep_entry and erep_entry.get('action') == 'execute_erep_p2':
+                        erep_entry = evaluate_erep_entry_trigger(
+                            pos, df_5m, df_15m, current_price,
+                            snap=snap, df_1h=df_1h, df_4h=df_4h, df_1d=df_1d
+                        )
+                        if erep_entry and erep_entry.get('action') == 'erep_structural_breakdown':
+                            self.log(f"🚨 [FOREX EREP CATASTROPHIC BREAKDOWN] {symbol} {side.upper()}: {erep_entry['reason']}", "WARNING")
+                            c_id = pos.get('ctrader_pos_id')
+                            if c_id:
+                                self.close_position(c_id, symbol=symbol)
+                            from app.core.position_monitor import _execute_paper_close
+                            reactor.callInThread(lambda p_close=pos: asyncio.run(_execute_paper_close(p_close, current_price, 'erep_structural_breakdown', sb)))
+                            continue
+                        elif erep_entry and erep_entry.get('action') == 'execute_erep_p2':
                             p2_side = erep_entry['side']
                             self.log(f"🚑 [EREP v2.0 P2 RESCATE TRIGGER] {symbol} {p2_side.upper()}: {erep_entry['reason']}")
                             approved = self._route_qshr_to_aduana(
@@ -1756,26 +1835,101 @@ class StandaloneForexWorker:
                     except Exception as erep_err:
                         self.log(f"Error evaluando EREP v2.0 {symbol}: {erep_err}", "DEBUG")
                     
+                    # ─── CLÍMAX & EREP TRANSITION & TP (Escalera EMA y TP en Basis 15m) ───
+                    try:
+                        from app.strategy.erep_recovery_engine import evaluate_climax_ema_transition
+                        climax_trans = evaluate_climax_ema_transition(
+                            position=pos,
+                            df_5m=df_5m,
+                            df_15m=df_15m,
+                            current_price=current_price,
+                            symbol=symbol,
+                            market_type='forex_futures'
+                        )
+                        if climax_trans:
+                            c_action = climax_trans.get('action')
+                            if c_action == 'climax_tp_partial_basis':
+                                self.log(f"🎯 [FOREX CLIMAX BASIS TP1] {symbol}: {climax_trans.get('reason')}")
+                                orig_lots = abs(float(pos.get('lots') or 0.02))
+                                partial_lots = round(orig_lots * 0.50, 2)
+                                remaining_lots = round(orig_lots - partial_lots, 2)
+                                self.safe_db_execute(sb.table('forex_positions').update({
+                                    'lots': remaining_lots if side.lower() in ('long', 'buy') else -remaining_lots,
+                                    'partial_closed': True,
+                                    'partial_close_price': current_price,
+                                    'partial_close_at': datetime.now(timezone.utc).isoformat(),
+                                    'sl_price': float(pos.get('entry_price') or current_price)
+                                }).eq('id', pos['id']))
+                                pos['partial_closed'] = True
+                                pos['lots'] = remaining_lots
+                                pos['sl_price'] = float(pos.get('entry_price') or current_price)
+                            elif c_action == 'climax_tp_full':
+                                self.log(f"🎯 [FOREX CLIMAX RUNNER TP FULL] {symbol}: {climax_trans.get('reason')}")
+                                c_id = pos.get('ctrader_pos_id')
+                                if c_id:
+                                    self.close_position(c_id, symbol=symbol, reason='climax_tp_full')
+                                from app.core.position_monitor import _execute_paper_close
+                                reactor.callInThread(lambda p_close=pos: asyncio.run(_execute_paper_close(p_close, current_price, climax_trans.get('rule_code', 'climax_tp_full'), sb)))
+                                continue
+                            elif c_action == 'adjust_sl_be':
+                                new_sl = float(climax_trans.get('new_sl', current_price))
+                                self.safe_db_execute(sb.table('forex_positions').update({
+                                    'sl_price': new_sl,
+                                    'protection_activated': True
+                                }).eq('id', pos['id']))
+                                pos['sl_price'] = new_sl
+                                pos['be_activated'] = True
+                                self.log(f"🛡️ [FOREX CLIMAX BE ACTIVADO] {symbol}: {climax_trans.get('reason')}")
+                            elif c_action == 'confirm_trend':
+                                self.safe_db_execute(sb.table('forex_positions').update({
+                                    'trend_confirmed': True,
+                                    'sl_price': float(climax_trans.get('new_sl', current_price))
+                                }).eq('id', pos['id']))
+                                pos['trend_confirmed'] = True
+                                pos['sl_price'] = float(climax_trans.get('new_sl', current_price))
+                                self.log(f"🚀 [FOREX CLIMAX ROTACIÓN MACRO CONFIRMADA] {symbol}: {climax_trans.get('reason')}")
+                    except Exception as c_trans_err:
+                        self.log(f"Error evaluando Climax Transition Forex {symbol}: {c_trans_err}", "DEBUG")
+
                     # ─── PASO PRIORITARIO: STOP LOSS VIRTUAL FIBONACCI (eTrade 100% Control) ───
                     try:
-                        from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
-                        fib_sl_res = evaluate_fib_band_virtual_sl(pos, df_15m, current_price, symbol)
-                        if fib_sl_res and fib_sl_res.get('action') == 'close_virtual_fib_sl':
-                            self.log(f"🛡️ [VIRTUAL FIB SL TRIGGERED] {symbol} {side.upper()}: {fib_sl_res.get('reason')}", "WARNING")
-                            c_id = pos.get('ctrader_pos_id')
-                            if c_id:
-                                self.close_position(c_id, symbol=symbol, reason='qshr_fib_band_virtual_sl', is_qshr=True)
-                            upd_fields = {
-                                'status': 'closed',
-                                'current_price': current_price,
-                                'closed_at': datetime.now(timezone.utc).isoformat(),
-                                'close_reason': 'qshr_fib_band_virtual_sl'
-                            }
-                            try:
-                                self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
-                            except Exception as upd_err:
-                                self.log(f"Error actualizando DB en Virtual Fib SL: {upd_err}", "ERROR")
-                            continue
+                        pos_rule = (pos.get('rule_code') or '').lower()
+                        is_non_qshr_rule = any(x in pos_rule for x in ('apex', 'aa13', 'aa21', 'bb13', 'bb21', 'swing', 'rebote', 'cascada', 'halcon', 'aduana'))
+                        is_climax_rule = any(x in pos_rule for x in ('climax', 'lower6', 'upper6', 'reversal'))
+                        is_erep_active = bool(pos.get('erep_active')) or (pos.get('erep_phase', 0) > 0)
+                        if not is_non_qshr_rule and not is_climax_rule and not is_erep_active:
+                            from app.strategy.quantum_squeeze_hedge import evaluate_fib_band_virtual_sl
+                            fib_sl_res = evaluate_fib_band_virtual_sl(pos, df_15m, current_price, symbol)
+                            if fib_sl_res and fib_sl_res.get('action') == 'close_virtual_fib_sl':
+                                self.log(f"🛡️ [VIRTUAL FIB SL TRIGGERED] {symbol} {side.upper()}: {fib_sl_res.get('reason')}", "WARNING")
+                                c_id = pos.get('ctrader_pos_id')
+                                if c_id:
+                                    self.close_position(c_id, symbol=symbol, reason='qshr_fib_band_virtual_sl', is_qshr=True)
+                                
+                                entry_px = float(pos.get('entry_price') or current_price)
+                                lots_qty = abs(float(pos.get('lots') or 0.01))
+                                from app.strategy.capital_protection import PIP_SIZES
+                                pip_size_val = PIP_SIZES.get(symbol, 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001)
+                                pip_val_usd = 1.0 if 'XAU' in symbol else (6.5 if 'JPY' in symbol else 10.0)
+                                is_short_pos = side.lower() in ('short', 'sell')
+                                pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
+                                pnl_usd_calc = pips_pnl_calc * pip_val_usd * lots_qty
+
+                                upd_fields = {
+                                    'status': 'closed',
+                                    'current_price': current_price,
+                                    'pnl_pips': round(pips_pnl_calc, 1),
+                                    'pnl_usd': round(pnl_usd_calc, 2),
+                                    'closed_at': datetime.now(timezone.utc).isoformat(),
+                                    'close_reason': 'qshr_fib_band_virtual_sl'
+                                }
+                                try:
+                                    self.safe_db_execute(sb.table('forex_positions').update(upd_fields).eq('id', pos['id']))
+                                    from app.core.capital_manager import register_realized_pnl
+                                    register_realized_pnl('forex', round(pnl_usd_calc, 2))
+                                except Exception as upd_err:
+                                    self.log(f"Error actualizando DB en Virtual Fib SL: {upd_err}", "ERROR")
+                                continue
                     except Exception as fib_sl_err:
                         self.log(f"Error evaluando SL Virtual Fibonacci {symbol}: {fib_sl_err}", "DEBUG")
                     
@@ -1839,6 +1993,26 @@ class StandaloneForexWorker:
                                 pnl_usd_calc = pips_pnl_calc * 10.0 * lots_qty
                                 pnl_label = f"+${pnl_usd_calc:.2f}, +{pips_pnl_calc:.1f} pips" if pips_pnl_calc >= 0 else f"-${abs(pnl_usd_calc):.2f}, {pips_pnl_calc:.1f} pips"
 
+                            # Proteger operaciones Clímax / EREP en ventana de maduración (primeras 3 barras 15m = 45 min)
+                            # Y blindar estrategias Swing (BbApexEma, Bb41, etc.) contra cortes y giros automáticos de QSHR
+                            pos_rule_cl = (pos.get('rule_code') or '').lower()
+                            is_climax_f = any(x in pos_rule_cl for x in ('climax', 'lower6', 'upper6', 'reversal')) or pos.get('erep_active')
+                            is_swing_f = any(x in pos_rule_cl for x in ('apex', 'bb41', 'aa13', 'aa21', 'swing', 'trend', 'ancla')) or not any(x in pos_rule_cl for x in ('qshr', 'booster', 'hedge', 'squeeze'))
+                            in_holding_window_f = False
+                            mins_elapsed_f = 0.0
+                            if is_climax_f and pos.get('opened_at'):
+                                try:
+                                    op_dt_f = datetime.fromisoformat(str(pos['opened_at']).replace('Z', '+00:00'))
+                                    mins_elapsed_f = (datetime.now(timezone.utc) - op_dt_f).total_seconds() / 60.0
+                                    if mins_elapsed_f < 45.0:
+                                        in_holding_window_f = True
+                                except: pass
+
+                            if in_holding_window_f:
+                                self.log(f"⏳ [FOREX CLIMAX HOLDING WINDOW] {symbol}: Omitiendo flip/cut en ventana de maduración ({mins_elapsed_f:.1f}/45 min). Posición protegida.")
+                            elif is_swing_f and q_action in ('close_and_flip_long', 'close_and_flip_short'):
+                                self.log(f"🛡️ [SWING IMMUNITY / QSHR FLIP SHIELD] {symbol} ({pos.get('rule_code')}): Estrategia Swing blindada contra QSHR Cut & Flip. Mantiene Stop Loss técnico.")
+                            elif q_action in ('close_and_flip_long', 'close_and_flip_short'):
                                 self.log(f"🔄 [QSHR CUT & FLIP TRIGGER] {symbol}: Cerrando {side.upper()} ({pnl_label}) y girando a {qshr_res['flip_side'].upper()} ({qshr_res.get('flip_lots', 0.02)}L)")
                                 c_id = pos.get('ctrader_pos_id')
                                 if c_id:
@@ -1859,6 +2033,12 @@ class StandaloneForexWorker:
                                 self._route_qshr_to_aduana(symbol, flip_signal, df_5m, df_15m, positions)
 
                             elif q_action in ('close_original_long', 'close_original_short', 'close_market_active_sipv', 'close_bollinger_exhaustion', 'close_cascada_fib_stagnation', 'partial_close_market_active_sipv', 'close_virtual_fib_sl'):
+                                # Blindar Swing contra cortes de emergencia de QSHR
+                                is_emergency_cut = q_action in ('close_original_long', 'close_original_short')
+                                if is_emergency_cut and is_swing_f:
+                                    self.log(f"🛡️ [SWING IMMUNITY / QSHR CUT SHIELD] {symbol} ({pos.get('rule_code')}): Estrategia Swing blindada contra QSHR Emergency Cut. Mantiene Stop Loss técnico.")
+                                    continue
+
                                 entry_px = float(pos.get('entry_price') or 0)
                                 lots_qty = abs(float(pos.get('lots') or 0))
                                 from app.strategy.capital_protection import PIP_SIZES
@@ -1867,12 +2047,28 @@ class StandaloneForexWorker:
                                 pips_pnl_calc = (entry_px - current_price) / pip_size_val if is_short_pos else (current_price - entry_px) / pip_size_val
                                 pnl_usd_calc = pips_pnl_calc * 10.0 * lots_qty
 
-                                # Salidas de EMERGENCIA / INVALIDACIÓN QSHR (close_original_long / close_original_short) cierran SIEMPRE, incluso en pérdida
-                                is_emergency_cut = q_action in ('close_original_long', 'close_original_short')
-                                min_pnl_ok = is_emergency_cut or (pips_pnl_calc >= 1.5) or (pnl_usd_calc >= 0.15 * max(0.01, lots_qty) / 0.01)
+                                # Guardia de Tendencia ADUANAS (EMA3 vs EMA9 15m) y Maduración de Ganancia para salidas proactivas
+                                c_series_15m = df_15m['close'] if (df_15m is not None and len(df_15m) >= 2) else None
+                                last_15m_row = df_15m.iloc[-1] if (df_15m is not None and len(df_15m) >= 1) else {}
+                                ema3_15m = float(last_15m_row.get('ema1') or last_15m_row.get('ema_3') or last_15m_row.get('ema3') or (c_series_15m.ewm(span=3, adjust=False).mean().iloc[-1] if c_series_15m is not None else 0))
+                                ema9_15m = float(last_15m_row.get('ema2') or last_15m_row.get('ema_9') or last_15m_row.get('ema9') or (c_series_15m.ewm(span=9, adjust=False).mean().iloc[-1] if c_series_15m is not None else 0))
+                                
+                                trend_active_15m = (is_short_pos and ema3_15m < ema9_15m) or ((not is_short_pos) and ema3_15m > ema9_15m)
+                                
+                                # Si la tendencia de 15m sigue viva y no es un corte de emergencia: Prohibir salida prematura (< 18 pips)
+                                if trend_active_15m and not is_emergency_cut and pips_pnl_calc < 18.0:
+                                    self.log(f"🛡️ [ADUANA SALIDA / 15M TREND GUARD SKIP] {symbol} {side.upper()}: Salida ({q_action}) omitida porque la tendencia 15m sigue viva (EMA3={ema3_15m:.5f}, EMA9={ema9_15m:.5f}, PnL={pips_pnl_calc:.1f} pips < 18p). Permitiendo maduración.", "INFO")
+                                    continue
+
+                                # Calificación de PnL: Exigir ganancia mínima real de al menos 12.0 pips / $1.20 USD (evita micro-cierres por centavos)
+                                if q_action == 'close_bollinger_exhaustion':
+                                    min_pnl_ok = (pips_pnl_calc >= 15.0) and (pnl_usd_calc >= 1.50 * max(0.01, lots_qty) / 0.01)
+                                else:
+                                    min_pnl_ok = is_emergency_cut or (pips_pnl_calc >= 12.0) or (pnl_usd_calc >= 1.20 * max(0.01, lots_qty) / 0.01)
 
                                 if not min_pnl_ok:
-                                    self.log(f"🛡️ [ADUANA SALIDA / QSHR SKIP] {symbol} {side.upper()}: Salida QSHR ({q_action}) ignorada por PnL insuficiente (${pnl_usd_calc:.2f}, {pips_pnl_calc:.1f} pips). Se mantiene posición activa.", "INFO")
+                                    self.log(f"🛡️ [ADUANA SALIDA / QSHR SKIP] {symbol} {side.upper()}: Salida QSHR ({q_action}) ignorada por PnL insuficiente (${pnl_usd_calc:.2f}, {pips_pnl_calc:.1f} pips < 12p). Se mantiene posición activa.", "INFO")
+                                    continue
                                 else:
                                     pnl_label = f"+${pnl_usd_calc:.2f}, +{pips_pnl_calc:.1f} pips" if pips_pnl_calc >= 0 else f"-${abs(pnl_usd_calc):.2f}, {pips_pnl_calc:.1f} pips"
                                     self.log(f"🛡️ [QSHR EXIT / {'EMERGENCY CUT' if is_emergency_cut else 'RIDE & CLOSE'}] {symbol}: {q_reason} (PnL: {pnl_label})")

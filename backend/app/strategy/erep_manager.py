@@ -35,8 +35,8 @@ EREP_CONFIG = {
         # EMA rápida (EMA3)
         'ema_period_slow':          9,
         # EMA lenta (EMA9)
-        'min_pips_recovery':        0.15,
-        # cerrar si ganancia > 0.15% (cubre fees)
+        'min_pips_recovery':        0.35,
+        # cerrar si ganancia > 0.35% (cubre fees de Binance y asegura ganancia)
 
         # ── Previous config keys ──
         'rsi_oversold_long':        25,
@@ -162,10 +162,14 @@ def detect_p2_entry_signal(
     symbol:    str,
     market_type: str = 'crypto_futures',
     df_5m:     pd.DataFrame = None,
+    entry_price: float = 0.0,
+    df_1h:     pd.DataFrame = None,
+    df_1d:     pd.DataFrame = None,
 ) -> dict:
     """
     Detecta la señal para comprar P2.
-    Supports LONG, SHORT, and Stocks.
+    Supports LONG, SHORT, Crypto, Forex, and Stocks.
+    Incluye detección de soporte/resistencia en Bollinger 1H y alineación Macro 1D.
     """
     cfg   = EREP_CONFIG.get(market_type, {})
     snap  = snap or {}
@@ -173,6 +177,61 @@ def detect_p2_entry_signal(
     signals_found = []
 
     is_long = side.lower() in ('long', 'buy')
+
+    # ── SEÑAL 1H: Soporte/Resistencia en Banda de Bollinger 1H ──────────
+    if df_1h is not None and len(df_1h) >= 20:
+        try:
+            col_close_1h = 'close' if 'close' in df_1h.columns else ('c' if 'c' in df_1h.columns else '')
+            if col_close_1h:
+                c1h = pd.to_numeric(df_1h[col_close_1h], errors='coerce').ffill()
+                m1h = c1h.rolling(20).mean().iloc[-1]
+                s1h = c1h.rolling(20).std().iloc[-1]
+                bb_lower_1h = m1h - 2.0 * s1h
+                bb_upper_1h = m1h + 2.0 * s1h
+                
+                last_1h = df_1h.iloc[-1]
+                c_now_1h = float(last_1h.get('close', last_1h.get('c', 0)))
+                l_now_1h = float(last_1h.get('low', last_1h.get('l', 0)))
+                h_now_1h = float(last_1h.get('high', last_1h.get('h', 0)))
+                
+                if is_long and (l_now_1h <= (bb_lower_1h * 1.002) or c_now_1h <= (bb_lower_1h * 1.002)):
+                    signals_found.append({
+                        'type':     'bollinger_1h_support',
+                        'strength': 0.95,
+                        'reason':   f'Toque de Soporte en Banda Inferior Bollinger 1H (${bb_lower_1h:.4f})',
+                    })
+                elif not is_long and (h_now_1h >= (bb_upper_1h * 0.998) or c_now_1h >= (bb_upper_1h * 0.998)):
+                    signals_found.append({
+                        'type':     'bollinger_1h_resistance',
+                        'strength': 0.95,
+                        'reason':   f'Toque de Resistencia en Banda Superior Bollinger 1H (${bb_upper_1h:.4f})',
+                    })
+        except Exception as e:
+            log_error('EREP_BOLLINGER_1H', f"Error calculando Bollinger 1H: {e}")
+
+    # ── SEÑAL MACRO 1D: Alineación con Tendencia Diaria ──────────
+    if df_1d is not None and len(df_1d) >= 2:
+        try:
+            col_close_1d = 'close' if 'close' in df_1d.columns else ('c' if 'c' in df_1d.columns else '')
+            if col_close_1d:
+                c1d = pd.to_numeric(df_1d[col_close_1d], errors='coerce').ffill()
+                e3_1d = float(c1d.ewm(span=3, adjust=False).mean().iloc[-1])
+                e3_prev = float(c1d.ewm(span=3, adjust=False).mean().iloc[-2])
+                e9_1d = float(c1d.ewm(span=9, adjust=False).mean().iloc[-1])
+                if is_long and (e3_1d >= e9_1d or e3_1d >= e3_prev):
+                    signals_found.append({
+                        'type':     'macro_1d_aligned',
+                        'strength': 0.90,
+                        'reason':   f'Tendencia Macro 1D Alcista (EMA3={e3_1d:.4f} ascendente)',
+                    })
+                elif not is_long and (e3_1d <= e9_1d or e3_1d <= e3_prev):
+                    signals_found.append({
+                        'type':     'macro_1d_aligned',
+                        'strength': 0.90,
+                        'reason':   f'Tendencia Macro 1D Bajista (EMA3={e3_1d:.4f} descendente)',
+                    })
+        except Exception as e:
+            log_error('EREP_MACRO_1D', f"Error calculando Macro 1D: {e}")
 
     # ── SEÑAL A: SIPV (vela del 15m) & Bollinger / Fibonacci extremas ──────────
     if df_15m is not None and len(df_15m) >= 2:
@@ -445,14 +504,31 @@ def detect_p2_entry_signal(
                         'reason':   f'Alineación EMA Reversión (50>200, 20>50, 9>20, 3<9)',
                     })
 
-    # ── SEÑAL B: Fibonacci extremo (Existente lower_6 / upper_6) ─────────────
+    # ── SEÑAL B: Cascada Fibonacci de Grado Inferior / Superior (LOWER_3 a LOWER_6 / UPPER_3 a UPPER_6) ──
     price = float(snap.get('price', 0))
+    if price <= 0 and df_15m is not None and not df_15m.empty:
+        col_c = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
+        if col_c:
+            price = float(df_15m[col_c].iloc[-1])
+
+    if entry_price > 0 and price > 0:
+        fib_ladder = get_fibonacci_erep_target(entry_price, price, side, snap)
+        if fib_ladder.get('reached'):
+            t_band = fib_ladder.get('target_band', '').upper()
+            t_px = fib_ladder.get('target_price', 0.0)
+            signals_found.append({
+                'type':     f'fib_ladder_{fib_ladder.get("target_band")}',
+                'strength': 1.0,
+                'reason':   f'Cascada EREP: precio ${price:.4f} alcanzó banda de menor grado {t_band} (${t_px:.4f})',
+            })
+
+    # Soporte / Resistencia Extrema Fibonacci (lower_6 / upper_6)
     if is_long:
         lower_6 = float(snap.get('lower_6', 0))
         if lower_6 > 0 and price <= lower_6:
             signals_found.append({
                 'type':     'fib_extreme_low',
-                'strength': 0.9,
+                'strength': 0.95,
                 'reason':   f'Precio ${price:.4f} ≤ lower_6 ${lower_6:.4f} (soporte extremo)',
             })
     else:
@@ -460,7 +536,7 @@ def detect_p2_entry_signal(
         if upper_6 > 0 and price >= upper_6:
             signals_found.append({
                 'type':     'fib_extreme_high',
-                'strength': 0.9,
+                'strength': 0.95,
                 'reason':   f'Precio ${price:.4f} ≥ upper_6 ${upper_6:.4f} (resistencia extrema)',
             })
 
@@ -478,6 +554,32 @@ def detect_p2_entry_signal(
             'strength': 1.0,
             'reason':   f'RSI={rsi:.1f} ≥ {100-rsi_oversold} (sobrecompra)',
         })
+
+    # ── SEÑAL D: Soporte / Resistencia Institucional en EMA9 / EMA20 (1h / 4h) ──
+    ema9_4h = float(snap.get('ema9_4h') or snap.get('ema_9_4h') or 0.0)
+    ema20_4h = float(snap.get('ema20_4h') or snap.get('ema_20_4h') or 0.0)
+    ema9_1h = float(snap.get('ema9_1h') or snap.get('ema_9_1h') or 0.0)
+    ema20_1h = float(snap.get('ema20_1h') or snap.get('ema_20_1h') or 0.0)
+
+    ema_tol = 0.0020 if ('crypto' in str(market_type).lower() or 'USDT' in str(symbol).upper()) else 0.0006
+    if is_long:
+        for ema_val, name in [(ema9_4h, "EMA9_4h"), (ema20_4h, "EMA20_4h"), (ema9_1h, "EMA9_1h"), (ema20_1h, "EMA20_1h")]:
+            if ema_val > 0 and price > 0 and abs(price - ema_val) / ema_val <= ema_tol:
+                signals_found.append({
+                    'type': f'ema_support_{name.lower()}',
+                    'strength': 0.95,
+                    'reason': f'Rebote soporte institucional en {name} (${ema_val:.4f}) testea precio ${price:.4f}',
+                })
+                break
+    else:
+        for ema_val, name in [(ema9_4h, "EMA9_4h"), (ema20_4h, "EMA20_4h"), (ema9_1h, "EMA9_1h"), (ema20_1h, "EMA20_1h")]:
+            if ema_val > 0 and price > 0 and abs(price - ema_val) / ema_val <= ema_tol:
+                signals_found.append({
+                    'type': f'ema_resistance_{name.lower()}',
+                    'strength': 0.95,
+                    'reason': f'Rechazo resistencia institucional en {name} (${ema_val:.4f}) testea precio ${price:.4f}',
+                })
+                break
 
     has_signal = len(signals_found) > 0
 
@@ -506,6 +608,8 @@ def check_erep_activation_conditions(
     df_4h:         pd.DataFrame = None,
     market_type:   str = 'crypto_futures',
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
+    df_1d:         pd.DataFrame = None,
 ) -> dict:
     """
     Verifica si el EREP puede activarse.
@@ -603,12 +707,30 @@ def check_erep_activation_conditions(
         sar_ok = True
         mtf_ok = True
     else:
-        if is_long:
-            sar_ok = sar_4h >= 0
-            mtf_ok = mtf >= -0.60
+        # Si Macro 1D está alineado con la posición, anula bloqueos de SAR 4H / MTF
+        macro_1d_aligned = False
+        if df_1d is not None and len(df_1d) >= 2:
+            col_c1d = 'close' if 'close' in df_1d.columns else ('c' if 'c' in df_1d.columns else '')
+            if col_c1d:
+                c1d = pd.to_numeric(df_1d[col_c1d], errors='coerce').ffill()
+                e3_1d = float(c1d.ewm(span=3, adjust=False).mean().iloc[-1])
+                e3_prev = float(c1d.ewm(span=3, adjust=False).mean().iloc[-2])
+                e9_1d = float(c1d.ewm(span=9, adjust=False).mean().iloc[-1])
+                if is_long and (e3_1d >= e9_1d or e3_1d >= e3_prev):
+                    macro_1d_aligned = True
+                elif not is_long and (e3_1d <= e9_1d or e3_1d <= e3_prev):
+                    macro_1d_aligned = True
+
+        if macro_1d_aligned:
+            sar_ok = True
+            mtf_ok = True
         else:
-            sar_ok = sar_4h <= 0
-            mtf_ok = mtf <= 0.60
+            if is_long:
+                sar_ok = sar_4h >= 0
+                mtf_ok = mtf >= -0.60
+            else:
+                sar_ok = sar_4h <= 0
+                mtf_ok = mtf <= 0.60
 
     conditions['sar_4h'] = {
         'passed':  sar_ok,
@@ -676,6 +798,8 @@ def evaluate_erep_phase(
     df_4h:         pd.DataFrame = None,
     market_type:   str = 'crypto_futures',
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
+    df_1d:         pd.DataFrame = None,
 ) -> dict:
     """
     Función principal del EREP.
@@ -704,11 +828,38 @@ def evaluate_erep_phase(
     if phase == 0:
         return {'action': 'none', 'reason': 'Fase Neutral'}
 
+    # ── PROTECCIÓN CRÍTICA: QUIEBRE ESTRUCTURAL CATASTRÓFICO (Hard Floor / Ceiling) ──
+    atr_val = float(snap.get('atr', 0))
+    if atr_val <= 0 and df_15m is not None and len(df_15m) >= 5:
+        col_c = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
+        if col_c:
+            atr_val = float(pd.to_numeric(df_15m[col_c], errors='coerce').std() * 0.5)
+    if atr_val <= 0:
+        atr_val = current_price * 0.015
+
+    if is_long:
+        lower_6_val = float(snap.get('lower_6', 0))
+        if lower_6_val > 0 and current_price <= (lower_6_val - 1.2 * atr_val):
+            return {
+                'action': 'close_all',
+                'close_type': 'erep_structural_breakdown',
+                'reason': f'🚨 QUIEBRE ESTRUCTURAL CATASTRÓFICO: Precio ${current_price:.4f} perforó suelo LOWER_6 (${lower_6_val:.4f} - 1.2*ATR). Cierre definitivo para salvaguardar capital.',
+            }
+    else:
+        upper_6_val = float(snap.get('upper_6', 0))
+        if upper_6_val > 0 and current_price >= (upper_6_val + 1.2 * atr_val):
+            return {
+                'action': 'close_all',
+                'close_type': 'erep_structural_breakdown',
+                'reason': f'🚨 QUIEBRE ESTRUCTURAL CATASTRÓFICO: Precio ${current_price:.4f} superó techo UPPER_6 (${upper_6_val:.4f} + 1.2*ATR). Cierre definitivo para salvaguardar capital.',
+            }
+
     # ── FASE 1: SL tocado ─────────────────────
     if phase == 1:
         check = check_erep_activation_conditions(
             position, current_price,
-            snap, df_15m, df_4h, market_type, df_5m
+            snap, df_15m, df_4h, market_type, df_5m,
+            df_1h=df_1h, df_1d=df_1d
         )
 
         if check.get('wait_natural'):
@@ -761,10 +912,12 @@ def evaluate_erep_phase(
                     'reason': f'🔄 EREP FORZADO POR PNL NEGATIVO ({real_loss_pct:.2f}%): Evitando cierre en pérdida. Entrando a fase 2 para buscar rebote.',
                     'conditions': check.get('conditions', {}),
                 }
+            # 🛡️ Si P&L es positivo o neutro (real_loss_pct <= 0), NUNCA cerrar por SL normal.
+            # Dejar correr la posición hacia su objetivo o recuperación natural.
             return {
-                'action':   'close_sl',
-                'reason': f'EREP no puede activarse: {check.get("reason", "Condición no cumplida")}. Cerrar por SL normal.',
-                'close_type': 'sl_normal',
+                'action':   'wait_natural',
+                'reason': f'Posición en ganancia/breakeven ({real_loss_pct:.2f}%). EREP en espera de maduración hacia TP.',
+                'conditions': check.get('conditions', {}),
             }
 
         return {
@@ -811,7 +964,8 @@ def evaluate_erep_phase(
             }
 
         signal = detect_p2_entry_signal(
-            df_15m, snap, side, '', market_type, df_5m
+            df_15m, snap, side, '', market_type, df_5m, entry_price=p1,
+            df_1h=df_1h, df_1d=df_1d
         )
 
         if signal['has_signal']:
@@ -879,24 +1033,82 @@ def evaluate_erep_phase(
         else:
             target_margin_pct = -min_pips
 
-        reached_p3 = current_loss <= target_margin_pct
+        reached_p3 = (current_loss <= target_margin_pct) or (current_loss <= 0.0)
         last_close = current_price
 
+        # Bandas de Bollinger objetivo para Clímax / Runner
+        upper_bb = float(snap.get('upper_band') or snap.get('upper_5') or 0.0)
+        lower_bb = float(snap.get('lower_band') or snap.get('lower_5') or 0.0)
+        if upper_bb <= 0 and df_15m is not None and len(df_15m) >= 20:
+            c_col = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
+            if c_col:
+                c15_s = pd.to_numeric(df_15m[c_col], errors='coerce').dropna()
+                if len(c15_s) >= 20:
+                    upper_bb = float(c15_s.rolling(20).mean().iloc[-1] + 2 * c15_s.rolling(20).std().iloc[-1])
+                    lower_bb = float(c15_s.rolling(20).mean().iloc[-1] - 2 * c15_s.rolling(20).std().iloc[-1])
+
+        # Pendiente EMA3 en 15m / 5m
+        ema3_slope_favorable = False
+        df_for_slope = df_15m if df_15m is not None and len(df_15m) >= 3 else (df_5m if df_5m is not None and len(df_5m) >= 3 else None)
+        if df_for_slope is not None and len(df_for_slope) >= 3:
+            c_col_sl = 'close' if 'close' in df_for_slope.columns else ('c' if 'c' in df_for_slope.columns else '')
+            if c_col_sl:
+                c_sl = pd.to_numeric(df_for_slope[c_col_sl], errors='coerce').dropna()
+                if len(c_sl) >= 3:
+                    e3_s = c_sl.ewm(span=3, adjust=False).mean()
+                    sl_diff = float(e3_s.iloc[-1] - e3_s.iloc[-2])
+                    ema3_slope_favorable = (sl_diff > 0) if is_long else (sl_diff < 0)
+
+        is_runner_active = bool(position.get('erep_runner_active'))
+
+        # ── 1. OBJETIVO CLÍMAX SUPERIOR / INFERIOR: Tocar la Banda Bollinger ──
+        if is_long and upper_bb > p3_avg and last_close >= (upper_bb * 0.999):
+            return {
+                'action': 'close_all',
+                'reason': f'🎯 TP CLÍMAX BANDA SUPERIOR: close {last_close:.4f} >= Upper_BB {upper_bb:.4f}. Cierre masivo con máxima ganancia!',
+                'close_type': 'tp_upper_bb_runner',
+                'last_close': last_close,
+            }
+        elif (not is_long) and lower_bb > 0 and lower_bb < p3_avg and last_close <= (lower_bb * 1.001):
+            return {
+                'action': 'close_all',
+                'reason': f'🎯 TP CLÍMAX BANDA INFERIOR: close {last_close:.4f} <= Lower_BB {lower_bb:.4f}. Cierre masivo con máxima ganancia!',
+                'close_type': 'tp_lower_bb_runner',
+                'last_close': last_close,
+            }
+
         if reached_p3:
-            if is_ema_fast_above == is_long:
+            # ── 2. EVALUACIÓN DE INERCIA EMA3 AL TOCAR P3 (Break-Even) ──
+            # Si EMA3 se mantiene favorable: PROHIBIDO CERRAR EN P3. Blindar SL y mantener RUNNER hacia Banda Bollinger
+            if (is_ema_fast_above == is_long) or ema3_slope_favorable:
+                buffer_pip = (min_pips * pip_size) if market_type == 'forex_futures' else (p3_avg * 0.001)
+                new_sl = round(p3_avg + buffer_pip, 6) if is_long else round(p3_avg - buffer_pip, 6)
+                target_bb = upper_bb if is_long else lower_bb
                 return {
-                    'action':  'close_all',
-                    'reason': f'✅ RECUPERO EXITOSO: close {last_close:.4f} >= P3 {p3_avg:.4f} y EMA favorable. Cerrar todo con ganancia.',
-                    'close_type': 'recovery_success',
+                    'action': 'hold_runner_to_bb',
+                    'new_sl': new_sl,
+                    'p3_avg': p3_avg,
+                    'target_bb': target_bb,
+                    'reason': f'🏃 EREP RUNNER ACTIVO: P3 {p3_avg:.4f} alcanzado con EMA3 favorable. Prohibido cerrar en BE; SL blindado a {new_sl:.4f} y acompañando hacia Banda {"Superior" if is_long else "Inferior"} ({target_bb:.4f}).',
                     'last_close': last_close,
                 }
-            else:
+
+            # ── 3. SALIDA POR AGOTAMIENTO SI RUNNER YA ESTABA ACTIVO ──
+            if is_runner_active and not ema3_slope_favorable and (is_ema_fast_above != is_long):
                 return {
-                    'action':  'close_all',
-                    'reason': f'✅ P3 alcanzado ({last_close:.4f} >= {p3_avg:.4f}). Cerrar (EMA no ideal pero objetivo alcanzado)',
-                    'close_type': 'recovery_p3',
+                    'action': 'close_all',
+                    'reason': f'⚠️ SALIDA POR AGOTAMIENTO EMA3: Momentum se agotó por encima de P3 ({last_close:.4f} vs P3 {p3_avg:.4f}). Cerrando para asegurar ganancia.',
+                    'close_type': 'tp_ema3_exhaustion',
                     'last_close': last_close,
                 }
+
+            # ── 4. SALIDA DEFENSIVA ESTÁNDAR SI EMA ES PLANA/DESFAVORABLE ──
+            return {
+                'action':  'close_all',
+                'reason': f'✅ P3 alcanzado ({last_close:.4f} >= {p3_avg:.4f}). EMA plana/desfavorable -> Cierre defensivo Break-Even estándar.',
+                'close_type': 'recovery_p3',
+                'last_close': last_close,
+            }
 
         # EMA desfavorable
         ema_unfavorable = (is_long and not is_ema_fast_above) or (not is_long and is_ema_fast_above)
@@ -939,6 +1151,114 @@ def evaluate_erep_phase(
 # ════════════════════════════════════════════
 # SMART Q2 FIBONACCI CALCULATION MODULE
 # ════════════════════════════════════════════
+
+def get_fibonacci_erep_target(
+    entry_price: float,
+    current_price: float,
+    side: str,
+    snap: dict
+) -> dict:
+    """
+    Determina la banda Fibonacci objetivo de menor grado para la recompra EREP (P2)
+    según el nivel de compra original (P1).
+
+    Regla del sistema:
+    LONG:
+      - P1 en o sobre LOWER_3 (-0.500 dev) -> P2 objetivo en LOWER_4 (-0.618 dev) o LOWER_5
+      - P1 en LOWER_4 (-0.618 dev)        -> P2 objetivo en LOWER_5 (-0.764 dev) o LOWER_6
+      - P1 en LOWER_5 (-0.764 dev)        -> P2 objetivo en LOWER_6 (-1.000 dev)
+      - P1 en LOWER_6 (-1.000 dev)        -> No hay banda inferior; Stop Loss estructural final
+
+    SHORT:
+      - P1 en o bajo UPPER_3 (+0.500 dev) -> P2 objetivo en UPPER_4 (+0.618 dev) o UPPER_5
+      - P1 en UPPER_4 (+0.618 dev)        -> P2 objetivo en UPPER_5 (+0.764 dev) o UPPER_6
+      - P1 en UPPER_5 (+0.764 dev)        -> P2 objetivo en UPPER_6 (+1.000 dev)
+      - P1 en UPPER_6 (+1.000 dev)        -> No hay banda superior; Stop Loss estructural final
+    """
+    snap = snap or {}
+    is_long = str(side).lower() in ('long', 'buy')
+
+    if is_long:
+        l3 = float(snap.get('lower_3', 0))
+        l4 = float(snap.get('lower_4', 0))
+        l5 = float(snap.get('lower_5', 0))
+        l6 = float(snap.get('lower_6', 0))
+
+        if l3 <= 0 or l6 <= 0:
+            return {
+                'target_band': 'lower_4',
+                'target_price': round(entry_price * 0.985, 6) if entry_price > 0 else 0.0,
+                'reached': False,
+                'is_climax_entry': False,
+                'current_band': 'unknown'
+            }
+
+        if entry_price >= l3:
+            current_band = 'above_or_at_lower_3'
+            target_band = 'lower_4'
+            target_price = l4
+        elif entry_price >= l4:
+            current_band = 'lower_4'
+            target_band = 'lower_5'
+            target_price = l5
+        elif entry_price >= l5:
+            current_band = 'lower_5'
+            target_band = 'lower_6'
+            target_price = l6
+        else:
+            current_band = 'lower_6_or_below'
+            target_band = None
+            target_price = 0.0
+
+        reached = (target_price > 0 and current_price <= target_price)
+        return {
+            'target_band': target_band,
+            'target_price': round(target_price, 6),
+            'reached': reached,
+            'is_climax_entry': (target_band is None),
+            'current_band': current_band
+        }
+    else:
+        u3 = float(snap.get('upper_3', 0))
+        u4 = float(snap.get('upper_4', 0))
+        u5 = float(snap.get('upper_5', 0))
+        u6 = float(snap.get('upper_6', 0))
+
+        if u3 <= 0 or u6 <= 0:
+            return {
+                'target_band': 'upper_4',
+                'target_price': round(entry_price * 1.015, 6) if entry_price > 0 else 0.0,
+                'reached': False,
+                'is_climax_entry': False,
+                'current_band': 'unknown'
+            }
+
+        if entry_price <= u3:
+            current_band = 'below_or_at_upper_3'
+            target_band = 'upper_4'
+            target_price = u4
+        elif entry_price <= u4:
+            current_band = 'upper_4'
+            target_band = 'upper_5'
+            target_price = u5
+        elif entry_price <= u5:
+            current_band = 'upper_5'
+            target_band = 'upper_6'
+            target_price = u6
+        else:
+            current_band = 'upper_6_or_above'
+            target_band = None
+            target_price = 0.0
+
+        reached = (target_price > 0 and current_price >= target_price)
+        return {
+            'target_band': target_band,
+            'target_price': round(target_price, 6),
+            'reached': reached,
+            'is_climax_entry': (target_band is None),
+            'current_band': current_band
+        }
+
 
 def find_target_fibonacci_band(
     snap:        dict,
@@ -1169,15 +1489,18 @@ async def execute_erep_action(
             'erep_activated_at':    datetime.now(timezone.utc).isoformat(),
             'erep_cycles_elapsed':  0,
         }
-        if table == 'positions':
-            update_fields['sl_type'] = 'erep_suspended'
-            update_fields['stop_loss'] = 0
-            update_fields['sl_price'] = 0
-        elif table == 'forex_positions':
-            update_fields['sl_price'] = 0
+        snap_act = action.get('snap') or {}
+        atr_val = float(snap_act.get('atr', current_price * 0.015))
+        if is_long:
+            l6_val = float(snap_act.get('lower_6', 0))
+            sl_struct = (l6_val - 1.2 * atr_val) if l6_val > 0 else (current_price * 0.985)
         else:
-            update_fields['stop_loss'] = 0
-            update_fields['sl_price'] = 0
+            u6_val = float(snap_act.get('upper_6', 0))
+            sl_struct = (u6_val + 1.2 * atr_val) if u6_val > 0 else (current_price * 1.015)
+
+        update_fields['sl_type'] = 'erep_structural_backstop'
+        update_fields['stop_loss'] = round(sl_struct, 6)
+        update_fields['sl_price'] = round(sl_struct, 6)
 
         supabase.table(table).update(update_fields).eq('id', pos_id).execute()
         position.update(update_fields)
@@ -1239,11 +1562,23 @@ async def execute_erep_action(
             log_error('EREP', f'Error P2: {e}')
             return {'executed': 'error_p2'}
 
+        snap_act = action.get('snap') or {}
+        atr_val = float(snap_act.get('atr', current_price * 0.015))
+        if is_long:
+            l6_val = float(snap_act.get('lower_6', 0))
+            sl_struct = (l6_val - 1.2 * atr_val) if l6_val > 0 else (current_price * 0.985)
+        else:
+            u6_val = float(snap_act.get('upper_6', 0))
+            sl_struct = (u6_val + 1.2 * atr_val) if u6_val > 0 else (current_price * 1.015)
+
         # Actualizar la posición original en memoria
         position['erep_phase'] = 3
         position['erep_p2_price'] = current_price
         position['erep_p2_size'] = p2_size
         position['erep_p3_avg'] = round(p3_avg, 6)
+        position['sl_price'] = round(sl_struct, 6)
+        position['stop_loss'] = round(sl_struct, 6)
+        position['sl_type'] = 'erep_structural_backstop'
 
         # Actualizar la posición original en BD
         try:
@@ -1260,6 +1595,9 @@ async def execute_erep_action(
                 'erep_target_band_price': band_price,
                 'erep_target_95pct':      round(target_price, 6),
                 'erep_cycles_elapsed':    0,
+                'sl_type':                'erep_structural_backstop',
+                'stop_loss':              round(sl_struct, 6),
+                'sl_price':               round(sl_struct, 6),
             }).eq('id', pos_id).execute()
         except Exception as upd_e:
             log_error('EREP', f"Error actualizando DB EREP P2 para {pos_id}: {upd_e}")
@@ -1281,6 +1619,39 @@ async def execute_erep_action(
             'p2_price': current_price,
             'p3_avg':   p3_avg,
         }
+
+    # ── MANTENER RUNNER A BANDA BOLLINGER (BLINDAJE SL EN P3) ──
+    elif act == 'hold_runner_to_bb':
+        new_sl = float(action.get('new_sl') or 0.0)
+        p3_avg = float(action.get('p3_avg') or 0.0)
+        target_bb = float(action.get('target_bb') or 0.0)
+
+        position['sl_price'] = new_sl
+        position['stop_loss'] = new_sl
+        position['sl_type'] = 'erep_runner_be'
+        position['erep_runner_active'] = True
+
+        try:
+            supabase.table(table).update({
+                'sl_price': new_sl,
+                'stop_loss': new_sl,
+                'sl_type': 'erep_runner_be',
+                'erep_runner_active': True,
+            }).eq('id', pos_id).execute()
+        except Exception as e:
+            log_warning('EREP', f"Error blindando SL a Breakeven P3 para {pos_id}: {e}")
+
+        runner_key = f"runner_{pos_id}"
+        if runner_key not in _erep_p2_notified_set:
+            _erep_p2_notified_set.add(runner_key)
+            await send_telegram_local(
+                f"🏃 EREP RUNNER BLINDADO [{symbol}] {side.upper()}\n"
+                f"P3 Breakeven: ${p3_avg:.4f}\n"
+                f"SL Blindado: ${new_sl:.4f} ($0.00 Riesgo)\n"
+                f"Objetivo: Banda Bollinger ${target_bb:.4f}\n"
+                f"🚀 Acompañando movimiento institucional!"
+            )
+        return {'executed': 'runner_retained', 'new_sl': new_sl}
 
     # ── CERRAR TODAS LAS POSICIONES ───────────
     elif act in ('close_all', 'close_sl', 'close_tp'):
@@ -1314,7 +1685,14 @@ async def execute_erep_action(
                 else:
                     log_error('EREP', f'Error P1 close final: {e}')
 
-        # Limpiar campos EREP en base de datos e incorporar campos de cierre principales
+        # Calcular P&L del EREP completo antes del update en BD
+        p1_price = float(position.get('erep_p1_price') or position.get('entry_price', current_price))
+        pnl_erep = (current_price - p1_price) / p1_price * 100 if p1_price > 0 else 0
+        if str(side).lower() in ('short', 'sell'):
+            pnl_erep = -pnl_erep
+        pnl_usd = (pnl_erep / 100.0) * (p1_price * size)
+
+        # Limpiar campos EREP en base de datos e incorporar campos de cierre principales con PnL calculado
         for attempt in range(max_retries):
             try:
                 supabase.table(table).update({
@@ -1323,7 +1701,10 @@ async def execute_erep_action(
                     'erep_close_reason': close_type[:20],
                     'status':            'closed',
                     'closed_at':         datetime.now(timezone.utc).isoformat(),
-                    'close_reason':      f'EREP_{close_type.upper()}'[:20]
+                    'current_price':     current_price,
+                    'close_reason':      f'EREP_{close_type.upper()}'[:20],
+                    'realized_pnl':      round(pnl_usd, 4),
+                    'realized_pnl_pct':  round(pnl_erep, 4)
                 }).eq('id', pos_id).execute()
                 break
             except Exception as e:
@@ -1332,12 +1713,6 @@ async def execute_erep_action(
                     await asyncio.sleep(1.0)
                 else:
                     log_error('EREP', f'Error P1 DB update final: {e}')
-
-        # Calcular P&L del EREP completo
-        p1_price = float(position.get('erep_p1_price') or position.get('entry_price', current_price))
-        pnl_erep = (current_price - p1_price) / p1_price * 100 if p1_price > 0 else 0
-        if str(side).lower() in ('short', 'sell'):
-            pnl_erep = -pnl_erep
 
         emoji = '✅' if pnl_erep >= 0 else '🔴'
 

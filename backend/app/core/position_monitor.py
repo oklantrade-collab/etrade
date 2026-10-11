@@ -6,7 +6,7 @@ y cualquier discrepancia entre el bot y el exchange.
 import asyncio
 import pandas as pd
 from datetime import datetime, timezone
-from app.core.memory_store import BOT_STATE
+from app.core.memory_store import BOT_STATE, MEMORY_STORE, get_memory_df
 from app.core.logger import log_info, log_warning, log_error
 from app.core.crypto_symbols import normalize_crypto_symbol, crypto_symbol_match_variants
 from app.strategy.capital_protection import (
@@ -42,6 +42,13 @@ async def check_signal_reversal(
     Nunca cierra con pérdida por esta regla (para pérdidas -> SL).
     No cierra por titubeos de MTF o 15M si la EMA3 en 5m sigue a favor.
     """
+    try:
+        res = await check_early_profit_protect_ema_5m(position, current_price, config, snap=snap)
+        if isinstance(res, dict):
+            return res
+    except Exception as e:
+        log_warning(MODULE, f"Error in check_signal_reversal: {e}")
+    return {'should_exit': False, 'should_modify_oco_breakeven': False}
 def is_trade_mature(position: dict, min_minutes: int = 20) -> bool:
     """Verifica si la posición ha cumplido su ventana mínima de maduración (por defecto 20m)."""
     ts_str = position.get('opened_at') or position.get('created_at')
@@ -337,11 +344,11 @@ async def check_sl_with_erep(
     market_type:   str,
     supabase,
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
+    df_1d:         pd.DataFrame = None,
 ) -> bool:
     """
-    Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP.
-
-    Se llama en el ciclo de 15m SOLO cuando el precio está cerca o en el SL.
+    Verifica si el precio tocó el SL, soporte 1H/4H o banda Bollinger 1H y decide si cerrar normalmente o activar EREP.
     """
     from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action, get_fibonacci_erep_target
     
@@ -363,14 +370,48 @@ async def check_sl_with_erep(
 
     erep_active = bool(position.get('erep_active')) or (int(position.get('erep_phase', 0)) > 0)
 
-    # ¿Posición en pérdida que alcanzó la siguiente banda Fibonacci de menor grado?
+    # ¿Posición en pérdida que alcanzó la siguiente banda Fibonacci o soporte EMA9/EMA20 o Bollinger 1H?
     is_in_loss = (current_price < entry_p) if is_long else (current_price > entry_p)
     fib_ladder_reached = False
-    if not erep_active and is_in_loss and snap:
-        fib_eval = get_fibonacci_erep_target(entry_p, current_price, side, snap)
-        fib_ladder_reached = bool(fib_eval.get('reached', False))
+    ema_support_reached = False
+    bb_1h_reached = False
+    if not erep_active and is_in_loss:
+        if snap:
+            fib_eval = get_fibonacci_erep_target(entry_p, current_price, side, snap)
+            fib_ladder_reached = bool(fib_eval.get('reached', False))
 
-    if not sl_touched and not erep_active and not fib_ladder_reached:
+        drawdown_pct = ((entry_p - current_price) / entry_p * 100) if is_long else ((current_price - entry_p) / entry_p * 100)
+        if drawdown_pct >= 0.40:
+            ema9_4h = float(snap.get('ema9_4h') or snap.get('ema_9_4h') or 0.0) if snap else 0.0
+            ema20_4h = float(snap.get('ema20_4h') or snap.get('ema_20_4h') or 0.0) if snap else 0.0
+            ema9_1h = float(snap.get('ema9_1h') or snap.get('ema_9_1h') or 0.0) if snap else 0.0
+            ema20_1h = float(snap.get('ema20_1h') or snap.get('ema_20_1h') or 0.0) if snap else 0.0
+            tol = 0.0020 if ('crypto' in str(market_type).lower() or 'USDT' in str(symbol).upper()) else 0.0006
+            for ema_val in [ema9_4h, ema20_4h, ema9_1h, ema20_1h]:
+                if ema_val > 0 and abs(current_price - ema_val) / ema_val <= tol:
+                    ema_support_reached = True
+                    break
+
+            # ── DETECCIÓN BOLLINGER 1H (Soporte en Lower BB para LONG / Resistencia en Upper BB para SHORT) ──
+            if df_1h is not None and len(df_1h) >= 20:
+                c1h = df_1h['close'] if 'close' in df_1h.columns else df_1h.get('c', pd.Series())
+                m1h = float(c1h.rolling(20).mean().iloc[-1])
+                s1h = float(c1h.rolling(20).std().iloc[-1])
+                lower_bb_1h = m1h - 2.0 * s1h
+                upper_bb_1h = m1h + 2.0 * s1h
+                if is_long and current_price <= (lower_bb_1h * 1.002):
+                    bb_1h_reached = True
+                elif not is_long and current_price >= (upper_bb_1h * 0.998):
+                    bb_1h_reached = True
+            elif snap:
+                lower_bb_1h = float(snap.get('lower_1h') or snap.get('bb_lower_1h') or 0.0)
+                upper_bb_1h = float(snap.get('upper_1h') or snap.get('bb_upper_1h') or 0.0)
+                if is_long and lower_bb_1h > 0 and current_price <= (lower_bb_1h * 1.002):
+                    bb_1h_reached = True
+                elif not is_long and upper_bb_1h > 0 and current_price >= (upper_bb_1h * 0.998):
+                    bb_1h_reached = True
+
+    if not sl_touched and not erep_active and not fib_ladder_reached and not ema_support_reached and not bb_1h_reached:
         return False  # Normal, sin acción
 
     async def open_position(symbol: str, side: str, size: float, price: float, reason: str, supabase):
@@ -407,8 +448,6 @@ async def check_sl_with_erep(
                 log_error("POSITION_MONITOR", f"Error inserting EREP order: {e}")
 
     async def close_position(*args, **kwargs):
-        # Support both positional: close_position(symbol, price, reason, supabase)
-        # and keyword: close_position(symbol, side, size, price, reason, supabase)
         price = current_price
         reason = 'erep_close'
         if len(args) >= 3:
@@ -432,7 +471,8 @@ async def check_sl_with_erep(
     if erep_active:
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type, df_5m
+            snap, df_15m, df_4h, market_type, df_5m,
+            df_1h=df_1h, df_1d=df_1d
         )
         result = await execute_erep_action(
             action        = action,
@@ -446,9 +486,9 @@ async def check_sl_with_erep(
         )
         return result.get('executed') == 'closed'
 
-    # ── SL TOCADO O BANDA FIBONACCI EREP ALCANZADA ──
-    if sl_touched or fib_ladder_reached:
-        trigger_src = "SL Tocado" if sl_touched else "Banda Fibonacci EREP Alcanzada"
+    # ── SL TOCADO, BANDA FIBONACCI O SOPORTE EMA/BOLLINGER 1H EREP ALCANZADO ──
+    if sl_touched or fib_ladder_reached or ema_support_reached or bb_1h_reached:
+        trigger_src = "SL Tocado" if sl_touched else ("Banda Bollinger 1H" if bb_1h_reached else ("Soporte EMA 1h/4h" if ema_support_reached else "Banda Fibonacci EREP Alcanzada"))
         log_info(MODULE, f"🔄 {symbol}: Activando evaluación EREP ({trigger_src}). Entry={entry_p:.4f}, Price={current_price:.4f}")
         sl_type = str(position.get('sl_type') or '')
         if sl_type.startswith('trailing'):
@@ -458,7 +498,6 @@ async def check_sl_with_erep(
             
             if pnl_usd <= 0:
                 log_info(MODULE, f"Trailing SL hit for {symbol}, but PNL<=0. Diverting to EREP unconditionally.")
-                # Do NOT close here. Let it fall through to EREP setup below.
             else:
                 await close_position(symbol, current_price, 'sl_trailing', supabase)
                 return True
@@ -481,7 +520,8 @@ async def check_sl_with_erep(
 
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type, df_5m
+            snap, df_15m, df_4h, market_type, df_5m,
+            df_1h=df_1h, df_1d=df_1d
         )
 
         if action['action'] == 'close_sl':
@@ -506,12 +546,14 @@ async def check_crypto_erep(
     supabase,
 ) -> bool:
     """
-    EREP para Crypto.
+    EREP para Crypto: Integra marcos multitemporales 1H y 1D para rescate inteligente en soportes.
     """
     from app.core.memory_store import get_memory_df
     df_5m  = get_memory_df(symbol, "5m")
     df_15m = get_memory_df(symbol, "15m")
+    df_1h  = get_memory_df(symbol, "1h")
     df_4h  = get_memory_df(symbol, "4h")
+    df_1d  = get_memory_df(symbol, "1d")
     
     return await check_sl_with_erep(
         symbol=symbol,
@@ -522,7 +564,9 @@ async def check_crypto_erep(
         df_4h=df_4h,
         market_type='crypto_futures',
         supabase=supabase,
-        df_5m=df_5m
+        df_5m=df_5m,
+        df_1h=df_1h,
+        df_1d=df_1d
     )
 
 async def trigger_trailing_stop_reentry(symbol, side, size, df_15m, supabase):
@@ -1145,8 +1189,8 @@ async def check_protections(
         log_error(MODULE, f"Error evaluando Dynamic TP v6 Crypto {symbol}: {tp_v6_err}")
 
     # ── CHECK 2: Trailing Stop ────────────────
-    
-    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
+    df_1h_trail = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
+    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap, df_1h=df_1h_trail)
     
     # Handle bb_touched update
     if trail.get('update_bb_touched') or trail['action'] == 'update_bb_touched':
@@ -1322,6 +1366,7 @@ async def check_open_positions_5m(
                     df_15m_p = get_memory_df(norm_symbol, "15m")
                     df_1h_p = get_memory_df(norm_symbol, "1h")
                     df_4h_p = get_memory_df(norm_symbol, "4h")
+                    df_1d_p = get_memory_df(norm_symbol, "1d")
                     
                     panic_eval = evaluate_panic_and_erep_status(
                         position=pos,
@@ -1330,7 +1375,8 @@ async def check_open_positions_5m(
                         df_15m=df_15m_p,
                         df_1h=df_1h_p,
                         df_4h=df_4h_p,
-                        snap=current_snap_obj
+                        snap=current_snap_obj,
+                        df_1d=df_1d_p
                     )
                     
                     if panic_eval.get('should_exit'):
@@ -1625,6 +1671,82 @@ async def check_open_positions_5m(
                 except Exception as reb_climax_err:
                     log_warning(MODULE, f"Error en evaluación REBOTE/ADUANA Clímax para {symbol}: {reb_climax_err}")
 
+                # ── 1.6 ADUANA TREND EXIT: Agotamiento EMA3 + Doble Validación Bollinger (1h / 4h) ──
+                try:
+                    df_1h_aduana = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
+                    df_4h_aduana = MEMORY_STORE.get(symbol, {}).get('4h', {}).get('df')
+                    if df_1h_aduana is not None and not df_1h_aduana.empty:
+                        from app.rebote_aduana.aduana_trend_exit import evaluate_aduana_trend_exit
+                        from app.rebote_aduana.aduana_exit_gate import GLOBAL_ADUANA_EXIT_GATE, ExitOrderRequest
+                        
+                        aduana_exit_res = evaluate_aduana_trend_exit(
+                            pos=pos,
+                            current_price=price,
+                            df_1h=df_1h_aduana,
+                            df_4h=df_4h_aduana,
+                            min_profit_pct=0.35
+                        )
+                        act = aduana_exit_res.get('action')
+                        
+                        if act == 'FULL_CLOSE':
+                            req_full = ExitOrderRequest(
+                                position_id=str(pos['id']),
+                                symbol=norm_symbol,
+                                side='buy' if side in ('short', 'sell') else 'sell',
+                                order_type='MARKET',
+                                price=price,
+                                volume=float(pos.get('size') or pos.get('lots') or 0),
+                                classification='ACTIVA',
+                                module_origin='ADUANA_TREND_FULL',
+                                metadata=aduana_exit_res.get('details', {})
+                            )
+                            arb_full = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_full)
+                            if arb_full.get('approved'):
+                                log_info(MODULE, f"🎯 [ADUANA TREND FULL EXIT] {aduana_exit_res['reason']}")
+                                await _execute_paper_close(pos, price, 'aduana_trend_full'[:20], supabase, snap=current_snap_obj)
+                                events.append({'symbol': symbol, 'event': 'aduana_trend_full'})
+                                
+                                from app.workers.alerts_service import send_telegram_message
+                                await send_telegram_message(
+                                    f"🎯 ADUANA TREND FULL EXIT [{norm_symbol}]\n"
+                                    f"Dirección: {side.upper()}\n"
+                                    f"Precio: ${price:.4f}\n"
+                                    f"PnL: {aduana_exit_res.get('details', {}).get('pnl_pct', 0.0):+.2f}%\n"
+                                    f"Motivo: {aduana_exit_res['reason']}"
+                                )
+                                continue
+                                
+                        elif act == 'PARTIAL_CLOSE_50' and not pos.get('partial_closed'):
+                            req_part = ExitOrderRequest(
+                                position_id=str(pos['id']),
+                                symbol=norm_symbol,
+                                side='buy' if side in ('short', 'sell') else 'sell',
+                                order_type='MARKET',
+                                price=price,
+                                volume=float(pos.get('size') or pos.get('lots') or 0) * 0.5,
+                                classification='ACTIVA',
+                                module_origin='ADUANA_TREND_TP50',
+                                metadata=aduana_exit_res.get('details', {})
+                            )
+                            arb_part = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_part)
+                            if arb_part.get('approved'):
+                                log_info(MODULE, f"🎯 [ADUANA TREND PARTIAL 50%] {aduana_exit_res['reason']}")
+                                await _execute_paper_partial_close(pos, price, supabase)
+                                pos['partial_closed'] = True
+                                events.append({'symbol': symbol, 'event': 'aduana_trend_tp50'})
+                                
+                                from app.workers.alerts_service import send_telegram_message
+                                await send_telegram_message(
+                                    f"🎯 ADUANA TREND PARTIAL 50% [{norm_symbol}]\n"
+                                    f"Dirección: {side.upper()}\n"
+                                    f"Precio: ${price:.4f}\n"
+                                    f"PnL: {aduana_exit_res.get('details', {}).get('pnl_pct', 0.0):+.2f}%\n"
+                                    f"Motivo: {aduana_exit_res['reason']}"
+                                )
+                                continue
+                except Exception as aduana_trend_err:
+                    log_warning(MODULE, f"Error en evaluación ADUANA Trend Exit para {symbol}: {aduana_trend_err}")
+
                 # 2. TAKE PROFIT PARTIAL (50% Close)
                 is_tp_p = (side == 'long' and price >= tp_p) or (side == 'short' and price <= tp_p) if (tp_p > 0 and not pos.get('partial_closed')) else False
                 if is_tp_p:
@@ -1729,6 +1851,8 @@ async def check_open_positions_5m(
                 # 6. SIGNAL REVERSAL (Early Exit / SL Prevention)
                 # Evalúa si la tendencia giró para salir antes del SL o asegurar TP.
                 rev_res = await check_signal_reversal(pos, mtf_score, price, config, snap=current_snap_obj)
+                if not isinstance(rev_res, dict):
+                    rev_res = {'should_exit': False, 'should_modify_oco_breakeven': False}
                 
                 if rev_res.get('should_modify_oco_breakeven'):
                     target_tp = rev_res.get('target_tp_price')
