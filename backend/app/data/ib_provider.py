@@ -57,6 +57,9 @@ class IBConnection(EWrapper, EClient):
         self._data_callbacks: dict = {}
         self._errors: list = []
         self._prices: Dict[str, float] = {}  # {ticker: last_price}
+        self._order_statuses: dict = {}      # {order_id: status_dict}
+        self._order_callback: Optional[Callable] = None
+        self.accounts: list[str] = []
         self._thread: threading.Thread | None = None
 
     # ── Connection ────────────────────────────────────────
@@ -152,6 +155,48 @@ class IBConnection(EWrapper, EClient):
         """Called when connection is lost."""
         self.connected = False
         log_warning(MODULE, "IB TWS connection closed")
+
+    def managedAccounts(self, accountsList: str):
+        """Called when account list is received from TWS."""
+        self.accounts = [a.strip() for a in accountsList.split(",") if a.strip()]
+        log_info(MODULE, f"[IB Accounts] Connected accounts: {self.accounts}")
+
+    def orderStatus(
+        self,
+        orderId: int,
+        status: str,
+        filled: float,
+        remaining: float,
+        avgFillPrice: float,
+        permId: int,
+        parentId: int,
+        lastFillPrice: float,
+        clientId: int,
+        whyHeld: str,
+        mktCapPrice: float = 0.0,
+    ):
+        """Called whenever an order status changes (Submitted, Filled, Cancelled, etc.)."""
+        log_info(MODULE, f"[IB OrderStatus] ID={orderId} Status={status} Filled={filled} AvgPrice=${avgFillPrice:.2f}")
+        status_info = {
+            "order_id": orderId,
+            "status": status.lower(),
+            "filled": filled,
+            "remaining": remaining,
+            "avg_fill_price": avgFillPrice,
+            "last_fill_price": lastFillPrice,
+            "parent_id": parentId,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        self._order_statuses[orderId] = status_info
+        if self._order_callback:
+            try:
+                self._order_callback(orderId, status_info)
+            except Exception as e:
+                log_error(MODULE, f"Error in order callback for ID {orderId}: {e}")
+
+    def set_order_callback(self, callback: Callable):
+        """Register a callback function to receive orderStatus events."""
+        self._order_callback = callback
 
     # ── Contract Builder ──────────────────────────────────
 

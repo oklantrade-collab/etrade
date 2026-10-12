@@ -322,16 +322,41 @@ async def get_stocks_status():
         sb = get_supabase()
         config_res = sb.table("stocks_config").select("*").execute()
         config = {r["key"]: r["value"] for r in (config_res.data or [])}
+
+        hb_raw = config.get("ib_bridge_heartbeat")
+        hb_data = None
+        if hb_raw:
+            try:
+                import ast
+                hb_data = ast.literal_eval(hb_raw) if isinstance(hb_raw, str) else hb_raw
+            except Exception:
+                hb_data = {"raw": str(hb_raw)}
         
         return {
             "capital_usd": float(config.get("total_capital", 5000)),
             "universe_size": 0,
-            "paper_mode": config.get("execution_mode", "paper") == "paper",
-            "max_risk_pct": float(config.get("max_risk_pct", 60))
+            "paper_mode": str(config.get("paper_mode_active", "true")).lower() == "true",
+            "max_risk_pct": float(config.get("max_risk_pct", 60)),
+            "ib_bridge": hb_data
         }
     except Exception as e:
         log_error("stocks_api", f"Error in get_stocks_status: {e}")
-        return {"capital_usd": 5000, "universe_size": 0, "paper_mode": True}
+        return {"capital_usd": 5000, "universe_size": 0, "paper_mode": True, "ib_bridge": None}
+
+@router.get("/orders")
+async def get_stocks_orders(limit: int = 100):
+    """Get stock orders history from stocks_orders table."""
+    try:
+        sb = get_supabase()
+        res = sb.table("stocks_orders")\
+            .select("*")\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        return res.data or []
+    except Exception as e:
+        log_error("stocks_api", f"Error in get_stocks_orders: {e}")
+        return []
 
 @router.get("/journal")
 async def get_stocks_journal(limit: int = 100):
