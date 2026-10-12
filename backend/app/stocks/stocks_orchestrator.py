@@ -97,13 +97,14 @@ def calculate_composite_rank(
     etv:         float = None,
     buying_force_score: float = None,
     is_high_priority_growth: bool = False,
+    is_intraday_alpha: bool = False,
 ) -> float:
     """
     Calcula el Composite Rank — métrica única
     para ordenar la cola de Alta Prioridad.
     Si Trade Score y ETV están disponibles (APEX v2.0), usa:
        Rank = Trade_Score × 0.70 + ETV_normalized × 0.30
-    Si califica con alto crecimiento / Buying Force, recibe boost de alta prioridad.
+    Si califica con alto crecimiento / Buying Force / Intraday Alpha, recibe boost de alta prioridad.
     """
     if trade_score is not None and etv is not None:
         # Normalizar ETV a 0-100 (ETV típico: -5% a +15%)
@@ -133,8 +134,10 @@ def calculate_composite_rank(
             rvol_norm  * w_rvol
         )
 
-    # ── BOOST DE ALTA PRIORIDAD PARA ALTO CRECIMIENTO & BUYING FORCE ──
-    if is_high_priority_growth or (buying_force_score is not None and buying_force_score >= 85):
+    # ── BOOST DE ALTA PRIORIDAD PARA ALTO CRECIMIENTO & BUYING FORCE & INTRADAY ALPHA ──
+    if is_intraday_alpha:
+        rank = max(rank, 98.5)
+    elif is_high_priority_growth or (buying_force_score is not None and buying_force_score >= 85):
         rank = max(rank, 92.0) + 6.0
     elif (buying_force_score is not None and buying_force_score >= 70):
         rank = max(rank, 85.0) + 5.0
@@ -170,6 +173,11 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
 
     if upper_3 > 0 and price > upper_3:
         reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
+
+    # Trap Shield: Bloqueo innegociable de trampas de apertura
+    if bool(snap.get('is_trap', False)):
+        trap_msg = snap.get('trap_reason') or 'Apertura tramposa detectada por Trap Shield'
+        reasons.append(f'Trap Shield: {trap_msg}')
 
     blocked = len(reasons) > 0
 
@@ -671,8 +679,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 
             # Criterios de entrada a la cola de alta prioridad
             bf_score = float(snap.get('buying_force_score') or 0)
+            is_trap = bool(snap.get('is_trap', False))
+            is_intraday_alpha = bool(snap.get('is_intraday_alpha', False)) and (not is_trap)
+
             is_high_growth = bool(snap.get('is_high_growth_opp', False)) or (bf_score >= 70 and not overbought['blocked'])
             enters_by_growth = is_high_growth and bool(snap.get('entry_route_1h'))
+            enters_by_alpha = is_intraday_alpha and (not overbought['blocked'])
 
             enters_by_apex = (apex_4h >= min_score) and macro_bonus_trigger_ok
             enters_by_rule = rule_signal['has_signal']
@@ -683,18 +695,22 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             )
             enters_by_breakout = breakout_5m.get('triggered', False)
 
-            if enters_by_breakout:
+            if enters_by_alpha:
+                log_info(MODULE, f'🚀 {ticker}: Intraday Alpha Sweet-Spot (Potencial +{snap.get("growth_potential_pct", 5.0)}%, Gap +{snap.get("gap_pct", 0.0)}%)')
+            elif enters_by_breakout:
                 log_info(MODULE, f'🎯 {ticker}: {breakout_5m["reason"]}')
             elif enters_by_growth:
                 log_info(MODULE, f'🔥 {ticker}: High Growth Swing 1H ({snap.get("entry_route_1h")} en {snap.get("entry_support_1h")}) | BF Score={bf_score}')
 
             # Definir estado inicial
-            # Si tiene señal de regla, alto crecimiento o score alto -> pending (lista para comprar)
+            # Si tiene señal de regla, alto crecimiento, intraday alpha o score alto -> pending (lista para comprar)
             # Si no -> watching (solo monitoreo)
-            status = 'pending' if (enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
+            status = 'pending' if (enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
 
-            # Recalcular rank con boost si es alto crecimiento
-            if enters_by_growth:
+            # Recalcular rank con boost si es intraday alpha o alto crecimiento
+            if enters_by_alpha:
+                rank = 98.5
+            elif enters_by_growth:
                 rank = calculate_composite_rank(
                     apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
                     trade_score=trade_s, etv=etv_val,
@@ -703,7 +719,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 )
 
             entry_reason = 'apex_auto'
-            if enters_by_growth:
+            if enters_by_alpha:
+                entry_reason = f'intraday_alpha_pot_{snap.get("growth_potential_pct", 5.0)}%'
+            elif enters_by_growth:
                 entry_reason = f'high_growth_1h_{snap.get("entry_route_1h", "pullback")}_{snap.get("entry_support_1h", "")}'
             elif enters_by_breakout:
                 entry_reason = 'breakout_5m_Aa30_STK'

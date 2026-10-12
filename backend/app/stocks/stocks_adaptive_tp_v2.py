@@ -112,11 +112,25 @@ def get_ema_trend(
 
     Considera el RVOL para validar la señal.
     """
+    if df is None or len(df) == 0:
+        return {
+            'ema3':     0,
+            'ema9':     0,
+            'trend':    'neutral',
+            'diff_pct': 0,
+            'valid':    False,
+            'rvol':     rvol,
+            'is_up':    False,
+            'is_down':  False,
+            'ema3_curving_down': False,
+            'reason':   'Sin datos para calcular EMAs'
+        }
+
     ema3 = calculate_ema(df, 3)
     ema9 = calculate_ema(df, 9)
     
     ema3_prev = 0.0
-    if len(df) >= 4:
+    if df is not None and len(df) >= 4:
         # Calculate previous EMA3 to determine if it is curving down
         close_col = 'close' if 'close' in df.columns else 'Close'
         if close_col in df.columns:
@@ -129,6 +143,11 @@ def get_ema_trend(
             'ema9':     0,
             'trend':    'neutral',
             'valid':    False,
+            'diff_pct': 0,
+            'rvol':     rvol,
+            'is_up':    False,
+            'is_down':  False,
+            'ema3_curving_down': False,
             'reason':   'EMAs no calculables'
         }
 
@@ -464,26 +483,52 @@ def evaluate_stock_tp_v2(
     rvol:          float = 1.0,
     sar_15m:       int   = 1,
 ) -> dict:
-    """Wrapper para bloquear salidas (TP) con menos de 1 dolar de ganancia"""
+    """
+    Evaluador de Salidas y TP v2 para STOCKS.
+    Prioridad 1: Motor Integral ADUANA (Combustible 15m, Sub-Bandas Fibonacci, Micro 5m y Macro BB).
+    Prioridad 2: Motor adaptativo de bloques v2 base.
+    Cero filtros de $1.00 USD — Cualquier ganancia positiva se toma ante agotamiento.
+    """
+    # ── 1. EVALUACIÓN PRIORITARIA ADUANA EXIT ENGINE ──
+    try:
+        from app.stocks.aduana_stocks_exit_engine import evaluate_aduana_stocks_exit
+        aduana_res = evaluate_aduana_stocks_exit(
+            position=position,
+            current_price=current_price,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            df_1h=df_1h,
+            df_4h=df_4h,
+            df_1d=None
+        )
+        if aduana_res.get('should_close'):
+            action = aduana_res.get('action')
+            shares_to_sell = aduana_res.get('shares_to_close', 0)
+            if action == 'CLOSE_PARTIAL_50':
+                return {
+                    'action': 'close_block1',
+                    'shares': shares_to_sell,
+                    'pct': 50,
+                    'trigger': aduana_res.get('rule_code', 'ADUANA_TP50'),
+                    'reason': aduana_res.get('reason', 'ADUANA Parcial 50%'),
+                    'debug_indicators': {}
+                }
+            elif action in ('CLOSE_TOTAL', 'CLOSE_MAJOR_75'):
+                return {
+                    'action': 'close_total' if action == 'CLOSE_TOTAL' else 'close_blocks_2_and_3',
+                    'shares': shares_to_sell,
+                    'pct': aduana_res.get('pct_to_close', 100),
+                    'trigger': aduana_res.get('rule_code', 'ADUANA_CLOSE'),
+                    'reason': aduana_res.get('reason', 'ADUANA Cierre'),
+                    'debug_indicators': {}
+                }
+    except Exception as e_aduana:
+        log_error("ADUANA_TP_V2", f"Error en evaluate_aduana_stocks_exit para {ticker}: {e_aduana}")
+
+    # ── 2. EVALUACIÓN COMPLEMENTARIA DE BLOQUES V2 ──
     res = _evaluate_stock_tp_v2_core(
         ticker, position, current_price, snap, df_15m, df_5m, df_1h, df_4h, rvol, sar_15m
     )
-    
-    action = res.get('action', 'hold')
-    if action in ['close_total', 'close_partial', 'close_block1', 'close_block2', 'close_block3', 'close_blocks_2_and_3']:
-        entry_price  = safe_float(position.get('avg_price') or position.get('entry_price') or 0)
-        shares_rem   = safe_int(position.get('shares_remaining') or position.get('shares') or 0)
-        
-        # Calcular PnL en USD
-        if entry_price > 0 and shares_rem > 0:
-            pnl_usd = (current_price - entry_price) * shares_rem
-            
-            # Si la ganancia es menor a 1 USD (centavos, $0.00 o en pérdida), la retenemos en vez de TP
-            if pnl_usd < 1.0:
-                res['action'] = 'hold'
-                res['reason'] = f"Bloqueado: Ganancia de ${pnl_usd:.2f} USD es menor a $1.00 USD. " + res.get('reason', '')
-                res['trigger'] = 'min_profit_usd_blocked'
-                
     return res
 
 def _evaluate_stock_tp_v2_core(
@@ -547,20 +592,8 @@ def _evaluate_stock_tp_v2_core(
     is_hot = ("HOT" in group or "SCALPING" in group)
 
     MIN_HOLDING_MINUTES = 15.0
-    if age_mins < MIN_HOLDING_MINUTES and not is_hot:
-        # Permitimos saltar la restricción únicamente si no hay ganancia (evaluado por seguridad en otros lados)
-        # o si la posición tiene ganancias pero es demasiado joven, la obligamos a madurar.
-        if gain_pct > 0:
-            return {
-                'action': 'hold',
-                'gain_pct': round(gain_pct, 2),
-                'debug_indicators': {},
-                'reason': f'Posición joven ({age_mins:.1f}m < {MIN_HOLDING_MINUTES}m) — bloqueo de salida prematura para buscar ganancias importantes.'
-            }
-
-    # ── NUEVO: EXIT AGRESIVO para posiciones Aa30_STK (Breakout 5m) ──
-    rule_code_pos = str(position.get('rule_code', '')).upper()
-    if rule_code_pos == 'AA30_STK' and df_5m is not None and len(df_5m) >= 10:
+    # ── NUEVO: EXIT AGRESIVO por Momentum 5m para todas las posiciones de Stocks ──
+    if df_5m is not None and len(df_5m) >= 10:
         try:
             close_col_5m = 'close' if 'close' in df_5m.columns else 'Close'
             ema3_s = df_5m[close_col_5m].ewm(span=3, adjust=False).mean()
@@ -570,43 +603,12 @@ def _evaluate_stock_tp_v2_core(
             ema3_val = float(ema3_s.iloc[-1])
             ema9_val = float(ema9_s.iloc[-1])
 
-            if gain_pct > 0:
-                # 1. Cruce EMA3 < EMA9 en 5m → cerrar con ganancias
-                if ema3_val < ema9_val:
-                    return {
-                        'action':  'close_total',
-                        'pct':     100,
-                        'shares':  shares_rem,
-                        'gain_pct': round(gain_pct, 2),
-                        'debug_indicators': {
-                            'ema3_5m': round(ema3_val, 4),
-                            'ema9_5m': round(ema9_val, 4),
-                        },
-                        'reason': (
-                            f'Aa30_STK TP Momentum 5m: EMA3({ema3_val:.4f}) cruzó EMA9({ema9_val:.4f}) en contra. '
-                            f'Ganancia asegurada: +{gain_pct:.2f}%'
-                        ),
-                    }
-
-                # 2. Close < EMA3 en 5m → señal de debilidad
-                if last_close < ema3_val:
-                    return {
-                        'action':  'close_total',
-                        'pct':     100,
-                        'shares':  shares_rem,
-                        'gain_pct': round(gain_pct, 2),
-                        'debug_indicators': {
-                            'close_5m': round(last_close, 4),
-                            'ema3_5m': round(ema3_val, 4),
-                        },
-                        'reason': (
-                            f'Aa30_STK TP Agotamiento 5m: Close({last_close:.4f}) < EMA3({ema3_val:.4f}). '
-                            f'Ganancia asegurada: +{gain_pct:.2f}%'
-                        ),
-                    }
+            # NOTA (Multi-TF ADUANA v6.0): Las salidas con ganancia por momentum
+            # están 100% gobernadas por evaluate_aduana_stocks_exit para garantizar
+            # el piso de maduración (>= +1.5%) y evitar cierres de centavos en 60 segundos.
 
             # Si está perdiendo y EMA stack se rompió, cortar pérdidas rápido
-            if gain_pct < -0.5 and ema3_val < ema9_val:
+            if gain_pct < -1.0 and ema3_val < ema9_val:
                 return {
                     'action':  'close_total',
                     'pct':     100,
@@ -627,6 +629,15 @@ def _evaluate_stock_tp_v2_core(
             'gain_pct': round(gain_pct, 2),
             'debug_indicators': {},
             'reason':   'Sin ganancia — no evaluar TP'
+        }
+
+    # Validar que existan datos de 15m para evaluar los indicadores técnicos
+    if df_15m is None or (isinstance(df_15m, pd.DataFrame) and df_15m.empty):
+        return {
+            'action': 'hold',
+            'gain_pct': round(gain_pct, 2),
+            'debug_indicators': {},
+            'reason': f'Sin datos 15m para {ticker} — manteniendo posición'
         }
 
     # ── Calcular indicadores (necesarios para debug_indicators) ──
@@ -702,13 +713,6 @@ def _evaluate_stock_tp_v2_core(
         if df_tf is not None:
             triggered, details = check_sipv_bb_sell_condition(df_tf, tf)
             if triggered:
-                if 0 <= gain_pct < 1.0:
-                    return {
-                        'action': 'hold',
-                        'trigger': f'sipv_bb_sell_blocked_{tf}',
-                        'debug_indicators': debug_indicators,
-                        'reason': f'MULTI-TIMEFRAME EXIT ({tf}) detectado, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
-                    }
                 remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
                 return {
                     'action':  'close_total',
@@ -752,13 +756,6 @@ def _evaluate_stock_tp_v2_core(
         
         # Escenario 1: Agotamiento Parabólico
         if prev_close > prev_bb_upper and (curr_low < prev_low or curr_high < prev_high):
-            if 0 <= gain_pct < 1.0:
-                return {
-                    'action': 'hold',
-                    'trigger': 'hot_parabolic_exhaustion_blocked',
-                    'debug_indicators': debug_indicators,
-                    'reason': f'HOT SCALPING detectado, pero ganancia ({gain_pct:.2f}%) es < 1.0%. Manteniendo.'
-                }
             remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
             return {
                 'action':  'close_total',
@@ -836,6 +833,7 @@ def _evaluate_stock_tp_v2_core(
     # Obtener OPEN y CLOSE de la vela vigente
     curr_open = 0.0
     curr_close = current_price
+    last_candle = None
     if df_15m is not None and len(df_15m) >= 1:
         last_candle = df_15m.iloc[-1]
         curr_open = float(last_candle.get('open', last_candle.get('Open', 0)))
@@ -852,13 +850,13 @@ def _evaluate_stock_tp_v2_core(
 
     # Condición 4: HIGH > BB_Upper AND CLOSE rechaza dejando mecha
     # Evalúa que rompa la banda de Bollinger y deje mecha de rechazo (>0.5% desde el high)
-    curr_high_15m = float(last_candle.get('high', last_candle.get('High', curr_close))) if df_15m is not None and len(df_15m) >= 1 else curr_close
+    curr_high_15m = float(last_candle.get('high', last_candle.get('High', curr_close))) if last_candle is not None else curr_close
     candle_above_bb = (curr_high_15m > bb_upper and curr_close < (curr_high_15m * 0.995))
 
-    # Condición extra: EMA3 convergiendo hacia EMA9 (squeeze descendente)
-    ema_squeezing_down = ema['is_up'] and (ema['diff_pct'] < 5.0) and ema['ema3_curving_down']
+    # Condición extra: Desactivada regla plana de diff_pct < 5.0 (causaba cierres prematuros en stocks)
+    ema_squeezing_down = False
 
-    if ema_crossed_down or close_above_upper6 or rsi_extreme or candle_above_bb or ema_squeezing_down:
+    if ema_crossed_down or close_above_upper6 or rsi_extreme or candle_above_bb:
         remaining = shares_rem if shares_rem > 0 else b2_shares + b3_shares
         # Determinar qué condición activó el cierre
         if ema_crossed_down:
@@ -870,12 +868,9 @@ def _evaluate_stock_tp_v2_core(
         elif rsi_extreme:
             trigger_name = "rsi_gte_75"
             reason_detail = f"RSI = {rsi_15m:.1f} >= 75 (Sobrecompra extrema)"
-        elif candle_above_bb:
+        else:
             trigger_name = "high_gt_bb_upper_rejection"
             reason_detail = f"HIGH ${curr_high_15m:.2f} > BB_Upper ${bb_upper:.2f} con mecha de rechazo (C=${curr_close:.2f})"
-        else:
-            trigger_name = "ema_squeezing_down"
-            reason_detail = f"EMA3 convergiendo hacia EMA9 ({ema['diff_pct']:.1f}% separación, curving down)"
 
         return {
             'action':  'close_total',

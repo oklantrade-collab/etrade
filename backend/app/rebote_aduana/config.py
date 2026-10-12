@@ -28,6 +28,9 @@ ADUANA_PARAMS = {
     'range_bb_bandwidth_threshold': 0.02,
     'macro_score_threshold': 30.0,
     'qshr_squeeze_velocity_min': 2.5,
+    'qshr_squeeze_velocity_min_crypto': 1.2,
+    'qshr_squeeze_velocity_min_forex': 2.5,
+    'fullspan_bandwidth_ratio_min': 1.15,
     'qshr_sipv_climax_threshold': 2.0,
     'qshr_ema_trailing_period': 9,
     # ── ADUANAS v6.0 ENTRADAS DE ALTA PRECISIÓN ──
@@ -37,7 +40,13 @@ ADUANA_PARAMS = {
     'forex_session_end_minute': 30,
     'adx_min_trend': 22.0,
     'ema20_min_slope': 0.025,
-    'volume_min_ratio': 1.15
+    'volume_min_ratio': 1.15,
+    # ── COOLDOWN POST-SL (OPCIÓN A) ──
+    'cooldown_post_sl_minutes_crypto': 45,
+    'cooldown_post_sl_minutes_forex': 60,
+    # ── FILTRO DE TENDENCIA MACRO & TAKE PROFIT CRYPTO ──
+    'qshr_macro_trend_filter_enabled': True,
+    'min_profit_exit_pct_crypto': 0.45
 }
 
 def load_rebote_config_from_db() -> dict:

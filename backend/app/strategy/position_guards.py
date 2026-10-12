@@ -120,12 +120,12 @@ SL_COOLDOWN_REGISTRY: dict = {}
 
 POST_SL_COOLDOWN = {
     'crypto_futures': {
-        'mismo_simbolo':   4,   # horas
-        'misma_direccion': 8,   # no repetir dirección fallida
+        'mismo_simbolo':   3.0, # 3 horas (180 minutos)
+        'misma_direccion': 3.0, # 3 horas
     },
     'forex_futures': {
-        'mismo_simbolo':   2,
-        'misma_direccion': 4,
+        'mismo_simbolo':   3.0, # 3 horas (180 minutos)
+        'misma_direccion': 3.0,
     },
     'stocks_spot': {
         'mismo_simbolo':   24,
@@ -134,18 +134,86 @@ POST_SL_COOLDOWN = {
 }
 
 
+def is_symbol_in_sl_cooldown(
+    symbol: str,
+    cooldown_minutes: float = 180.0,
+    market_type: str = 'crypto_futures',
+    sb = None,
+    current_time: datetime = None,
+    is_macro_extreme: bool = False,
+) -> tuple[bool, float]:
+    """
+    Verifica si un símbolo está en enfriamiento tras un Stop Loss o Invalidación.
+    Si is_macro_extreme es True (UPPER_6 / LOWER_6 macro), el cooldown se anula.
+    Retorna (en_cooldown: bool, minutos_restantes: float).
+    """
+    if is_macro_extreme:
+        return False, 0.0
+    now = current_time or datetime.now(timezone.utc)
+    clean_sym = symbol.replace('/', '').replace('_', '').upper()
+
+    # 1. Comprobación en memoria
+    last_sl = SL_COOLDOWN_REGISTRY.get(f'{clean_sym}_any')
+    if not last_sl:
+        last_sl = SL_COOLDOWN_REGISTRY.get(f'{symbol.upper()}_any')
+
+    if last_sl:
+        mins_since = (now - last_sl).total_seconds() / 60.0
+        if mins_since < cooldown_minutes:
+            return True, round(cooldown_minutes - mins_since, 1)
+
+    # 2. Persistencia en DB (si el worker se reinició y la memoria está vacía)
+    if sb is not None:
+        try:
+            is_forex = any(x in clean_sym for x in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')) or market_type == 'forex_futures'
+            tbl = 'forex_positions' if is_forex else 'positions'
+            res = sb.table(tbl).select('closed_at,exit_reason,status,total_pnl,unrealized_pnl')\
+                .eq('symbol', symbol)\
+                .eq('status', 'closed')\
+                .order('closed_at', desc=True)\
+                .limit(1)\
+                .execute()
+            if res.data and len(res.data) > 0:
+                last_pos = res.data[0]
+                closed_at_str = last_pos.get('closed_at')
+                reason = str(last_pos.get('exit_reason') or '').lower()
+                pnl = float(last_pos.get('total_pnl') or last_pos.get('unrealized_pnl') or 0.0)
+
+                sl_triggers = ('sl', 'stop_loss', 'invalidation', 'cut_and_flip')
+                is_loss_exit = any(r in reason for r in sl_triggers) or pnl < 0
+
+                if closed_at_str and is_loss_exit:
+                    dt_closed = datetime.fromisoformat(closed_at_str.replace('Z', '+00:00'))
+                    mins_since_db = (now - dt_closed).total_seconds() / 60.0
+                    if mins_since_db < cooldown_minutes:
+                        SL_COOLDOWN_REGISTRY[f'{clean_sym}_any'] = dt_closed
+                        SL_COOLDOWN_REGISTRY[f'{symbol.upper()}_any'] = dt_closed
+                        return True, round(cooldown_minutes - mins_since_db, 1)
+        except Exception:
+            pass
+
+    return False, 0.0
+
+
+DAILY_SL_REGISTRY: dict = {}
+
 def can_open_position(
     symbol:         str,
     direction:      str,
     market_type:    str = 'crypto_futures',
     open_positions: list = None,
+    is_macro_extreme: bool = False,
 ) -> dict:
     """
     Verifica si se puede abrir una nueva posición.
 
     REGLA 1: Solo 1 posición abierta por símbolo (evita ×3 SHORTs).
-    REGLA 2: Cooldown post-SL del mismo símbolo.
+    REGLA 1B: Límite de Monedas Activas Simultáneas.
+    REGLA 2: Cooldown post-SL del mismo símbolo (3 horas).
     REGLA 3: Cooldown de dirección específica (no repetir SHORT fallido).
+    REGLA 4: Circuit Breaker Diario (máx 2 SLs por símbolo / día).
+
+    Si is_macro_extreme es True (UPPER_6 / LOWER_6 macro), las reglas 2, 3 y 4 se anulan.
 
     Returns:
         dict con 'allowed' (bool) y 'reason' (str)
@@ -157,7 +225,6 @@ def can_open_position(
         from app.core.crypto_symbols import normalize_crypto_symbol
         norm_symbol = normalize_crypto_symbol(symbol)
         
-        # Obtenemos el límite de la configuración o usamos 3 por defecto
         from app.core.supabase_client import get_risk_config
         try:
             max_per_symbol = int(get_risk_config().get('max_positions_per_symbol', 3))
@@ -178,7 +245,7 @@ def can_open_position(
                 )
             }
 
-    # ── REGLA 1B: Límite de Monedas Activas Simultáneas (Cant. Monedas Activas) ──
+    # ── REGLA 1B: Límite de Monedas Activas Simultáneas ──
     try:
         from app.core.supabase_client import get_supabase
         sb = get_supabase()
@@ -213,14 +280,35 @@ def can_open_position(
     except Exception as max_sym_err:
         pass
 
-    # ── REGLA 2: Cooldown general del símbolo post-SL ──
+    # Si es una oportunidad Macro Extrema (UPPER_6 / LOWER_6), levantar cooldowns y circuit breaker de símbolo
+    if is_macro_extreme:
+        return {'allowed': True, 'reason': 'Bypass de Zona Extrema Macro (UPPER_6 / LOWER_6) activado'}
+
+    # ── REGLA 4: Circuit Breaker Diario por Símbolo (Máx 2 SLs / día) ──
     now = datetime.now(timezone.utc)
+    today_key = now.strftime('%Y-%m-%d')
+    clean_sym = symbol.replace('/', '').replace('_', '').upper()
+    sym_daily_sls = DAILY_SL_REGISTRY.get(f"{today_key}_{clean_sym}", 0)
+    if sym_daily_sls >= 2:
+        return {
+            'allowed': False,
+            'reason': f'{symbol}: Circuit Breaker Diario activo ({sym_daily_sls} SLs hoy >= 2). Símbolo bloqueado hasta mañana.'
+        }
+
+    global_daily_sls = DAILY_SL_REGISTRY.get(f"{today_key}_GLOBAL", 0)
+    if global_daily_sls >= 3:
+        return {
+            'allowed': False,
+            'reason': f'Circuit Breaker Global de Cuenta activo ({global_daily_sls} SLs globales hoy >= 3). Pausa hasta mañana.'
+        }
+
+    # ── REGLA 2: Cooldown general del símbolo post-SL (3 horas) ──
     cfg = POST_SL_COOLDOWN.get(market_type, {})
 
     last_sl = SL_COOLDOWN_REGISTRY.get(f'{symbol.upper()}_any')
     if last_sl:
         hours_since = (now - last_sl).total_seconds() / 3600
-        cooldown = cfg.get('mismo_simbolo', 4)
+        cooldown = cfg.get('mismo_simbolo', 3.0)
         if hours_since < cooldown:
             remaining = cooldown - hours_since
             return {
@@ -231,11 +319,11 @@ def can_open_position(
                 )
             }
 
-    # ── REGLA 3: Cooldown de dirección específica ──
+    # ── REGLA 3: Cooldown de dirección específica (3 horas) ──
     last_sl_dir = SL_COOLDOWN_REGISTRY.get(f'{symbol.upper()}_{direction_l}')
     if last_sl_dir:
         hours_since = (now - last_sl_dir).total_seconds() / 3600
-        cooldown_dir = cfg.get('misma_direccion', 8)
+        cooldown_dir = cfg.get('misma_direccion', 3.0)
         if hours_since < cooldown_dir:
             remaining = cooldown_dir - hours_since
             return {
@@ -249,16 +337,25 @@ def can_open_position(
     return {'allowed': True, 'reason': 'OK'}
 
 
-def register_sl_event(symbol: str, direction: str):
+def register_sl_event(symbol: str, direction: str, event_time: datetime = None):
     """
     Registra que se activó un SL para este símbolo/dirección.
-    Inicia el período de cooldown.
+    Inicia el período de cooldown y actualiza el contador diario.
     """
-    now = datetime.now(timezone.utc)
-    key_any = f'{symbol.upper()}_any'
-    key_dir = f'{symbol.upper()}_{direction.lower()}'
+    now = event_time or datetime.now(timezone.utc)
+    clean_sym = symbol.replace('/', '').replace('_', '').upper()
+    key_any = f'{clean_sym}_any'
+    key_dir = f'{clean_sym}_{direction.lower()}'
     SL_COOLDOWN_REGISTRY[key_any] = now
     SL_COOLDOWN_REGISTRY[key_dir] = now
+    SL_COOLDOWN_REGISTRY[f'{symbol.upper()}_any'] = now
+    SL_COOLDOWN_REGISTRY[f'{symbol.upper()}_{direction.lower()}'] = now
+
+    today_key = now.strftime('%Y-%m-%d')
+    sym_k = f"{today_key}_{clean_sym}"
+    DAILY_SL_REGISTRY[sym_k] = DAILY_SL_REGISTRY.get(sym_k, 0) + 1
+    DAILY_SL_REGISTRY[f"{today_key}_GLOBAL"] = DAILY_SL_REGISTRY.get(f"{today_key}_GLOBAL", 0) + 1
+    log_info(MODULE, f"🛡️ Registrado evento SL para {symbol} ({direction.upper()}). Total hoy para {clean_sym}: {DAILY_SL_REGISTRY[sym_k]}, Global: {DAILY_SL_REGISTRY[f'{today_key}_GLOBAL']}")
     log_info(MODULE,
         f'🧊 COOLDOWN registrado: {symbol}/{direction} → '
         f'SL activado, cooldown iniciado'

@@ -574,6 +574,24 @@ def calculate_slv(entry_price: float, side: str, symbol: str, snap: dict, market
         dist = min(dist, max_dist)
         slv_price = entry_price - dist if side.lower() in ('long','buy') else entry_price + dist
         source = 'fallback_pct_capped'
+
+    # ── INVARIANTE MATEMÁTICO DE SEGURIDAD (Crypto y Forex, LONG y SHORT) ──
+    # Para LONG: SLV DEBE estar estrictamente por debajo del precio de entrada.
+    # Para SHORT: SLV DEBE estar estrictamente por encima del precio de entrada.
+    # Evita que bandas de Fibonacci superiores o fallos de snapshot fijen un SL invertido.
+    is_long = side.lower() in ('long', 'buy')
+    atr_val = safe_float(snap.get('atr', 0))
+    min_dist_pct = config.get('slv_fallback_pct', 0.015)
+    default_dist = (atr_val * 1.5) if atr_val > 0 else (entry_price * min_dist_pct)
+
+    if is_long:
+        if slv_price >= entry_price:
+            slv_price = entry_price - default_dist
+            source = 'bounded_below_entry_long'
+    else:
+        if slv_price <= entry_price:
+            slv_price = entry_price + default_dist
+            source = 'bounded_above_entry_short'
         
     return {
         'slv_price': slv_price,

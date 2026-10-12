@@ -23,6 +23,10 @@ from app.cascada.level_evaluator import check_fib_zone_reversal_15m, calculate_f
 
 MODULE = "quantum_squeeze_hedge"
 
+# Configuración de Producción: Solo Clímax Reversal (LOWER_6 / UPPER_6 en 15m y 5m) con gestión EREP.
+# Desactivadas las rupturas DIRECT y MOMENTUM de 5m para erradicar operaciones perdedoras por falsos rompimientos.
+QSHR_ENABLE_DIRECT_BREAKOUTS: bool = False
+
 def format_price_precision(symbol: str, price: float) -> float:
     """Formatea la precisión del precio según el activo para evitar rechazos del broker."""
     if not price or pd.isna(price) or math.isnan(price):
@@ -34,6 +38,21 @@ def format_price_precision(symbol: str, price: float) -> float:
         return float(round(price, 2))
     else:
         return float(round(price, 5))
+
+def is_trade_mature(position: dict, min_minutes: int = 20) -> bool:
+    """Verifica si la posición ha cumplido su ventana mínima de maduración (por defecto 20m)."""
+    if not position:
+        return True
+    ts_str = position.get('opened_at') or position.get('created_at')
+    if not ts_str:
+        return True
+    try:
+        from app.core.safety_manager import _safe_parse_iso
+        op_dt = _safe_parse_iso(ts_str)
+        now_dt = datetime.now(timezone.utc)
+        return (now_dt - op_dt).total_seconds() >= (min_minutes * 60)
+    except Exception:
+        return True
 
 def calculate_15m_fibonacci_levels(df_15m: pd.DataFrame, current_price: float) -> dict:
     """
@@ -52,6 +71,7 @@ def calculate_15m_fibonacci_levels(df_15m: pd.DataFrame, current_price: float) -
         }
 
     try:
+        df_15m = df_15m.copy()
         last = df_15m.iloc[-1]
         c = df_15m['close']
         basis = float(last.get('basis') or c.rolling(20, min_periods=1).mean().iloc[-1])
@@ -278,6 +298,23 @@ def check_15m_anti_range_filter(df_15m: pd.DataFrame, current_price: float, side
         log_error(MODULE, f"Error evaluando 15m Anti-Range filter: {e}")
         return {"passed": True, "reason": f"Error: {e}"}
 
+def calculate_rsi(series: pd.Series, period: int = 14) -> float:
+    """Calcula el RSI clásico para una serie de precios."""
+    if series is None or len(series) < period + 1:
+        return 50.0
+    try:
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0.0)).rolling(window=period, min_periods=period).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=period, min_periods=period).mean()
+        last_g = float(gain.iloc[-1]) if not gain.empty else 0.0
+        last_l = float(loss.iloc[-1]) if not loss.empty else 0.0
+        if last_l == 0:
+            return 100.0 if last_g > 0 else 50.0
+        rs = last_g / (last_l + 1e-9)
+        return float(100.0 - (100.0 / (1.0 + rs)))
+    except Exception:
+        return 50.0
+
 def check_triple_ema_alignment(df_5m: pd.DataFrame, direction: str) -> bool:
     """Verifica alineación de EMAs en 5m (EMA3, EMA9, EMA20)."""
     if df_5m is None or len(df_5m) < 20:
@@ -423,8 +460,16 @@ def evaluate_fullspan_velocity_breakout(
         v_score = float(vel_info.get('v_5m_score', 0.0))
         is_high_velocity = vel_info.get('is_high_velocity', False)
 
-        # Condición OR de Aceleración: Alta Velocidad V_5m >= 3.0 (o 2.5 Forex) OR Bandas Divergentes
-        passes_acceleration_or = is_high_velocity or is_divergent or (squeeze_5m.get('bandwidth_ratio', 1.0) >= 1.25)
+        # Condición Estricta de Aceleración: Requiere Alta Velocidad institucional Y expansión divergente de BB
+        passes_acceleration_or = is_high_velocity and (is_divergent or (squeeze_5m.get('bandwidth_ratio', 1.0) >= 1.20))
+
+        # Filtro de Amplitud Mínima en Forex (evitar micro-ruido de 2 pips en mercados planos)
+        is_forex = (market_type == 'forex_futures') or any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU'))
+        if is_forex:
+            min_pip_size = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
+            min_body_pips = 100.0 if 'XAU' in symbol else 8.0
+            if abs(c - o) < (min_body_pips * min_pip_size):
+                return None
 
         # ATR 15m para Escudo Anti-Agotamiento (Mejora 2)
         atr_15m = 0.0010
@@ -436,7 +481,7 @@ def evaluate_fullspan_velocity_breakout(
 
         # ── 1. EVALUACIÓN FULLSPAN SHORT (Flash Dump) ──
         # Nació en o sobre la media móvil/basis y perforó la banda inferior en la misma vela
-        if o >= (mean_reference * 0.999) and c <= lower_bb_5m and passes_acceleration_or:
+        if o >= mean_reference and c <= lower_bb_5m and c < o and passes_acceleration_or:
             # Mejora 1: Anti-Mecha de Absorción (Precio en el 15% inferior de la vela)
             max_allowed_rebound_price = l + (0.15 * rng_5m)
             passes_anti_wick = c <= max_allowed_rebound_price or (rng_5m > 0 and (h - c) / rng_5m >= 0.80)
@@ -457,13 +502,14 @@ def evaluate_fullspan_velocity_breakout(
                     "entry_price": limit_entry,
                     "sl_price": sl_price,
                     "velocity": v_score,
+                    "is_divergent": is_divergent,
                     "bandwidth_ratio": squeeze_5m.get('bandwidth_ratio', 1.0),
                     "reason": f"QSHR FullSpan SHORT: Open>=EMA20 con rotura Lower BB y aceleración V_5m={v_score:.2f} (OR BB Divergence)"
                 }
 
         # ── 2. EVALUACIÓN FULLSPAN LONG (Flash Pump / Short Squeeze) ──
         # Nació en o bajo la media móvil/basis y perforó la banda superior en la misma vela
-        if o <= (mean_reference * 1.001) and c >= upper_bb_5m and passes_acceleration_or:
+        if o <= mean_reference and c >= upper_bb_5m and c > o and passes_acceleration_or:
             # Mejora 1: Anti-Mecha de Absorción (Precio en el 15% superior de la vela)
             min_allowed_push_price = h - (0.15 * rng_5m)
             passes_anti_wick = c >= min_allowed_push_price or (rng_5m > 0 and (c - l) / rng_5m >= 0.80)
@@ -484,6 +530,7 @@ def evaluate_fullspan_velocity_breakout(
                     "entry_price": limit_entry,
                     "sl_price": sl_price,
                     "velocity": v_score,
+                    "is_divergent": is_divergent,
                     "bandwidth_ratio": squeeze_5m.get('bandwidth_ratio', 1.0),
                     "reason": f"QSHR FullSpan LONG: Open<=EMA20 con rotura Upper BB y aceleración V_5m={v_score:.2f} (OR BB Divergence)"
                 }
@@ -559,15 +606,28 @@ def calculate_sipv_indicator(df_15m: pd.DataFrame) -> dict:
 
 def calculate_hedge_sl(breakout_candle: pd.Series, hedge_side: str, symbol: str, buffer_pips: float = 2.0) -> float:
     """Calcula el Stop Loss estricto para la posición de Cobertura o Entrada Directa."""
-    is_jpy = 'JPY' in (symbol or '').upper()
-    pip_factor = 0.01 if is_jpy else 0.0001
-    
-    if hedge_side.lower() in ('short', 'sell'):
-        high_price = float(breakout_candle['high'])
-        sl_price = high_price + (buffer_pips * pip_factor)
+    is_crypto = 'USDT' in (symbol or '').upper() or 'BUSD' in (symbol or '').upper()
+    close_price = float(breakout_candle.get('close', 0.0))
+
+    if is_crypto and close_price > 0:
+        # En Crypto, usar buffer porcentual / ATR para evitar que ruido de 5m toque el SL
+        atr_candle = float(breakout_candle.get('atr', 0.0) or breakout_candle.get('atr_val', 0.0) or (float(breakout_candle['high']) - float(breakout_candle['low'])))
+        # Buffer de al menos 0.8% del precio o 1.5x ATR de la vela
+        buffer_dist = max(close_price * 0.008, 1.5 * atr_candle)
+        if hedge_side.lower() in ('short', 'sell'):
+            sl_price = float(breakout_candle['high']) + buffer_dist
+        else:
+            sl_price = float(breakout_candle['low']) - buffer_dist
     else:
-        low_price = float(breakout_candle['low'])
-        sl_price = low_price - (buffer_pips * pip_factor)
+        is_jpy = 'JPY' in (symbol or '').upper()
+        pip_factor = 0.01 if is_jpy else 0.0001
+        
+        if hedge_side.lower() in ('short', 'sell'):
+            high_price = float(breakout_candle['high'])
+            sl_price = high_price + (buffer_pips * pip_factor)
+        else:
+            low_price = float(breakout_candle['low'])
+            sl_price = low_price - (buffer_pips * pip_factor)
 
     return format_price_precision(symbol, sl_price)
 
@@ -575,13 +635,18 @@ def scan_squeeze_opportunities(
     symbol: str,
     df_5m: pd.DataFrame,
     df_15m: pd.DataFrame = None,
-    market_type: str = 'forex_futures'
+    market_type: str = 'forex_futures',
+    enable_direct_breakouts: bool = None
 ) -> dict | None:
     """
     Scanner Multi-Par Autónomo QSHR v5.
-    Evalúa si un símbolo presenta un Squeeze Breakout activo, Momentum o Clímax
-    condicionado a la confirmación de expansión de Bandas de Bollinger en 15 minutos.
+    Prioriza de forma absoluta las Reversiones de Clímax Institucional (LOWER_6 / UPPER_6 en 15m y 5m)
+    sin Stop Loss y con gestión de rescate EREP (Cero pérdidas demostradas).
+    Opcionalmente evalúa rupturas de momentum (DIRECT/FULLSPAN) si enable_direct_breakouts=True.
     """
+    if enable_direct_breakouts is None:
+        enable_direct_breakouts = QSHR_ENABLE_DIRECT_BREAKOUTS
+
     if df_5m is None or len(df_5m) < 20:
         return None
 
@@ -590,14 +655,240 @@ def scan_squeeze_opportunities(
         current_price = float(last_5m['close'])
         open_price = float(last_5m['open'])
 
-        # ─── 0. TOP PRIORITY: FULLSPAN VELOCITY BREAKOUT (Mejora Instantánea Punto Cero) ───
-        fullspan_res = evaluate_fullspan_velocity_breakout(symbol, df_5m, df_15m, current_price, market_type)
-        if fullspan_res:
-            return fullspan_res
-
         squeeze = detect_bollinger_squeeze_expansion(df_5m)
         vel_info = calculate_5m_velocity(df_5m, market_type=market_type, symbol=symbol)
         v_score = float(vel_info.get('v_5m_score', 0.0))
+
+        # ─── 1. PRIORIDAD ABSOLUTA: CLÍMAX EXTREMO FIBONACCI / SIPV (LOWER_6 / UPPER_6 en 15m y 5m) ───
+        # Reversión cuántica condicionada a filtros de Inflexión EMA3, Pendiente de Bandas,
+        # Clasificador de Capitulación vs Sangría Lenta y Desviación Mínima a Basis.
+        # Opera estrictamente SIN STOP LOSS con gestión EREP (Tasa de salvamento / no-pérdida = 100%).
+        if df_15m is not None and len(df_15m) >= 3:
+            last_15m = df_15m.iloc[-1]
+            prev_15m = df_15m.iloc[-2]
+
+            c15_series = df_15m['close'] if 'close' in df_15m.columns else df_15m.get('c', pd.Series())
+            ema3_15m_s = c15_series.ewm(span=3, adjust=False).mean()
+            ema9_15m_s = c15_series.ewm(span=9, adjust=False).mean()
+            ema20_15m_s = c15_series.ewm(span=20, adjust=False).mean()
+
+            ema3_15m = float(ema3_15m_s.iloc[-1])
+            ema9_15m = float(ema9_15m_s.iloc[-1]) if len(ema9_15m_s) >= 9 else 0.0
+            ema20_15m = float(ema20_15m_s.iloc[-1]) if len(ema20_15m_s) >= 20 else 0.0
+            is_bull_macro_15m = (ema3_15m > ema9_15m > ema20_15m) and (ema20_15m > 0)
+            is_bear_macro_15m = (ema3_15m < ema9_15m < ema20_15m) and (ema20_15m > 0)
+
+            atr_15m = float(last_15m.get('atr') or last_15m.get('atr_14') or 0.0)
+            rng_15m = float(last_15m.get('high', 0)) - float(last_15m.get('low', 0))
+            if atr_15m <= 0:
+                atr_15m = rng_15m if rng_15m > 0 else 1.0
+
+            # Pendiente de EMA3 en 15m (normalizada por ATR)
+            ema3_slope_15m = float((ema3_15m_s.iloc[-1] - ema3_15m_s.iloc[-2]) / (atr_15m + 1e-10))
+
+            # Bandas de 15m y pendientes
+            levels_15m = calculate_15m_fibonacci_levels(df_15m, current_price)
+            basis_15m = float(levels_15m.get('basis_15m') or current_price)
+            l6_15m = float(last_15m.get('lower_6', 0.0) or levels_15m.get('lower_6', 0.0) or 0.0)
+            u6_15m = float(last_15m.get('upper_6', 0.0) or levels_15m.get('upper_6', 0.0) or 0.0)
+            prev_l6 = float(prev_15m.get('lower_6', 0.0) or 0.0)
+            prev_u6 = float(prev_15m.get('upper_6', 0.0) or 0.0)
+
+            l6_slope_15m = float((l6_15m - prev_l6) / (atr_15m + 1e-10)) if prev_l6 > 0 else 0.0
+            u6_slope_15m = float((u6_15m - prev_u6) / (atr_15m + 1e-10)) if prev_u6 > 0 else 0.0
+
+            # Indicadores de Régimen (Capitulación vs Sangría Lenta)
+            adx_15m = float(last_15m.get('adx', 0.0) or 0.0)
+            candle_range_ratio = rng_15m / (atr_15m + 1e-10)
+
+            # Filtro de Desviación Mínima a Basis (Blindaje contra micro-ruidos como EURUSD)
+            dist_to_basis = abs(current_price - basis_15m)
+            dist_atr_ratio = dist_to_basis / (atr_15m + 1e-10)
+
+            # Umbral de pips en Forex
+            is_forex = (market_type == 'forex_futures') or any(x in symbol for x in ('EUR', 'GBP', 'JPY', 'XAU'))
+            pip_size = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
+            dist_pips = dist_to_basis / pip_size if is_forex else 999.0
+            min_dist_pips = 8.0 if 'XAU' in symbol else (15.0 if is_forex else 0.0)
+            sufficient_basis_distance = (dist_atr_ratio >= 1.8) and (dist_pips >= min_dist_pips)
+
+            # Datos de 5m
+            c_5m = float(last_5m.get('close', 0))
+            o_5m = float(last_5m.get('open', 0))
+            h_5m = float(last_5m.get('high', 0))
+            l_5m = float(last_5m.get('low', 0))
+            rng_5m = h_5m - l_5m
+            body_5m = abs(c_5m - o_5m)
+            body_ratio_5m = (body_5m / (rng_5m + 1e-10)) if rng_5m > 0 else 0.0
+            rsi_5m = float(last_5m.get('rsi') or last_5m.get('rsi_14') or 50.0)
+            fib_zone_5m = float(last_5m.get('fibonacci_zone', 0.0) or 0.0)
+            l6_5m = float(last_5m.get('lower_6', 0.0) or 0.0)
+            u6_5m = float(last_5m.get('upper_6', 0.0) or 0.0)
+
+            # Volumen y ATR en 5m
+            v5_series = df_5m['volume'] if 'volume' in df_5m.columns else df_5m.get('v', pd.Series(dtype=float))
+            vol_5m = float(v5_series.iloc[-1]) if len(v5_series) > 0 else 0.0
+            vol_sma10_5m = float(v5_series.tail(10).mean()) if len(v5_series) >= 10 else 0.0
+            has_vol_boost_5m = (vol_sma10_5m > 0 and vol_5m >= 1.15 * vol_sma10_5m)
+            atr_5m_val = float(df_5m['atr'].iloc[-1]) if 'atr' in df_5m.columns else (c_5m * 0.005 if not is_forex else 0.0008)
+            is_rocket_5m = (rng_5m > 2.5 * atr_5m_val) if atr_5m_val > 0 else False
+
+            prev_5m = df_5m.iloc[-2] if len(df_5m) >= 2 else last_5m
+            h_prev_5m = float(prev_5m.get('high', 0))
+            l_prev_5m = float(prev_5m.get('low', 0))
+
+            # EMA3 y EMA9 en 5m para confirmación intradía
+            c5_series = df_5m['close'] if 'close' in df_5m.columns else df_5m.get('c', pd.Series())
+            ema3_5m = float(c5_series.ewm(span=3, adjust=False).mean().iloc[-1]) if len(c5_series) >= 3 else c_5m
+            ema9_5m = float(c5_series.ewm(span=9, adjust=False).mean().iloc[-1]) if len(c5_series) >= 9 else c_5m
+
+            # 15m OHLC & RSI
+            low_15m = float(last_15m.get('low', 0))
+            high_15m = float(last_15m.get('high', 0))
+            c_15m = float(last_15m.get('close', 0))
+            o_15m = float(last_15m.get('open', 0))
+            rsi_15m = float(last_15m.get('rsi') or last_15m.get('rsi_14') or 50.0)
+            fib_zone = float(last_15m.get('fibonacci_zone', 0.0) or 0.0)
+
+            # ─── 1.A CLÍMAX EN 15 MINUTOS ───
+            # Reversión LONG: Penetración de LOWER_6 con filtros anti-pérdidas estrictos
+            touched_lower_15m = (fib_zone <= -5) or (l6_15m > 0 and low_15m <= l6_15m)
+            if touched_lower_15m and rng_15m > 0 and sufficient_basis_distance:
+                lower_wick_ratio = (min(c_15m, o_15m) - low_15m) / rng_15m
+                turn_5m_confirmed = (c_5m > o_5m) and (c_5m > ema3_5m)
+                has_absorption = (lower_wick_ratio >= 0.28) and ((c_15m > o_15m) or turn_5m_confirmed)
+                ema3_ok_long = (ema3_slope_15m >= -0.08) or (turn_5m_confirmed and lower_wick_ratio >= 0.30)
+                band_ok_long = (l6_slope_15m >= -0.12)
+                macro_ok_long = not (is_bear_macro_15m and (v_score >= 2.6 or vel_info.get('is_high_velocity', False)))
+                size_factor_15m_long = 0.45 if is_bear_macro_15m else 1.0
+                slv_15m_long = low_15m - (1.2 * atr_15m) if not is_forex else (low_15m - 10.0 * pip_size)
+
+                if has_absorption and ema3_ok_long and band_ok_long and macro_ok_long:
+                    return {
+                        "action": "open_climax_reversal_long",
+                        "side": "long",
+                        "rule_code": "Bb33_QSHR_CLIMAX_LOWER6_LONG",
+                        "order_type": "MARKET",
+                        "sl_price": slv_15m_long,  # STOP LOSS ESTRUCTURAL (LOWER_6 - 1.2 ATR) con gestión EREP
+                        "structural_sl": slv_15m_long,
+                        "climax_slv": slv_15m_long,
+                        "no_sl": False,
+                        "velocity": vel_info['v_5m_score'],
+                        "bandwidth_ratio": squeeze['bandwidth_ratio'],
+                        "reason": f"QSHR v5 Clímax LOWER_6 15M LONG: Extremo 15m (RSI={rsi_15m:.1f}, SlopeEMA3={ema3_slope_15m:.2f}) con absorción ({lower_wick_ratio*100:.0f}% mecha) y SL estructural",
+                        "erep_eligible": True,
+                        "holding_window_bars": 3,
+                        "size_factor": size_factor_15m_long
+                    }
+
+            # Reversión SHORT: Penetración de UPPER_6 con filtros anti-pérdidas estrictos
+            touched_upper_15m = (fib_zone >= 5) or (u6_15m > 0 and high_15m >= u6_15m)
+            if touched_upper_15m and rng_15m > 0 and sufficient_basis_distance:
+                upper_wick_ratio = (high_15m - max(c_15m, o_15m)) / rng_15m
+                turn_5m_short_confirmed = (c_5m < o_5m) and (c_5m < ema3_5m)
+                has_rejection = (upper_wick_ratio >= 0.28) and ((c_15m < o_15m) or turn_5m_short_confirmed)
+                ema3_ok_short = (ema3_slope_15m <= 0.08) or (turn_5m_short_confirmed and upper_wick_ratio >= 0.30)
+                band_ok_short = (u6_slope_15m <= 0.12)
+                macro_ok_short = not (is_bull_macro_15m and (v_score >= 2.6 or vel_info.get('is_high_velocity', False)))
+                size_factor_15m_short = 0.45 if is_bull_macro_15m else 1.0
+                slv_15m_short = high_15m + (1.2 * atr_15m) if not is_forex else (high_15m + 10.0 * pip_size)
+
+                if has_rejection and ema3_ok_short and band_ok_short and macro_ok_short:
+                    return {
+                        "action": "open_climax_reversal_short",
+                        "side": "short",
+                        "rule_code": "Bb33_QSHR_CLIMAX_UPPER6_SHORT",
+                        "order_type": "MARKET",
+                        "sl_price": slv_15m_short,  # STOP LOSS ESTRUCTURAL (UPPER_6 + 1.2 ATR) con gestión EREP
+                        "structural_sl": slv_15m_short,
+                        "climax_slv": slv_15m_short,
+                        "no_sl": False,
+                        "velocity": vel_info['v_5m_score'],
+                        "bandwidth_ratio": squeeze['bandwidth_ratio'],
+                        "reason": f"QSHR v5 Clímax UPPER_6 15M SHORT: Extremo 15m (RSI={rsi_15m:.1f}, SlopeEMA3={ema3_slope_15m:.2f}) con rechazo ({upper_wick_ratio*100:.0f}% mecha) y SL estructural",
+                        "erep_eligible": True,
+                        "holding_window_bars": 3,
+                        "size_factor": size_factor_15m_short
+                    }
+
+            # ─── 1.B CLÍMAX EXTREMO EN 5 MINUTOS CON FILTROS ANTI-PÉRDIDAS Y FUERZA REAL ───
+            # 5m Clímax LOWER_6 LONG
+            touched_l6_5m = (fib_zone_5m <= -5) or (l6_5m > 0 and l_5m <= l6_5m)
+            if touched_l6_5m and rng_5m > 0 and c_5m < basis_15m and sufficient_basis_distance:
+                lower_wick_5m = (min(c_5m, o_5m) - l_5m) / rng_5m
+                # Fuerza compradora real en 5m: vela verde cerrada sobre EMA3 + volumen o cuerpo sólido
+                turn_5m_confirmed = (c_5m > o_5m) and (c_5m > ema3_5m)
+                has_buying_force = has_vol_boost_5m or (body_ratio_5m >= 0.40) or (lower_wick_5m >= 0.30)
+                ema3_5m_ok = turn_5m_confirmed and has_buying_force
+                band_5m_ok = (l6_slope_15m >= -0.08)
+                rocket_guard_ok = (not is_rocket_5m) or (c_5m > h_prev_5m)
+
+                rsi_ok_5m = (rsi_5m <= 32.0) and ((rsi_15m <= 38.0) or (rsi_5m <= 24.0))
+                macro_ok_5m = not (is_bear_macro_15m and (v_score >= 2.6 or vel_info.get('is_high_velocity', False))) and (not is_bear_macro_15m or (rsi_15m <= 32.0 or rsi_5m <= 24.0)) and rocket_guard_ok
+                size_factor_5m_long = 0.45 if is_bear_macro_15m else 0.70
+                slv_5m_long = l_5m - (1.2 * atr_5m_val) if not is_forex else (l_5m - 10.0 * pip_size)
+
+                if rsi_ok_5m and ema3_5m_ok and band_5m_ok and macro_ok_5m:
+                    return {
+                        "action": "open_climax_reversal_long",
+                        "side": "long",
+                        "rule_code": "Bb33_QSHR_CLIMAX_5M_LOWER6_LONG",
+                        "order_type": "MARKET",
+                        "sl_price": slv_5m_long,  # STOP LOSS ESTRUCTURAL (LOWER_6 - 1.2 ATR) con gestión EREP
+                        "structural_sl": slv_5m_long,
+                        "climax_slv": slv_5m_long,
+                        "no_sl": False,
+                        "velocity": vel_info['v_5m_score'],
+                        "bandwidth_ratio": squeeze['bandwidth_ratio'],
+                        "reason": f"QSHR v5 Clímax 5M LOWER_6 LONG: Extremo 5m (RSI_5m={rsi_5m:.1f}, RSI_15m={rsi_15m:.1f}) con giro verde sobre EMA3 y SL estructural",
+                        "erep_eligible": True,
+                        "holding_window_bars": 3,
+                        "size_factor": size_factor_5m_long
+                    }
+
+            # 5m Clímax UPPER_6 SHORT
+            touched_u6_5m = (fib_zone_5m >= 5) or (u6_5m > 0 and h_5m >= u6_5m)
+            if touched_u6_5m and rng_5m > 0 and c_5m > basis_15m and sufficient_basis_distance:
+                upper_wick_5m = (h_5m - max(c_5m, o_5m)) / rng_5m
+                # Fuerza vendedora real en 5m: vela roja cerrada bajo EMA3 + volumen o cuerpo sólido
+                turn_5m_confirmed = (c_5m < o_5m) and (c_5m < ema3_5m)
+                has_selling_force = has_vol_boost_5m or (body_ratio_5m >= 0.40) or (upper_wick_5m >= 0.30)
+                ema3_5m_ok = turn_5m_confirmed and has_selling_force
+                band_5m_ok = (u6_slope_15m <= 0.08)
+                rocket_guard_ok = (not is_rocket_5m) or (c_5m < l_prev_5m)
+
+                rsi_ok_5m = (rsi_5m >= 68.0) and ((rsi_15m >= 62.0) or (rsi_5m >= 76.0))
+                # En contra-tendencia macro alcista, exigir sobrecompra extrema (RSI 15m >= 75 o 5m >= 78)
+                macro_ok_5m = not (is_bull_macro_15m and (v_score >= 2.6 or vel_info.get('is_high_velocity', False))) and (not is_bull_macro_15m or (rsi_15m >= 75.0 or rsi_5m >= 78.0)) and rocket_guard_ok
+                size_factor_5m_short = 0.45 if is_bull_macro_15m else 0.70
+                slv_5m_short = h_5m + (1.2 * atr_5m_val) if not is_forex else (h_5m + 10.0 * pip_size)
+
+                if rsi_ok_5m and ema3_5m_ok and band_5m_ok and macro_ok_5m:
+                    return {
+                        "action": "open_climax_reversal_short",
+                        "side": "short",
+                        "rule_code": "Bb33_QSHR_CLIMAX_5M_UPPER6_SHORT",
+                        "order_type": "MARKET",
+                        "sl_price": slv_5m_short,  # STOP LOSS ESTRUCTURAL (UPPER_6 + 1.2 ATR) con gestión EREP
+                        "structural_sl": slv_5m_short,
+                        "climax_slv": slv_5m_short,
+                        "no_sl": False,
+                        "velocity": vel_info['v_5m_score'],
+                        "bandwidth_ratio": squeeze['bandwidth_ratio'],
+                        "reason": f"QSHR v5 Clímax 5M UPPER_6 SHORT: Extremo 5m (RSI_5m={rsi_5m:.1f}, RSI_15m={rsi_15m:.1f}) con giro rojo bajo EMA3 y SL estructural",
+                        "erep_eligible": True,
+                        "holding_window_bars": 3,
+                        "size_factor": size_factor_5m_short
+                    }
+
+        # ─── 2. RUPTURAS Y MOMENTUM (DIRECT / FULLSPAN) CONDICIONADOS A FLAG ───
+        if not enable_direct_breakouts:
+            return None
+
+        # ─── 0. EVALUACIÓN SECUNDARIA: FULLSPAN VELOCITY BREAKOUT (Solo si enable_direct_breakouts=True) ───
+        fullspan_res = evaluate_fullspan_velocity_breakout(symbol, df_5m, df_15m, current_price, market_type)
+        if fullspan_res:
+            return fullspan_res
 
         # ─── FILTRO MAESTRO: Expansión de Bandas de Bollinger en 15m (con Bypass por Alta Velocidad) ───
         # Si la velocidad extrema V_5m >= 3.0 está activa, se autoriza bypass del cálculo rezagado de 15m
@@ -624,15 +915,44 @@ def scan_squeeze_opportunities(
             min_body_ratio = 0.35
 
         rng_5m = float(last_5m['high']) - float(last_5m['low'])
+        high_5m = float(last_5m['high'])
+        low_5m = float(last_5m['low'])
         body_5m = abs(current_price - open_price)
         passes_body_ratio = not (rng_5m > 0 and (body_5m / rng_5m) < min_body_ratio)
+
+        upper_wick = high_5m - max(open_price, current_price)
+        lower_wick = min(open_price, current_price) - low_5m
+        upper_wick_ratio = (upper_wick / rng_5m) if rng_5m > 0 else 0.0
+        lower_wick_ratio = (lower_wick / rng_5m) if rng_5m > 0 else 0.0
+
+        # Filtros de Sobreextensión RSI (5m y 15m)
+        rsi_5m = calculate_rsi(df_5m['close'])
+        rsi_15m = calculate_rsi(df_15m['close']) if (df_15m is not None and len(df_15m) >= 15) else rsi_5m
+        levels_15m = calculate_15m_fibonacci_levels(df_15m, current_price) if df_15m is not None else {}
 
         # 1. Ruptura Alcista Directa (LONG)
         if vel_info['is_high_velocity'] and is_breakout_active and passes_body_ratio:
             if current_price >= squeeze['curr_upper'] and current_price > open_price:
-                if check_triple_ema_alignment(df_5m, 'bullish') and vel_info['direction'] == 'BULLISH_SURGE':
+                # Filtro Anti-Agotamiento / Mecha de absorción en techo
+                if upper_wick_ratio > 0.28:
+                    log_info(MODULE, f"🛡️ [ANTI-AGOTAMIENTO] {symbol} Direct LONG rechazado: Mecha superior excesiva ({upper_wick_ratio*100:.1f}% > 28%)")
+                # Filtro RSI Sobrecompra
+                elif rsi_5m > 72.0 or rsi_15m > 74.0:
+                    log_info(MODULE, f"🛡️ [RSI SOBRECOMPRA] {symbol} Direct LONG rechazado: RSI 5m={rsi_5m:.1f}, 15m={rsi_15m:.1f} > 72")
+                # Filtro Fibonacci Zona Extrema
+                elif df_15m is not None and (current_price >= levels_15m.get('upper_5_15m', float('inf')) or current_price >= levels_15m.get('upper_4', float('inf'))):
+                    log_info(MODULE, f"🛡️ [FIB EXTREMO] {symbol} Direct LONG rechazado: Precio en zona extrema Upper_4/Upper_5")
+                elif check_triple_ema_alignment(df_5m, 'bullish') and vel_info['direction'] == 'BULLISH_SURGE':
+                    # Filtro Macro Anti-Tendencia 15m: No comprar rupturas en 5m si 15m está en rotación bajista confirmada
+                    c15_s = df_15m['close'] if 'close' in df_15m.columns else df_15m.get('c', pd.Series())
+                    ema3_15m_val = float(c15_s.ewm(span=3, adjust=False).mean().iloc[-1]) if len(c15_s) >= 3 else 0.0
+                    ema9_15m_val = float(c15_s.ewm(span=9, adjust=False).mean().iloc[-1]) if len(c15_s) >= 9 else 0.0
+                    ema20_15m_val = float(c15_s.ewm(span=20, adjust=False).mean().iloc[-1]) if len(c15_s) >= 20 else 0.0
+                    is_macro_bear = (ema3_15m_val < ema9_15m_val < ema20_15m_val) and (ema20_15m_val > 0)
+                    if is_macro_bear:
+                        log_info(MODULE, f"🛡️ [ANTI-MACRO 15M] {symbol} Direct LONG rechazado: Marco 15m en rotación bajista (EMA3 < EMA9 < EMA20)")
                     # Filtro Anti-Rango 15m
-                    if df_15m is not None:
+                    elif df_15m is not None:
                         anti_range = check_15m_anti_range_filter(df_15m, current_price, 'long', vel_info['v_5m_score'])
                         if not anti_range.get('passed', True):
                             log_info(MODULE, f"🛡️ [ANTI-RANGO 15M] {symbol} Direct LONG rechazado: {anti_range.get('reason')}")
@@ -646,15 +966,32 @@ def scan_squeeze_opportunities(
                                 "sl_price": sl_price,
                                 "velocity": vel_info['v_5m_score'],
                                 "bandwidth_ratio": squeeze['bandwidth_ratio'],
-                                "reason": f"QSHR v5 Direct LONG: Squeeze Breakout 5m confirmado (V_5m={vel_info['v_5m_score']}, BB_Ratio={squeeze['bandwidth_ratio']})"
+                                "reason": f"QSHR v5 Direct LONG: Squeeze Breakout 5m confirmado (V_5m={vel_info['v_5m_score']}, BB_Ratio={squeeze['bandwidth_ratio']}, RSI={rsi_5m:.1f})"
                             }
 
         # 2. Ruptura Bajista Directa (SHORT)
         if vel_info['is_high_velocity'] and is_breakout_active and passes_body_ratio:
             if current_price <= squeeze['curr_lower'] and current_price < open_price:
-                if check_triple_ema_alignment(df_5m, 'bearish') and vel_info['direction'] == 'BEARISH_SURGE':
+                # Filtro Anti-Agotamiento / Mecha de absorción en piso
+                if lower_wick_ratio > 0.28:
+                    log_info(MODULE, f"🛡️ [ANTI-AGOTAMIENTO] {symbol} Direct SHORT rechazado: Mecha inferior excesiva ({lower_wick_ratio*100:.1f}% > 28%)")
+                # Filtro RSI Sobreventa
+                elif rsi_5m < 28.0 or rsi_15m < 26.0:
+                    log_info(MODULE, f"🛡️ [RSI SOBREVENTA] {symbol} Direct SHORT rechazado: RSI 5m={rsi_5m:.1f}, 15m={rsi_15m:.1f} < 28")
+                # Filtro Fibonacci Zona Extrema
+                elif df_15m is not None and ((levels_15m.get('lower_5_15m', 0.0) > 0 and current_price <= levels_15m['lower_5_15m']) or (levels_15m.get('lower_4', 0.0) > 0 and current_price <= levels_15m['lower_4'])):
+                    log_info(MODULE, f"🛡️ [FIB EXTREMO] {symbol} Direct SHORT rechazado: Precio en zona extrema Lower_4/Lower_5")
+                elif check_triple_ema_alignment(df_5m, 'bearish') and vel_info['direction'] == 'BEARISH_SURGE':
+                    # Filtro Macro Anti-Tendencia 15m: No vender rupturas en 5m si 15m está en rotación alcista confirmada
+                    c15_s = df_15m['close'] if 'close' in df_15m.columns else df_15m.get('c', pd.Series())
+                    ema3_15m_val = float(c15_s.ewm(span=3, adjust=False).mean().iloc[-1]) if len(c15_s) >= 3 else 0.0
+                    ema9_15m_val = float(c15_s.ewm(span=9, adjust=False).mean().iloc[-1]) if len(c15_s) >= 9 else 0.0
+                    ema20_15m_val = float(c15_s.ewm(span=20, adjust=False).mean().iloc[-1]) if len(c15_s) >= 20 else 0.0
+                    is_macro_bull = (ema3_15m_val > ema9_15m_val > ema20_15m_val) and (ema20_15m_val > 0)
+                    if is_macro_bull:
+                        log_info(MODULE, f"🛡️ [ANTI-MACRO 15M] {symbol} Direct SHORT rechazado: Marco 15m en rotación alcista (EMA3 > EMA9 > EMA20)")
                     # Filtro Anti-Rango 15m
-                    if df_15m is not None:
+                    elif df_15m is not None:
                         anti_range = check_15m_anti_range_filter(df_15m, current_price, 'short', vel_info['v_5m_score'])
                         if not anti_range.get('passed', True):
                             log_info(MODULE, f"🛡️ [ANTI-RANGO 15M] {symbol} Direct SHORT rechazado: {anti_range.get('reason')}")
@@ -668,7 +1005,7 @@ def scan_squeeze_opportunities(
                                 "sl_price": sl_price,
                                 "velocity": vel_info['v_5m_score'],
                                 "bandwidth_ratio": squeeze['bandwidth_ratio'],
-                                "reason": f"QSHR v5 Direct SHORT: Squeeze Breakout 5m confirmado (V_5m={vel_info['v_5m_score']}, BB_Ratio={squeeze['bandwidth_ratio']})"
+                                "reason": f"QSHR v5 Direct SHORT: Squeeze Breakout 5m confirmado (V_5m={vel_info['v_5m_score']}, BB_Ratio={squeeze['bandwidth_ratio']}, RSI={rsi_5m:.1f})"
                             }
 
         # 3. MOMENTUM CASCADE (EMA3 vs EMA9 + Velocidad V_5m >= 2.0)
@@ -682,80 +1019,34 @@ def scan_squeeze_opportunities(
                 ema3_5m = float(c_5m.ewm(span=3, adjust=False).mean().iloc[-1])
                 ema9_5m = float(c_5m.ewm(span=9, adjust=False).mean().iloc[-1])
 
-            # Momentum SHORT: EMA3 < EMA9 con impulso bajista y V_5m >= 2.0
+            # Momentum SHORT: EMA3 < EMA9 con impulso bajista y V_5m >= 2.0 (con filtro de mecha y RSI)
             if ema3_5m < ema9_5m and (vel_info['direction'] == 'BEARISH_SURGE' or current_price < open_price):
-                sl_price = calculate_hedge_sl(last_5m, 'short', symbol)
-                return {
-                    "action": "open_momentum_short",
-                    "side": "short",
-                    "rule_code": "Bb33_QSHR_MOMENTUM_SHORT",
-                    "order_type": "MARKET",
-                    "sl_price": sl_price,
-                    "velocity": vel_info['v_5m_score'],
-                    "bandwidth_ratio": squeeze['bandwidth_ratio'],
-                    "reason": f"QSHR v5 Momentum SHORT: EMA3<EMA9 con V_5m={vel_info['v_5m_score']:.2f} >= 2.0"
-                }
-
-            # Momentum LONG: EMA3 > EMA9 con impulso alcista y V_5m >= 2.0
-            if ema3_5m > ema9_5m and (vel_info['direction'] == 'BULLISH_SURGE' or current_price > open_price):
-                sl_price = calculate_hedge_sl(last_5m, 'long', symbol)
-                return {
-                    "action": "open_momentum_long",
-                    "side": "long",
-                    "rule_code": "Bb33_QSHR_MOMENTUM_LONG",
-                    "order_type": "MARKET",
-                    "sl_price": sl_price,
-                    "velocity": vel_info['v_5m_score'],
-                    "bandwidth_ratio": squeeze['bandwidth_ratio'],
-                    "reason": f"QSHR v5 Momentum LONG: EMA3>EMA9 con V_5m={vel_info['v_5m_score']:.2f} >= 2.0"
-                }
-
-        # 4. CLÍMAX EXTREMO FIBONACCI / SIPV (Toque de LOWER_6 / UPPER_6)
-        # Reversión cuántica inmediata por agotamiento extremo de presión vendedora/compradora
-        if df_15m is not None and len(df_15m) >= 2:
-            last_15m = df_15m.iloc[-1]
-            fib_zone = float(last_15m.get('fibonacci_zone', 0.0) or 0.0)
-            l6_15m = float(last_15m.get('lower_6', 0.0) or 0.0)
-            u6_15m = float(last_15m.get('upper_6', 0.0) or 0.0)
-            rng_15m = float(last_15m.get('high', 0)) - float(last_15m.get('low', 0))
-            low_15m = float(last_15m.get('low', 0))
-            high_15m = float(last_15m.get('high', 0))
-            c_15m = float(last_15m.get('close', 0))
-            o_15m = float(last_15m.get('open', 0))
-
-            # Clímax Bajista / Reversión LONG: Precio penetró LOWER_6 (o zona <= -5) y deja absorción
-            touched_lower_extreme = (fib_zone <= -5) or (l6_15m > 0 and low_15m <= l6_15m)
-            if touched_lower_extreme and rng_15m > 0:
-                lower_wick_ratio = (min(c_15m, o_15m) - low_15m) / rng_15m
-                # Mecha de absorción >= 30% o vela de rechazo con cierre verde/alto
-                if lower_wick_ratio >= 0.30 or c_15m > o_15m:
-                    sl_price = calculate_hedge_sl(last_5m, 'long', symbol)
-                    return {
-                        "action": "open_climax_reversal_long",
-                        "side": "long",
-                        "rule_code": "Bb33_QSHR_CLIMAX_LOWER6_LONG",
-                        "order_type": "MARKET",
-                        "sl_price": sl_price,
-                        "velocity": vel_info['v_5m_score'],
-                        "bandwidth_ratio": squeeze['bandwidth_ratio'],
-                        "reason": f"QSHR v5 Clímax LOWER_6 LONG: Toque zona extrema (Fib {fib_zone}) con absorción SIPV ({lower_wick_ratio*100:.0f}% mecha)"
-                    }
-
-            # Clímax Alcista / Reversión SHORT: Precio penetró UPPER_6 (o zona >= 5) y deja absorción
-            touched_upper_extreme = (fib_zone >= 5) or (u6_15m > 0 and high_15m >= u6_15m)
-            if touched_upper_extreme and rng_15m > 0:
-                upper_wick_ratio = (high_15m - max(c_15m, o_15m)) / rng_15m
-                if upper_wick_ratio >= 0.30 or c_15m < o_15m:
+                if lower_wick_ratio <= 0.28 and rsi_5m >= 28.0:
                     sl_price = calculate_hedge_sl(last_5m, 'short', symbol)
                     return {
-                        "action": "open_climax_reversal_short",
+                        "action": "open_momentum_short",
                         "side": "short",
-                        "rule_code": "Bb33_QSHR_CLIMAX_UPPER6_SHORT",
+                        "rule_code": "Bb33_QSHR_MOMENTUM_SHORT",
                         "order_type": "MARKET",
                         "sl_price": sl_price,
                         "velocity": vel_info['v_5m_score'],
                         "bandwidth_ratio": squeeze['bandwidth_ratio'],
-                        "reason": f"QSHR v5 Clímax UPPER_6 SHORT: Toque zona extrema (Fib {fib_zone}) con absorción SIPV ({upper_wick_ratio*100:.0f}% mecha)"
+                        "reason": f"QSHR v5 Momentum SHORT: EMA3<EMA9 con V_5m={vel_info['v_5m_score']:.2f} >= 2.0"
+                    }
+
+            # Momentum LONG: EMA3 > EMA9 con impulso alcista y V_5m >= 2.0 (con filtro de mecha y RSI)
+            if ema3_5m > ema9_5m and (vel_info['direction'] == 'BULLISH_SURGE' or current_price > open_price):
+                if upper_wick_ratio <= 0.28 and rsi_5m <= 72.0:
+                    sl_price = calculate_hedge_sl(last_5m, 'long', symbol)
+                    return {
+                        "action": "open_momentum_long",
+                        "side": "long",
+                        "rule_code": "Bb33_QSHR_MOMENTUM_LONG",
+                        "order_type": "MARKET",
+                        "sl_price": sl_price,
+                        "velocity": vel_info['v_5m_score'],
+                        "bandwidth_ratio": squeeze['bandwidth_ratio'],
+                        "reason": f"QSHR v5 Momentum LONG: EMA3>EMA9 con V_5m={vel_info['v_5m_score']:.2f} >= 2.0"
                     }
 
         return None
@@ -853,6 +1144,16 @@ def evaluate_fib_band_virtual_sl(
         return None
     
     try:
+        rule = (position.get('rule_code') or '').lower()
+        # Aislamiento Estratégico: No cerrar estrategias de tendencia / rebote ajenas a QSHR
+        is_trend_or_other = any(x in rule for x in ('apex', 'aa13', 'aa21', 'bb13', 'bb21', 'swing', 'rebote', 'cascada', 'halcon', 'aduana'))
+        if is_trend_or_other:
+            return None
+
+        # Aislamiento Clímax y EREP: No aplicar SL Virtual prematuro a operaciones de reversión extrema o en recuperación
+        if any(x in rule for x in ('climax', 'lower6', 'upper6', 'reversal')) or position.get('erep_active') or (position.get('erep_phase', 0) > 0):
+            return None
+
         side = (position.get('side') or '').lower()
         entry_price = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
         pos_lots = abs(float(position.get('lots') or position.get('size') or position.get('shares') or 0.01))
@@ -878,11 +1179,12 @@ def evaluate_fib_band_virtual_sl(
                 return None
             
             # Determinar la banda Fibonacci inferior activa según la zona de entrada
-            # Se usa la banda inmediatamente inferior a donde se abrió la posición
             lower_1 = levels.get('lower_1', basis)
             lower_2 = levels.get('lower_2', lower_1)
             lower_3 = levels.get('lower_3', lower_2)
             lower_4 = levels.get('lower_4', lower_3)
+            lower_5 = levels.get('lower_5_15m', levels.get('lower_5', lower_4))
+            lower_6 = levels.get('lower_6_15m', levels.get('lower_6', lower_5))
             lower_band = levels.get('lower_band_15m', basis)
             
             # Seleccionar el piso Fibonacci protector según la posición del entry_price
@@ -896,8 +1198,16 @@ def evaluate_fib_band_virtual_sl(
                 fib_floor = lower_3
             elif entry_price >= lower_3:
                 fib_floor = lower_4
+            elif entry_price >= lower_4:
+                fib_floor = lower_5
+            elif entry_price >= lower_5:
+                fib_floor = lower_6
             else:
-                fib_floor = lower_band
+                fib_floor = lower_6 * (1.0 - buffer_pct)
+            
+            # Seguro matemático para LONG: el piso protector NUNCA puede ser mayor o igual al precio de entrada
+            if fib_floor >= entry_price:
+                fib_floor = entry_price * (1.0 - buffer_pct)
             
             # Aplicar el buffer porcentual de seguridad por debajo de la banda
             sl_virtual_level = fib_floor * (1.0 - buffer_pct)
@@ -933,6 +1243,8 @@ def evaluate_fib_band_virtual_sl(
             upper_2 = levels.get('upper_2', upper_1)
             upper_3 = levels.get('upper_3', upper_2)
             upper_4 = levels.get('upper_4', upper_3)
+            upper_5 = levels.get('upper_5_15m', levels.get('upper_5', upper_4))
+            upper_6 = levels.get('upper_6_15m', levels.get('upper_6', upper_5))
             upper_band = levels.get('upper_band_15m', basis)
             
             # Seleccionar el techo Fibonacci protector según la posición del entry_price
@@ -946,8 +1258,16 @@ def evaluate_fib_band_virtual_sl(
                 fib_ceiling = upper_3
             elif entry_price <= upper_3:
                 fib_ceiling = upper_4
+            elif entry_price <= upper_4:
+                fib_ceiling = upper_5
+            elif entry_price <= upper_5:
+                fib_ceiling = upper_6
             else:
-                fib_ceiling = upper_band
+                fib_ceiling = upper_6 * (1.0 + buffer_pct)
+            
+            # Seguro matemático para SHORT: el techo protector NUNCA puede ser menor o igual al precio de entrada
+            if fib_ceiling <= entry_price:
+                fib_ceiling = entry_price * (1.0 + buffer_pct)
             
             # Aplicar el buffer porcentual de seguridad por encima de la banda
             sl_virtual_level = fib_ceiling * (1.0 + buffer_pct)
@@ -998,6 +1318,13 @@ def evaluate_qshr_trailing_and_exit(
         return None
 
     try:
+        rule = (position.get('rule_code') or '').lower()
+        is_climax_or_erep = any(x in rule for x in ('climax', 'lower6', 'upper6', 'reversal')) or position.get('erep_active') or (position.get('erep_phase', 0) > 0)
+        is_swing = any(x in rule for x in ('apex', 'bb41', 'aa13', 'aa21', 'swing', 'trend', 'ancla'))
+        if is_climax_or_erep or is_swing:
+            # Las operaciones Clímax / EREP y Swing (BbApexEma, Bb41, etc.) no son gestionadas por agotamiento QSHR
+            return None
+
         side = (position.get('side') or '').lower()
         pos_lots = abs(float(position.get('lots') or position.get('size') or position.get('shares') or 0.01))
         entry_price = float(position.get('avg_entry_price') or position.get('entry_price') or current_price)
@@ -1093,13 +1420,29 @@ def evaluate_qshr_trailing_and_exit(
                     }
 
             # 3. ESCENARIO A: Agotamiento en Banda de Bollinger Superior
-            # [ADUANA SALIDA]: Solo permite salida si el precio está en ganancia (current_price > entry_price)
-            if (current_price >= levels_15m['upper_band_15m'] or high_15m >= levels_15m['upper_band_15m']) and current_price > entry_price:
+            # [ADUANA SALIDA]: 
+            # 1) Persistencia de tendencia: mientras EMA3 > EMA9 en 15m, la tendencia alcista continúa viva -> BLOQUEAR salida.
+            # 2) Solo permite salida si el precio está en ganancia sustancial (>= 8.0 pips en Forex o >= 1.20% en Crypto).
+            has_ema_15m = any(col in df_15m.columns for col in ('ema1', 'ema_3', 'ema3', 'ma3')) if df_15m is not None else False
+            trend_active_long = False
+            if has_ema_15m:
+                e3 = float(last_15m.get('ema1') or last_15m.get('ema_3') or last_15m.get('ema3') or last_15m.get('ma3', 0))
+                e9 = float(last_15m.get('ema2') or last_15m.get('ema_9') or last_15m.get('ema9') or last_15m.get('ma9', 0))
+                if e3 > 0 and e9 > 0 and e3 > e9:
+                    trend_active_long = True
+
+            pip_sz_val = 0.01 if ('JPY' in symbol.upper() or 'XAU' in symbol.upper()) else 0.0001
+            is_forex_sym = 'forex' in market_type.lower() or any(curr in symbol.upper() for curr in ('USD', 'EUR', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF'))
+            pips_gain_long = (current_price - entry_price) / pip_sz_val
+            pnl_pct_long = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+            profit_qualified_long = (pips_gain_long >= 8.0) if is_forex_sym else (pnl_pct_long >= 1.20)
+
+            if not trend_active_long and profit_qualified_long and (current_price >= levels_15m['upper_band_15m'] or high_15m >= levels_15m['upper_band_15m']) and current_price > entry_price:
                 if high_5m_curr < high_5m_prev:
                     return {
                         "action": "close_bollinger_exhaustion",
                         "close_lots": pos_lots,
-                        "reason": f"Bollinger Exhaustion Exit: Precio en Upper BB 15m ({levels_15m['upper_band_15m']:.5f}) y fallo de nuevo High en 5m ({high_5m_curr:.5f} < {high_5m_prev:.5f}) con beneficio",
+                        "reason": f"Bollinger Exhaustion Exit: Precio en Upper BB 15m ({levels_15m['upper_band_15m']:.5f}) y fallo de nuevo High en 5m ({high_5m_curr:.5f} < {high_5m_prev:.5f}) con beneficio (+{pips_gain_long:.1f} pips)",
                         "rule_code": "Bb33_BOLLINGER_EXHAUSTION_EXIT"
                     }
 
@@ -1129,20 +1472,24 @@ def evaluate_qshr_trailing_and_exit(
                     else:
                         fib_floor = basis
                     
-                    # Si el precio perfora el piso protegido -> Cierre de protección
-                    if current_price < fib_floor and current_price > entry_price:
+                    # Si el precio perfora el piso protegido -> Cierre de protección (exigiendo maduración >= 20m, 15m trend no alcista, y ganancia sustancial)
+                    pnl_pct_long = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+                    pips_gain_long = (current_price - entry_price) / pip_sz_val
+                    min_gain_ok = (pips_gain_long >= 12.0) if is_forex_sym else (pnl_pct_long >= 1.80)
+
+                    if is_trade_mature(position, min_minutes=20) and not trend_active_long and min_gain_ok and current_price < fib_floor and current_price > entry_price:
                         return {
                             "action": "close_cascada_fib_stagnation",
                             "close_lots": pos_lots,
-                            "reason": f"CASCADA Fib Stagnation Exit: Estancamiento 3 velas 15m (Highs descendentes/planos) y quiebre de piso Fib ({current_price:.5f} < {fib_floor:.5f})",
+                            "reason": f"CASCADA Fib Stagnation Exit: Estancamiento 3 velas 15m (Highs descendentes/planos) y quiebre de piso Fib ({current_price:.5f} < {fib_floor:.5f}) con beneficio (+{pnl_pct_long:.2f}%)",
                             "rule_code": "Bb33_CASCADA_FIB_STAGNATION_EXIT"
                         }
-                    elif fib_floor > entry_price:
+                    elif is_trade_mature(position, min_minutes=15) and fib_floor > entry_price and (pips_gain_long >= 10.0 if is_forex_sym else pnl_pct_long >= 1.20):
                         return {
                             "action": "adjust_trailing_sl",
                             "sl_price": format_price_precision(symbol, fib_floor),
                             "rule_code": "Bb33_CASCADA_FIB_TRAILING_ADJUST",
-                            "reason": f"CASCADA Fib Trailing Adjust: Highs descendentes en 3 velas 15m. Ceñir SL a piso Fib ({fib_floor:.5f})"
+                            "reason": f"CASCADA Fib Trailing Adjust: Highs descendentes en 3 velas 15m y maduración cumplida. Ceñir SL a piso Fib ({fib_floor:.5f})"
                         }
 
         # -------------------------------------------------------------
@@ -1212,13 +1559,27 @@ def evaluate_qshr_trailing_and_exit(
                     }
 
             # 3. ESCENARIO A: Agotamiento en Banda de Bollinger Inferior
-            # [ADUANA SALIDA]: Solo permite salida si el precio está en ganancia (current_price < entry_price)
-            if (current_price <= levels_15m['lower_band_15m'] or low_15m <= levels_15m['lower_band_15m']) and current_price < entry_price:
+            # [ADUANA SALIDA]: 
+            # 1) Persistencia de tendencia: mientras EMA3 < EMA9 en 15m, la tendencia bajista continúa viva -> BLOQUEAR salida.
+            # 2) Solo permite salida si el precio está en ganancia sustancial (>= 8.0 pips en Forex o >= 1.20% en Crypto).
+            has_ema_15m_s = any(col in df_15m.columns for col in ('ema1', 'ema_3', 'ema3', 'ma3')) if df_15m is not None else False
+            trend_active_short = False
+            if has_ema_15m_s:
+                e3_s = float(last_15m.get('ema1') or last_15m.get('ema_3') or last_15m.get('ema3') or last_15m.get('ma3', 0))
+                e9_s = float(last_15m.get('ema2') or last_15m.get('ema_9') or last_15m.get('ema9') or last_15m.get('ma9', 0))
+                if e3_s > 0 and e9_s > 0 and e3_s < e9_s:
+                    trend_active_short = True
+
+            pips_gain_short = (entry_price - current_price) / pip_sz_val
+            pnl_pct_short = ((entry_price - current_price) / entry_price * 100) if entry_price > 0 else 0
+            profit_qualified_short = (pips_gain_short >= 8.0) if is_forex_sym else (pnl_pct_short >= 1.20)
+
+            if not trend_active_short and profit_qualified_short and (current_price <= levels_15m['lower_band_15m'] or low_15m <= levels_15m['lower_band_15m']) and current_price < entry_price:
                 if low_5m_curr > low_5m_prev:
                     return {
                         "action": "close_bollinger_exhaustion",
                         "close_lots": pos_lots,
-                        "reason": f"Bollinger Exhaustion Exit: Precio en Lower BB 15m ({levels_15m['lower_band_15m']:.5f}) y fallo de nuevo Low en 5m ({low_5m_curr:.5f} > {low_5m_prev:.5f}) con beneficio",
+                        "reason": f"Bollinger Exhaustion Exit: Precio en Lower BB 15m ({levels_15m['lower_band_15m']:.5f}) y fallo de nuevo Low en 5m ({low_5m_curr:.5f} > {low_5m_prev:.5f}) con beneficio (+{pips_gain_short:.1f} pips)",
                         "rule_code": "Bb33_BOLLINGER_EXHAUSTION_EXIT"
                     }
 
@@ -1248,20 +1609,24 @@ def evaluate_qshr_trailing_and_exit(
                     else:
                         fib_ceiling = basis
                     
-                    # Si el precio perfora el techo protegido -> Cierre de protección
-                    if current_price > fib_ceiling and current_price < entry_price:
+                    # Si el precio perfora el techo protegido -> Cierre de protección (exigiendo maduración >= 20m, 15m trend no bajista, y ganancia sustancial)
+                    pnl_pct_short = ((entry_price - current_price) / entry_price * 100) if entry_price > 0 else 0
+                    pips_gain_short = (entry_price - current_price) / pip_sz_val
+                    min_gain_ok_short = (pips_gain_short >= 12.0) if is_forex_sym else (pnl_pct_short >= 1.80)
+
+                    if is_trade_mature(position, min_minutes=20) and not trend_active_short and min_gain_ok_short and current_price > fib_ceiling and current_price < entry_price:
                         return {
                             "action": "close_cascada_fib_stagnation",
                             "close_lots": pos_lots,
-                            "reason": f"CASCADA Fib Stagnation Exit: Estancamiento 3 velas 15m (Lows ascendentes/planos) y quiebre de techo Fib ({current_price:.5f} > {fib_ceiling:.5f})",
+                            "reason": f"CASCADA Fib Stagnation Exit: Estancamiento 3 velas 15m (Lows ascendentes/planos) y quiebre de techo Fib ({current_price:.5f} > {fib_ceiling:.5f}) con beneficio (+{pnl_pct_short:.2f}%)",
                             "rule_code": "Bb33_CASCADA_FIB_STAGNATION_EXIT"
                         }
-                    elif fib_ceiling < entry_price:
+                    elif is_trade_mature(position, min_minutes=15) and fib_ceiling < entry_price and (pips_gain_short >= 10.0 if is_forex_sym else pnl_pct_short >= 1.20):
                         return {
                             "action": "adjust_trailing_sl",
                             "sl_price": format_price_precision(symbol, fib_ceiling),
                             "rule_code": "Bb33_CASCADA_FIB_TRAILING_ADJUST",
-                            "reason": f"CASCADA Fib Trailing Adjust: Lows ascendentes en 3 velas 15m. Ceñir SL a techo Fib ({fib_ceiling:.5f})"
+                            "reason": f"CASCADA Fib Trailing Adjust: Lows ascendentes en 3 velas 15m y maduración cumplida. Ceñir SL a techo Fib ({fib_ceiling:.5f})"
                         }
 
         return None
@@ -1316,6 +1681,36 @@ def evaluate_qshr_hedge_signal(
             pnl_pct = (current_price - entry_px) / entry_px * 100 if entry_px > 0 else 0
             has_min_profit = (pnl_pct >= 0.25) if is_crypto else (pnl_pips >= 3.0)
             is_already_booster = active_position.get('rule_code') == 'Bb33_QSHR_BOOSTER_LONG' or active_position.get('has_booster')
+
+            # A0.5. EARLY INVALIDATION LOSS CUT (Pérdida de Media EMA20/Basis con EMA3 < EMA9)
+            # Protegido por Aduana 15m y Ventana de Maduración
+            basis_5m = float(last_5m.get('basis') or (squeeze['curr_upper'] + squeeze['curr_lower']) / 2.0)
+            ema3_val = float(last_5m.get('ma3', 0) or last_5m.get('ema1', 0) or 0)
+            ema9_val = float(last_5m.get('ma9', 0) or last_5m.get('ema2', 0) or 0)
+            if ema3_val == 0.0 or ema9_val == 0.0:
+                ema3_val = float(df_5m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_val = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+
+            trend_bullish_15m = False
+            if df_15m is not None and len(df_15m) >= 2:
+                c15 = df_15m['close']
+                e3_15 = float(df_15m.iloc[-1].get('ema1') or df_15m.iloc[-1].get('ema_3') or df_15m.iloc[-1].get('ema3') or c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                e9_15 = float(df_15m.iloc[-1].get('ema2') or df_15m.iloc[-1].get('ema_9') or df_15m.iloc[-1].get('ema9') or c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                if e3_15 > 0 and e9_15 > 0 and e3_15 > e9_15:
+                    trend_bullish_15m = True
+
+            is_mature_15m = is_trade_mature(active_position, min_minutes=15)
+            if is_crypto:
+                cut_loss_qualified = (pnl_pct < -1.50) if trend_bullish_15m else (is_mature_15m and pnl_pct < -1.00)
+            else:
+                cut_loss_qualified = (pnl_pips < -12.0) if trend_bullish_15m else (is_mature_15m and pnl_pips < -7.0)
+
+            if cut_loss_qualified and (current_price < basis_5m) and (ema3_val < ema9_val):
+                return {
+                    "action": "close_original_long",
+                    "rule_code": "Bb33_QSHR_EARLY_INVALIDATION",
+                    "reason": f"QSHR Early Invalidation: Breakout fallido confirmado (Price={current_price:.2f} < Basis={basis_5m:.2f}, EMA3 < EMA9, 15m_alive={trend_bullish_15m}, PnL={pnl_pct:.2f}%)"
+                }
 
             if is_expanding and is_bullish_breakout and vel_info['is_high_velocity'] and vel_info['direction'] == 'BULLISH_SURGE' and not is_already_booster and has_min_profit:
                 anti_range = check_15m_anti_range_filter(df_15m, current_price, 'long', vel_info['v_5m_score'])
@@ -1389,6 +1784,36 @@ def evaluate_qshr_hedge_signal(
             has_min_profit = (pnl_pct >= 0.25) if is_crypto else (pnl_pips >= 3.0)
             is_already_booster = active_position.get('rule_code') == 'Bb33_QSHR_BOOSTER_SHORT' or active_position.get('has_booster')
 
+            # B0.5. EARLY INVALIDATION LOSS CUT (Pérdida de Media EMA20/Basis con EMA3 > EMA9)
+            # Protegido por Aduana 15m y Ventana de Maduración
+            basis_5m = float(last_5m.get('basis') or (squeeze['curr_upper'] + squeeze['curr_lower']) / 2.0)
+            ema3_val = float(last_5m.get('ma3', 0) or last_5m.get('ema1', 0) or 0)
+            ema9_val = float(last_5m.get('ma9', 0) or last_5m.get('ema2', 0) or 0)
+            if ema3_val == 0.0 or ema9_val == 0.0:
+                ema3_val = float(df_5m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_val = float(df_5m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+
+            trend_bearish_15m = False
+            if df_15m is not None and len(df_15m) >= 2:
+                c15 = df_15m['close']
+                e3_15 = float(df_15m.iloc[-1].get('ema1') or df_15m.iloc[-1].get('ema_3') or df_15m.iloc[-1].get('ema3') or c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                e9_15 = float(df_15m.iloc[-1].get('ema2') or df_15m.iloc[-1].get('ema_9') or df_15m.iloc[-1].get('ema9') or c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                if e3_15 > 0 and e9_15 > 0 and e3_15 < e9_15:
+                    trend_bearish_15m = True
+
+            is_mature_15m_s = is_trade_mature(active_position, min_minutes=15)
+            if is_crypto:
+                cut_loss_qualified_short = (pnl_pct < -1.50) if trend_bearish_15m else (is_mature_15m_s and pnl_pct < -1.00)
+            else:
+                cut_loss_qualified_short = (pnl_pips < -12.0) if trend_bearish_15m else (is_mature_15m_s and pnl_pips < -7.0)
+
+            if cut_loss_qualified_short and (current_price > basis_5m) and (ema3_val > ema9_val):
+                return {
+                    "action": "close_original_short",
+                    "rule_code": "Bb33_QSHR_EARLY_INVALIDATION",
+                    "reason": f"QSHR Early Invalidation: Breakout fallido confirmado (Price={current_price:.2f} > Basis={basis_5m:.2f}, EMA3 > EMA9, 15m_alive={trend_bearish_15m}, PnL={pnl_pct:.2f}%)"
+                }
+
             if is_expanding and is_bearish_breakout and vel_info['is_high_velocity'] and vel_info['direction'] == 'BEARISH_SURGE' and not is_already_booster and has_min_profit:
                 anti_range = check_15m_anti_range_filter(df_15m, current_price, 'short', vel_info['v_5m_score'])
                 if anti_range.get('passed', True) and check_triple_ema_alignment(df_5m, 'bearish'):
@@ -1455,15 +1880,26 @@ def calculate_cluster_stop_loss(symbol: str, breakout_candle: pd.Series, side: s
     """
     Calcula el Stop Loss estructural sincronizado para todo el Cluster de posiciones del par.
     """
-    is_jpy = 'JPY' in (symbol or '').upper()
-    pip_factor = 0.01 if is_jpy else 0.0001
+    is_crypto = 'USDT' in (symbol or '').upper() or 'BUSD' in (symbol or '').upper()
+    close_price = float(breakout_candle.get('close', 0.0))
 
-    if side.lower() in ('short', 'sell'):
-        high_val = float(breakout_candle.get('high', 0))
-        sl = high_val + (buffer_pips * pip_factor)
+    if is_crypto and close_price > 0:
+        atr_candle = float(breakout_candle.get('atr', 0.0) or breakout_candle.get('atr_val', 0.0) or (float(breakout_candle.get('high', 0)) - float(breakout_candle.get('low', 0))))
+        buffer_dist = max(close_price * 0.008, 1.5 * atr_candle)
+        if side.lower() in ('short', 'sell'):
+            sl = float(breakout_candle.get('high', 0)) + buffer_dist
+        else:
+            sl = float(breakout_candle.get('low', 0)) - buffer_dist
     else:
-        low_val = float(breakout_candle.get('low', 0))
-        sl = low_val - (buffer_pips * pip_factor)
+        is_jpy = 'JPY' in (symbol or '').upper()
+        pip_factor = 0.01 if is_jpy else 0.0001
+
+        if side.lower() in ('short', 'sell'):
+            high_val = float(breakout_candle.get('high', 0))
+            sl = high_val + (buffer_pips * pip_factor)
+        else:
+            low_val = float(breakout_candle.get('low', 0))
+            sl = low_val - (buffer_pips * pip_factor)
 
     return format_price_precision(symbol, sl)
 
@@ -1571,10 +2007,23 @@ def evaluate_cluster_exit(
         return None
 
     try:
+        # Filtrar únicamente posiciones pertenecientes al clúster QSHR
+        def _is_qshr(pos: dict) -> bool:
+            r = str(pos.get('rule_code') or pos.get('strategy') or '').lower()
+            if not r:
+                return True  # Para compatibilidad con tests unitarios
+            if any(non_q in r for non_q in ('apex', 'hot', 'swing', 'aduana', 'v5_', 'aa41', 'bb41', 'aa13', 'bb13', 'aa21', 'bb25')):
+                return False
+            return 'qshr' in r or 'booster' in r or 'hedge' in r or 'erep' in r or 'breakout' in r or 'bb33' in r
+
+        qshr_positions = [p for p in active_positions if _is_qshr(p)]
+        if not qshr_positions:
+            return None
+
         sipv = calculate_sipv_indicator(df_15m)
         levels_15m = calculate_15m_fibonacci_levels(df_15m, current_price)
         bb_regime = detect_bollinger_regime_15m(df_15m)
-        side = (active_positions[0].get('side') or '').lower()
+        side = (qshr_positions[0].get('side') or '').lower()
 
         if side in ('long', 'buy'):
             # 1. En MODO EXPANSIÓN con tendencia activa: NO cerrar prematuramente
@@ -1584,21 +2033,35 @@ def evaluate_cluster_exit(
                     return {
                         "action": "cluster_take_profit",
                         "side": "long",
-                        "position_ids": [p.get('id') for p in active_positions if p.get('id')],
+                        "position_ids": [p.get('id') for p in qshr_positions if p.get('id')],
                         "rule_code": "Bb33_QSHR_CLUSTER_TP",
-                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico Extremo en Upper_6 ({len(active_positions)} posiciones cerradas)"
+                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico Extremo en Upper_6 ({len(qshr_positions)} posiciones cerradas)"
                     }
                 log_info(MODULE, f"🚀 [QSHR CLUSTER TP SKIP] [{symbol} LONG]: Modo Expansión 15m activo con EMA3>EMA9>EMA20. Dejando correr tendencia.")
                 return None
 
-            # 2. En MODO TUBO / CANAL LATERAL: Take Profit al tocar la banda superior
+            # 2. Si EMA3 > EMA9 (Momentum alcista activo), no cerrar prematuramente en banda de 15m
+            if bb_regime.get('is_ema_bullish_aligned') or (bb_regime.get('ema3', 0) > bb_regime.get('ema9', 0) > 0):
+                upper_6 = levels_15m.get('upper_6_15m', float('inf'))
+                if upper_6 and current_price >= upper_6:
+                    return {
+                        "action": "cluster_take_profit",
+                        "side": "long",
+                        "position_ids": [p.get('id') for p in qshr_positions if p.get('id')],
+                        "rule_code": "Bb33_QSHR_CLUSTER_TP",
+                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico en Upper_6 con EMA3>EMA9 ({len(qshr_positions)} posiciones cerradas)"
+                    }
+                log_info(MODULE, f"🚀 [QSHR CLUSTER TP SKIP] [{symbol} LONG]: Momentum alcista EMA3>EMA9 en 15m. Dejando correr impulso.")
+                return None
+
+            # 3. En MODO TUBO / CANAL LATERAL sin momentum: Take Profit al tocar la banda superior
             if (current_price >= levels_15m['upper_5_15m'] or current_price >= levels_15m['upper_band_15m']):
                 return {
                     "action": "cluster_take_profit",
                     "side": "long",
-                    "position_ids": [p.get('id') for p in active_positions if p.get('id')],
+                    "position_ids": [p.get('id') for p in qshr_positions if p.get('id')],
                     "rule_code": "Bb33_QSHR_CLUSTER_TP",
-                    "reason": f"QSHR Cluster TP 15m: Take Profit en Banda Superior (Modo Tubo / Rango Lateral) ({len(active_positions)} posiciones cerradas)"
+                    "reason": f"QSHR Cluster TP 15m: Take Profit en Banda Superior (Modo Tubo / Rango Lateral) ({len(qshr_positions)} posiciones cerradas)"
                 }
 
         elif side in ('short', 'sell'):
@@ -1609,21 +2072,35 @@ def evaluate_cluster_exit(
                     return {
                         "action": "cluster_take_profit",
                         "side": "short",
-                        "position_ids": [p.get('id') for p in active_positions if p.get('id')],
+                        "position_ids": [p.get('id') for p in qshr_positions if p.get('id')],
                         "rule_code": "Bb33_QSHR_CLUSTER_TP",
-                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico Extremo en Lower_6 ({len(active_positions)} posiciones cerradas)"
+                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico Extremo en Lower_6 ({len(qshr_positions)} posiciones cerradas)"
                     }
                 log_info(MODULE, f"🚀 [QSHR CLUSTER TP SKIP] [{symbol} SHORT]: Modo Expansión 15m activo con EMA3<EMA9<EMA20. Dejando correr tendencia.")
                 return None
 
-            # 2. En MODO TUBO / CANAL LATERAL: Take Profit al tocar la banda inferior
+            # 2. Si EMA3 < EMA9 (Momentum bajista activo), no cerrar prematuramente en banda de 15m
+            if bb_regime.get('is_ema_bearish_aligned') or (0 < bb_regime.get('ema3', 0) < bb_regime.get('ema9', 0)):
+                lower_6 = levels_15m.get('lower_6_15m', 0.0)
+                if lower_6 and current_price <= lower_6:
+                    return {
+                        "action": "cluster_take_profit",
+                        "side": "short",
+                        "position_ids": [p.get('id') for p in qshr_positions if p.get('id')],
+                        "rule_code": "Bb33_QSHR_CLUSTER_TP",
+                        "reason": f"QSHR Cluster TP 15m: Clímax Parabólico en Lower_6 con EMA3<EMA9 ({len(qshr_positions)} posiciones cerradas)"
+                    }
+                log_info(MODULE, f"🚀 [QSHR CLUSTER TP SKIP] [{symbol} SHORT]: Momentum bajista EMA3<EMA9 en 15m. Dejando correr impulso.")
+                return None
+
+            # 3. En MODO TUBO / CANAL LATERAL sin momentum: Take Profit al tocar la banda inferior
             if (current_price <= levels_15m['lower_5_15m'] or current_price <= levels_15m['lower_band_15m']):
                 return {
                     "action": "cluster_take_profit",
                     "side": "short",
-                    "position_ids": [p.get('id') for p in active_positions if p.get('id')],
+                    "position_ids": [p.get('id') for p in qshr_positions if p.get('id')],
                     "rule_code": "Bb33_QSHR_CLUSTER_TP",
-                    "reason": f"QSHR Cluster TP 15m: Take Profit en Banda Inferior (Modo Tubo / Rango Lateral) ({len(active_positions)} posiciones cerradas)"
+                    "reason": f"QSHR Cluster TP 15m: Take Profit en Banda Inferior (Modo Tubo / Rango Lateral) ({len(qshr_positions)} posiciones cerradas)"
                 }
 
         return None

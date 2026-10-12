@@ -202,6 +202,20 @@ class TestVirtualFibSL(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result['action'], 'close_virtual_fib_sl')
 
+    # ── Strategy Isolation Tests (AaApexEma, Aa13, Aa21, Swing) ──
+
+    def test_virtual_fib_sl_ignores_apex_ema_and_aa13(self):
+        """Validar que estrategias de tendencia o rebote (AaApexEma, Aa13, Aa21, Swing) son IGNORADAS."""
+        df_down = self.df_15m_eur.copy()
+        df_down['close'] = [1.1050 - i * 0.0003 for i in range(30)]
+        entry_price = 1.1030
+        trigger_price = 1.0900  # Muy por debajo
+
+        for rule in ['AaApexEma', 'BbApexEma', 'Aa13', 'Aa21', 'Swing_Pullback', 'Rebote_Cascada', 'Halcon_Centinela']:
+            pos = {'side': 'long', 'entry_price': entry_price, 'lots': 0.05, 'rule_code': rule}
+            result = evaluate_fib_band_virtual_sl(pos, df_down, trigger_price, 'EURUSD')
+            self.assertIsNone(result, f"Failed for rule {rule}: should be None")
+
     # ── Edge cases ──
 
     def test_returns_none_with_no_position(self):

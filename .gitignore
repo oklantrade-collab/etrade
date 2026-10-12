@@ -26,3 +26,6 @@ venv/
 .DS_Store
 Thumbs.db
 backend/google-credentials.json.json
+token_result.txt
+scratch/
+backend/scratch/

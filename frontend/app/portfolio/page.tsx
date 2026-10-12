@@ -47,27 +47,70 @@ export default function PortfolioPage() {
   const [perf, setPerf] = useState<PerformanceSummary | null>(null)
   const [global, setGlobal] = useState<GlobalPortfolioData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [page, setPage] = useState(0)
   const ITEMS_PER_PAGE = 10
   const MAX_HISTORY = 100
 
   useEffect(() => {
     fetchData()
-    // Cambiado: Reemplazar Realtime de market_snapshot por polling cada 60s
-    // Esto ahorra el 99% del consumo de Egress en Supabase
-    const interval = setInterval(() => { fetchData() }, 60000)
-    return () => clearInterval(interval)
+
+    // Polling inteligente cada 90s solo si la pestaña está activa
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchData()
+      }
+    }, 90000)
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchData()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      clearInterval(interval)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
   }, [])
 
   async function fetchData() {
     try {
       const [pRes, gRes] = await Promise.all([fetch('/api/v1/portfolio/performance-summary'), fetch('/api/v1/portfolio/global')])
-      if (pRes.ok) setPerf(await pRes.json())
-      if (gRes.ok) setGlobal(await gRes.json())
-    } catch (err) { console.error(err) } finally { setLoading(false) }
+      if (pRes.ok) {
+        setPerf(await pRes.json())
+      } else {
+        const errJson = await pRes.json().catch(() => ({}))
+        setError(errJson?.detail || `Error al obtener resumen de rendimiento (${pRes.status})`)
+      }
+
+      if (gRes.ok) {
+        setGlobal(await gRes.json())
+      } else {
+        const errJson = await gRes.json().catch(() => ({}))
+        setError(errJson?.detail || `Error al obtener datos globales (${gRes.status})`)
+      }
+    } catch (err: any) {
+      console.error(err)
+      setError(err?.message || 'Error de conexión con el backend')
+    } finally {
+      setLoading(false)
+    }
   }
 
-  if (loading || !perf || !global) return <div className="min-h-screen bg-[#020205] flex items-center justify-center text-blue-500 font-black uppercase tracking-widest text-[0.6rem] animate-pulse">Sincronizando Sistema...</div>
+  if (loading) return <div className="min-h-screen bg-[#020205] flex items-center justify-center text-blue-500 font-black uppercase tracking-widest text-[0.6rem] animate-pulse">Sincronizando Sistema...</div>
+
+  if (error || !perf || !global) {
+    return (
+      <div className="min-h-screen bg-[#020208] flex flex-col items-center justify-center p-6 text-center space-y-4">
+        <div className="w-12 h-12 rounded-full bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-500 text-xl font-bold">!</div>
+        <div className="text-sm font-black uppercase tracking-widest text-rose-400">Error de Conexión / Base de Datos</div>
+        <div className="text-xs text-slate-400 max-w-lg bg-slate-900/60 p-4 rounded-xl border border-white/5 font-mono break-all">{error || 'No fue posible cargar el estado consolidado del portafolio.'}</div>
+        <button onClick={() => { setLoading(true); setError(null); fetchData(); }} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-black rounded-lg tracking-widest uppercase transition-all shadow-lg shadow-blue-600/20">Reintentar</button>
+      </div>
+    )
+  }
 
   const activeCrypto = global?.markets?.crypto?.symbols?.filter(s => s.status === 'active') || []
   const activeForex  = global?.markets?.forex?.symbols?.filter(s => s.status === 'active') || []

@@ -2510,8 +2510,9 @@ class ForexExecutionService:
             
         df_15m = _get_df('15m')
         df_5m = _get_df('5m')
+        df_1h = _get_df('1h')
 
-        result = evaluate_all_protections(state, price, snap, df_15m=df_15m, df_5m=df_5m)
+        result = evaluate_all_protections(state, price, snap, df_15m=df_15m, df_5m=df_5m, df_1h=df_1h)
         
         # Handle bb_touch update
         if result.get('bb_touch_triggered'):
@@ -2811,6 +2812,64 @@ class ForexExecutionService:
                     )
         except Exception as fx_clim_err:
             self.log(f"Error evaluando Aduana Climax Forex {symbol}: {fx_clim_err}")
+
+        # ── ADUANA TREND EXIT FOREX (EMA3 + BB Double Validation 1h / 4h) ──
+        try:
+            bars_1h = self.state.get('candles', {}).get(f'{symbol}_1h', [])
+            df_1h_fx = None
+            if bars_1h:
+                df_1h_fx = pd.DataFrame(bars_1h)
+                df_1h_fx = df_1h_fx.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'ts': 'open_time'})
+                df_1h_fx['open_time'] = pd.to_datetime(df_1h_fx['open_time'], unit='s')
+                df_1h_fx = df_1h_fx.set_index('open_time')
+                df_1h_fx = df_1h_fx.dropna(subset=['open', 'high', 'low', 'close'])
+                for col in ['open','high','low','close']: df_1h_fx[col] = pd.to_numeric(df_1h_fx[col], errors='coerce').fillna(0)
+            
+            bars_4h = self.state.get('candles', {}).get(f'{symbol}_4h', [])
+            df_4h_fx = None
+            if bars_4h:
+                df_4h_fx = pd.DataFrame(bars_4h)
+                df_4h_fx = df_4h_fx.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'ts': 'open_time'})
+                df_4h_fx['open_time'] = pd.to_datetime(df_4h_fx['open_time'], unit='s')
+                df_4h_fx = df_4h_fx.set_index('open_time')
+                df_4h_fx = df_4h_fx.dropna(subset=['open', 'high', 'low', 'close'])
+                for col in ['open','high','low','close']: df_4h_fx[col] = pd.to_numeric(df_4h_fx[col], errors='coerce').fillna(0)
+
+            if df_1h_fx is not None and not df_1h_fx.empty:
+                from app.rebote_aduana.aduana_trend_exit import evaluate_aduana_trend_exit
+                aduana_fx_res = evaluate_aduana_trend_exit(
+                    pos=pos,
+                    current_price=price,
+                    df_1h=df_1h_fx,
+                    df_4h=df_4h_fx,
+                    min_profit_pips=4.0
+                )
+                act_fx = aduana_fx_res.get('action')
+                if act_fx == 'FULL_CLOSE':
+                    self.log(f"[{symbol}] ADUANA Trend Exit: {aduana_fx_res['reason']}. Ejecutando Full Close.")
+                    self._close_position(pos, price, 'aduana_trend_full'[:20], pips_pnl, snap=snap)
+                    self._send_telegram(
+                        f"🎯 ADUANA TREND FULL EXIT [{symbol}]\n"
+                        f"Dirección: {side.upper()}\n"
+                        f"Precio: {price}\n"
+                        f"Pips PnL: {pips_pnl:+.1f}\n"
+                        f"Motivo: {aduana_fx_res['reason']}"
+                    )
+                    return
+                elif act_fx == 'PARTIAL_CLOSE_50' and not pos.get('partial_closed'):
+                    self.log(f"[{symbol}] ADUANA Trend Exit: {aduana_fx_res['reason']}. Cierre Parcial 50%.")
+                    self._partial_close_position(pos, price, 0.50, pips_pnl, snap=snap)
+                    pos['partial_closed'] = True
+                    self.sb.table('forex_positions').update({'partial_closed': True}).eq('id', pos['id']).execute()
+                    self._send_telegram(
+                        f"🎯 ADUANA TREND PARTIAL 50% [{symbol}]\n"
+                        f"Dirección: {side.upper()}\n"
+                        f"Precio: {price}\n"
+                        f"Pips PnL: {pips_pnl:+.1f}\n"
+                        f"Motivo: {aduana_fx_res['reason']}"
+                    )
+        except Exception as aduana_fx_err:
+            self.log(f"Error evaluando ADUANA Trend Exit Forex {symbol}: {aduana_fx_err}")
 
         #    Verificación estricta de SL/TP   
         hit_sl = (sl > 0 and ((side in ['long', 'buy'] and price <= sl) or (side in ['short', 'sell'] and price >= sl)))

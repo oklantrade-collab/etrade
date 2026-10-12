@@ -248,18 +248,19 @@ def evaluate_proactive_exit(
         current_time = nyc_now.time()
         # Cerrar todo lo HOT/Scalping en los últimos 5 min para evitar GAPs nocturnos
         # Solo para Stocks. Forex (24/5) y Crypto (24/7) prefieren evitar cierres forzados por horario.
-        if market_type == 'stocks_spot' and time(15, 55) <= current_time <= time(16, 5):
+        if market_type == 'stocks_spot' and time(15, 50) <= current_time <= time(16, 5):
             pnl_data = calculate_position_pnl(position, current_price, market_type)
-            if pnl_data['pnl_usd'] >= 0:
+            group_u = str(position.get('group_name', '')).upper()
+            rule_u = str(position.get('rule_code', '') or position.get('strategy', '')).upper()
+            is_hot_pos = ('HOT' in group_u or 'SCALPING' in group_u or 'BB_PULLBACK' in rule_u or 'DIP_BUY' in rule_u)
+            if pnl_data['pnl_usd'] >= 0 or is_hot_pos:
                 return {
                     'should_close': True,
                     'rule_code':    'AaEOD' if is_long else 'BbEOD',
-                    'reason':       'Protección EOD: Cierre preventivo con ganancia antes del fin de jornada.',
+                    'reason':       f'Protección EOD: Cierre preventivo antes del fin de jornada (PnL: {pnl_data["pnl_pct"]:.2f}%).',
                     'pnl':          pnl_data,
                     'urgency':      'urgent'
                 }
-            else:
-                log_info(MODULE, f"EOD ignorado para {position.get('symbol')} porque PNL es negativo. Se mantendrá para EREP.")
     except Exception as e:
         log_error(MODULE, f"Error en protección EOD: {e}")
 

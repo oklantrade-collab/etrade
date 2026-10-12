@@ -83,24 +83,51 @@ class AduanaValidator:
         return is_impulse, candle_dir
 
     def _check_range_regime(self, df_15m: pd.DataFrame) -> bool:
+        """
+        Determina si el mercado en 15m está en régimen lateral / rango (sin tendencia fuerte).
+        Condiciones:
+        - ADX < 20 (o threshold)
+        - Pendiente de EMA20 (basis) muy plana (slope < 0.0003)
+        - O bandas de Bollinger sin expansión activa (upper_slope <= 0 o lower_slope >= 0)
+        """
         if df_15m is None or df_15m.empty or len(df_15m) < 2:
             return False
             
-        last_closed = df_15m.iloc[-2] if len(df_15m) > 1 else df_15m.iloc[-1]
-        prev_closed = df_15m.iloc[-3] if len(df_15m) > 2 else last_closed
+        last_closed = df_15m.iloc[-1]
+        prev_closed = df_15m.iloc[-2]
         
         try:
-            adx = float(last_closed.get('adx', 0))
-            bb_width = float(last_closed.get('bb_width', 100))
-            ema20_curr = float(last_closed.get('ema_20', 0))
-            ema20_prev = float(prev_closed.get('ema_20', 0))
+            adx = float(last_closed.get('adx', 0) or 0)
+            ema20_curr = float(last_closed.get('ema20', 0) or last_closed.get('ema_20', 0) or last_closed.get('basis', 0) or 0)
+            ema20_prev = float(prev_closed.get('ema20', 0) or prev_closed.get('ema_20', 0) or prev_closed.get('basis', 0) or 0)
         except (ValueError, TypeError):
             return False
             
         adx_thresh = self.params.get('adx_range_threshold', 20.0)
-        bb_thresh = self.params.get('range_bb_bandwidth_threshold', 0.1)
-        
         slope = abs(ema20_curr - ema20_prev) / ema20_prev if ema20_prev > 0 else 0
+        
+        # Check Bollinger slopes
+        col_upper = 'upper_2' if 'upper_2' in df_15m.columns else ('bb_upper' if 'bb_upper' in df_15m.columns else ('upper_6' if 'upper_6' in df_15m.columns else None))
+        col_lower = 'lower_2' if 'lower_2' in df_15m.columns else ('bb_lower' if 'bb_lower' in df_15m.columns else ('lower_6' if 'lower_6' in df_15m.columns else None))
+        
+        is_flat_bb = False
+        if col_upper and col_lower and len(df_15m) >= 2:
+            try:
+                u_curr = float(df_15m[col_upper].iloc[-1])
+                u_prev = float(df_15m[col_upper].iloc[-2])
+                l_curr = float(df_15m[col_lower].iloc[-1])
+                l_prev = float(df_15m[col_lower].iloc[-2])
+                upper_slope = u_curr - u_prev
+                lower_slope = l_curr - l_prev
+                if not (upper_slope > 0 and lower_slope < 0):
+                    is_flat_bb = True
+            except Exception:
+                pass
+                
+        if (adx > 0 and adx < adx_thresh) or (slope < 0.0003) or is_flat_bb:
+            return True
+            
+        return False
         
     def _extract_rsi_15m(self, df_15m: pd.DataFrame, market_data: dict) -> float:
         if market_data:
@@ -240,6 +267,203 @@ class AduanaValidator:
             pass
             
         return True, ""
+
+    def _validate_climax_entry(self, symbol: str, norm_side: str, strategy: str,
+                               market_data: dict, df_15m: Optional[pd.DataFrame],
+                               df_5m: Optional[pd.DataFrame], is_forex: bool) -> AduanaResult:
+        """
+        Validador ADUANAS & CASCADA para Entradas Clímax (LOWER_6 / UPPER_6).
+        Permite operaciones contra-tendencia macro ÚNICAMENTE bajo CONDICIONES EXTREMAS:
+        1. Nivel Extremo Real comprobado.
+        2. RSI Parabólico Extremo (>= 75/80 para SHORT, <= 25/20 para LONG).
+        3. Curvatura Bollinger Estabilizada (Anti 'Walking the Bands').
+        4. Regla Anti-Cohete / Anti-Cuchillo (> 2.5x ATR).
+        5. Fuerza Real en 5M (Vela roja bajo EMA3 + volumen para SHORT; vela verde sobre EMA3 + volumen para LONG).
+        Sizing adaptativo: 45% en contra-tendencia extrema; 70-100% en neutro/alineado.
+        """
+        strat_upper = strategy.upper()
+
+        # 1. Extracción o cálculo de RSI 15m y 5m
+        rsi_15m = market_data.get('rsi_15m')
+        if rsi_15m is None and df_15m is not None and len(df_15m) >= 14:
+            rsi_col = 'rsi' if 'rsi' in df_15m.columns else ('rsi_14' if 'rsi_14' in df_15m.columns else None)
+            if rsi_col:
+                rsi_15m = float(df_15m[rsi_col].iloc[-1])
+            else:
+                delta = df_15m['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / (loss + 1e-10)
+                rsi_series = 100 - (100 / (1 + rs))
+                rsi_15m = float(rsi_series.iloc[-1])
+        rsi_15m = float(rsi_15m or 50.0)
+
+        rsi_5m = market_data.get('rsi_5m')
+        if rsi_5m is None and df_5m is not None and len(df_5m) >= 14:
+            rsi_col_5 = 'rsi' if 'rsi' in df_5m.columns else ('rsi_14' if 'rsi_14' in df_5m.columns else None)
+            if rsi_col_5:
+                rsi_5m = float(df_5m[rsi_col_5].iloc[-1])
+            else:
+                delta5 = df_5m['close'].diff()
+                gain5 = (delta5.where(delta5 > 0, 0)).rolling(window=14).mean()
+                loss5 = (-delta5.where(delta5 < 0, 0)).rolling(window=14).mean()
+                rs5 = gain5 / (loss5 + 1e-10)
+                rsi_series5 = 100 - (100 / (1 + rs5))
+                rsi_5m = float(rsi_series5.iloc[-1])
+        rsi_5m = float(rsi_5m or 50.0)
+
+        # 2. Detección de Contra-Tendencia Macro
+        mtf = market_data.get('mtf_score', market_data.get('mtf', 0.0))
+        mtf_val = float(mtf) if mtf is not None else 0.0
+        sar = str(market_data.get('sar_trend', market_data.get('sar_phase', ''))).lower()
+
+        is_bull_macro_15m = False
+        is_bear_macro_15m = False
+        diff_pct = 0.0
+        if df_15m is not None and len(df_15m) >= 20:
+            c15 = df_15m['close'] if 'close' in df_15m.columns else df_15m.get('Close', pd.Series())
+            e3 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+            e9 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+            e20 = float(c15.ewm(span=20, adjust=False).mean().iloc[-1])
+            if e3 > e9 > e20:
+                is_bull_macro_15m = True
+            elif e3 < e9 < e20:
+                is_bear_macro_15m = True
+
+            if len(c15) >= 30:
+                e50 = float(c15.ewm(span=50, adjust=False).mean().iloc[-1])
+                diff_pct = (e20 - e50) / (e50 + 1e-9) * 100.0
+
+        if norm_side == 'short':
+            is_contra_trend = (mtf_val > 0.15) or ('sar+' in sar or 'long' in sar) or is_bull_macro_15m or (diff_pct > 0.05)
+        else:
+            is_contra_trend = (mtf_val < -0.15) or ('sar-' in sar or 'short' in sar) or is_bear_macro_15m or (diff_pct < -0.05)
+
+        # 3. Si es Contra-Tendencia, aplicar CONDICIONES EXTREMAS ADUANAS & CASCADA
+        if is_contra_trend:
+            # Condición A: RSI Parabólico Extremo
+            if norm_side == 'short':
+                min_rsi_15m = 72.0 if is_forex else 75.0
+                min_rsi_5m = 78.0 if is_forex else 80.0
+                if rsi_15m < min_rsi_15m and rsi_5m < min_rsi_5m:
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='REJECT_CLIMAX_RSI_NOT_EXTREME',
+                        reason=f'{strategy} SHORT rechazado en contra-tendencia: RSI no es extremo parabólico (RSI_15m={rsi_15m:.1f} < {min_rsi_15m}, RSI_5m={rsi_5m:.1f} < {min_rsi_5m})',
+                        step=2
+                    )
+            else:
+                max_rsi_15m = 28.0 if is_forex else 25.0
+                max_rsi_5m = 22.0 if is_forex else 20.0
+                if rsi_15m > max_rsi_15m and rsi_5m > max_rsi_5m:
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='REJECT_CLIMAX_RSI_NOT_EXTREME',
+                        reason=f'{strategy} LONG rechazado en contra-tendencia: RSI no es extremo parabólico (RSI_15m={rsi_15m:.1f} > {max_rsi_15m}, RSI_5m={rsi_5m:.1f} > {max_rsi_5m})',
+                        step=2
+                    )
+
+            # Condición B: Curvatura Bollinger Estabilizada (Anti 'Walking the Bands')
+            bw_ratio = float(market_data.get('bandwidth_ratio', 1.0))
+            is_divergent = bool(market_data.get('is_divergent', False))
+            if bw_ratio >= 1.25 and is_divergent:
+                return AduanaResult(
+                    approved=False,
+                    rule_triggered='REJECT_CLIMAX_WALKING_THE_BANDS',
+                    reason=f'{strategy} {norm_side.upper()} rechazado: Bandas Bollinger en expansión divergente explosiva (BW={bw_ratio:.2f}, Walking the Bands)',
+                    step=2
+                )
+
+            # Condición C: Fuerza Real y Giro en 5M
+            if df_5m is not None and len(df_5m) >= 2:
+                last_5m = df_5m.iloc[-1]
+                c5 = float(last_5m.get('close', 0))
+                o5 = float(last_5m.get('open', 0))
+                h5 = float(last_5m.get('high', 0))
+                l5 = float(last_5m.get('low', 0))
+                rng5 = max(h5 - l5, 1e-8)
+                body5 = abs(c5 - o5)
+                body_ratio5 = body5 / rng5
+
+                c5_series = df_5m['close'] if 'close' in df_5m.columns else df_5m.get('c', pd.Series())
+                ema3_5m = float(c5_series.ewm(span=3, adjust=False).mean().iloc[-1])
+
+                v5_series = df_5m['volume'] if 'volume' in df_5m.columns else df_5m.get('v', pd.Series(dtype=float))
+                vol_5m = float(v5_series.iloc[-1]) if len(v5_series) > 0 else 0.0
+                vol_sma10 = float(v5_series.tail(10).mean()) if len(v5_series) >= 10 else 0.0
+                has_vol_boost = (vol_sma10 > 0 and vol_5m >= 1.15 * vol_sma10)
+
+                # Regla Anti-Cohete (> 2.5x ATR)
+                atr_5m = float(df_5m['atr'].iloc[-1]) if 'atr' in df_5m.columns else (c5 * 0.005 if not is_forex else 0.0008)
+                if atr_5m > 0 and rng5 > 2.5 * atr_5m:
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='REJECT_CLIMAX_ROCKET_EXPANSION',
+                        reason=f'{strategy} {norm_side.upper()} rechazado: Vela 5m en expansión explosiva ({rng5:.4f} > 2.5x ATR={atr_5m:.4f}), esperar confirmación',
+                        step=2
+                    )
+
+                if norm_side == 'short':
+                    is_red = c5 < o5
+                    is_under_ema3 = c5 < ema3_5m
+                    upper_wick = (h5 - max(c5, o5)) / rng5
+                    has_selling_force = has_vol_boost or (body_ratio5 >= 0.40) or (upper_wick >= 0.30 and is_red)
+                    if not (is_red and is_under_ema3):
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='REJECT_CLIMAX_NO_REVERSAL_CANDLE',
+                            reason=f'{strategy} SHORT rechazado en contra-tendencia: Vela 5m no confirma giro bajista bajo EMA3 (Close={c5:.4f}, Open={o5:.4f}, EMA3={ema3_5m:.4f})',
+                            step=2
+                        )
+                    if not has_selling_force:
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='REJECT_CLIMAX_INSUFFICIENT_SELLING_FORCE',
+                            reason=f'{strategy} SHORT rechazado en contra-tendencia: Sin fuerza vendedora real en 5m (Volumen insuficiente y cuerpo menor a 40%)',
+                            step=2
+                        )
+                else:
+                    is_green = c5 > o5
+                    is_over_ema3 = c5 > ema3_5m
+                    lower_wick = (min(c5, o5) - l5) / rng5
+                    has_buying_force = has_vol_boost or (body_ratio5 >= 0.40) or (lower_wick >= 0.30 and is_green)
+                    if not (is_green and is_over_ema3):
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='REJECT_CLIMAX_NO_REVERSAL_CANDLE',
+                            reason=f'{strategy} LONG rechazado en contra-tendencia: Vela 5m no confirma giro alcista sobre EMA3 (Close={c5:.4f}, Open={o5:.4f}, EMA3={ema3_5m:.4f})',
+                            step=2
+                        )
+                    if not has_buying_force:
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='REJECT_CLIMAX_INSUFFICIENT_BUYING_FORCE',
+                            reason=f'{strategy} LONG rechazado en contra-tendencia: Sin fuerza compradora real en 5m (Volumen insuficiente y cuerpo menor a 40%)',
+                            step=2
+                        )
+
+            # Todas las condiciones extremas cumplidas: Aprobación con sizing prudente (45%)
+            rule_name = 'QSHR_CLIMAX_EXTREME_CONTRA_TREND_APPROVED'
+            log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado bajo CONDICIONES EXTREMAS ADUANA-CASCADA (Sizing=45%)")
+            return AduanaResult(
+                approved=True,
+                rule_triggered=rule_name,
+                reason=f'{strategy} aprobado bajo condiciones extremas y fuerza real de giro (Sizing=45%)',
+                step=2,
+                detail={'sizing_factor': 0.45, 'approval_type': 'climax_extreme_contra_trend', 'contra_trend': True}
+            )
+        else:
+            # Macro alineada o neutral: Aprobación con sizing estándar (70% - 100%)
+            sizing_factor = 0.70 if '5M' in strat_upper else 1.0
+            rule_name = 'QSHR_CLIMAX_APPROVED'
+            log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado por Agotamiento en Banda Extrema con Macro Favorable (Sizing={int(sizing_factor*100)}%)")
+            return AduanaResult(
+                approved=True,
+                rule_triggered=rule_name,
+                reason=f'{strategy} aprobado por absorción en banda extrema con macro favorable',
+                step=2,
+                detail={'sizing_factor': sizing_factor, 'approval_type': 'climax_reversal', 'contra_trend': False}
+            )
 
     def validate(self, symbol: str, side: str, order_type: str,
                  market_data: dict, strategy: str = '',
@@ -408,7 +632,14 @@ class AduanaValidator:
         # Step 1.6: Bloqueo de Re-Entrada en la Misma Dirección ante Drawdown > 5 pips
         is_erep_strategy = strategy.startswith('Bb33_EREP') or 'EREP' in strategy
         is_booster = 'BOOSTER' in strategy.upper()
-        if not is_erep_strategy and not is_booster:
+        strat_up = strategy.upper()
+        is_macro_climax = bool(
+            'MACRO_CLIMAX' in strat_up or 'MACRO_P2' in strat_up or 
+            'UPPER_6' in strat_up or 'LOWER_6' in strat_up or 
+            market_data.get('is_macro_extreme', False)
+        )
+
+        if not is_erep_strategy and not is_booster and not is_macro_climax:
             try:
                 active_positions = market_data.get('active_positions')
                 if active_positions is None and not is_test:
@@ -444,26 +675,61 @@ class AduanaValidator:
             except Exception as dd_err:
                 log_warning(f"Error checking same side drawdown in Aduana: {dd_err}", MODULE)
 
-        # Step 1.7: Macro 1D Direction Check (EMA3 vs EMA9)
-        step = 1
-        df_1d = market_data.get('df_1d')
-        if df_1d is not None and len(df_1d) >= 10:
-            ema3_1d = float(df_1d['close'].ewm(span=3, adjust=False).mean().iloc[-1])
-            ema9_1d = float(df_1d['close'].ewm(span=9, adjust=False).mean().iloc[-1])
-            if norm_side == 'long' and ema3_1d < ema9_1d:
-                return AduanaResult(
-                    approved=False,
-                    rule_triggered='MACRO_BIAS_CONFLICT',
-                    reason=f'Operación LONG rechazada por sesgo macro bajista en 1D (EMA3={ema3_1d:.5f} < EMA9={ema9_1d:.5f}) para orden {order_type.upper()}',
-                    step=step
-                )
-            elif norm_side == 'short' and ema3_1d > ema9_1d:
-                return AduanaResult(
-                    approved=False,
-                    rule_triggered='MACRO_BIAS_CONFLICT',
-                    reason=f'Operación SHORT rechazada por sesgo macro alcista en 1D (EMA3={ema3_1d:.5f} > EMA9={ema9_1d:.5f}) para orden {order_type.upper()}',
-                    step=step
-                )
+        # Step 1.65: Cooldown Post-SL (3h salvo que sea Oportunidad Macro Extrema)
+        if not is_erep_strategy and not is_booster and not is_macro_climax and not market_data.get('bypass_cooldown', False):
+            try:
+                from app.strategy.position_guards import is_symbol_in_sl_cooldown
+                cd_minutes = float(self.params.get('cooldown_post_sl_minutes_forex' if is_forex else 'cooldown_post_sl_minutes_crypto', 180.0))
+                m_type = 'forex_futures' if is_forex else 'crypto_futures'
+                cur_t = market_data.get('current_time')
+                sb_client = None if is_test else get_supabase()
+                in_cd, rem_mins = is_symbol_in_sl_cooldown(symbol, cooldown_minutes=cd_minutes, market_type=m_type, sb=sb_client, current_time=cur_t, is_macro_extreme=is_macro_climax)
+                if in_cd:
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='POST_SL_COOLDOWN_ACTIVE',
+                        reason=f'{symbol} en enfriamiento post-SL ({rem_mins:.1f}m restantes de {cd_minutes:.0f}m)',
+                        step=step
+                    )
+            except Exception as cd_err:
+                log_warning(f"Error checking post-sl cooldown in Aduana: {cd_err}", MODULE)
+
+        # Step 1.7: Macro 1D Direction Check (EMA3 vs EMA9 - Exento si es Clímax en UPPER_6 / LOWER_6)
+        if not is_macro_climax:
+            step = 1
+            df_1d = market_data.get('df_1d')
+            if df_1d is not None and len(df_1d) >= 10:
+                ema3_1d = float(df_1d['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_1d = float(df_1d['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+                if norm_side == 'long' and ema3_1d < ema9_1d:
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='MACRO_BIAS_CONFLICT',
+                        reason=f'Operación LONG rechazada por sesgo macro bajista en 1D (EMA3={ema3_1d:.5f} < EMA9={ema9_1d:.5f}) para orden {order_type.upper()}',
+                        step=step
+                    )
+                elif norm_side == 'short' and ema3_1d > ema9_1d:
+                    return AduanaResult(
+                        approved=False,
+                        rule_triggered='MACRO_BIAS_CONFLICT',
+                        reason=f'Operación SHORT rechazada por sesgo macro alcista en 1D (EMA3={ema3_1d:.5f} > EMA9={ema9_1d:.5f}) para orden {order_type.upper()}',
+                        step=step
+                    )
+
+        # Step 1.75: Anti-Chop Guard (ADX < 20 en 15m)
+        if not is_macro_climax and not is_erep_strategy:
+            adx_val = market_data.get('adx')
+            if adx_val is not None:
+                try:
+                    if float(adx_val) < 20.0:
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='CHOPPY_MARKET_BLOCKED',
+                            reason=f'{symbol} bloqueado por mercado lateral/sin tendencia (ADX={float(adx_val):.1f} < 20.0)',
+                            step=step
+                        )
+                except Exception:
+                    pass
 
         # Step 1.8: Non-Squeeze 15m RSI Extrema Check (35 / 65)
         step = 1
@@ -500,7 +766,7 @@ class AduanaValidator:
                     rsi_series = 100 - (100 / (1 + rs))
                     rsi_15m = float(rsi_series.iloc[-1])
 
-        is_trend_strategy = any(k in strategy for k in ('Aa61', 'AaHot', 'BbHot', 'Aa13', 'Bb13', 'Aa21', 'Bb25', 'Aa33', 'Bb33', 'Bb41', 'Bb12', 'Bb40', 'Bb11', 'AaApexEma', 'BbApexEma', 'Breakout', 'breakout', 'Trend', 'trend', 'Momentum', 'momentum'))
+        is_trend_strategy = any(k in strategy for k in ('Aa61', 'AaHot', 'BbHot', 'Aa13', 'Bb13', 'Aa21', 'Bb25', 'Aa33', 'Bb33', 'Bb41', 'Bb12', 'Bb40', 'Bb11', 'Breakout', 'breakout', 'Trend', 'trend', 'Momentum', 'momentum'))
 
         if not is_trend_strategy and not is_qshr_strategy and not is_erep_strategy and rsi_15m is not None and not is_squeeze:
             # 1. No-Trade Deadzone Check (RSI 40 - 60)
@@ -566,6 +832,49 @@ class AduanaValidator:
                         step=step
                     )
 
+        # Step 1.91: Flat / Horizontal Bollinger Bands Range Rule
+        # Si el mercado está en rango lateral / bandas planas en 15m (no hay expansión activa de volatilidad):
+        # Para LONG: Exigir que el precio esté por debajo de la Banda Inferior de Bollinger.
+        # Para SHORT: Exigir que el precio esté por encima de la Banda Superior de Bollinger.
+        # Compras o ventas en el medio (cerca de EMA9/Basis) están terminantemente prohibidas en mercado horizontal.
+        if df_15m is not None and len(df_15m) >= 20 and not is_qshr_strategy and not is_erep_strategy:
+            col_upper = 'upper_2' if 'upper_2' in df_15m.columns else ('bb_upper' if 'bb_upper' in df_15m.columns else ('upper_6' if 'upper_6' in df_15m.columns else None))
+            col_lower = 'lower_2' if 'lower_2' in df_15m.columns else ('bb_lower' if 'bb_lower' in df_15m.columns else ('lower_6' if 'lower_6' in df_15m.columns else None))
+            
+            if col_upper and col_lower and len(df_15m) >= 2:
+                u_curr = float(df_15m[col_upper].iloc[-1])
+                u_prev = float(df_15m[col_upper].iloc[-2])
+                l_curr = float(df_15m[col_lower].iloc[-1])
+                l_prev = float(df_15m[col_lower].iloc[-2])
+                upper_slope = u_curr - u_prev
+                lower_slope = l_curr - l_prev
+                
+                # Expansión requiere banda superior ascendente Y banda inferior descendente
+                is_bb_expanding = (upper_slope > 0) and (lower_slope < 0)
+                
+                if not is_bb_expanding:
+                    last_low = float(df_15m['low'].iloc[-1]) if 'low' in df_15m.columns else float(df_15m['close'].iloc[-1])
+                    last_high = float(df_15m['high'].iloc[-1]) if 'high' in df_15m.columns else float(df_15m['close'].iloc[-1])
+                    last_close = float(df_15m['close'].iloc[-1])
+                    tol = 0.00015 if is_forex else (last_close * 0.0005)
+                    
+                    if norm_side == 'long':
+                        if min(last_low, last_close) > (l_curr + tol):
+                            return AduanaResult(
+                                approved=False,
+                                rule_triggered='BB_HORIZONTAL_RANGE_NOT_EXTREME',
+                                reason=f'Mercado horizontal con bandas planas (UpperSlope={upper_slope:.6f}, LowerSlope={lower_slope:.6f}); compras LONG prohibidas dentro del canal sin cruzar Banda Inferior (Low={last_low:.5f} > LowerBB={l_curr:.5f}) para orden {order_type.upper()}',
+                                step=step
+                            )
+                    elif norm_side == 'short':
+                        if max(last_high, last_close) < (u_curr - tol):
+                            return AduanaResult(
+                                approved=False,
+                                rule_triggered='BB_HORIZONTAL_RANGE_NOT_EXTREME',
+                                reason=f'Mercado horizontal con bandas planas (UpperSlope={upper_slope:.6f}, LowerSlope={lower_slope:.6f}); ventas SHORT prohibidas dentro del canal sin cruzar Banda Superior (High={last_high:.5f} < UpperBB={u_curr:.5f}) para orden {order_type.upper()}',
+                                step=step
+                            )
+
         # Step 1.95: Micro 5m EMA Alignment Guard (Evitar compras en caída libre o ventas en subida parabólica de 5m)
         df_5m = market_data.get('df_5m')
         if df_5m is not None and len(df_5m) >= 20 and not is_qshr_strategy and not is_erep_strategy:
@@ -580,6 +889,7 @@ class AduanaValidator:
                 ema3_5m = float(ema3_5m_series.iloc[-1])
                 ema9_5m = float(ema9_5m_series.iloc[-1])
                 ema20_5m = float(ema20_5m_series.iloc[-1])
+                ema20_5m_prev1 = float(ema20_5m_series.iloc[-2])
                 
                 last_c5 = float(c5.iloc[-1])
                 last_o5 = float(o5.iloc[-1])
@@ -588,6 +898,14 @@ class AduanaValidator:
                 is_candle_red_5m = last_c5 < last_o5
                 
                 if norm_side == 'long':
+                    # Bloqueo 0: EMA20 de 5m en retroceso/declive (EMA20[t] <= EMA20[t-1])
+                    if ema20_5m <= ema20_5m_prev1:
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='REJECT_5M_EMA20_RETROCESO',
+                            reason=f'Orden LONG rechazada: EMA20 de 5m en retroceso/declive ({ema20_5m:.5f} <= {ema20_5m_prev1:.5f}), posible caída futura para {order_type.upper()}',
+                            step=1
+                        )
                     # Bloqueo 1: Cascada bajista activa en 5m (EMA3 < EMA9 < EMA20)
                     if ema3_5m < ema9_5m < ema20_5m:
                         if not (is_candle_green_5m and last_c5 > ema3_5m):
@@ -606,6 +924,14 @@ class AduanaValidator:
                             step=1
                         )
                 elif norm_side == 'short':
+                    # Bloqueo 0: EMA20 de 5m en retroceso/subida (EMA20[t] >= EMA20[t-1])
+                    if ema20_5m >= ema20_5m_prev1:
+                        return AduanaResult(
+                            approved=False,
+                            rule_triggered='REJECT_5M_EMA20_RETROCESO',
+                            reason=f'Orden SHORT rechazada: EMA20 de 5m en retroceso/subida ({ema20_5m:.5f} >= {ema20_5m_prev1:.5f}), posible subida futura para {order_type.upper()}',
+                            step=1
+                        )
                     # Bloqueo 1: Cascada alcista activa en 5m (EMA3 > EMA9 > EMA20)
                     if ema3_5m > ema9_5m > ema20_5m:
                         if not (is_candle_red_5m and last_c5 < ema3_5m):
@@ -626,9 +952,86 @@ class AduanaValidator:
 
         # Step 2.5: QSHR Squeeze Override & Booster Handling
         squeeze_velocity = float(market_data.get('squeeze_velocity', 0.0))
-        min_squeeze_vel = float(self.params.get('qshr_squeeze_velocity_min', 2.5))
+        strat_upper = strategy.upper()
+        
+        # Umbral adaptativo según mercado (Crypto vs Forex)
+        if is_forex:
+            min_squeeze_vel = float(self.params.get('qshr_squeeze_velocity_min_forex', self.params.get('qshr_squeeze_velocity_min', 2.5)))
+        else:
+            min_squeeze_vel = float(self.params.get('qshr_squeeze_velocity_min_crypto', 1.2))
 
         if is_qshr_strategy:
+            # ── 0. FILTRO DE TENDENCIA MACRO 15M (EMA20 vs EMA50) ──
+            # Evita entrar contra la inercia macro de 15m (las compras en caída y ventas en subida generan el 86% de pérdidas)
+            # Excepción: Estrategias CLIMAX (diseñadas para reversión en extremos)
+            trend_filter_enabled = bool(self.params.get('qshr_macro_trend_filter_enabled', True))
+            if trend_filter_enabled and not is_forex and 'CLIMAX' not in strat_upper and 'BOOSTER' not in strat_upper and not is_erep_strategy:
+                if df_15m is not None and len(df_15m) >= 30:
+                    try:
+                        c15 = df_15m['close'] if 'close' in df_15m.columns else df_15m.get('Close', pd.Series())
+                        if len(c15) >= 30:
+                            ema20_15m = float(c15.ewm(span=20, adjust=False).mean().iloc[-1])
+                            ema50_15m = float(c15.ewm(span=50, adjust=False).mean().iloc[-1])
+                            diff_pct = (ema20_15m - ema50_15m) / (ema50_15m + 1e-9) * 100.0
+                            if norm_side == 'long' and diff_pct < -0.05:
+                                return AduanaResult(
+                                    approved=False,
+                                    rule_triggered='MACRO_TREND_DISCORDANT',
+                                    reason=f'{strategy} LONG rechazado: Tendencia macro bajista en 15m (EMA20={ema20_15m:.2f} < EMA50={ema50_15m:.2f})',
+                                    step=2
+                                )
+                            elif norm_side == 'short' and diff_pct > 0.05:
+                                return AduanaResult(
+                                    approved=False,
+                                    rule_triggered='MACRO_TREND_DISCORDANT',
+                                    reason=f'{strategy} SHORT rechazado: Tendencia macro alcista en 15m (EMA20={ema20_15m:.2f} > EMA50={ema50_15m:.2f})',
+                                    step=2
+                                )
+                    except Exception as trend_e:
+                        log_warning(f"Error comprobando filtro de tendencia 15m en Aduana: {trend_e}", MODULE)
+
+            # ── 1. EXENCIÓN FULLSPAN: Divergencia de Bandas con Sizing Dinámico ──
+            if 'FULLSPAN' in strat_upper:
+                is_divergent = bool(market_data.get('is_divergent', False))
+                bw_ratio = float(market_data.get('bandwidth_ratio', 1.0))
+                min_bw_ratio = float(self.params.get('fullspan_bandwidth_ratio_min', 1.15))
+                has_band_divergence = is_divergent or (bw_ratio >= min_bw_ratio)
+
+                if has_band_divergence:
+                    if squeeze_velocity >= min_squeeze_vel:
+                        rule_name = 'QSHR_FULLSPAN_HIGH_VELOCITY'
+                        log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity:.2f} >= {min_squeeze_vel:.2f} y Bandas Divergentes (BW={bw_ratio:.2f}, Sizing=100%)")
+                        return AduanaResult(
+                            approved=True,
+                            rule_triggered=rule_name,
+                            reason=f'{strategy} aprobado por alta aceleración con bandas divergentes (Sizing=100%)',
+                            step=2,
+                            detail={'sizing_factor': 1.0, 'approval_type': 'fullspan_high_velocity', 'velocity': squeeze_velocity, 'bandwidth_ratio': bw_ratio}
+                        )
+                    else:
+                        rule_name = 'QSHR_FULLSPAN_DIVERGENCE_APPROVED'
+                        log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado por Divergencia de Bandas (V_5m={squeeze_velocity:.2f} < {min_squeeze_vel:.2f}, BW={bw_ratio:.2f}, Sizing=50%)")
+                        return AduanaResult(
+                            approved=True,
+                            rule_triggered=rule_name,
+                            reason=f'{strategy} aprobado por divergencia técnica de Bandas Bollinger con riesgo moderado (Sizing=50%)',
+                            step=2,
+                            detail={'sizing_factor': 0.5, 'approval_type': 'fullspan_divergence_conservative', 'velocity': squeeze_velocity, 'bandwidth_ratio': bw_ratio}
+                        )
+
+            # ── 2. VALIDACIÓN CLÍMAX (ADUANAS & CASCADA): Reversión por agotamiento en banda extrema ──
+            if 'CLIMAX' in strat_upper:
+                return self._validate_climax_entry(
+                    symbol=symbol,
+                    norm_side=norm_side,
+                    strategy=strategy,
+                    market_data=market_data,
+                    df_15m=df_15m,
+                    df_5m=df_5m,
+                    is_forex=is_forex
+                )
+
+            # ── 3. BOOSTER / RUPTURAS DIRECTAS / MOMENTUM ──
             if squeeze_velocity >= min_squeeze_vel:
                 # Si es Booster, validar que la posición existente tenga ganancia positiva
                 if 'BOOSTER' in strategy:
@@ -652,7 +1055,10 @@ class AduanaValidator:
                             )
                     rule_name = 'QSHR_BOOSTER_APPROVED'
                     log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity} >= {min_squeeze_vel}")
-                    return AduanaResult(approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity})', step=2)
+                    return AduanaResult(
+                        approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity})',
+                        step=2, detail={'sizing_factor': 1.0, 'approval_type': 'booster'}
+                    )
 
                 # Si es Ruptura Directa o Momentum, exigir validación de Pullback (evitar venta en piso / compra en techo)
                 if any(k in strategy for k in ('DIRECT', 'direct', 'MOMENTUM', 'momentum')):
@@ -667,10 +1073,13 @@ class AduanaValidator:
                         )
 
                 rule_name = 'QSHR_SQUEEZE_OVERRIDE'
-                log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity} >= {min_squeeze_vel}")
-                return AduanaResult(approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity})', step=2)
+                log_info(MODULE, f"⚡ [ADUANA {rule_name}] {symbol} {norm_side.upper()} aprobado con V_5m={squeeze_velocity:.2f} >= {min_squeeze_vel:.2f}")
+                return AduanaResult(
+                    approved=True, rule_triggered=rule_name, reason=f'{strategy} aprobado (V_5m={squeeze_velocity:.2f})',
+                    step=2, detail={'sizing_factor': 1.0, 'approval_type': 'squeeze_override'}
+                )
             else:
-                return AduanaResult(approved=False, rule_triggered='QSHR_LOW_VELOCITY', reason=f'Squeeze velocity insuficiente ({squeeze_velocity:.2f} < {min_squeeze_vel})', step=2)
+                return AduanaResult(approved=False, rule_triggered='QSHR_LOW_VELOCITY', reason=f'Squeeze velocity insuficiente ({squeeze_velocity:.2f} < {min_squeeze_vel:.2f})', step=2)
 
         # Step 2.8: EREP Recovery Validation
         is_erep_strategy = strategy.startswith('Bb33_EREP') or 'EREP' in strategy

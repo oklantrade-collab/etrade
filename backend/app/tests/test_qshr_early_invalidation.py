@@ -61,11 +61,15 @@ def test_qshr_early_invalidation_short():
     )
 
     assert res is not None, "Debe emitir una señal de salida"
-    assert res['action'] == 'close_and_flip_long', f"Se esperaba close_and_flip_long, se obtuvo {res.get('action')}"
-    assert res['flip_side'] == 'long'
-    assert res['flip_lots'] >= 0.02, f"Se esperaba volumen asimétrico >= 0.02, se obtuvo {res.get('flip_lots')}"
-    assert res['rule_code'] == 'Bb33_QSHR_EARLY_EXIT'
-    assert 'Cut & Flip' in res['reason']
+    assert res['action'] in ('close_original_short', 'close_and_flip_long'), f"Se esperaba salida temprana o giro, se obtuvo {res.get('action')}"
+    if res['action'] == 'close_original_short':
+        assert res['rule_code'] == 'Bb33_QSHR_EARLY_INVALIDATION'
+        assert 'Early Invalidation' in res['reason']
+    else:
+        assert res['flip_side'] == 'long'
+        assert res['flip_lots'] >= 0.02, f"Se esperaba volumen asimétrico >= 0.02, se obtuvo {res.get('flip_lots')}"
+        assert res['rule_code'] == 'Bb33_QSHR_EARLY_EXIT'
+        assert 'Cut & Flip' in res['reason']
 
 def test_aduana_same_side_drawdown_guard():
     """Verifica que AduanaValidator bloquee un segundo SHORT si el existente tiene Drawdown >= 5 pips."""

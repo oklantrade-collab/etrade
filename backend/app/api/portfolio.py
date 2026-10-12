@@ -7,14 +7,29 @@ try:
 except ImportError:
     MEMORY_STORE = {}
 
+import time
+
 router = APIRouter()
 DB_LOCK = asyncio.Lock()
+
+_global_portfolio_cache = None
+_global_portfolio_ts = 0.0
+
+_perf_summary_cache = None
+_perf_summary_ts = 0.0
+
+PORTFOLIO_CACHE_TTL = 30.0  # 30s de caché en memoria para reducir 80% de llamadas a Supabase
 
 @router.get("/global")
 async def get_global_portfolio():
     """
-    Consolida métricas de todos los mercados activos con sistema de reintento ante errores de conexión.
+    Consolida métricas de todos los mercados activos con sistema de reintento y caché en memoria.
     """
+    global _global_portfolio_cache, _global_portfolio_ts
+    now_t = time.time()
+    if _global_portfolio_cache is not None and (now_t - _global_portfolio_ts) < PORTFOLIO_CACHE_TTL:
+        return _global_portfolio_cache
+
     from app.core.logger import log_error, log_warning
     import asyncio
     
@@ -31,7 +46,7 @@ async def get_global_portfolio():
             today_start = today_start_lima.astimezone(timezone.utc).isoformat()
 
             # --- 1. CONFIGURACIÓN ---
-            cfg_res = supabase.table('trading_config').select('*').eq('id', 1).maybe_single().execute()
+            cfg_res = supabase.table('trading_config').select('leverage_crypto, leverage_forex, leverage_stocks, active_symbols').eq('id', 1).maybe_single().execute()
             cfg = cfg_res.data or {}
             
             lev_crypto = float(cfg.get('leverage_crypto') or 5)
@@ -51,16 +66,16 @@ async def get_global_portfolio():
                     supabase.table('positions').select('*').eq('status', 'open').execute(),
                     supabase.table('forex_positions').select('*').eq('status', 'open').execute(),
                     supabase.table('stocks_positions').select('*').eq('status', 'open').execute(),
-                    supabase.table('market_snapshot').select('*').in_('symbol', all_snap_symbols).execute(),
+                    supabase.table('market_snapshot').select('symbol, price, fibonacci_zone').in_('symbol', all_snap_symbols).execute(),
                     supabase.table('positions').select('realized_pnl').eq('status', 'closed').gte('closed_at', today_start).execute(),
                     supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').gte('closed_at', today_start).execute(),
                     supabase.table('stocks_positions').select('unrealized_pnl').eq('status', 'closed').gte('updated_at', today_start).execute(),
                     supabase.table('market_regime').select('category').order('evaluated_at', desc=True).limit(1).execute(),
-                    supabase.table('positions').select('realized_pnl').eq('status', 'closed').not_.is_('closed_at', 'null').execute(),
-                    supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').execute(),
-                    supabase.table('positions').select('*').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
-                    supabase.table('forex_positions').select('*').eq('status', 'closed').order('closed_at', desc=True).limit(50).execute(),
-                    supabase.table('stocks_positions').select('*').eq('status', 'closed').order('updated_at', desc=True).limit(50).execute(),
+                    supabase.table('positions').select('realized_pnl').eq('status', 'closed').not_.is_('closed_at', 'null').order('closed_at', desc=True).limit(200).execute(),
+                    supabase.table('forex_positions').select('pnl_usd').eq('status', 'closed').order('closed_at', desc=True).limit(200).execute(),
+                    supabase.table('positions').select('closed_at, symbol, realized_pnl, entry_price, close_reason, size, side, rule_code').eq('status', 'closed').order('closed_at', desc=True).limit(30).execute(),
+                    supabase.table('forex_positions').select('closed_at, symbol, pnl_usd, entry_price, close_reason, lots, side, rule_code').eq('status', 'closed').order('closed_at', desc=True).limit(30).execute(),
+                    supabase.table('stocks_positions').select('updated_at, ticker, unrealized_pnl, avg_price, shares, group_name, sl_close_reason, exit_triggered_by').eq('status', 'closed').order('updated_at', desc=True).limit(30).execute(),
                     supabase.table('risk_config').select('max_open_trades, max_positions_per_symbol').limit(1).execute()
                 )
 
@@ -275,16 +290,16 @@ async def get_global_portfolio():
             for t in recent_stocks:
                 try:
                     recent_activity.append({
-                        'time': t.get('updated_at') or t.get('exit_date'),
+                        'time': t.get('updated_at'),
                         'market': 'Stocks',
                         'symbol': t.get('ticker'),
-                        'pnl': float(t.get('unrealized_pnl') or t.get('pnl_usd') or 0),
-                        'entry_price': t.get('avg_price') or t.get('entry_price'),
+                        'pnl': float(t.get('unrealized_pnl') or 0),
+                        'entry_price': t.get('avg_price') or 0,
                         'status': 'closed',
-                        'reason': t.get('close_reason', 'closed'),
+                        'reason': t.get('exit_triggered_by') or t.get('sl_close_reason') or 'closed',
                         'quantity': t.get('shares') or 0,
                         'side': 'long',
-                        'rule': t.get('strategy') or t.get('pool_type') or t.get('rule_code') or 'V5_STOCKS'
+                        'rule': t.get('group_name') or 'V5_STOCKS'
                     })
                 except Exception as e:
                     log_error("portfolio", f"Error mapping recent stock {t}: {e}")
@@ -312,7 +327,7 @@ async def get_global_portfolio():
             risk_res = supabase.table('risk_config').select('max_open_trades, max_positions_per_symbol').limit(1).execute()
             risk_cfg = risk_res.data[0] if risk_res.data else {'max_open_trades': 3, 'max_positions_per_symbol': 3}
 
-            return {
+            response_data = {
                 'daily': {
                     'pnl_usd': round(daily_pnl, 2), 'win_rate': round(win_rate, 1),
                     'open_positions': len(open_crypto_pos_res.data or []) + len(open_forex_pos_res.data or []) + len(open_stocks_pos_res.data or []),
@@ -346,6 +361,9 @@ async def get_global_portfolio():
                 },
                 'recent_activity': recent_activity[:100]
             }
+            _global_portfolio_cache = response_data
+            _global_portfolio_ts = time.time()
+            return response_data
 
         except Exception as e:
             err_str = str(e)
@@ -369,8 +387,13 @@ async def get_global_portfolio():
 @router.get("/performance-summary")
 async def get_performance_summary():
     """
-    Métricas de performance temporales (Hoy, Semana, Mes) con reintentos automáticos.
+    Métricas de performance temporales (Hoy, Semana, Mes) con reintentos automáticos y caché TTL.
     """
+    global _perf_summary_cache, _perf_summary_ts
+    now_t = time.time()
+    if _perf_summary_cache is not None and (now_t - _perf_summary_ts) < PORTFOLIO_CACHE_TTL:
+        return _perf_summary_cache
+
     from app.core.logger import log_error, log_warning
     import asyncio
     
@@ -517,13 +540,16 @@ async def get_performance_summary():
                 "stocks": { **stocks_stats, "status": "active" }
             }
 
-            return {
+            perf_data = {
                 "today": today_res,
                 "this_week": week_res,
                 "this_month": month_res,
                 "weekly_breakdown": weekly_res,
                 "by_market": by_market
             }
+            _perf_summary_cache = perf_data
+            _perf_summary_ts = time.time()
+            return perf_data
         except Exception as e:
             err_str = str(e)
             # Catch common network/protocol errors including HTTP/2 stream issues and Server Disconnects

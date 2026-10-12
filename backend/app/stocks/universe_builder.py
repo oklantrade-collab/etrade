@@ -36,9 +36,9 @@ class UniverseBuilder:
 
     async def build_daily_watchlist(
         self,
-        max_price: float = 20.0,
+        max_price: float = 50.0,
         min_price: float = 1.0,
-        min_market_cap: int = 1_000_000_000,
+        min_market_cap: int = 50_000_000,
         min_volume: int = 1_000_000,
         min_rvol: float = 1.5,
         max_results: int = 50,
@@ -268,6 +268,15 @@ class UniverseBuilder:
                 # Compute RVOL (today's volume / 3-month average)
                 rvol = vol / avg_vol if avg_vol > 0 else 0
 
+                # Volatilidad intradía estimada
+                day_high = float(q.get('regularMarketDayHigh') or price)
+                day_low = float(q.get('regularMarketDayLow') or price)
+                today_range_pct = ((day_high - day_low) / price * 100.0) if price > 0 else 0.0
+
+                # Descartar activos totalmente aletargados (rango de hoy < 1.2% y bajo momentum)
+                if price > 0 and today_range_pct < 1.2 and abs(chg_pct) < 0.8 and rvol < 1.2:
+                    continue
+
                 candidates.append({
                     "ticker": sym.upper(),
                     "catalyst_score": max(1, min(10, int(vol / 5_000_000))),
@@ -280,6 +289,7 @@ class UniverseBuilder:
                     "_market_cap": mcap,
                     "_change_pct": chg_pct,
                     "_name": name,
+                    "_today_range_pct": today_range_pct,
                 })
 
             # To ensure we don't miss high volume leaders (like OPEN, SOFI), 

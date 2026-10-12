@@ -10,7 +10,8 @@ from app.strategy.quantum_squeeze_hedge import (
     scan_squeeze_opportunities,
     evaluate_qshr_trailing_and_exit,
     evaluate_qshr_hedge_signal,
-    get_qshr_hud_status
+    get_qshr_hud_status,
+    calculate_hedge_sl
 )
 from app.rebote_aduana.aduana_validator import AduanaValidator, AduanaResult
 
@@ -124,5 +125,54 @@ class TestQSHRv5(unittest.TestCase):
         self.assertTrue(res.approved)
         self.assertEqual(res.rule_triggered, 'QSHR_SQUEEZE_OVERRIDE')
 
+    def test_upper_wick_rejection(self):
+        # Crear vela con mecha superior del 40% (rechazo en techo)
+        df_wick = self.df_5m.copy()
+        df_wick.iloc[-1, df_wick.columns.get_loc('high')] = 1.3750
+        df_wick.iloc[-1, df_wick.columns.get_loc('close')] = 1.3650
+        df_wick.iloc[-1, df_wick.columns.get_loc('open')] = 1.3600
+        df_wick.iloc[-1, df_wick.columns.get_loc('low')] = 1.3590
+        # High=1.3750, Close=1.3650, Open=1.3600, Low=1.3590 -> Range=0.0160, UpperWick=0.0100 (62.5%)
+        res = scan_squeeze_opportunities('GBPUSD', df_wick, self.df_15m, 'forex_futures')
+        # Debe ser rechazado por mecha superior excesiva o retornar None
+        if res:
+            self.assertNotEqual(res.get('action'), 'open_direct_long', "No debe abrir DIRECT_LONG con mecha superior de rechazo")
+
+    def test_early_invalidation_cut_long(self):
+        # Crear un escenario donde el LONG entró en 1.3650 y el precio cayó por debajo de basis (1.3550) con EMA3 < EMA9
+        df_bearish_fall = self.df_5m.copy()
+        df_bearish_fall.iloc[-1, df_bearish_fall.columns.get_loc('close')] = 1.3520
+        df_bearish_fall.iloc[-1, df_bearish_fall.columns.get_loc('open')] = 1.3580
+        df_bearish_fall['ma3'] = 1.3530
+        df_bearish_fall['ma9'] = 1.3560
+        df_bearish_fall['basis'] = 1.3550
+
+        pos_long = {
+            'id': 'pos-long-trap',
+            'symbol': 'GBPUSD',
+            'side': 'long',
+            'entry_price': 1.3650,
+            'lots': 0.01,
+            'status': 'open'
+        }
+        res = evaluate_qshr_hedge_signal('GBPUSD', df_bearish_fall, self.df_15m, active_position=pos_long)
+        self.assertIsNotNone(res)
+        self.assertIn(res.get('action'), ('close_original_long', 'close_and_flip_short'), "Debe cortar la pérdida del LONG temprano ante ruptura fallida")
+
+    def test_calculate_hedge_sl_crypto_buffer(self):
+        # En BTCUSDT a 60,000, el buffer debe ser de al menos 0.8% (~480 USD) y no 0.0002
+        candle_btc = pd.Series({
+            'open': 59800.0,
+            'high': 60500.0,
+            'low': 59500.0,
+            'close': 60000.0,
+            'atr': 400.0
+        })
+        sl_long = calculate_hedge_sl(candle_btc, 'long', 'BTCUSDT')
+        sl_dist = 60000.0 - sl_long
+        self.assertGreater(sl_dist, 450.0, f"SL dist {sl_dist} debe ser mayor a 450 USD para tolerar ruido")
+        self.assertLess(sl_long, 59500.0, "SL long debe estar debajo del low de la vela con buffer de seguridad")
+
 if __name__ == '__main__':
     unittest.main()
+

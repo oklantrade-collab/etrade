@@ -524,6 +524,7 @@ class CTraderProtobufProvider(BaseMarketProvider):
         """
         Obtiene el precio actual del cache.
         Si no está en cache, espera hasta 5 seg.
+        Fallback a MEMORY_STORE o Supabase market_snapshot.
         """
         for _ in range(50):
             if symbol in self._live_prices:
@@ -532,10 +533,28 @@ class CTraderProtobufProvider(BaseMarketProvider):
                 ]['mid']
             await asyncio.sleep(0.1)
 
+        # Fallback 1: MEMORY_STORE
+        try:
+            from app.core.memory_store import MEMORY_STORE
+            if symbol in MEMORY_STORE and MEMORY_STORE[symbol].get('current_price', 0) > 0:
+                return float(MEMORY_STORE[symbol]['current_price'])
+        except Exception:
+            pass
+
+        # Fallback 2: Supabase market_snapshot
+        try:
+            from app.core.supabase_client import get_supabase
+            sb = get_supabase()
+            res = sb.table('market_snapshot').select('price').eq('symbol', symbol).maybe_single().execute()
+            if res.data and res.data.get('price'):
+                return float(res.data['price'])
+        except Exception:
+            pass
+
         if not is_forex_market_open():
             log_warning('CTRADER', f'Sin precio para {symbol} (Mercado Cerrado)')
         else:
-            log_error('CTRADER', f'Sin precio para {symbol}')
+            log_warning('CTRADER', f'Sin precio en vivo para {symbol}')
             
         return 0.0
 
@@ -553,7 +572,7 @@ class CTraderProtobufProvider(BaseMarketProvider):
             if not is_forex_market_open():
                 log_warning('CTRADER', 'No autenticado (Mercado Cerrado)')
             else:
-                log_error('CTRADER', 'No autenticado')
+                log_warning('CTRADER', 'Proveedor secundario no autenticado')
             return pd.DataFrame()
 
         symbol_id = self._symbol_ids.get(symbol)

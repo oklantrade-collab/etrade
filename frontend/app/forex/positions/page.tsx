@@ -479,7 +479,15 @@ export default function ForexPositions() {
                       closedPositions.slice(closedPage * ITEMS_PER_PAGE, (closedPage + 1) * ITEMS_PER_PAGE).map((pos: any) => {
                         const isLong = pos.side.toLowerCase() === 'long' || pos.side.toLowerCase() === 'buy'
                         const exitPrice = pos.exit_price || pos.close_price || pos.current_price || 0
-                        const realPnl = parseFloat(pos.pnl_usd || 0)
+                        let realPnl = parseFloat(pos.pnl_usd || 0)
+
+                        if ((!pos.pnl_usd || realPnl === 0) && pos.entry_price > 0 && exitPrice > 0 && Math.abs(exitPrice - pos.entry_price) > 0.000001) {
+                          const pipSize = (pos.symbol.includes('JPY') || pos.symbol.includes('XAU')) ? 0.01 : 0.0001
+                          const pipVal = pos.symbol.includes('XAU') ? 1.0 : (pos.symbol.includes('JPY') ? 6.5 : 10.0)
+                          const lots = Math.abs(parseFloat(pos.lots || 0.01))
+                          const pips = isLong ? (exitPrice - pos.entry_price) / pipSize : (pos.entry_price - exitPrice) / pipSize
+                          realPnl = parseFloat((pips * pipVal * lots).toFixed(2))
+                        }
 
                         return (
                           <tr key={pos.id} className="hover:bg-white/[0.03] transition-all group">
@@ -908,8 +916,16 @@ function TransactionModal({ position, onClose }: { position: any, onClose: () =>
   const isLong = position.side.toLowerCase() === 'long' || position.side.toLowerCase() === 'buy';
   const isOpen = position.isOpen || false;
   const exitPrice = isOpen ? position.currentPrice : (position.exit_price || position.close_price || position.current_price || position.entry_price);
-  const pnl = isOpen ? position.currentPnl : parseFloat(position.pnl_usd || position.realized_pnl || '0');
+  let pnl = isOpen ? position.currentPnl : parseFloat(position.pnl_usd || position.realized_pnl || '0');
   const size = position.lots || position.size || 0;
+  
+  if (!isOpen && (!pnl || pnl === 0) && position.entry_price > 0 && exitPrice > 0 && Math.abs(exitPrice - position.entry_price) > 0.000001) {
+    const pipSize = (position.symbol.includes('JPY') || position.symbol.includes('XAU')) ? 0.01 : 0.0001;
+    const pipVal = position.symbol.includes('XAU') ? 1.0 : (position.symbol.includes('JPY') ? 6.5 : 10.0);
+    const lots = Math.abs(parseFloat(size || 0.01));
+    const pips = isLong ? (exitPrice - position.entry_price) / pipSize : (position.entry_price - exitPrice) / pipSize;
+    pnl = parseFloat((pips * pipVal * lots).toFixed(2));
+  }
   
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md p-4" onClick={onClose}>

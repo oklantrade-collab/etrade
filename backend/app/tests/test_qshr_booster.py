@@ -118,8 +118,8 @@ class TestQSHRBooster(unittest.TestCase):
 
     def test_cluster_take_profit_sipv_15m(self):
         positions = [
-            {'id': 'p-1', 'symbol': 'GBPUSD', 'side': 'long', 'lots': 0.01},
-            {'id': 'p-2', 'symbol': 'GBPUSD', 'side': 'long', 'lots': 0.02}
+            {'id': 'p-1', 'symbol': 'GBPUSD', 'side': 'long', 'lots': 0.01, 'rule_code': 'Bb33_QSHR_BREAKOUT'},
+            {'id': 'p-2', 'symbol': 'GBPUSD', 'side': 'long', 'lots': 0.02, 'rule_code': 'Bb33_QSHR_BOOSTER'}
         ]
         # Al tocar sobre-extensión alcista con clímax SIPV
         res = evaluate_cluster_exit('GBPUSD', positions, self.df_5m_bull, self.df_15m, 1.3650)
@@ -127,6 +127,25 @@ class TestQSHRBooster(unittest.TestCase):
         if res:
             self.assertEqual(res['action'], 'cluster_take_profit')
             self.assertEqual(len(res['position_ids']), 2)
+
+    def test_cluster_exit_ignores_apex_ema_positions(self):
+        # Posiciones que pertenecen a AaApexEma o estrategias tendenciales no deben ser tocadas por QSHR Cluster Exit
+        apex_positions = [
+            {'id': 'pos-apex-1', 'symbol': 'EURUSD', 'side': 'long', 'lots': 0.01, 'rule_code': 'AaApexEma'},
+            {'id': 'pos-apex-2', 'symbol': 'EURUSD', 'side': 'long', 'lots': 0.01, 'rule_code': 'BbApexEma'}
+        ]
+        res = evaluate_cluster_exit('EURUSD', apex_positions, self.df_5m_bull, self.df_15m, 1.3650)
+        self.assertIsNone(res, "QSHR evaluate_cluster_exit debe ignorar completamente posiciones de AaApexEma")
+
+    def test_cluster_exit_skips_when_ema_momentum_active(self):
+        # Posiciones QSHR pero con EMA3 > EMA9 en 15m y precio en banda normal (no clímax Upper_6)
+        positions = [
+            {'id': 'p-1', 'symbol': 'GBPUSD', 'side': 'long', 'lots': 0.01, 'rule_code': 'Bb33_QSHR_BREAKOUT'}
+        ]
+        # Precio tocando upper_band pero no Upper_6 (Upper_6 es ~1.3620+)
+        price_near_upper_band = 1.3580
+        res = evaluate_cluster_exit('GBPUSD', positions, self.df_5m_bull, self.df_15m, price_near_upper_band)
+        self.assertIsNone(res, "Debe omitir TP prematuro cuando hay momentum alcista activo EMA3>EMA9")
 
     def test_aduana_booster_approval_and_max_positions_limit(self):
         aduana = AduanaValidator()

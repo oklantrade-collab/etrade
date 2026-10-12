@@ -169,6 +169,22 @@ async def get_stocks_opportunities():
                     merged["entry_support_1h"] = sigs.get("entry_support_1h") or item.get("entry_support_1h")
                     merged["entry_reason_1h"] = sigs.get("entry_reason_1h") or item.get("entry_reason_1h")
 
+                    # Trap Shield & Intraday Alpha
+                    merged["is_intraday_alpha"] = bool(sigs.get("is_intraday_alpha") or item.get("is_intraday_alpha") or False)
+                    merged["is_trap"] = bool(sigs.get("is_trap") or item.get("is_trap") or False)
+                    merged["trap_reason"] = sigs.get("trap_reason") or item.get("trap_reason") or ""
+                    merged["gap_pct"] = float(sigs.get("gap_pct") or item.get("gap_pct") or 0.0)
+                    merged["growth_potential_pct"] = float(sigs.get("growth_potential_pct") or item.get("growth_potential_pct") or 0.0)
+                    merged["intraday_alpha_score"] = int(sigs.get("intraday_alpha_score") or item.get("intraday_alpha_score") or 0)
+                    merged["catalyst_tier"] = int(sigs.get("catalyst_tier") or item.get("catalyst_tier") or 3)
+                    merged["catalyst_name"] = sigs.get("catalyst_name") or item.get("catalyst_name") or ""
+                    merged["catalyst_reason"] = sigs.get("catalyst_reason") or item.get("catalyst_reason") or ""
+                    merged["catalyst_headline"] = sigs.get("catalyst_headline") or item.get("catalyst_headline") or ""
+                    merged["target_upper5"] = float(sigs.get("target_upper5") or item.get("target_upper5") or 0.0)
+                    merged["target_upper6"] = float(sigs.get("target_upper6") or item.get("target_upper6") or 0.0)
+                    merged["fast_entry_type"] = sigs.get("fast_entry_type") or item.get("fast_entry_type") or ""
+                    merged["fast_entry_reason"] = sigs.get("fast_entry_reason") or item.get("fast_entry_reason") or ""
+
                     flattened.append(merged)
                 except Exception as item_e:
                     log_warning("stocks_api", f"Error processing item {item.get('ticker')}: {item_e}")

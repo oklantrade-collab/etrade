@@ -284,6 +284,28 @@ def is_eod_final_candles(now_dt: Optional[datetime] = None) -> bool:
     return dt_time(15, 15) <= t < dt_time(15, 50)
 
 
+def is_eod_hard_deadline(now_dt: Optional[datetime] = None) -> bool:
+    """
+    Determina si nos encontramos en el umbral estricto de cierre forzoso EOD (15:50 ET a 16:05 ET).
+    A partir de las 15:50 ET, TODAS las posiciones de stocks se liquidan al 100% incondicionalmente
+    para erradicar el riesgo nocturno y la dilución (Cero retención overnight).
+    """
+    from datetime import time as dt_time
+    from zoneinfo import ZoneInfo
+    if now_dt is None:
+        try:
+            now_dt = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            now_dt = datetime.now().astimezone(ZoneInfo('America/New_York'))
+    elif now_dt.tzinfo is not None:
+        try:
+            now_dt = now_dt.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            pass
+    t = now_dt.time()
+    return dt_time(15, 50) <= t <= dt_time(16, 5)
+
+
 def evaluate_fuel_15m(df_15m: pd.DataFrame, side: str = 'long') -> dict:
     """
     Evalúa el Combustible Estructural en 15 minutos:
@@ -572,16 +594,22 @@ def evaluate_accelerated_trailing_stop(
         u5 = float(bands_15m.get('upper_5', 0))
         u6 = float(bands_15m.get('upper_6', 0))
 
-        if u5 <= 0 or current_price < u5:
+        if u5 <= 0 or current_price < (u5 * 0.998):
             return {'action': 'NONE'}
 
-        touched_u6 = current_price >= u6 * 0.998
-        if touched_u6 and not partial_taken:
+        touched_u5 = current_price >= (u5 * 0.998)
+        touched_u6 = (u6 > 0 and current_price >= (u6 * 0.998))
+        entry_p = float(position.get('avg_price') or position.get('entry_price') or 0.0)
+        gain_pct = ((current_price - entry_p) / entry_p * 100.0) if entry_p > 0 else 0.0
+
+        if touched_u5 and not partial_taken and gain_pct >= 2.5:
+            target_level = "UPPER_6" if touched_u6 else "UPPER_5"
+            target_val = u6 if touched_u6 else u5
             return {
                 'action': 'TAKE_PROFIT_50_CLIMAX',
                 'pct': 50,
-                'rule_code': 'ADUANA_STK_CLIMAX_UPPER6_TP50',
-                'reason': f"Clímax Parabólico en UPPER_6 (${u6:.2f}): Cierre parcial del 50% garantizado en la cumbre."
+                'rule_code': f'ADUANA_STK_CLIMAX_{target_level}_TP50',
+                'reason': f"Clímax en {target_level} (${target_val:.2f}) con ganancia +{gain_pct:.1f}%: Cierre parcial del 50% garantizado."
             }
 
         if df_5m is not None and len(df_5m) >= 2:
@@ -691,6 +719,21 @@ def evaluate_aduana_stocks_exit(
 
     gain_pct = ((current_price - entry_p) / entry_p * 100.0) if is_long else ((entry_p - current_price) / entry_p * 100.0)
     pnl_usd = (current_price - entry_p) * shares if is_long else (entry_p - current_price) * shares
+
+    # ── 0. CIERRE FORZOSO EOD INCONDICIONAL (15:50 ET - CERO OVERNIGHT) ──
+    # A las 15:50 ET o más tarde, se liquida el 100% incondicionalmente
+    # sin importar si la posición está en ganancia o pérdida, erradicando el riesgo nocturno.
+    if is_eod_hard_deadline(now_dt):
+        return {
+            'should_close': True,
+            'action': 'CLOSE_TOTAL',
+            'shares_to_close': shares,
+            'pct_to_close': 100,
+            'rule_code': 'ADUANA_STK_EOD_HARD_EXIT',
+            'gain_pct': round(gain_pct, 2),
+            'pnl_usd': round(pnl_usd, 2),
+            'reason': f"Hard-Exit EOD (15:50 ET): Liquidación forzosa incondicional del 100% para erradicar riesgo nocturno/dilución ({gain_pct:+.2f}% / ${pnl_usd:+.2f} USD)."
+        }
 
     # ── CASO A: SI LA POSICIÓN ESTÁ EN PÉRDIDA O BREAKEVEN (gain_pct <= 0) ──
     # El motor de TP/Salida con Ganancia no interfiere; la gestión de pérdida la maneja el SL / Panic Recovery Gate.

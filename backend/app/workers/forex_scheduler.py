@@ -227,6 +227,8 @@ async def write_forex_snapshot(
             changed_at_iso = datetime.now(timezone.utc).isoformat()
             MEMORY_STORE[symbol]['sar']['changed_at'] = changed_at_iso
             log_info('SAR_FOREX', f"CAMBIO SAR {symbol}: {prev_trend} -> {sar_trend}")
+        else:
+            MEMORY_STORE[symbol]['sar']['changed_at'] = None
 
         # SAR 15m
         sar_15m = None
@@ -1387,6 +1389,28 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
 
             # 4. Smart Exit: SAR Phase Change
             if sar_changed_at and not is_pending_sar:
+                # 🛡️ Protección 1: Período de gracia mínimo (300 segundos / 5 minutos)
+                opened_at_str = position.get('opened_at')
+                if opened_at_str:
+                    try:
+                        opened_dt = datetime.fromisoformat(str(opened_at_str).replace('Z', '+00:00'))
+                        elapsed_s = (datetime.now(timezone.utc) - opened_dt).total_seconds()
+                        if elapsed_s < 300:
+                            log_info(MODULE, f"🛡️ SAR_PHASE_CHANGE ignorado para {symbol}: posición en período de gracia ({elapsed_s:.0f}s < 300s).")
+                            continue
+
+                        # 🛡️ Protección 2: Precedencia temporal (la posición debe haber sido abierta ANTES del cambio de SAR)
+                        sar_dt = datetime.fromisoformat(str(sar_changed_at).replace('Z', '+00:00'))
+                        if opened_dt >= sar_dt:
+                            continue
+                    except Exception as sar_time_err:
+                        log_warning(MODULE, f"Error evaluando tiempos SAR para {symbol}: {sar_time_err}")
+
+                # 🛡️ Protección 3: Inmunidad para estrategias swing / pullback (ApexEma, etc.)
+                rule_c = str(position.get('rule_code') or '')
+                if any(k in rule_c for k in ('ApexEma', 'Aa13', 'Bb13', 'Aa21', 'Bb25', 'Bb41')):
+                    continue
+
                 side = (position.get('side') or '').lower()
                 if (sar_phase == 'short' and side == 'long') or \
                    (sar_phase == 'long' and side == 'short'):
@@ -1402,7 +1426,7 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                             pnl_pct = (entry - current_price) / entry * 100
                             pnl_pips = (entry - current_price) / PIP_SIZES.get(symbol, 0.0001)
 
-                    if pnl_pct >= -0.05:
+                    if pnl_pct >= 0.05 and pnl_pips >= 1.0:
                         from app.strategy.candle_momentum_guard import should_allow_exit
                         df_15m_fx = MEMORY_STORE.get(symbol, {}).get('15m', {}).get('df')
                         df_5m_fx = MEMORY_STORE.get(symbol, {}).get('5m', {}).get('df')
@@ -1743,12 +1767,14 @@ async def _forex_process_symbol_5m(symbol: str, provider: CTraderProtobufProvide
                                     f"Razón: {tp_res['reason']}\n"
                                     f"Ganancia Asegurada: +{pnl_pips_local:.1f} pips"
                                 )
-                                # Mover SL a Breakeven
-                                new_sl_be = entry_pr
+                                # Mover SL escalonado CASCADA tras toma parcial (asegurar ganancia real, no BE plano)
+                                pip_sz_be = PIP_SIZES.get(symbol, 0.0001)
+                                protected_pips = max(5.0, pnl_pips_local * 0.40)
+                                new_sl_be = (entry_pr + protected_pips * pip_sz_be) if side == 'long' else (entry_pr - protected_pips * pip_sz_be)
                                 position['sl_price'] = new_sl_be
-                                position['sl_type'] = 'be_after_partial'
+                                position['sl_type'] = 'cascada_trailing_after_partial'
                                 try:
-                                    sb.table('forex_positions').update({'sl_price': new_sl_be, 'sl_type': 'be_after_partial'}).eq('id', position['id']).execute()
+                                    sb.table('forex_positions').update({'sl_price': new_sl_be, 'sl_type': 'cascada_trailing_after_partial'}).eq('id', position['id']).execute()
                                 except: pass
                             else:
                                 await _execute_paper_close(position, current_price, f"tp_{tp_res['rule_code'].lower()}"[:20], sb)
@@ -2402,14 +2428,20 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
                             if not usd_check['passed']:
                                 log_info('USD_CORR_FX', f"{symbol}: {usd_check['reason']}")
                             else:
-                                # Proceder a abrir
-                                await open_forex_position(
-                                    symbol=symbol,
-                                    signal=signal,
-                                    price=current_price,
-                                    provider=provider,
-                                    sb=sb,
-                                )
+                                # ── MEJORA D: Filtro de Volatilidad / Gasolina 15m ──
+                                pip_sz = 0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001
+                                avg_range_pips = float(((df['high'] - df['low']).tail(10).mean()) / pip_sz) if (df is not None and len(df) >= 10) else 10.0
+                                if avg_range_pips < 5.0:
+                                    log_info('VOLATILITY_BLOCK_FX', f"[{symbol}] Rango promedio 15m insuficiente ({avg_range_pips:.1f} pips < 5.0 pips). Mercado horizontal sin volatilidad ('sin gasolina').")
+                                else:
+                                    # Proceder a abrir
+                                    await open_forex_position(
+                                        symbol=symbol,
+                                        signal=signal,
+                                        price=current_price,
+                                        provider=provider,
+                                        sb=sb,
+                                    )
             else:
                 # Log near-misses
                 all_results = (

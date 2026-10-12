@@ -37,6 +37,8 @@ class BrokerSynchronizer:
         self._crypto_provider = None
         self._crypto_client = None
         self._missing_confirmation_counts: Dict[str, int] = {}
+        self._last_db_sync_time: Dict[str, float] = {}
+        self._last_synced_price: Dict[str, float] = {}
 
     async def _get_crypto_client(self):
         if self._crypto_client is None:
@@ -137,18 +139,29 @@ class BrokerSynchronizer:
             for sym, b_pos in active_binance_map.items():
                 self._missing_confirmation_counts.pop(sym, None) # Reiniciar contador si está activa
                 if sym in db_symbols_map:
-                    # Posición ya existe -> actualizar mark_price y unrealized_pnl en Supabase
+                    # Posición ya existe -> actualizar mark_price y unrealized_pnl en Supabase (con filtro de variación para proteger Egress)
                     db_p = db_symbols_map[sym]
-                    update_data = {
-                        "current_price": b_pos["mark_price"],
-                        "unrealized_pnl": b_pos["unrealized_pnl"],
-                        "size": b_pos["size"],
-                    }
-                    if b_pos.get("liquidation_price"):
-                        update_data["liquidation_price"] = b_pos["liquidation_price"]
+                    now_ts = asyncio.get_event_loop().time()
+                    last_ts = self._last_db_sync_time.get(sym, 0.0)
+                    last_p = self._last_synced_price.get(sym, float(db_p.get("current_price") or 0.0))
+                    curr_p = b_pos["mark_price"]
 
-                    sb.table("positions").update(update_data).eq("id", db_p["id"]).execute()
-                    result["updated"].append(sym)
+                    price_pct_diff = abs(curr_p - last_p) / max(last_p, 1e-6) if last_p > 0 else 1.0
+                    time_diff = now_ts - last_ts
+
+                    if price_pct_diff >= 0.0015 or time_diff >= 120.0 or abs(b_pos["size"] - float(db_p.get("size") or 0)) > 1e-6:
+                        update_data = {
+                            "current_price": curr_p,
+                            "unrealized_pnl": b_pos["unrealized_pnl"],
+                            "size": b_pos["size"],
+                        }
+                        if b_pos.get("liquidation_price"):
+                            update_data["liquidation_price"] = b_pos["liquidation_price"]
+
+                        sb.table("positions").update(update_data).eq("id", db_p["id"]).execute()
+                        self._last_db_sync_time[sym] = now_ts
+                        self._last_synced_price[sym] = curr_p
+                        result["updated"].append(sym)
                 else:
                     # Posición existe en Binance pero no en Supabase (ej. abierta externamente o recuperada) -> Registrarla sin SL/TP rígido (gestionada por ADUANA)
                     entry_p = b_pos["entry_price"]

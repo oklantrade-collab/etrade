@@ -19,8 +19,24 @@ from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
 from app.core.symbol_state import SymbolStateMachine
 
-sm = SymbolStateMachine.get_instance()
 MODULE = "stocks_order_exec"
+
+
+def _is_after_1515_et(now_dt=None) -> bool:
+    """Retorna True si la hora de Nueva York es >= 15:15 ET (últimas 3 velas de mercado)."""
+    from datetime import time as dt_time
+    from zoneinfo import ZoneInfo
+    if now_dt is None:
+        try:
+            now_dt = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            now_dt = datetime.now().astimezone(ZoneInfo('America/New_York'))
+    elif getattr(now_dt, 'tzinfo', None) is not None:
+        try:
+            now_dt = now_dt.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            pass
+    return now_dt.time() >= dt_time(15, 15)
 
 
 def _get_config() -> dict:
@@ -107,6 +123,24 @@ def execute_market_order(
     if price <= 0:
         log_warning(MODULE, f"Aborting MARKET order for {ticker}: Invalid price ${price}")
         return {"success": False, "reason": "Precio inválido"}
+
+    # ── VALIDACIÓN 0: CUTOFF INTRADÍA 15:15 ET (ÚLTIMAS 3 VELAS) ──
+    if direction.lower() == "buy":
+        group_name = str(rule.get("group_name", "")).lower()
+        is_hot_or_intraday = (
+            "hot" in group_name or
+            "scalp" in group_name or
+            "hot" in rule_code.lower() or
+            "scalp" in rule_code.lower() or
+            rule_code in ('Aa30_STK', 'S05', 'S06', 'S07', 'S08')
+        )
+        mock_now = context.get("now_dt")
+        if _is_after_1515_et(mock_now) and is_hot_or_intraday:
+            log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Cutoff 15:15 ET alcanzado (últimas 3 velas). Apertura {rule_code} bloqueada.")
+            return {
+                "success": False,
+                "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas HOT bloqueadas para evitar liquidación prematura EOD."
+            }
 
     capital = config["total_capital"]
     max_pct = config["max_pct_per_trade"]
@@ -224,6 +258,25 @@ def place_limit_order(
         return {"success": False, "reason": "Precio LIMIT no disponible"}
 
     limit_price = float(limit_price)
+
+    # ── VALIDACIÓN 0: CUTOFF INTRADÍA 15:15 ET (ÚLTIMAS 3 VELAS) ──
+    if direction.lower() == "buy":
+        group_name = str(rule.get("group_name", "")).lower()
+        is_hot_or_intraday = (
+            "hot" in group_name or
+            "scalp" in group_name or
+            "hot" in rule_code.lower() or
+            "scalp" in rule_code.lower() or
+            rule_code in ('Aa30_STK', 'S05', 'S06', 'S07', 'S08')
+        )
+        mock_now = context.get("now_dt")
+        if _is_after_1515_et(mock_now) and is_hot_or_intraday:
+            log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Cutoff 15:15 ET alcanzado (últimas 3 velas). Apertura {rule_code} bloqueada.")
+            return {
+                "success": False,
+                "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas HOT bloqueadas para evitar liquidación prematura EOD."
+            }
+
     trigger_pct = float(rule.get("limit_trigger_pct") or 0.005)
 
     if direction == "buy":
@@ -534,21 +587,6 @@ def _close_all_positions(ticker: str, price: float):
         shares = safe_float(pos.get("shares"))
         pnl = (price - avg) * shares
         pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
-
-        # 🛡️ GUARDA MAESTRA ABSOLUTA ANTI-PÉRDIDAS EN STOCKS (PnL < $1.00 USD) 🛡️
-        if pnl < 1.0:
-            log_warning(MODULE, f"🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando _close_all_positions para {ticker} con PnL de ${pnl:.2f} USD < $1.00 USD.")
-            sb.table('stocks_positions').update({
-                'sl_type': 'anti_loss_hold',
-                'stop_loss': 0,
-                'sl_dynamic_price': 0,
-                'erep_active': True,
-                'erep_phase': 1,
-                'erep_p1_price': avg,
-                'erep_q1': shares,
-                'erep_market_type': 'stocks_spot'
-            }).eq('id', pos['id']).execute()
-            return
 
         sb.table("stocks_positions") \
             .update({

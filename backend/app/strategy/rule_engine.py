@@ -66,10 +66,10 @@ DEFAULT_RULES = [
             {"indicator": "price_touched_lower_5_6", "operator": "==", "value": True},
             {"indicator": "reversal_confirmation_long", "operator": "==", "value": True},
             {"indicator": "bb_lower_slope_positive", "operator": "==", "value": True},
-            {"indicator": "low_below_ema20_1h", "operator": "==", "value": True},
+            {"indicator": "ema3_slope_1h_positive", "operator": "==", "value": True},
         ],
         "logic": "AND",
-        "notes": "Rebote desde zona de sobreventa extrema. Funciona contra-tendencia. (v2 forced)",
+        "notes": "Rebote desde zona de sobreventa extrema con EMA3 de 1h positiva. Previene cuchillos cayendo. (v2 forced)",
     },
     {
         "id": 1001,
@@ -983,6 +983,14 @@ def build_market_data_dict(
         "ema9_below_ema20_5m": float(last.get("ema9_5m", 0)) < float(last.get("ema20_5m", 0)) if pd.notna(last.get("ema9_5m")) else False,
         "bb_upper_5m_opens": bool(last.get("bb_upper_5m_opens", False)),
         "bb_lower_5m_opens": bool(last.get("bb_lower_5m_opens", False)),
+
+        # 1h indicators
+        "ema3_slope_1h_positive": bool(last.get("ema3_slope_1h_positive", False)),
+        "ema3_slope_1h_negative": bool(last.get("ema3_slope_1h_negative", False)),
+        "low_below_ema20_1h": bool(last.get("low_below_ema20_1h", False)),
+        "high_above_ema20_1h": bool(last.get("high_above_ema20_1h", False)),
+        "ema3_above_ema9_1h": bool(last.get("ema3_above_ema9_1h", False)),
+        "ema3_below_ema9_1h": bool(last.get("ema3_below_ema9_1h", False)),
         
         # DI
         "plus_di": float(last.get("plus_di", 0)) if pd.notna(last.get("plus_di")) else 0.0,

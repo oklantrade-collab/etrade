@@ -19,43 +19,39 @@ from app.core.logger import log_info, log_error
 # ── Configuración por mercado ─────────────────
 PROTECTION_CONFIG = {
     'crypto_futures': {
-        'be_trigger_pct':    0.008,  # +0.8% (Break-Even Relámpago)
-        'be_buffer_pct':     0.0028, # +0.28% (Cobertura comisiones Binance Market Taker + Slippage)
+        'be_trigger_pct':    0.015,  # +1.5% (Maduración superada para activar BE)
+        'be_buffer_pct':     0.0035, # +0.35% (Cobertura comisiones Binance Market Taker + Slippage)
         'trailing_levels': [
             # (trigger_pct, new_sl_pct)
-            (0.008,  0.0028),  # +0.8% → SL a +0.28% (BE con ganancia neta garantizada)
-            (0.015,  0.0080),  # +1.5% → SL a +0.80%
-            (0.025,  0.0150),  # +2.5% → SL a +1.50%
-            (0.040,  0.0250),  # +4.0% → SL a +2.50%
-            (0.060,  0.0380),  # +6.0% → SL a +3.80%
+            (0.015,  0.0035),  # +1.5% → SL a +0.35% (BE con ganancia neta garantizada)
+            (0.025,  0.0120),  # +2.5% → SL a +1.20%
+            (0.040,  0.0240),  # +4.0% → SL a +2.40%
+            (0.060,  0.0420),  # +6.0% → SL a +4.20%
+            (0.080,  0.0600),  # +8.0% → SL a +6.00%
         ],
-        'min_time_before_inverse_close': 2,
-        # ciclos de 5m = 10 minutos
+        'min_time_before_inverse_close': 4, # 20 minutos
         'max_loss_before_inverse_close': 0.5,
-        # cerrar por señal inversa solo si
-        # pérdida < 50% del SL original
-        'partial_close_tp1_pct':  0.008,  # +0.8%
-        'partial_close_tp2_pct':  0.015,  # +1.5%
+        'partial_close_tp1_pct':  0.025,  # +2.5%
+        'partial_close_tp2_pct':  0.050,  # +5.0%
         'partial_close_ratio':    0.50,   # 50%
-        'cooldown_cycles':        2,
+        'cooldown_cycles':        3,
         'counter_trend_size_pct': 0.50,
     },
     'forex_futures': {
-        'be_trigger_pips':   5,
-        'be_buffer_pips':    1,
+        'be_trigger_pips':   14,
+        'be_buffer_pips':    2,
         'trailing_levels_pips': [
             # (trigger_pips, new_sl_pips)
-            (5,   1),    # +5 pips  → BE +1 pip (cobertura comisión IC Markets)
-            (12,  4),    # +12 pips → SL a +4 pips
-            (20,  10),   # +20 pips → SL a +10 pips
+            (14,  2),    # +14 pips → BE +2 pips (cobertura comisión IC Markets)
+            (22,  10),   # +22 pips → SL a +10 pips
             (35,  20),   # +35 pips → SL a +20 pips
             (50,  35),   # +50 pips → SL a +35 pips
+            (70,  52),   # +70 pips → SL a +52 pips
         ],
-        'min_time_before_inverse_close': 3,
-        # ciclos de 5m = 15 minutos
+        'min_time_before_inverse_close': 4, # 20 minutos
         'max_loss_before_inverse_close': 0.5,
-        'partial_close_tp1_pips':  20,
-        'partial_close_tp2_pips':  40,
+        'partial_close_tp1_pips':  25,
+        'partial_close_tp2_pips':  50,
         'partial_close_ratio':     0.50,
         'cooldown_cycles':         3,
         'counter_trend_size_pct':  0.50,
@@ -530,14 +526,27 @@ def evaluate_volatile_trailing_v2(
     else:
         pnl_pips = (entry_price - current_price) / pip
 
+    # ── Trailing Stop Escalonado CASCADA (Anti-Devolución a Breakeven Plano) ──
     lock_trigger = cfg_sym.get('lock_in_trigger_pips', 15)
     lock_buffer  = cfg_sym.get('lock_in_buffer_pips', 2)
     lock_in_active = False
     lock_in_sl = None
 
-    if pnl_pips >= lock_trigger:
+    best_pips = (best_price - entry_price) / pip if is_long else (entry_price - best_price) / pip
+    cascada_locked_pips = 0.0
+
+    if best_pips >= 15.0:
+        # Asegurar al menos el 50% de la ganancia pico alcanzada (mínimo 8.0 pips / $0.80 USD)
+        cascada_locked_pips = max(8.0, best_pips * 0.50)
+    elif best_pips >= 10.0:
+        # Asegurar al menos Nivel 1 de CASCADA (mínimo 5.0 pips / $0.50 USD)
+        cascada_locked_pips = max(5.0, best_pips * 0.40)
+    elif pnl_pips >= lock_trigger:
+        cascada_locked_pips = max(lock_buffer, 1.0)
+
+    if cascada_locked_pips > 0:
         lock_in_active = True
-        lock_in_sl = (entry_price + (lock_buffer * pip)) if is_long else (entry_price - (lock_buffer * pip))
+        lock_in_sl = (entry_price + (cascada_locked_pips * pip)) if is_long else (entry_price - (cascada_locked_pips * pip))
 
     if pnl_pips < min_pips and not lock_in_active:
         return {
@@ -687,16 +696,23 @@ def evaluate_volatile_trailing_v2(
 
     if is_long:
         # LONG: SL más ALTO = mayor protección
+        # Respetar distancia mínima de respiro con respecto al precio actual para trailing dinámico,
+        # pero el piso de ganancia bloqueado (lock_in_sl) y current_sl NUNCA retroceden.
         best_sl  = max(candidates)
-        final_sl = max(best_sl, current_sl)
-        # Respetar distancia mínima de respiro con respecto al precio actual
-        final_sl = min(final_sl, current_price - min_dist_val)
+        capped_dynamic = min(best_sl, current_price - min_dist_val)
+        floor_sl = lock_in_sl if lock_in_sl is not None else current_sl
+        final_sl = max(capped_dynamic, floor_sl, current_sl)
     else:
         # SHORT: SL más BAJO = mayor protección
+        # Respetar distancia mínima de respiro con respecto al precio actual para trailing dinámico,
+        # pero el techo de ganancia bloqueado (lock_in_sl) y current_sl NUNCA retroceden.
         best_sl  = min(candidates)
-        final_sl = min(best_sl, current_sl)
-        # Respetar distancia mínima de respiro con respecto al precio actual
-        final_sl = max(final_sl, current_price + min_dist_val)
+        capped_dynamic = max(best_sl, current_price + min_dist_val)
+        floor_sl = lock_in_sl if lock_in_sl is not None else current_sl
+        if current_sl > 0:
+            final_sl = min(capped_dynamic, floor_sl, current_sl)
+        else:
+            final_sl = min(capped_dynamic, floor_sl)
 
     final_sl = round(final_sl, 6)
 
@@ -1140,6 +1156,7 @@ def evaluate_trailing_stop(
     df_15m:        pd.DataFrame = None,
     snap:          dict = None,
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
 ) -> dict:
     """
     REGLA 4: Trailing Stop Escalonado.
@@ -1414,6 +1431,36 @@ def evaluate_trailing_stop(
         levels       = cfg.get('trailing_levels_pips', [])
         pip = PIP_SIZES.get(state.symbol, 0.0001)
 
+        # ── 1H STRUCTURAL TRAILING STOP FOREX ──
+        if df_1h is not None and len(df_1h) >= 2 and current_gain >= 5.0:
+            last_1h = df_1h.iloc[-1]
+            prev_1h = df_1h.iloc[-2]
+            pip = PIP_SIZES.get(state.symbol, 0.0001)
+            if is_long:
+                low_prev = float(prev_1h.get('low', prev_1h.get('Low', 0)) or 0)
+                ema9_1h = float(last_1h.get('ema_9', last_1h.get('ema2', last_1h.get('ema9', 0))) or 0)
+                sl_cand = max(low_prev, ema9_1h) if ema9_1h > 0 and low_prev > 0 else (low_prev or ema9_1h)
+                if sl_cand > state.current_sl and sl_cand < current_price and sl_cand > entry:
+                    return {
+                        'action':    'update_sl',
+                        'new_sl':    round(sl_cand, 6),
+                        'new_level': 20,
+                        'reason':    f'Trailing Stop 1h Forex [LONG]: SL a soporte 1h ({sl_cand:.5f})',
+                        'sl_type':   'trailing_1h'
+                    }
+            else:
+                high_prev = float(prev_1h.get('high', prev_1h.get('High', 0)) or 0)
+                ema9_1h = float(last_1h.get('ema_9', last_1h.get('ema2', last_1h.get('ema9', 0))) or 0)
+                sl_cand = min(high_prev, ema9_1h) if ema9_1h > 0 and high_prev > 0 else (high_prev or ema9_1h)
+                if (sl_cand < state.current_sl or state.current_sl == 0) and sl_cand > current_price and 0 < sl_cand < entry:
+                    return {
+                        'action':    'update_sl',
+                        'new_sl':    round(sl_cand, 6),
+                        'new_level': 20,
+                        'reason':    f'Trailing Stop 1h Forex [SHORT]: SL a resistencia 1h ({sl_cand:.5f})',
+                        'sl_type':   'trailing_1h'
+                    }
+
         for i, (trigger, new_sl_pips) in enumerate(levels):
             level_idx = i + 1
             if current_gain >= trigger and state.trailing_level < level_idx:
@@ -1504,6 +1551,35 @@ def evaluate_trailing_stop(
                             'new_level': 99,
                             'reason': f'Trailing SIPV Crypto: pine={pine_trigger}, bb={bb_touch} → SL a {sl_sipv:.6f}',
                         }
+
+        # ── 1H STRUCTURAL TRAILING STOP CRYPTO ──
+        if df_1h is not None and len(df_1h) >= 2 and current_gain >= 0.004:
+            last_1h = df_1h.iloc[-1]
+            prev_1h = df_1h.iloc[-2]
+            if is_long:
+                low_prev = float(prev_1h.get('low', prev_1h.get('Low', 0)) or 0)
+                ema9_1h = float(last_1h.get('ema_9', last_1h.get('ema2', last_1h.get('ema9', 0))) or 0)
+                sl_cand = max(low_prev, ema9_1h) if ema9_1h > 0 and low_prev > 0 else (low_prev or ema9_1h)
+                if sl_cand > state.current_sl and sl_cand < current_price and sl_cand > entry:
+                    return {
+                        'action':    'update_sl',
+                        'new_sl':    round(sl_cand, 8),
+                        'new_level': 20,
+                        'reason':    f'Trailing Stop 1h Crypto [LONG]: SL elevado a soporte 1h ({sl_cand:.6f})',
+                        'sl_type':   'trailing_1h'
+                    }
+            else:
+                high_prev = float(prev_1h.get('high', prev_1h.get('High', 0)) or 0)
+                ema9_1h = float(last_1h.get('ema_9', last_1h.get('ema2', last_1h.get('ema9', 0))) or 0)
+                sl_cand = min(high_prev, ema9_1h) if ema9_1h > 0 and high_prev > 0 else (high_prev or ema9_1h)
+                if (sl_cand < state.current_sl or state.current_sl == 0) and sl_cand > current_price and 0 < sl_cand < entry:
+                    return {
+                        'action':    'update_sl',
+                        'new_sl':    round(sl_cand, 8),
+                        'new_level': 20,
+                        'reason':    f'Trailing Stop 1h Crypto [SHORT]: SL descendido a resistencia 1h ({sl_cand:.6f})',
+                        'sl_type':   'trailing_1h'
+                    }
 
         for i, (trigger, new_sl_pct) in enumerate(levels):
             level_idx = i + 1
@@ -1805,6 +1881,7 @@ def evaluate_all_protections(
     inverse_rule:  Optional[str] = None,
     df_15m:        pd.DataFrame = None,
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
 ) -> dict:
     """
     Función principal de evaluación por prioridades.
@@ -1818,7 +1895,7 @@ def evaluate_all_protections(
         actions.append({'priority': 1, 'type': 'break_even', **be})
 
     # 2. Trailing Stop
-    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap)
+    trail = evaluate_trailing_stop(state, current_price, df_15m=df_15m, df_5m=df_5m, snap=snap, df_1h=df_1h)
     if trail.get('update_bb_touched') or trail['action'] == 'update_bb_touched':
         bb_touch_triggered = True
 

@@ -465,6 +465,46 @@ function AnalysisModal({ stock, onClose }: any) {
                                     </div>
                                 </div>
                             </div>
+
+                            {/* CAPA 6: INTRADAY ALPHA, TRAP SHIELD & ADUANA EXITS */}
+                            <div style={{ marginTop:'15px', padding:'15px', background:'rgba(56,189,248,0.03)', borderRadius:'12px', border:'1px solid rgba(56,189,248,0.2)' }}>
+                                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'10px' }}>
+                                    <span style={{ color:'#38BDF8', fontWeight:950, fontSize:'10px', textTransform:'uppercase', letterSpacing:'1px' }}>🚀 MOTOR INTRADÍA ALPHA & ESCUDO ANTI-TRAMPAS</span>
+                                    {stock.is_trap ? (
+                                        <span style={{ background:'rgba(239,68,68,0.2)', border:'1px solid #EF4444', color:'#EF4444', fontSize:'9px', padding:'2px 8px', borderRadius:'4px', fontWeight:900 }}>🚫 BLOQUEADO POR TRAP SHIELD</span>
+                                    ) : stock.is_intraday_alpha ? (
+                                        <span style={{ background:'linear-gradient(90deg, #10B981, #06B6D4)', color:'#000', fontSize:'9px', padding:'2px 8px', borderRadius:'4px', fontWeight:950 }}>🚀 ALPHA CANDIDATE</span>
+                                    ) : (
+                                        <span style={{ background:'rgba(255,255,255,0.05)', color:'#888', fontSize:'9px', padding:'2px 8px', borderRadius:'4px', fontWeight:800 }}>ESTÁNDAR</span>
+                                    )}
+                                </div>
+                                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'10px', fontSize:'11px', color:'#CCC', marginBottom:'10px' }}>
+                                    <div style={{ background:'rgba(0,0,0,0.3)', padding:'10px', borderRadius:'8px' }}>
+                                        <div style={{ fontSize:'8px', color:'#888', fontWeight:800 }}>APERTURA & SWEET SPOT</div>
+                                        <div style={{ fontSize:'12px', fontWeight:900, color: (stock.gap_pct || 0) > 35 ? '#EF4444' : '#22C55E' }}>
+                                            Gap: {(stock.gap_pct || 0) >= 0 ? '+' : ''}{(stock.gap_pct || 0).toFixed(1)}% {((stock.gap_pct || 0) <= 35 && (stock.gap_pct || 0) >= -3) ? '✅ Sweet Spot' : '⚠️ Fuera de Rango'}
+                                        </div>
+                                        <div style={{ fontSize:'9px', color:'#666', marginTop:'2px' }}>Potencial Intradía: +{(stock.growth_potential_pct || 5).toFixed(1)}%</div>
+                                    </div>
+                                    <div style={{ background:'rgba(0,0,0,0.3)', padding:'10px', borderRadius:'8px' }}>
+                                        <div style={{ fontSize:'8px', color:'#888', fontWeight:800 }}>SALIDAS ADUANA FIBONACCI</div>
+                                        <div style={{ fontSize:'12px', fontWeight:900, color:'#38BDF8' }}>
+                                            TP1 (50%): ${stock.target_upper5 ? stock.target_upper5.toFixed(2) : '—'} (UPPER_5)
+                                        </div>
+                                        <div style={{ fontSize:'9px', color:'#888', marginTop:'2px' }}>
+                                            Clímax Total: ${stock.target_upper6 ? stock.target_upper6.toFixed(2) : '—'} (UPPER_6) | Hard-Exit: 15:50 ET
+                                        </div>
+                                    </div>
+                                </div>
+                                {stock.catalyst_name && stock.catalyst_name !== 'NO_RECENT_NEWS' && (
+                                    <div style={{ fontSize:'10px', color:'#AAA', background:'rgba(255,255,255,0.02)', padding:'8px', borderRadius:'6px' }}>
+                                        <b style={{ color: stock.catalyst_tier === 0 ? '#EF4444' : stock.catalyst_tier === 1 ? '#00C896' : '#38BDF8' }}>
+                                            {stock.catalyst_tier === 0 ? '🚫 PELIGRO DILUCIÓN: ' : stock.catalyst_tier === 1 ? '⚡ CATALIZADOR TIER 1: ' : '📰 EVENTO TIER 2: '}
+                                        </b>
+                                        {stock.catalyst_headline || stock.catalyst_reason}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -620,6 +660,18 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
           {opp.is_high_growth_opp && (
             <span title={`Buying Force: ${opp.buying_force_score || 0}/100 | ${opp.entry_route_1h || 'Swing 1H'} ${opp.entry_support_1h || ''}`} style={{ fontSize: '8px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
           )}
+          {opp.is_intraday_alpha && (
+            <span title={`Intraday Alpha: Potencial +${opp.growth_potential_pct || 5}% | Gap +${opp.gap_pct || 0}%`} style={{ fontSize: '8px', background: 'linear-gradient(90deg, #10B981, #06B6D4)', color: '#000', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>🚀 ALPHA</span>
+          )}
+          {opp.catalyst_tier === 1 && (
+            <span title={`Catalizador Tier 1 (${opp.catalyst_name}): ${opp.catalyst_headline || opp.catalyst_reason}`} style={{ fontSize: '8px', background: '#059669', color: '#FFF', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>⚡ TIER 1</span>
+          )}
+          {opp.catalyst_tier === 2 && opp.catalyst_name !== 'NO_RECENT_NEWS' && (
+            <span title={`Catalizador Tier 2 (${opp.catalyst_name}): ${opp.catalyst_headline || opp.catalyst_reason}`} style={{ fontSize: '8px', background: '#2563EB', color: '#FFF', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>📰 TIER 2</span>
+          )}
+          {opp.is_trap && (
+            <span title={`Trap Shield: ${opp.trap_reason || 'Apertura tramposa'}`} style={{ fontSize: '8px', background: 'rgba(239, 68, 68, 0.2)', border: '1px solid #EF4444', color: '#EF4444', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>🚫 TRAMPA</span>
+          )}
       </div>
       
       <div style={{ display:'flex', alignItems:'center' }}>
@@ -636,9 +688,16 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
 
       <PiotroskiBadge score={opp.piotroski_score} detail={opp.piotroski_detail} />
 
-      <span style={{ color: getMovColor(rawMovement), fontSize: '10px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-        {movementDisplay}
-      </span>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        <span style={{ color: getMovColor(rawMovement), fontSize: '10px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          {movementDisplay}
+        </span>
+        {opp.target_upper5 > 0 && (
+          <span style={{ fontSize: '8px', color: '#38BDF8', fontWeight: 800 }}>
+            🎯 TP50: ${opp.target_upper5.toFixed(2)} (U5)
+          </span>
+        )}
+      </div>
 
       <div style={{ display:'flex', flexDirection:'column', justifyContent: 'center' }}>
         <span style={{ fontSize:'9px', color:'#555', fontWeight:800 }}>{opp.created_at ? new Date(opp.created_at).toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' }) : '--/--'}</span>
@@ -831,8 +890,9 @@ export default function OpportunitiesIntelligence() {
     })
     .slice(0, settings.maxHotResults);
 
+  const alphaList = mergedOpportunities.filter(o => o.is_intraday_alpha || o.is_high_growth_opp);
   const valueList = mergedOpportunities.filter(o => o.is_pro_member);
-  const displayList = activeTab === 'HOT' ? hotList : valueList;
+  const displayList = activeTab === 'HOT' ? hotList : (activeTab === 'ALPHA' ? alphaList : valueList);
 
   return (
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
@@ -856,6 +916,7 @@ export default function OpportunitiesIntelligence() {
             <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>⚙️ FILTROS</button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', alignItems: 'center' }}>
                 <TabButton label="🔥 Hot by Volume" active={activeTab === 'HOT'} onClick={() => setActiveTab('HOT')} count={hotList.length}/>
+                <TabButton label="🚀 Alpha Runners" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
                 <TabButton label="💎 Inversión Pro" active={activeTab === 'VALUE'} onClick={() => setActiveTab('VALUE')} count={valueList.length}/>
                 <button onClick={() => setShowAddModal(true)} style={{ background: '#22C55E', color: '#000', border: 'none', width: '28px', height: '28px', borderRadius: '8px', marginLeft: '8px', cursor: 'pointer', fontWeight: 900, fontSize: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
             </div>

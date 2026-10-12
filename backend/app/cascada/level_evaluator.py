@@ -314,13 +314,14 @@ def check_rebote(
     slope_ema3 = radar_snapshot.get('pendiente_EMA3', 'sin_datos')
     slope_ema20 = radar_snapshot.get('pendiente_EMA20', 'sin_datos')
 
-    pnl_positive = pnl_current > 0
+    min_rebote_pnl = 0.20
+    pnl_positive = pnl_current >= min_rebote_pnl
 
     if not pnl_positive:
         return {
             'is_rebote': False,
-            'reason': 'PNL_NOT_POSITIVE',
-            'detail': f"PnL (${pnl_current:.2f}) is not positive; rebote exit not applicable"
+            'reason': 'PNL_BELOW_MIN_THRESHOLD',
+            'detail': f"PnL (${pnl_current:.2f}) is below minimum rebote threshold (${min_rebote_pnl:.2f}); rebote exit not applicable"
         }
 
     # 0. Evaluación prioritaria de Reversión por Bandas Fibonacci y SIPV 15m

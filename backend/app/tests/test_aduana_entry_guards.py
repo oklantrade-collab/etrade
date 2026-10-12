@@ -173,3 +173,274 @@ class TestAduanaEntryGuards:
         )
         assert res.rule_triggered != 'RSI_EXHAUSTION_OVERBOUGHT'
         assert res.rule_triggered != 'RSI_EXHAUSTION_OVERSOLD'
+
+    def test_aduana_fullspan_divergence_approves_with_50pct_sizing(self):
+        df_15m = _create_sample_df_15m(n=25, rsi_val=50.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 65000.0,
+            'squeeze_velocity': 0.45,
+            'is_divergent': True,
+            'bandwidth_ratio': 1.10,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_FULLSPAN_LONG'
+        )
+        assert res.approved is True
+        assert res.rule_triggered == 'QSHR_FULLSPAN_DIVERGENCE_APPROVED'
+        assert res.detail.get('sizing_factor') == 0.5
+
+    def test_aduana_fullspan_high_velocity_approves_with_100pct_sizing(self):
+        df_15m = _create_sample_df_15m(n=25, rsi_val=50.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 65000.0,
+            'squeeze_velocity': 2.8,
+            'is_divergent': True,
+            'bandwidth_ratio': 1.30,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_FULLSPAN_LONG'
+        )
+        assert res.approved is True
+        assert res.rule_triggered == 'QSHR_FULLSPAN_HIGH_VELOCITY'
+        assert res.detail.get('sizing_factor') == 1.0
+
+    def test_aduana_fullspan_no_divergence_low_velocity_rejects(self):
+        df_15m = _create_sample_df_15m(n=25, rsi_val=50.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 65000.0,
+            'squeeze_velocity': 0.45,
+            'is_divergent': False,
+            'bandwidth_ratio': 1.05,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_FULLSPAN_LONG'
+        )
+        assert res.approved is False
+        assert res.rule_triggered == 'QSHR_LOW_VELOCITY'
+
+    def test_aduana_climax_reversal_approves(self):
+        df_15m = _create_sample_df_15m(n=25, rsi_val=22.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 62000.0,
+            'squeeze_velocity': 0.15,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_CLIMAX_LOWER6_LONG'
+        )
+        assert res.approved is True
+        assert res.rule_triggered == 'QSHR_CLIMAX_APPROVED'
+        assert res.detail.get('sizing_factor') == 1.0
+
+    def test_aduana_crypto_vs_forex_velocity_thresholds(self):
+        df_15m = _create_sample_df_15m(n=25, rsi_val=55.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 65000.0,
+            'squeeze_velocity': 1.5,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        # En Crypto (BTCUSDT), umbral es 1.2 -> 1.5 debe aprobar
+        res_crypto = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_DIRECT_LONG'
+        )
+        assert res_crypto.approved is True
+
+        # En Forex (EURUSD), umbral es 2.5 -> 1.5 debe rechazar
+        market_data_forex = {
+            'df_15m': df_15m,
+            'price': 1.1680,
+            'squeeze_velocity': 1.5,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res_forex = self.validator.validate(
+            symbol='EURUSD',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data_forex,
+            strategy='Bb33_QSHR_DIRECT_LONG'
+        )
+        assert res_forex.approved is False
+        assert res_forex.rule_triggered == 'QSHR_LOW_VELOCITY'
+
+    def test_post_sl_cooldown_blocks_crypto_entry(self):
+        from datetime import datetime, timezone
+        from app.strategy.position_guards import register_sl_event, SL_COOLDOWN_REGISTRY
+        
+        # Registrar SL en BTCUSDT
+        register_sl_event('BTCUSDT', 'long')
+        
+        df_15m = _create_sample_df_15m(n=25, rsi_val=50.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 60000.0,
+            'squeeze_velocity': 3.0,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_DIRECT_LONG'
+        )
+        assert res.approved is False
+        assert res.rule_triggered == 'POST_SL_COOLDOWN_ACTIVE'
+        assert 'enfriamiento post-sl' in res.reason.lower()
+
+        # Limpiar registro para otras pruebas
+        SL_COOLDOWN_REGISTRY.clear()
+
+    def test_post_sl_cooldown_expires_after_45m(self):
+        from datetime import datetime, timezone, timedelta
+        from app.strategy.position_guards import SL_COOLDOWN_REGISTRY
+        
+        # Simular SL ocurrido hace 46 minutos
+        SL_COOLDOWN_REGISTRY['BTCUSDT_ANY'] = datetime.now(timezone.utc) - timedelta(minutes=46)
+        SL_COOLDOWN_REGISTRY['BTCUSDT_any'] = datetime.now(timezone.utc) - timedelta(minutes=46)
+        
+        df_15m = _create_sample_df_15m(n=25, rsi_val=50.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 60000.0,
+            'squeeze_velocity': 3.0,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_DIRECT_LONG'
+        )
+        assert res.approved is True
+        
+        SL_COOLDOWN_REGISTRY.clear()
+
+    def test_post_sl_cooldown_bypass_for_erep_and_booster(self):
+        from datetime import datetime, timezone
+        from app.strategy.position_guards import register_sl_event, SL_COOLDOWN_REGISTRY
+        
+        register_sl_event('BTCUSDT', 'long')
+        
+        df_15m = _create_sample_df_15m(n=25, rsi_val=50.0)
+        market_data = {
+            'df_15m': df_15m,
+            'price': 60000.0,
+            'squeeze_velocity': 3.0,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        # Estrategia EREP debe hacer bypass al cooldown
+        res_erep = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_EREP_RECOVERY'
+        )
+        assert res_erep.rule_triggered != 'POST_SL_COOLDOWN_ACTIVE'
+        
+        # Estrategia BOOSTER debe hacer bypass al cooldown
+        res_booster = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_BOOSTER_LONG'
+        )
+        assert res_booster.rule_triggered != 'POST_SL_COOLDOWN_ACTIVE'
+        
+        SL_COOLDOWN_REGISTRY.clear()
+
+    def test_aduana_macro_trend_filter_blocks_counter_trend(self):
+        # Crear df_15m con tendencia bajista (close cayendo -> EMA20 < EMA50)
+        df_15m = _create_sample_df_15m(n=35, rsi_val=50.0)
+        df_15m['close'] = [60000.0 - i * 100 for i in range(len(df_15m))]
+        market_data = {
+            'df_15m': df_15m,
+            'price': 56500.0,
+            'squeeze_velocity': 2.5,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        # Intentar LONG en tendencia bajista -> debe ser rechazado
+        res_long = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_MOMENTUM_LONG'
+        )
+        assert res_long.approved is False
+        assert res_long.rule_triggered == 'MACRO_TREND_DISCORDANT'
+
+        # Intentar SHORT en tendencia bajista -> debe ser aprobado
+        res_short = self.validator.validate(
+            symbol='BTCUSDT',
+            side='short',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_MOMENTUM_SHORT'
+        )
+        assert res_short.approved is True
+
+    def test_aduana_macro_trend_filter_bypasses_climax(self):
+        # Tendencia bajista (EMA20 < EMA50)
+        df_15m = _create_sample_df_15m(n=35, rsi_val=22.0)
+        df_15m['close'] = [60000.0 - i * 100 for i in range(len(df_15m))]
+        market_data = {
+            'df_15m': df_15m,
+            'price': 56500.0,
+            'squeeze_velocity': 0.5,
+            'open_symbols': [],
+            'max_active_symbols': 3
+        }
+        # Climax LONG en piso extremo debe ser aprobado incluso con EMA20 < EMA50
+        res = self.validator.validate(
+            symbol='BTCUSDT',
+            side='long',
+            order_type='MARKET',
+            market_data=market_data,
+            strategy='Bb33_QSHR_CLIMAX_LOWER6_LONG'
+        )
+        assert res.approved is True
+        assert res.rule_triggered == 'QSHR_CLIMAX_APPROVED'
+
+
+

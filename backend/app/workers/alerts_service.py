@@ -8,7 +8,24 @@ from app.core.memory_store import BOT_STATE
 
 async def send_telegram_message(mensaje: str):
     """Envía mensaje a Telegram respetando la configuración de enable/disable."""
-    # 1. Config Check (Lazy load)
+    # 0. Global Kill-Switch via Environment
+    if os.getenv('TELEGRAM_ENABLED', 'true').lower() in ('false', '0', 'no', 'off'):
+        return
+
+    # 1. Anti-spam filter for database quota/outage errors
+    msg_lower = (mensaje or "").lower()
+    if any(k in msg_lower for k in [
+        "exceed_egress_quota",
+        "payment required",
+        "402",
+        "json could not be generated",
+        "failed to write log to db",
+        "postgrest",
+        "supabase",
+    ]):
+        return
+
+    # 2. Config Check (Lazy load)
     token = settings.telegram_bot_token or os.getenv('TELEGRAM_BOT_TOKEN')
     chat_id = settings.telegram_chat_id or os.getenv('TELEGRAM_CHAT_ID')
 
@@ -16,7 +33,7 @@ async def send_telegram_message(mensaje: str):
         log_warning("alerts_service", "Telegram Token or Chat ID not found. Message ignored.")
         return
 
-    # 2. Status Check (trading_config)
+    # 3. Status Check (trading_config)
     # We use memory cache if available, else we query DB
     enabled = True
     if BOT_STATE.config_cache and 'telegram_enabled' in BOT_STATE.config_cache:

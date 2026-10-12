@@ -239,24 +239,80 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
     if total_qty <= 0:
         return
 
-    # 8. Filtro de Distancia Mínima de Soporte (0.4%) y FOMO Threshold (0.08%)
+    # 8. Filtro de Distancia Mínima de Soporte (0.4%) y Evaluación Estricta EMA9
     dist_pct = abs(ema9 - ema20) / ema20
     dist_to_ema9 = abs(current_price - ema9) / ema9
     
     orders_to_place = []
     
-    # Si estamos muy cerca de EMA9 (FOMO), aseguramos 20% inmediato
-    if dist_to_ema9 <= 0.0008:
-        qty_fomo = total_qty * 0.20
+    # Evaluar filtros estrictos para entrada en EMA9 (LONG y SHORT)
+    # 1. Cascada completa en 5m
+    # 2. Expansión de Bollinger en 15m (Upper > 0 y Lower < 0)
+    # 3. EMA20 en 5m con aceleración continua (al menos 3 velas sin retroceso)
+    df_5m = get_memory_df(symbol, "5m")
+    cascade_5m_ok = False
+    ema20_slope_ok = False
+    
+    if df_5m is not None and len(df_5m) >= 20:
+        c5 = pd.to_numeric(df_5m['close'] if 'close' in df_5m.columns else df_5m.get('Close', pd.Series()), errors='coerce').dropna()
+        if len(c5) >= 20:
+            e3_5m = c5.ewm(span=3, adjust=False).mean()
+            e9_5m = c5.ewm(span=9, adjust=False).mean()
+            e20_5m = c5.ewm(span=20, adjust=False).mean()
+            e50_5m = c5.ewm(span=min(50, len(c5)), adjust=False).mean()
+            e200_5m = c5.ewm(span=min(200, len(c5)), adjust=False).mean()
+            
+            curr_e3 = float(e3_5m.iloc[-1])
+            curr_e9 = float(e9_5m.iloc[-1])
+            curr_e20 = float(e20_5m.iloc[-1])
+            curr_e50 = float(e50_5m.iloc[-1])
+            curr_e200 = float(e200_5m.iloc[-1])
+            
+            e20_t = curr_e20
+            e20_t1 = float(e20_5m.iloc[-2]) if len(e20_5m) >= 2 else e20_t
+            e20_t2 = float(e20_5m.iloc[-3]) if len(e20_5m) >= 3 else e20_t1
+            
+            if trigger_long:
+                cascade_5m_ok = (curr_e3 > curr_e9 > curr_e20 > curr_e50 > curr_e200)
+                ema20_slope_ok = (e20_t > e20_t1 > e20_t2)
+            else:
+                cascade_5m_ok = (curr_e3 < curr_e9 < curr_e20 < curr_e50 < curr_e200)
+                ema20_slope_ok = (e20_t < e20_t1 < e20_t2)
+
+    col_upper = 'upper_2' if 'upper_2' in df_15m.columns else ('bb_upper' if 'bb_upper' in df_15m.columns else ('upper_6' if 'upper_6' in df_15m.columns else None))
+    col_lower = 'lower_2' if 'lower_2' in df_15m.columns else ('bb_lower' if 'bb_lower' in df_15m.columns else ('lower_6' if 'lower_6' in df_15m.columns else None))
+    
+    if col_upper and col_lower and len(df_15m) >= 2:
+        bb_u_curr = float(df_15m[col_upper].iloc[-1])
+        bb_u_prev = float(df_15m[col_upper].iloc[-2])
+        bb_l_curr = float(df_15m[col_lower].iloc[-1])
+        bb_l_prev = float(df_15m[col_lower].iloc[-2])
+        upper_slope_15m = bb_u_curr - bb_u_prev
+        lower_slope_15m = bb_l_curr - bb_l_prev
+    else:
+        bb_basis_s = df_15m['close'].rolling(20).mean()
+        bb_std_s = df_15m['close'].rolling(20).std()
+        bb_u_s = bb_basis_s + (2.0 * bb_std_s)
+        bb_l_s = bb_basis_s - (2.0 * bb_std_s)
+        upper_slope_15m = float(bb_u_s.iloc[-1] - bb_u_s.iloc[-2]) if len(bb_u_s) >= 2 else 0.0
+        lower_slope_15m = float(bb_l_s.iloc[-1] - bb_l_s.iloc[-2]) if len(bb_l_s) >= 2 else 0.0
+
+    is_bb_expanding = (upper_slope_15m > 0) and (lower_slope_15m < 0)
+    ema9_entry_allowed = cascade_5m_ok and is_bb_expanding and ema20_slope_ok
+
+    if dist_to_ema9 <= 0.0008 and ema9_entry_allowed:
+        qty_ema9 = total_qty * 0.20
         rem_qty = total_qty * 0.80
         orders_to_place.append({
             'limit_price': current_price,
-            'qty': qty_fomo,
-            'name': 'Order FOMO'
+            'qty': qty_ema9,
+            'name': 'Order EMA9 Pullback'
         })
-        log_info('APEX_EMA', f"[{symbol}] FOMO detectado (dist: {dist_to_ema9:.4f}). Separando 20% a precio actual.")
+        log_info('APEX_EMA', f"🎯 [{symbol}] EMA9 Entry Disciplinado APROBADO: Cascada 5m OK, BB 15m expansiva (Up={upper_slope_15m:.6f}>0, Low={lower_slope_15m:.6f}<0), EMA20 5m acelerando. 20% colocado @ {current_price:.4f}.")
     else:
         rem_qty = total_qty
+        if dist_to_ema9 <= 0.0008:
+            log_warning('APEX_EMA', f"🚫 [{symbol}] Entrada EMA9 BLOQUEADA por filtros estrictos: Cascada5m={cascade_5m_ok}, BB_Expansiva={is_bb_expanding} (Up={upper_slope_15m:.6f}, Low={lower_slope_15m:.6f}), EMA20_Acel={ema20_slope_ok}. Asignando 100% a órdenes límite en extremos.")
 
     # Extraer o calcular niveles Lower_5 y Lower_6 en 5m
     import math
@@ -312,7 +368,7 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         'name': name_2
     })
 
-    # 9. Insertar Órdenes Límite en la base de datos
+    # 9. Insertar Órdenes Límite en la base de datos (con Validación ADUANA obligatoria)
     is_paper = BOT_STATE.config_cache.get("paper_trading", False) is not False
     mode_val = 'paper' if is_paper else 'real'
     ttl_hours = 4  # 4 horas de expiración estándar para Swing
@@ -335,6 +391,27 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         if size_val <= 0:
             log_warning('APEX_EMA', f"[{symbol}] Orden ignorada: Cantidad calculada ({size_val}) es cero o insuficiente. Verifica tu capital asignado y riesgo.")
             continue
+
+        # ADUANA Pre-validation
+        try:
+            from app.rebote_aduana.aduana_validator import AduanaValidator
+            aduana = AduanaValidator()
+            aduana_res = aduana.validate(
+                symbol=symbol,
+                side=direction,
+                order_type='LIMIT',
+                market_data={
+                    'df_15m': df_15m,
+                    'df_5m': df_5m,
+                    'price': limit_px
+                },
+                strategy=rule_code
+            )
+            if not aduana_res.approved:
+                log_warning('APEX_EMA', f"🚫 [ADUANA REJECT] {symbol} {rule_code} {op['name']} @ {limit_px}: {aduana_res.rule_triggered} - {aduana_res.reason}")
+                continue
+        except Exception as aduana_err:
+            log_error('APEX_EMA', f"Error validando ADUANA para orden {op['name']} en {symbol}: {aduana_err}")
             
         new_order = {
             'symbol': symbol,
@@ -360,9 +437,6 @@ async def process_swing_ema_strategy(symbol: str, df_15m: pd.DataFrame, snap: di
         try:
             sb.table('pending_orders').insert(new_order).execute()
             log_info('APEX_EMA', f"🎯 [PLACED LIMIT] {symbol} {rule_code}: {op['name']} colocada a ${limit_px:.4f} | Cantidad: {size_val}")
-            
-            # Alerta Telegram (Removida por solicitud del usuario para evitar ruido)
-            pass
         except Exception as ins_e:
             log_error('APEX_EMA', f"Error insertando orden límite {op['name']} en DB: {ins_e}")
 
@@ -688,6 +762,32 @@ async def check_limit_order_execution(symbol: str, current_price: float, provide
         except Exception as e:
             log_warning('SWING', f"No se pudo verificar momentum en 1m para {symbol}: {e}")
         # ---------------------------------
+
+        # --- REAL-TIME ADUANA VALIDATION ---
+        try:
+            from app.rebote_aduana.aduana_validator import AduanaValidator
+            from app.core.memory_store import get_memory_df
+            df_15m_rt = get_memory_df(symbol, "15m")
+            df_5m_rt = get_memory_df(symbol, "5m")
+            aduana_rt = AduanaValidator()
+            aduana_res = aduana_rt.validate(
+                symbol=symbol,
+                side=direction,
+                order_type='LIMIT',
+                market_data={
+                    'df_15m': df_15m_rt,
+                    'df_5m': df_5m_rt,
+                    'price': current_price
+                },
+                strategy=rule_code
+            )
+            if not aduana_res.approved:
+                log_warning('SWING', f"🚫 [ADUANA REALTIME REJECT] {symbol} {direction.upper()} ({rule_code}): {aduana_res.rule_triggered} - {aduana_res.reason}. Cancelando orden límite.")
+                await cancel_swing_orders(symbol, timeframe=order.get('timeframe', ''), reason='aduana_realtime_rejection', sb=sb, direction=direction)
+                continue
+        except Exception as aduana_e:
+            log_warning('SWING', f"Error en validación ADUANA tiempo real para {symbol}: {aduana_e}")
+        # -----------------------------------
 
         log_info('SWING', f'{symbol}: LIMIT EJECUTADO {direction.upper()} @ ${current_price:,.4f}')
         await execute_limit_order_paper(order=order, execution_price=current_price, sb=sb)

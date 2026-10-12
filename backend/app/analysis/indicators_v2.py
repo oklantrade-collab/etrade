@@ -187,11 +187,27 @@ def calculate_all_indicators(df: pd.DataFrame, cfg: dict = None) -> pd.DataFrame
     # Fill any NaNs that might cause issues in calculation
     df = df.ffill().fillna(0)
     
-    # --- CALCULO DE ZONA FIBONACCI (PUENTE SNAPSHOT) ---
-    # fibonacci_bollinger solo calcula bandas, aqui extraemos la zona
-    from app.analysis.fibonacci_bb import extract_fib_levels
-    fib_levels = extract_fib_levels(df)
-    df['fibonacci_zone'] = fib_levels['zone']
+    # --- CALCULO DE ZONA FIBONACCI (VECTORIAL BARRA POR BARRA) ---
+    if 'lower_6' in df.columns and 'upper_6' in df.columns and 'close' in df.columns:
+        valid = (df['upper_6'] > 0) & (df['lower_6'] > 0)
+        conditions = [
+            valid & (df['close'] <= df['lower_6']),
+            valid & (df['close'] < df['lower_5']),
+            valid & (df['close'] < df['lower_4']),
+            valid & (df['close'] < df['lower_3']),
+            valid & (df['close'] < df['lower_2']),
+            valid & (df['close'] < df['lower_1']),
+            valid & (df['close'] > df['upper_6']),
+            valid & (df['close'] > df['upper_5']),
+            valid & (df['close'] > df['upper_4']),
+            valid & (df['close'] > df['upper_3']),
+            valid & (df['close'] > df['upper_2']),
+            valid & (df['close'] > df['upper_1']),
+        ]
+        choices = [-6, -5, -4, -3, -2, -1, 6, 5, 4, 3, 2, 1]
+        df['fibonacci_zone'] = np.select(conditions, choices, default=0)
+    else:
+        df['fibonacci_zone'] = 0
     
     # --- INYECCIÓN DE SEÑAL PINESCRIPT (CORRECCIÓN 2) ---
     # Proxy del PineScript -- basado en MACD 4C hasta integracion real.

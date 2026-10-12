@@ -620,9 +620,153 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["entry_support_1h"] = entry_1h_info.get('support_level')
         ind_15m["entry_reason_1h"] = entry_1h_info.get('reason')
 
-        # Si califica como oportunidad de alto crecimiento y tiene entrada activa en 1H:
-        # Asignar ALTA PRIORIDAD inmediata en stocks_priority_queue
-        if buying_force_info['is_qualified'] and entry_1h_info.get('triggered'):
+        # ── NUEVO: TRAP SHIELD & INTRADAY ALPHA CANDIDATE ──
+        from app.stocks.trap_shield import evaluate_trap_shield
+        prev_close_1d = current_price
+        open_price_today = current_price
+        if df_1d is not None and len(df_1d) >= 2:
+            prev_close_1d = float(df_1d['close'].iloc[-2]) if 'close' in df_1d.columns else current_price
+            open_price_today = float(df_1d['open'].iloc[-1]) if 'open' in df_1d.columns else current_price
+        elif df_5m is not None and len(df_5m) >= 1:
+            open_price_today = float(df_5m['open'].iloc[0]) if 'open' in df_5m.columns else current_price
+
+        trap_shield_res = evaluate_trap_shield(
+            current_price=current_price,
+            prev_close=prev_close_1d,
+            open_price=open_price_today,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            rvol=rvol_1h_val,
+            adr_pct=float(adr_gate_res.get('adr_pct', 4.0)),
+            consumed_pct=float(adr_gate_res.get('consumed_pct', 30.0)),
+            bands_15m=movement_15m.get('bands') or {}
+        )
+
+        # ── NUEVO: EVALUACIÓN DE CATALIZADOR / NOTICIAS EN VIVO ──
+        from app.stocks.catalyst_classifier import analyze_ticker_live_catalyst
+        news_items = f_data.get('news') if f_data else None
+        cat_info = analyze_ticker_live_catalyst(ticker, news_items)
+        ind_15m["catalyst_tier"] = cat_info['tier']
+        ind_15m["catalyst_name"] = cat_info['catalyst_name']
+        ind_15m["catalyst_reason"] = cat_info['reason']
+        ind_15m["catalyst_headline"] = cat_info.get('headline', '')
+
+        # Si la noticia anuncia dilución tóxica directa (Tier 0), vetar de inmediato
+        if cat_info.get('is_toxic'):
+            trap_shield_res['is_trap'] = True
+            trap_shield_res['trap_type'] = 'TOXIC_DILUTION_RISK'
+            trap_shield_res['trap_reason'] = f"VETO NOTICIAS: {cat_info['reason']}"
+
+        # ── NUEVO: FAST ENTRY ENGINE (MULTI-TF ADX/DI + VELAS) ──
+        from app.stocks.fast_entry_engine import evaluate_fast_entry
+        fast_entry_res = evaluate_fast_entry(
+            current_price=current_price,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            df_1h=df_1h,
+            df_4h=df_4h,
+            df_1d=df_1d,
+            rvol=rvol_1h_val,
+            bands_15m=movement_15m.get('bands') or {},
+            is_trap=trap_shield_res['is_trap']
+        )
+
+        ind_15m["fast_entry_triggered"] = fast_entry_res['fast_entry_triggered']
+        ind_15m["fast_entry_type"] = fast_entry_res['entry_type']
+        ind_15m["fast_entry_reason"] = fast_entry_res['entry_reason']
+        ind_15m["recommended_sl"] = fast_entry_res['recommended_sl']
+        ind_15m["target_upper5"] = fast_entry_res['target_upper5']
+        ind_15m["target_upper6"] = fast_entry_res['target_upper6']
+        ind_15m["adx_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('adx', 0)
+        ind_15m["plus_di_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('plus_di', 0)
+        ind_15m["minus_di_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('minus_di', 0)
+
+        ind_15m["is_trap"] = trap_shield_res['is_trap']
+        ind_15m["trap_type"] = trap_shield_res['trap_type']
+        ind_15m["trap_reason"] = trap_shield_res['trap_reason']
+        ind_15m["gap_pct"] = trap_shield_res['gap_pct']
+        ind_15m["is_sweet_spot"] = trap_shield_res['is_sweet_spot']
+        ind_15m["is_intraday_alpha"] = trap_shield_res['is_intraday_alpha']
+        ind_15m["growth_potential_pct"] = trap_shield_res['growth_potential_pct']
+        ind_15m["intraday_alpha_score"] = trap_shield_res.get('intraday_alpha_score', 0)
+
+        # ── GESTIÓN DE COLA DE ALTA PRIORIDAD & EXCLUSIÓN DE TRAMPAS ──
+        # 1. Si es TRAMPA: Bloquear en la cola para erradicar compras no deseadas
+        if trap_shield_res['is_trap']:
+            try:
+                sb.table("stocks_priority_queue").upsert({
+                    'ticker': ticker,
+                    'group_name': ind_15m.get('pool_type', 'HOT'),
+                    'price_at_rank': current_price,
+                    'apex_score_4h': float(ind_15m.get('apex_4h') or 50.0),
+                    'apex_score_1d': float(ind_15m.get('apex_1d') or 50.0),
+                    'return_expected': 0.0,
+                    'confidence': 'low',
+                    'composite_rank': 0.0,
+                    'status': 'blocked',
+                    'entry_reason': f"TRAP_SHIELD_{trap_shield_res['trap_type']}",
+                    'triggered_rule': 'NONE',
+                    'is_overbought': True,
+                    'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                    'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                    'last_updated': datetime.now(timezone.utc).isoformat()
+                }, on_conflict='ticker').execute()
+                log_warning(MODULE, f"🚫 TRAMPA BLOQUEADA EN COLA: {ticker} ({trap_shield_res['trap_reason']})")
+            except Exception as q_err:
+                log_warning(MODULE, f"Error bloqueando trampa para {ticker}: {q_err}")
+
+        # 2. Si GATILLO DE ENTRADA RÁPIDA (FAST ENTRY) está activo: Máxima Prioridad Rank 99.0
+        elif fast_entry_res['fast_entry_triggered']:
+            try:
+                rank_boost = 99.0
+                sb.table("stocks_priority_queue").upsert({
+                    'ticker': ticker,
+                    'group_name': ind_15m.get('pool_type', 'HOT'),
+                    'price_at_rank': current_price,
+                    'apex_score_4h': float(ind_15m.get('apex_4h') or 95.0),
+                    'apex_score_1d': float(ind_15m.get('apex_1d') or 95.0),
+                    'return_expected': trap_shield_res['growth_potential_pct'],
+                    'confidence': 'high',
+                    'composite_rank': rank_boost,
+                    'status': 'pending',
+                    'entry_reason': fast_entry_res['entry_reason'],
+                    'triggered_rule': f"FAST_{fast_entry_res['entry_type']}",
+                    'is_overbought': False,
+                    'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                    'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                    'last_updated': datetime.now(timezone.utc).isoformat()
+                }, on_conflict='ticker').execute()
+                log_info(MODULE, f"⚡ GATILLO FAST ENTRY 99.0: {ticker} | {fast_entry_res['entry_type']} | {fast_entry_res['entry_reason']}")
+            except Exception as q_err:
+                log_warning(MODULE, f"Error asignando fast entry en cola para {ticker}: {q_err}")
+
+        # 3. Si es INTRADAY ALPHA CANDIDATE: Rank 98.5
+        elif trap_shield_res['is_intraday_alpha']:
+            try:
+                rank_boost = 98.5
+                sb.table("stocks_priority_queue").upsert({
+                    'ticker': ticker,
+                    'group_name': ind_15m.get('pool_type', 'HOT'),
+                    'price_at_rank': current_price,
+                    'apex_score_4h': float(ind_15m.get('apex_4h') or 90.0),
+                    'apex_score_1d': float(ind_15m.get('apex_1d') or 90.0),
+                    'return_expected': trap_shield_res['growth_potential_pct'],
+                    'confidence': 'high',
+                    'composite_rank': rank_boost,
+                    'status': 'pending',
+                    'entry_reason': f"intraday_alpha_pot_{trap_shield_res['growth_potential_pct']}%",
+                    'triggered_rule': 'INTRADAY_ALPHA_BUY',
+                    'is_overbought': False,
+                    'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                    'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                    'last_updated': datetime.now(timezone.utc).isoformat()
+                }, on_conflict='ticker').execute()
+                log_info(MODULE, f"🚀 ALTA PRIORIDAD INTRADÍA (Rank 98.5): {ticker} (Potencial=+{trap_shield_res['growth_potential_pct']}%, Gap=+{trap_shield_res['gap_pct']}%, RVOL={rvol_1h_val:.1f}x)")
+            except Exception as q_err:
+                log_warning(MODULE, f"Error asignando intraday alpha en cola para {ticker}: {q_err}")
+
+        # 3. Ruta alternativa: Swing 1H Buying Force
+        elif buying_force_info['is_qualified'] and entry_1h_info.get('triggered'):
             try:
                 rank_boost = min(99.0, 92.0 + (buying_force_info['score'] * 0.07))
                 sb.table("stocks_priority_queue").upsert({
@@ -987,6 +1131,14 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 "entry_route_1h": ind_15m.get("entry_route_1h"),
                 "entry_support_1h": ind_15m.get("entry_support_1h"),
                 "entry_reason_1h": ind_15m.get("entry_reason_1h"),
+                "is_trap": bool(ind_15m.get("is_trap", False)),
+                "trap_type": ind_15m.get("trap_type", "NONE"),
+                "trap_reason": ind_15m.get("trap_reason", ""),
+                "gap_pct": float(ind_15m.get("gap_pct", 0.0)),
+                "is_sweet_spot": bool(ind_15m.get("is_sweet_spot", False)),
+                "is_intraday_alpha": bool(ind_15m.get("is_intraday_alpha", False)),
+                "growth_potential_pct": float(ind_15m.get("growth_potential_pct", 0.0)),
+                "intraday_alpha_score": int(ind_15m.get("intraday_alpha_score", 0)),
             }
             # Append APEX data for UI
             if apex_result:

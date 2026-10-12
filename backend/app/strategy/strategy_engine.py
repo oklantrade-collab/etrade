@@ -239,6 +239,8 @@ class StrategyEngine:
         ema3_below_ema9_1h = False
         low_below_ema20_1h = False
         high_above_ema20_1h = False
+        ema3_slope_1h_positive = False
+        ema3_slope_1h_negative = False
         symbol = snap.get('symbol', '')
         if symbol:
             df_1h = MEMORY_STORE.get(symbol, {}).get('1h', {}).get('df')
@@ -257,6 +259,13 @@ class StrategyEngine:
                 if ema20_1h > 0:
                     low_below_ema20_1h = low_1h < ema20_1h
                     high_above_ema20_1h = high_1h > ema20_1h
+
+                if len(df_1h) >= 2:
+                    prev_1h = df_1h.iloc[-2]
+                    e3_prev = safe_float(prev_1h.get('ema_3', prev_1h.get('ema1', prev_1h.get('ma3'))))
+                    if ema3_1h > 0 and e3_prev > 0:
+                        ema3_slope_1h_positive = ema3_1h >= e3_prev
+                        ema3_slope_1h_negative = ema3_1h < e3_prev
 
         ema20_ascending_1h = False
         ema20_descending_1h = False
@@ -523,6 +532,8 @@ class StrategyEngine:
             # EMAs 1h
             'ema3_above_ema9_1h': ema3_above_ema9_1h,
             'ema3_below_ema9_1h': ema3_below_ema9_1h,
+            'ema3_slope_1h_positive': ema3_slope_1h_positive,
+            'ema3_slope_1h_negative': ema3_slope_1h_negative,
             'low_below_ema20_1h': low_below_ema20_1h,
             'high_above_ema20_1h': high_above_ema20_1h,
             'ema20_ascending_1h': ema20_ascending_1h,

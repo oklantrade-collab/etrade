@@ -1,15 +1,20 @@
+from decimal import Decimal
 import math
 import logging
 
 def round_step_size(quantity: float, step_size: float) -> float:
-    if step_size <= 0: return quantity
-    precision = int(round(-math.log(step_size, 10), 0))
-    return round(quantity - (quantity % step_size), precision)
+    if step_size <= 0: return float(quantity)
+    d_qty = Decimal(str(quantity))
+    d_step = Decimal(str(step_size))
+    rounded = (d_qty // d_step) * d_step
+    return float(rounded)
 
 def round_price(price: float, tick_size: float) -> float:
-    if tick_size <= 0: return price
-    precision = int(round(-math.log(tick_size, 10), 0))
-    return round(price - (price % tick_size), precision)
+    if tick_size <= 0: return float(price)
+    d_price = Decimal(str(price))
+    d_tick = Decimal(str(tick_size))
+    rounded = (d_price // d_tick) * d_tick
+    return float(rounded)
 
 def build_oco_params(
     signal: dict,

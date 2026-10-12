@@ -46,10 +46,16 @@ class CascadaManager:
         if not open_positions or not self.params.get('enabled', True):
             return results
 
-        # Monitoreo universal CASCADA: evaluar todas las posiciones abiertas activas
+        # Monitoreo CASCADA: evaluar posiciones activas excluyendo taxativamente CLIMAX y EREP
+        def _is_cascade_target(p: dict) -> bool:
+            r = str(p.get('rule_code') or p.get('strategy') or '').lower()
+            if any(x in r for x in ('climax', 'lower6', 'upper6', 'erep')):
+                return False
+            return p.get('status', 'open') in ('open', 'active') or not p.get('status')
+
         cascade_candidates = [
             p for p in open_positions 
-            if p.get('status', 'open') in ('open', 'active') or not p.get('status')
+            if _is_cascade_target(p)
         ]
 
         if not cascade_candidates:
@@ -91,7 +97,10 @@ class CascadaManager:
         to CASCADA. True if position origin is REBOTE.
         """
         origen = str(position.get('origen', '')).upper()
-        rule_code = str(position.get('rule_code', ''))
+        rule_code = str(position.get('rule_code', '') or position.get('strategy', ''))
+        rule_lower = rule_code.lower()
+        if any(x in rule_lower for x in ('climax', 'lower6', 'upper6', 'erep', 'qshr', 'booster')):
+            return False
         return origen == 'REBOTE' or rule_code.startswith(('AaReb', 'BbReb', 'REBOTE'))
 
     def _update_position_db_state(self, pos_id: str, result: CascadaResult, market_type: str) -> None:

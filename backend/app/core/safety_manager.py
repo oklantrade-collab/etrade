@@ -817,7 +817,7 @@ async def check_subprocesses_safety(supabase) -> dict:
         forex_checks['feed_freshness'] = (not stale_forex) if fx_open else True
         forex_checks['stop_loss_integrity'] = not pos_missing_sl_forex
         forex_checks['adaptive_indicators'] = not indicators_crashed_forex
-        forex_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive
+        forex_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive if fx_open else True
         
         # Check 2.4: Integridad del SLVM (Modo Recuperación)
         forex_checks['slvm_integrity'] = True
@@ -837,9 +837,10 @@ async def check_subprocesses_safety(supabase) -> dict:
     from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
     was_forex_blocked = check_db_safety_block('forex_futures')
     if forex_failed and not was_forex_blocked:
-        # Acaba de entrar en emergencia
-        import asyncio
-        asyncio.create_task(trigger_emergency_protection('forex_futures'))
+        # Acaba de entrar en emergencia (solo si el mercado Forex está abierto)
+        if fx_open:
+            import asyncio
+            asyncio.create_task(trigger_emergency_protection('forex_futures'))
     elif not forex_failed and was_forex_blocked:
         # Acaba de salir de emergencia
         import asyncio
@@ -939,22 +940,24 @@ async def check_subprocesses_safety(supabase) -> dict:
     # ────────────────────────────────────────────────────────────────
     # Alerta Forex
     if forex_failed:
-        report_msg = (
-            "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO FOREX**\n"
-            "El control automático de seguridad de 15 min detectó fallos:\n"
-        )
-        for name, ok in forex_checks.items():
-            icon = "✅ OK" if ok else "❌ FALLÓ"
-            report_msg += f"- [{name}]: {icon}\n"
-        report_msg += (
-            "\n⚠️ **ACCIÓN DE EMERGENCIA**: Se ha activado el bloqueo de seguridad para FOREX. "
-            "El sistema tiene prohibido comprar/vender cualquier activo de Forex hasta solucionar los problemas."
-        )
-        await _send_telegram(report_msg)
-        log_error('SAFETY', f"Bloqueo de Seguridad FOREX activado. Diagnóstico: {forex_checks}")
+        # Solo alertar a Telegram al entrar en estado bloqueado para evitar spam recurrente cada 15m
+        if not was_forex_blocked:
+            report_msg = (
+                "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO FOREX**\n"
+                "El control automático de seguridad de 15 min detectó fallos:\n"
+            )
+            for name, ok in forex_checks.items():
+                icon = "✅ OK" if ok else "❌ FALLÓ"
+                report_msg += f"- [{name}]: {icon}\n"
+            report_msg += (
+                "\n⚠️ **ACCIÓN DE EMERGENCIA**: Se ha activado el bloqueo de seguridad para FOREX. "
+                "El sistema tiene prohibido comprar/vender cualquier activo de Forex hasta solucionar los problemas."
+            )
+            await _send_telegram(report_msg)
+        log_info('SAFETY', f"Bloqueo de Seguridad FOREX activo. Diagnóstico: {forex_checks}")
     else:
         # Si estaba bloqueado anteriormente, alertamos que se solucionó
-        if check_db_safety_block('forex_futures'):
+        if was_forex_blocked:
             await _send_telegram("✅ **SISTEMA RESTAURADO - MERCADO FOREX**\nTodos los subprocesos de Forex operan con normalidad. Bloqueo de seguridad levantado.")
         log_info('SAFETY', "✅ Control de Seguridad de 15m para FOREX completado exitosamente (Sin fallos).")
         
@@ -963,7 +966,7 @@ async def check_subprocesses_safety(supabase) -> dict:
         from app.execution.data_provider import BinanceCryptoProvider
         if BinanceCryptoProvider.is_banned() and crypto_checks.get('stop_loss_integrity') and crypto_checks.get('adaptive_indicators'):
             log_info('SAFETY', f"Bloqueo de Seguridad CRYPTO mantenido por BAN de Binance. Diagnóstico: {crypto_checks}. Omitiendo alerta de Telegram.")
-        else:
+        elif not was_crypto_blocked:
             report_msg = (
                 "🚨 **FALLO DE SUBPROCESOS CRÍTICOS - MERCADO CRYPTO**\n"
                 "El control automático de seguridad de 15 min detectó fallos:\n"
@@ -976,10 +979,10 @@ async def check_subprocesses_safety(supabase) -> dict:
                 "El sistema tiene prohibido comprar/vender cualquier activo de Crypto hasta solucionar los problemas."
             )
             await _send_telegram(report_msg)
-            log_error('SAFETY', f"Bloqueo de Seguridad CRYPTO activado. Diagnóstico: {crypto_checks}")
+        log_info('SAFETY', f"Bloqueo de Seguridad CRYPTO activo. Diagnóstico: {crypto_checks}")
     else:
         # Si estaba bloqueado anteriormente, alertamos que se solucionó
-        if check_db_safety_block('crypto_futures'):
+        if was_crypto_blocked:
             await _send_telegram("✅ **SISTEMA RESTAURADO - MERCADO CRYPTO**\nTodos los subprocesos de Crypto operan con normalidad. Bloqueo de seguridad levantado.")
         log_info('SAFETY', "✅ Control de Seguridad de 15m para CRYPTO completado exitosamente (Sin fallos).")
         
@@ -1071,12 +1074,12 @@ async def check_all_heartbeats() -> list:
                 if elapsed > max_age + 5: # Damos 5 min extra de margen por latencia DB
                     dead.append(w_name)
         except Exception as e:
-            log_error('SAFETY', f'Error verificando heartbeat DB para {w_name}: {e}')
+            log_warning('SAFETY', f'Error verificando heartbeat DB para {w_name}: {e}')
             # Si falla la DB, no marcamos como muerto para evitar spam si es solo un problema de red
             pass
 
     if dead:
-        log_error('SAFETY', f'💀 Workers caídos (DB/Mem): {", ".join(dead)}')
+        log_warning('SAFETY', f'💀 Workers caídos (DB/Mem): {", ".join(dead)}')
         # Solo enviar alerta si el fallo persiste o si somos el worker principal (crypto_scheduler)
         if _current_worker == 'crypto_scheduler':
             await _send_telegram(

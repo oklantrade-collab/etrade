@@ -177,6 +177,8 @@ async def write_market_snapshot(symbol: str, df, regime: dict, spike: dict, mtf_
             changed_at_iso = datetime.now(timezone.utc).isoformat()
             MEMORY_STORE[symbol]['sar']['changed_at'] = changed_at_iso
             log_info('SAR', f"--- CAMBIO DETECTADO PARA {symbol}: {prev_trend} -> {sar_trend} ---")
+        else:
+            MEMORY_STORE[symbol]['sar']['changed_at'] = None
 
         # ─── 3. CÁLCULO SAR 15m (Híbrido) ───
         sar_15m = None
@@ -928,6 +930,8 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
             'price': last_price,
             'broker_ticker_price': live_ticker_px,
             'squeeze_velocity': float(signal.get('velocity', 0.0)),
+            'is_divergent': bool(signal.get('is_divergent', False)),
+            'bandwidth_ratio': float(signal.get('bandwidth_ratio', 1.0)),
             'open_symbols': open_symbols,
             'max_active_symbols': max_active,
             'current_symbol_positions': current_sym_positions,
@@ -947,7 +951,10 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
             log_info(MODULE, f"🛑 [ADUANA CRYPTO QSHR REJECT] {symbol} {side.upper()}: {result.rule_triggered} — {result.reason}")
             return False
             
-        log_info(MODULE, f"⚡ [ADUANA CRYPTO QSHR APPROVED] {symbol} {side.upper()}: {signal.get('reason')}")
+        sizing_factor = float(result.detail.get('sizing_factor', 1.0)) if hasattr(result, 'detail') and result.detail else 1.0
+        if signal.get('size_factor'):
+            sizing_factor = min(sizing_factor, float(signal['size_factor']))
+        log_info(MODULE, f"⚡ [ADUANA CRYPTO QSHR APPROVED] {symbol} {side.upper()} (Sizing: {int(sizing_factor*100)}%): {signal.get('reason')}")
         
         # ─── REVERSIÓN DE POSICIÓN OPUESTA (Netting / Clímax Flip) ───
         # Si vamos a abrir LONG y hay SHORTs abiertos (o viceversa), cerrar las opuestas primero
@@ -975,24 +982,25 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
                 except Exception as close_err:
                     log_error(MODULE, f"Error cerrando posición opuesta {opp_pos.get('id')} para {symbol}: {close_err}")
 
-        # Ejecución
+        # Ejecución con Sizing Dinámico
         cap_op = float(BOT_STATE.config_cache.get("capital_operativo", 100))
-        sizing_usd = max(18.0, cap_op * 0.10) # 10% base
+        sizing_usd = max(15.0, (cap_op * 0.10) * sizing_factor) # 10% base ajustado por factor de riesgo (50% en divergencia)
         qty = sizing_usd / last_price
         
         from app.core.position_monitor import _execute_paper_open
         await _execute_paper_open(
             symbol=symbol, side=side, price=last_price,
             size=qty, rule_code=rule_code, regime={'category': 'favorable_trend'}, levels={},
-            vel_config={'adx_val': 30, 'multiplier': 1.0}, supabase=sb
+            vel_config={'adx_val': 30, 'multiplier': sizing_factor}, supabase=sb
         )
 
         from app.workers.performance_monitor import send_telegram_message
         mode_label = "PAPER" if is_paper else "LIVE REAL"
+        sizing_tag = f" [Sizing {int(sizing_factor*100)}%]" if sizing_factor < 1.0 else ""
         await send_telegram_message(
-            f"🚀 [{mode_label} QSHR ENTRY] {symbol} {side.upper()}\n"
+            f"🚀 [{mode_label} QSHR ENTRY{sizing_tag}] {symbol} {side.upper()}\n"
             f"Estrategia: {rule_code}\n"
-            f"Precio: ${last_price:,.2f} | Cantidad: {qty:.4f}\n"
+            f"Precio: ${last_price:,.2f} | Cantidad: {qty:.4f} (${sizing_usd:.2f} USD)\n"
             f"Razón: {signal.get('reason')}"
         )
         return True
@@ -1778,21 +1786,26 @@ async def process_profit_management_15m(
         else 'stocks_positions'
     )
     # ── CASCADA: Extended Position Management (REBOTE) ───────────────
-    try:
-        from app.cascada.cascada_manager import CascadaManager
-        cm = CascadaManager.get_instance()
-        cascade_results = cm.evaluate_all_cascade_positions([position], market_type='crypto')
-        if cascade_results:
-            c_res = cascade_results[0]
-            if c_res.decision in ('CERRAR', 'GIVEBACK_CLOSE'):
-                log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Cierre {c_res.decision} para {symbol} N{c_res.current_level} ({c_res.detail})")
-                await _execute_paper_close(position, current_price, f"CASCADA_{c_res.decision}_N{c_res.current_level}", sb)
-                return True
-            elif getattr(c_res, 'cascade_hold', False) or c_res.decision == 'MANTENER':
-                log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Hold / Mantener para {symbol} N{c_res.current_level} ({c_res.detail})")
-                return False
-    except Exception as cascade_err:
-        log_error('CASCADA', f"Error evaluando CASCADA crypto para {symbol}: {cascade_err}")
+    pos_rule_lower = str(position.get('rule_code') or position.get('strategy') or '').lower()
+    is_climax_or_erep = any(x in pos_rule_lower for x in ('climax', 'lower6', 'upper6', 'reversal')) or position.get('erep_active') or (position.get('erep_phase', 0) > 0)
+
+    if not is_climax_or_erep:
+        try:
+            from app.cascada.cascada_manager import CascadaManager
+            cm = CascadaManager.get_instance()
+            if cm.should_delegate_slv(position) or str(position.get('origen', '')).upper() == 'REBOTE':
+                cascade_results = cm.evaluate_all_cascade_positions([position], market_type='crypto')
+                if cascade_results:
+                    c_res = cascade_results[0]
+                    if c_res.decision in ('CERRAR', 'GIVEBACK_CLOSE'):
+                        log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Cierre {c_res.decision} para {symbol} N{c_res.current_level} ({c_res.detail})")
+                        await _execute_paper_close(position, current_price, f"CASCADA_{c_res.decision}_N{c_res.current_level}", sb)
+                        return True
+                    elif getattr(c_res, 'cascade_hold', False) or c_res.decision == 'MANTENER':
+                        log_info('CASCADA', f"🌊 [CASCADA CRYPTO] Hold / Mantener para {symbol} N{c_res.current_level} ({c_res.detail})")
+                        return False
+        except Exception as cascade_err:
+            log_error('CASCADA', f"Error evaluando CASCADA crypto para {symbol}: {cascade_err}")
 
     # ── MÓDULO A: Profit Capture ───────────────
     # (sobreextensión extrema → cierre inmediato)
@@ -2132,6 +2145,28 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
             if sar_changed_at:
                 positions = BOT_STATE.get_positions_by_symbol(symbol)
                 for position in positions:
+                    # 🛡️ Protección 1: Período de gracia mínimo (300 segundos / 5 minutos)
+                    opened_at_str = position.get('opened_at')
+                    if opened_at_str:
+                        try:
+                            opened_dt = datetime.fromisoformat(str(opened_at_str).replace('Z', '+00:00'))
+                            elapsed_s = (datetime.now(timezone.utc) - opened_dt).total_seconds()
+                            if elapsed_s < 300:
+                                log_info('SAR', f"🛡️ SAR_PHASE_CHANGE ignorado para {symbol}: posición en período de gracia ({elapsed_s:.0f}s < 300s).")
+                                continue
+
+                            # 🛡️ Protección 2: Precedencia temporal (debe haberse abierto ANTES del cambio)
+                            sar_dt = datetime.fromisoformat(str(sar_changed_at).replace('Z', '+00:00'))
+                            if opened_dt >= sar_dt:
+                                continue
+                        except Exception as sar_t_err:
+                            log_warning('SAR', f"Error evaluando tiempos SAR para {symbol}: {sar_t_err}")
+
+                    # 🛡️ Protección 3: Inmunidad para estrategias swing / pullback / climax
+                    rule_c = str(position.get('rule_code') or '')
+                    if any(k in rule_c for k in ('ApexEma', 'Aa13', 'Bb13', 'Aa21', 'Bb25', 'Bb41', 'CLIMAX', 'Climax', 'EREP', 'Erep')):
+                        continue
+
                     side = (position.get('side') or '').lower()
                     
                     # Calcular P&L para el log
@@ -3007,7 +3042,7 @@ async def main():
         except Exception as b_err:
             log_warning(MODULE, f"Error en broker_live_sync_job: {b_err}")
 
-    scheduler.add_job(broker_live_sync_job, 'interval', seconds=10, id='sync_broker_live', replace_existing=True)
+    scheduler.add_job(broker_live_sync_job, 'interval', seconds=30, id='sync_broker_live', replace_existing=True)
     asyncio.create_task(broker_live_sync_job()) # Sync inmediata al iniciar
     
     # 5. Schedule Tasks with offsets

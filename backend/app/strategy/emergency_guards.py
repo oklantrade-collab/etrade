@@ -16,6 +16,13 @@ async def trigger_emergency_protection(market_type: str):
     sb = get_supabase()
     
     try:
+        # Si el mercado de Forex está cerrado (fin de semana), no ejecutar cierres de emergencia
+        if 'forex' in market_type:
+            from app.core.market_hours import is_forex_market_open
+            if not is_forex_market_open():
+                log_info(MODULE, f"Mercado de FOREX CERRADO (fin de semana). No se ejecutan cierres a mercado de emergencia.")
+                return
+
         # Obtener todas las posiciones abiertas del mercado especificado
         # Asumimos que forex_futures guarda en 'forex_positions' y crypto en 'positions'
         table_name = 'forex_positions' if 'forex' in market_type else 'positions'
@@ -26,38 +33,76 @@ async def trigger_emergency_protection(market_type: str):
             log_info(MODULE, f"No hay posiciones abiertas en {market_type} para proteger.")
             return
 
+        is_forex = 'forex' in market_type
+
         for pos in open_positions:
             pos_id = pos['id']
             symbol = pos['symbol']
             side = pos.get('side', '').upper()
             entry_price = float(pos.get('entry_price') or pos.get('avg_entry_price') or 0)
-            current_price = float(pos.get('current_price') or entry_price)
             
-            # Calcular PNL
-            if side in ['LONG', 'BUY']:
-                pnl = current_price - entry_price
+            # Obtener precio fresco de mercado (desde market_snapshot o fallback a base de datos)
+            current_price = None
+            try:
+                snap_res = sb.table('market_snapshot').select('price').eq('symbol', symbol).maybe_single().execute()
+                if snap_res and snap_res.data and snap_res.data.get('price'):
+                    current_price = float(snap_res.data['price'])
+            except Exception as snap_err:
+                log_warning(MODULE, f"No se pudo obtener snapshot de precio para {symbol}: {snap_err}")
+
+            if not current_price or current_price <= 0:
+                current_price = float(pos.get('current_price') or entry_price)
+
+            pip_sz = (0.01 if ('JPY' in symbol or 'XAU' in symbol) else 0.0001) if is_forex else 0.01
+            qty = float(pos.get('size') or pos.get('lots') or 0.01)
+
+            # Calcular PNL en precio, pips y USD
+            is_long = side in ['LONG', 'BUY']
+            price_diff = (current_price - entry_price) if is_long else (entry_price - current_price)
+            pnl_pips = (price_diff / pip_sz) if pip_sz > 0 else 0.0
+
+            if is_forex:
+                from app.core.pnl_calculator import calculate_pnl
+                pnl_usd, pnl_pct = calculate_pnl('forex', side.lower(), entry_price, current_price, qty, symbol, sb)
             else:
-                pnl = entry_price - current_price
-                
-            # Condición A: PNL >= 0 -> Cerrar a Mercado
-            if pnl >= 0:
-                log_info(MODULE, f"[{symbol}] PNL >= 0. Cerrando a mercado por emergencia.")
-                if 'forex' in market_type:
-                    # Marcar para cierre en la BD (el worker intentará cerrarla si puede)
+                pnl_usd = price_diff * qty
+                pnl_pct = (price_diff / entry_price * 100) if entry_price > 0 else 0.0
+
+            # Condición A: Ganancia REAL confirmada (mínimo $0.10 USD y 1 pip en Forex para evitar ruido)
+            is_real_profit = (pnl_usd >= 0.10) and (pnl_pips >= 1.0 if is_forex else True)
+            if is_real_profit:
+                log_info(MODULE, f"[{symbol}] PNL positivo confirmado (${pnl_usd:.2f} | {pnl_pips:+.1f} pips). Cerrando a mercado por emergencia.")
+                if is_forex:
                     sb.table(table_name).update({
                         'status': 'closed',
                         'close_reason': 'EMERGENCY_PROFIT_CLOSE',
+                        'current_price': current_price,
+                        'pnl_usd': round(pnl_usd, 2),
+                        'pnl_pips': round(pnl_pips, 1),
+                        'pnl_pct': round(pnl_pct, 4),
                         'closed_at': datetime.now(timezone.utc).isoformat()
                     }).eq('id', pos_id).execute()
+
+                    # Si es LIVE con cTrader pos ID, cerrar en broker
+                    if pos.get('mode') == 'live' and pos.get('ctrader_pos_id'):
+                        try:
+                            from app.core.safety_manager import get_worker
+                            fw = get_worker('forex_worker')
+                            if fw and hasattr(fw, 'close_position'):
+                                lots_clean = round(abs(qty), 2)
+                                close_vol = int(round(lots_clean * 10_000_000)) if symbol != 'XAUUSD' else int(round(lots_clean * 10_000))
+                                fw.close_position(pos['ctrader_pos_id'], close_vol, symbol=symbol, reason='EMERGENCY_PROFIT_CLOSE')
+                        except Exception as live_e:
+                            log_error(MODULE, f"Error enviando cierre de emergencia a cTrader para {symbol}: {live_e}")
                 else:
                     from app.execution.order_manager import close_position
                     success = close_position(pos_id, "EMERGENCY_PROFIT_CLOSE")
                     if not success:
                         log_error(MODULE, f"[{symbol}] Falló el cierre de emergencia.")
                 
-            # Condición B: PNL < 0 -> Establecer Take Profit Limit en Breakeven (Estrategia OCO)
+            # Condición B: PNL <= 0 o sin ganancia confirmada -> Establecer Take Profit Limit en Breakeven (Estrategia OCO)
             else:
-                log_info(MODULE, f"[{symbol}] PNL < 0. Colocando TP Limit de Breakeven a {entry_price}.")
+                log_info(MODULE, f"[{symbol}] PNL <= 0 o sin ganancia confirmada (${pnl_usd:.2f}). Colocando TP Limit de Breakeven a {entry_price}.")
                 # Actualizar el take_profit en BD usando columnas existentes
                 update_data = {
                     'recovery_exit_reason': 'EMERGENCY_OCO',

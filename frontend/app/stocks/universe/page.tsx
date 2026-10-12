@@ -125,7 +125,7 @@ export default function StocksUniverse() {
         </div>
 
         <div style={{ display: 'flex', gap: '6px' }}>
-          {['ALL', 'FUTURE_GIANT', 'GROWTH_LEADER'].map(pool => (
+          {['ALL', 'FUTURE_GIANT', 'GROWTH_LEADER', 'INTRADAY_ALPHA'].map(pool => (
             <button
               key={pool}
               onClick={() => setFilterPool(pool)}

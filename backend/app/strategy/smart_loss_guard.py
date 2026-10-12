@@ -25,6 +25,10 @@ EXEMPT_KEYWORDS = [
     'apexconfluence',  # Apex confluence signal
     'cleanup',         # Limpieza administrativa
     'reversal',        # Reversión de dirección (netting IC Markets: SIEMPRE debe cerrar la opuesta)
+    'panic',           # Salidas del Modo Pánico (Hard Cap 5%, etc.)
+    'escape',          # Salidas de Escape Defensivo (Bollinger, EMA MTF)
+    'breakout_cut',    # Ruptura estructural de banda extrema
+    'micro_breakeven', # Cierre en Breakeven de rescate
 ]
 
 

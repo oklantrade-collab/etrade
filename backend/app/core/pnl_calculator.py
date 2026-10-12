@@ -40,11 +40,14 @@ def calculate_pnl(market_type, side, entry_price, current_price, qty, symbol, su
         
         # Buscar por prefijo o sufijo
         leverage = config.get('leverage_forex')
-        if leverage is None: leverage = 500
         for key, val in lev_map.items():
             if key.upper() in symbol.upper():
-                leverage = val if val is not None else 500
+                leverage = val
                 break
+        try:
+            leverage = float(leverage) if leverage is not None else 500.0
+        except (ValueError, TypeError):
+            leverage = 500.0
                 
         # Nocional para forex: qty (lotes) * contract_size (100k para forex, 100 para XAU)
         contract_size = 100 if 'XAU' in symbol else 100000
@@ -55,7 +58,10 @@ def calculate_pnl(market_type, side, entry_price, current_price, qty, symbol, su
         # Es Cripto / Stocks
         pnl_usd = (current_price - entry_price) * qty if is_long else (entry_price - current_price) * qty
         leverage = config.get('leverage_crypto')
-        if leverage is None: leverage = 15
+        try:
+            leverage = float(leverage) if leverage is not None else 15.0
+        except (ValueError, TypeError):
+            leverage = 15.0
         notional = qty * entry_price
         margin = notional / leverage if leverage and leverage > 0 else notional
 

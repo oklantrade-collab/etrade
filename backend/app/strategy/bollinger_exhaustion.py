@@ -151,6 +151,15 @@ async def execute_market_bollinger_exhaustion(market: str):
                 
             # 3. Evaluar
             if check_bollinger_exhaustion(df_15m, side):
+                # Validar Guardia de Tendencia ADUANAS (EMA3 vs EMA9 15m)
+                ema3_15m = float(df_15m['close'].ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15m = float(df_15m['close'].ewm(span=9, adjust=False).mean().iloc[-1])
+                is_short_check = side in ('short', 'sell')
+                trend_active = (is_short_check and ema3_15m < ema9_15m) or ((not is_short_check) and ema3_15m > ema9_15m)
+                if trend_active:
+                    log_info(MODULE, f"🛡️ [ADUANA SALIDA / BOLLINGER EXHAUSTION SKIP] {sym} ({side.upper()}): Agotamiento 15m omitido porque la tendencia sigue viva según ADUANAS (EMA3={ema3_15m:.5f}, EMA9={ema9_15m:.5f}).")
+                    continue
+
                 # 4. Obtener la más antigua y calcular su PnL en tiempo real
                 sorted_pos = sorted(pos_list, key=lambda x: x.get('opened_at') or x.get('created_at') or '')
                 oldest_pos = sorted_pos[0]
@@ -175,12 +184,12 @@ async def execute_market_bollinger_exhaustion(market: str):
                 # [ADUANA SALIDA]: Proporcional a pips / lotaje en Forex y % en Crypto (Anti-Bloqueo de Ganancias)
                 min_pnl_allowed = False
                 if market == 'forex':
-                    min_pnl_allowed = (pips >= 1.5) or (pnl_usd >= 0.15 * max(0.01, lots) / 0.01)
+                    min_pnl_allowed = (pips >= 8.0) and (pnl_usd >= 0.80 * max(0.01, lots) / 0.01)
                 elif market == 'stocks':
                     min_pnl_allowed = (pnl_usd >= 1.00)
                 else: # crypto
                     pnl_pct = ((current_price - entry_price) / entry_price * 100) if not is_short else ((entry_price - current_price) / entry_price * 100)
-                    min_pnl_allowed = (pnl_pct >= 0.15) or (pnl_usd > 0)
+                    min_pnl_allowed = (pnl_pct >= 1.20) and (pnl_usd >= 0.50)
 
                 if not min_pnl_allowed:
                     log_info(MODULE, f"🛡️ [ADUANA SALIDA / BOLLINGER EXHAUSTION SKIP] {sym} ({side.upper()}): Agotamiento 15m detectado pero PnL insuficiente (${pnl_usd:.2f}). No se ejecuta scale-out de pos {pos_id}.")

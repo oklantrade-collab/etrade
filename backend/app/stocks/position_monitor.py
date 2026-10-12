@@ -111,17 +111,31 @@ class PositionMonitor:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", trade["id"]).execute()
 
-            # ── EREP Integration ──
-            if trade.get('erep_active') or trade.get('erep_phase', 0) > 0:
-                log_info(MODULE, f"Bypassing normal exits for {ticker} because EREP is active (phase: {trade.get('erep_phase')})")
+            # ── 1. PROTECCIÓN EOD (Fin de Día a las 15:50 ET - Cero Retención Nocturna) ──
+            from app.core.market_hours import get_nyc_now
+            nyc_now = get_nyc_now()
+            if nyc_now.weekday() < 5 and nyc_now.hour == 15 and nyc_now.minute >= 50:
+                log_warning(MODULE, f"⏰ EOD HARD-EXIT (15:50 ET): {ticker} cerrando al 100% para evitar riesgo nocturno. PnL: {pnl_pct:+.2f}%")
+                await self._close_position(trade, current_price, "eod_hard_exit_1550")
                 return
+
+            # ── 2. HARD CAP DE SEGURIDAD DEL 5% ──
+            if pnl_pct <= -5.0:
+                log_warning(MODULE, f"🛑 HARD CAP 5% HIT: {ticker} @ ${current_price:.2f} ({pnl_pct:.2f}% <= -5.0%). Cortando a mercado incondicionalmente...")
+                await self._close_position(trade, current_price, "hard_cap_5pct_exit")
+                return
+
+            # ── 3. POSICIONES EN GANANCIA vs RESCATE EREP ──
+            # Si la posición está en ganancia (pnl_usd >= 0), NUNCA debe ser bloqueada por erep_phase previo
+            if pnl_usd < 0 and (trade.get('erep_active') or trade.get('erep_phase', 0) > 0):
+                log_info(MODULE, f"EREP activo en pérdida para {ticker} (fase: {trade.get('erep_phase')}).")
+                # Continuar flujo para permitir evaluar salidas técnicas o SL si corresponde
 
             # ── Cálculo de Antigüedad de la Posición ──
             entry_time_str = trade.get("first_buy_at") or trade.get("entry_time")
             age_mins = 0.0
             if entry_time_str:
                 try:
-                    # Normalizar ISO string para comparación
                     entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
                     age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
                 except Exception as age_e:
@@ -181,24 +195,10 @@ class PositionMonitor:
 
             sl_action = sl_res['action']
 
-            if sl_action == 'close_backstop':
-                log_warning(MODULE, f"🔴 BACKSTOP HIT: {ticker} @ ${current_price:.2f}. Routing to EREP Phase 1...")
-                sb.table("stocks_positions").update({
-                    "erep_phase": 1,
-                    "erep_p1_price": entry_price,
-                    "erep_q1": safe_float(trade.get("shares_remaining")) or safe_float(trade.get("shares")) or shares,
-                    "erep_market_type": "stocks_spot",
-                }).eq("id", trade["id"]).execute()
-                return
-
-            if sl_action == 'trigger_dynamic_sl':
-                log_warning(MODULE, f"🔴 DYNAMIC SL HIT: {ticker} @ ${current_price:.2f} (SIPV). Routing to EREP Phase 1...")
-                sb.table("stocks_positions").update({
-                    "erep_phase": 1,
-                    "erep_p1_price": entry_price,
-                    "erep_q1": safe_float(trade.get("shares_remaining")) or safe_float(trade.get("shares")) or shares,
-                    "erep_market_type": "stocks_spot",
-                }).eq("id", trade["id"]).execute()
+            # Si el precio perforó el Stop Loss o Dynamic SL, cerrar limpiamente
+            if sl_action in ('close_backstop', 'trigger_dynamic_sl'):
+                log_warning(MODULE, f"🔴 STOP LOSS HIT: {ticker} @ ${current_price:.2f} ({sl_action}). Ejecutando cierre a mercado...")
+                await self._close_position(trade, current_price, f"sl_{sl_action}")
                 return
 
             if sl_action == 'activate_dynamic_sl':
@@ -460,25 +460,6 @@ class PositionMonitor:
         pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
         result = "win" if pnl_usd > 0 else "loss"
 
-        # 🛡️ GUARDA MAESTRA ABSOLUTA ANTI-PÉRDIDAS EN STOCKS (PnL < $1.00 USD) 🛡️
-        # En Mercado de Stocks Spot (sin liquidación), NUNCA cerrar una posición si pnl_usd < 1.00 USD
-        if pnl_usd < 1.0:
-            log_warning(MODULE, f"🛡️ [STOCKS ANTI-LOSS MASTER GUARD] Bloqueando cierre de {ticker} ({exit_reason}) con PnL de ${pnl_usd:.2f} USD < $1.00 USD. La posición se mantiene ABIERTA para recuperación.")
-            try:
-                sb.table('stocks_positions').update({
-                    'sl_type': 'anti_loss_hold',
-                    'stop_loss': 0,
-                    'sl_dynamic_price': 0,
-                    'erep_active': True,
-                    'erep_phase': 1,
-                    'erep_p1_price': entry_price,
-                    'erep_q1': shares,
-                    'erep_market_type': 'stocks_spot'
-                }).eq('id', trade['id']).execute()
-            except Exception as upd_e:
-                log_error(MODULE, f"Error actualizando estado anti-loss para {ticker}: {upd_e}")
-            return
-
         try:
             # 1. Insert into trades_journal
             journal_entry = {
@@ -540,11 +521,19 @@ class PositionMonitor:
             current_shares = int(safe_float(raw_shares_remaining) if raw_shares_remaining is not None else safe_float(raw_shares, 0))
             shares_rem = current_shares - int(shares_to_close)
 
+            # Blindaje Matemático: Mover Stop Loss a Breakeven + 1.0% para proteger el remanente
+            cur_sl = safe_float(trade.get("stop_loss", 0.0))
+            be_sl = round(entry_price * 1.01, 2)
+            new_sl = max(cur_sl, be_sl) if entry_price > 0 else cur_sl
+
             update_data = {
                 f"tp_{block_name}_executed": True,
                 f"tp_{block_name}_price": exit_price,
                 f"tp_{block_name}_pnl": pnl_usd,
                 "shares_remaining": shares_rem,
+                "stop_loss": new_sl,
+                "sl_type": "breakeven_plus_1pct",
+                "sl_activation_reason": f"Blindaje tras parcial {block_name} (+1.0% garantizado @ ${new_sl:.2f})",
                 "updated_at": now
             }
             

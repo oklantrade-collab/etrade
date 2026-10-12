@@ -101,9 +101,24 @@ def _should_notify(module: str, message: str) -> bool:
     if "BinanceAPIException" in message or "APIError(code=-1003)" in message or "code=-1021" in message or "recvWindow" in message or "TimeoutError" in message or "IP banned" in message or "IP is banned" in message or "418 I'm a teapot" in message or "baneada" in message.lower() or "ConnectionTerminated" in message or "last_stream_id" in message:
         return False
         
-    if module == "CTRADER" and not is_forex_market_open():
+    if module == "CTRADER":
         if "Sin precio" in message or "No autenticado" in message or "Desconectado" in message:
             return False
+
+    # Prevent Telegram spam for database outages, egress limits, and 402 errors
+    msg_lower = message.lower()
+    if any(k in msg_lower for k in [
+        "exceed_egress_quota",
+        "payment required",
+        "402",
+        "json could not be generated",
+        "failed to write log to db",
+        "pgrst",
+        "postgrest",
+        "supabase",
+        "circuit_breaker"
+    ]):
+        return False
 
     # Fingerprint: módulo + primeros 40 caracteres del mensaje
     fingerprint = (module, message[:40])

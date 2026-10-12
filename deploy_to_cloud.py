@@ -171,6 +171,13 @@ files_to_sync = [
     "app/stocks/position_monitor.py",
     "app/stocks/aduana_stocks_exit_engine.py",
     "app/stocks/adr_volatility_gate.py",
+    "app/stocks/trap_shield.py",
+    "app/stocks/fast_entry_engine.py",
+    "app/stocks/catalyst_classifier.py",
+    "app/rebote_aduana/aduana_trend_exit.py",
+    "tests/test_trap_shield_priority.py",
+    "tests/test_fast_entry_catalyst_aduana.py",
+    "tests/test_fase4_execution_and_telemetry.py",
     "tests/test_aduana_stocks_exit.py",
     "tests/test_adr_volatility_gate.py",
     "tests/test_maturation_and_multi_tf_exit.py",
@@ -240,7 +247,9 @@ frontend_files = [
     ("frontend/app/forex/positions/page.tsx", "frontend/app/forex/positions/page.tsx"),
     ("frontend/app/dashboard/page.tsx", "frontend/app/dashboard/page.tsx"),
     ("frontend/app/portfolio/page.tsx", "frontend/app/portfolio/page.tsx"),
-    ("frontend/app/settings/page.tsx", "frontend/app/settings/page.tsx")
+    ("frontend/app/settings/page.tsx", "frontend/app/settings/page.tsx"),
+    ("frontend/app/stocks/opportunities/page.tsx", "frontend/app/stocks/opportunities/page.tsx"),
+    ("frontend/app/stocks/universe/page.tsx", "frontend/app/stocks/universe/page.tsx")
 ]
 
 def check_syntax():
