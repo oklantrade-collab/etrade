@@ -504,6 +504,21 @@ function AnalysisModal({ stock, onClose }: any) {
                                         {stock.catalyst_headline || stock.catalyst_reason}
                                     </div>
                                 )}
+                                {stock.pullback_triggered && (
+                                    <div style={{ marginTop:'10px', fontSize:'10px', color:'#CCC', background:'rgba(139,92,246,0.1)', border:'1px solid rgba(139,92,246,0.3)', padding:'8px', borderRadius:'6px' }}>
+                                        <b style={{ color: '#A78BFA' }}>🎯 RETROCESO DETECTADO ({stock.pullback_type || 'PULLBACK'}): </b>
+                                        {stock.pullback_reason}
+                                        {stock.pullback_limit_orders && stock.pullback_limit_orders.length > 0 && (
+                                            <div style={{ marginTop:'4px', display:'flex', gap:'8px', fontSize:'9px', color:'#FFF' }}>
+                                                {stock.pullback_limit_orders.map((lo: any, idx: number) => (
+                                                    <span key={idx} style={{ background:'rgba(255,255,255,0.08)', padding:'2px 6px', borderRadius:'4px' }}>
+                                                        Orden LIMIT {lo.ema_target}: <b>${lo.limit_price}</b> (TTL: {lo.ttl_minutes}m)
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -662,6 +677,9 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete }: any) {
           )}
           {opp.is_intraday_alpha && (
             <span title={`Intraday Alpha: Potencial +${opp.growth_potential_pct || 5}% | Gap +${opp.gap_pct || 0}%`} style={{ fontSize: '8px', background: 'linear-gradient(90deg, #10B981, #06B6D4)', color: '#000', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>🚀 ALPHA</span>
+          )}
+          {opp.pullback_triggered && (
+            <span title={`Pullback Setup: ${opp.pullback_reason || opp.pullback_type}`} style={{ fontSize: '8px', background: 'linear-gradient(90deg, #8B5CF6, #EC4899)', color: '#FFF', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>🎯 PULLBACK</span>
           )}
           {opp.catalyst_tier === 1 && (
             <span title={`Catalizador Tier 1 (${opp.catalyst_name}): ${opp.catalyst_headline || opp.catalyst_reason}`} style={{ fontSize: '8px', background: '#059669', color: '#FFF', padding: '1px 4px', borderRadius: '3px', fontWeight: 950 }}>⚡ TIER 1</span>

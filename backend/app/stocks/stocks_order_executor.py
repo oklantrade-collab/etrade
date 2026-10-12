@@ -307,9 +307,16 @@ def place_limit_order(
         if shares <= 0:
             return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
-    # Expiración: 5 días para S02 (120h), 4h para el resto
+    # Expiración: si context/rule define ttl_minutes (ej. 5m para pullbacks), usarlo; de lo contrario 120h para S02/PRO_BUY_LMT o 4h
+    ttl_minutes = context.get("ttl_minutes") or rule.get("ttl_minutes")
     ttl_hours = 120 if (rule_code == "S02" or rule_code == "PRO_BUY_LMT") else 4
     now = datetime.now(timezone.utc)
+    if ttl_minutes:
+        expires_at_dt = now + timedelta(minutes=float(ttl_minutes))
+        ttl_label = f"{float(ttl_minutes):.0f}m"
+    else:
+        expires_at_dt = now + timedelta(hours=ttl_hours)
+        ttl_label = f"{ttl_hours}h"
 
     # Cancelar órdenes anteriores del mismo ticker/dirección
     sb.table("stocks_orders") \
@@ -337,7 +344,7 @@ def place_limit_order(
         "movement_type": context.get("movement_type"),
         "rvol": context.get("rvol"),
         "status": "pending",
-        "expires_at": (now + timedelta(hours=ttl_hours)).isoformat(),
+        "expires_at": expires_at_dt.isoformat(),
         "created_at": now.isoformat(),
     }
 
@@ -349,7 +356,7 @@ def place_limit_order(
     log_info(MODULE,
         f"📍 LIMIT {direction.upper()} {ticker} "
         f"@ ${limit_price:.4f} ({band_name}) "
-        f"trigger ${trigger_price:.4f} TTL={ttl_hours}h"
+        f"trigger ${trigger_price:.4f} TTL={ttl_label}"
     )
 
     _send_telegram_sync(
@@ -361,7 +368,7 @@ def place_limit_order(
         f"Precio LIMIT: ${limit_price:.4f}\n"
         f"Trigger (0.5%): ${trigger_price:.4f}\n"
         f"Precio actual: ${context.get('price', 0):.2f}\n"
-        f"TTL: {ttl_hours}h"
+        f"TTL: {ttl_label}"
     )
 
     return {

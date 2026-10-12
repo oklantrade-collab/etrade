@@ -681,6 +681,24 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["plus_di_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('plus_di', 0)
         ind_15m["minus_di_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('minus_di', 0)
 
+        # ── NUEVO: PULLBACK BUYING ENGINE (MACRO 1H/15M + LOWER_5/6 + LIMIT EMA9/20) ──
+        from app.stocks.pullback_engine import evaluate_pullback_setup
+        pullback_res = evaluate_pullback_setup(
+            current_price=current_price,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            df_1h=df_1h,
+            bands_15m=movement_15m.get('bands') or {},
+            vwap=trap_shield_res.get('vwap', 0.0),
+            spread=0.02
+        )
+
+        ind_15m["pullback_triggered"] = pullback_res['pullback_triggered']
+        ind_15m["pullback_type"] = pullback_res['trigger_type']
+        ind_15m["pullback_order_type"] = pullback_res['order_type']
+        ind_15m["pullback_reason"] = pullback_res['reason']
+        ind_15m["pullback_limit_orders"] = pullback_res.get('limit_orders', [])
+
         ind_15m["is_trap"] = trap_shield_res['is_trap']
         ind_15m["trap_type"] = trap_shield_res['trap_type']
         ind_15m["trap_reason"] = trap_shield_res['trap_reason']
@@ -740,7 +758,54 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             except Exception as q_err:
                 log_warning(MODULE, f"Error asignando fast entry en cola para {ticker}: {q_err}")
 
-        # 3. Si es INTRADAY ALPHA CANDIDATE: Rank 98.5
+        # 3. Si GATILLO DE COMPRA EN RETROCESO (PULLBACK) está activo: Rank 98.8 (LOWER) o 98.6 (EMA LIMIT)
+        elif pullback_res['pullback_triggered'] and not trap_shield_res['is_trap']:
+            try:
+                rank_boost = 98.8 if pullback_res['trigger_type'] == 'PULLBACK_LOWER_ABSORPTION' else 98.6
+                sb.table("stocks_priority_queue").upsert({
+                    'ticker': ticker,
+                    'group_name': ind_15m.get('pool_type', 'HOT'),
+                    'price_at_rank': current_price,
+                    'apex_score_4h': float(ind_15m.get('apex_4h') or 92.0),
+                    'apex_score_1d': float(ind_15m.get('apex_1d') or 92.0),
+                    'return_expected': trap_shield_res['growth_potential_pct'] or 7.0,
+                    'confidence': 'high',
+                    'composite_rank': rank_boost,
+                    'status': 'pending',
+                    'entry_reason': pullback_res['reason'],
+                    'triggered_rule': f"PULLBACK_{pullback_res['trigger_type']}",
+                    'is_overbought': False,
+                    'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                    'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                    'last_updated': datetime.now(timezone.utc).isoformat()
+                }, on_conflict='ticker').execute()
+                log_info(MODULE, f"🎯 GATILLO PULLBACK {rank_boost}: {ticker} | {pullback_res['trigger_type']} | {pullback_res['reason']}")
+
+                # Si es PULLBACK_EMA_LIMIT, colocar orden LIMIT con TTL de 5m
+                if pullback_res['trigger_type'] == 'PULLBACK_EMA_LIMIT' and pullback_res.get('limit_orders'):
+                    best_limit = pullback_res['limit_orders'][0]
+                    rule_ctx_pb = {
+                        "price": current_price,
+                        "smart_limit_price": best_limit['limit_price'],
+                        "limit_price": best_limit['limit_price'],
+                        "band_name": f"{best_limit['ema_target']}_PULLBACK",
+                        "ttl_minutes": 5,
+                        "movement_type": movement_15m.get("movement_type"),
+                        "rvol": rvol_1h_val,
+                    }
+                    rule_pb = {
+                        "group_name": ind_15m.get('pool_type', 'HOT'),
+                        "limit_trigger_pct": 0.005,
+                    }
+                    try:
+                        from app.stocks.stocks_order_executor import place_limit_order
+                        place_limit_order(ticker, "buy", "PULLBACK_EMA_LMT", rule_ctx_pb, rule_pb)
+                    except Exception as lmt_e:
+                        log_warning(MODULE, f"Error colocando orden LIMIT pullback para {ticker}: {lmt_e}")
+            except Exception as q_err:
+                log_warning(MODULE, f"Error asignando pullback en cola para {ticker}: {q_err}")
+
+        # 4. Si es INTRADAY ALPHA CANDIDATE: Rank 98.5
         elif trap_shield_res['is_intraday_alpha']:
             try:
                 rank_boost = 98.5

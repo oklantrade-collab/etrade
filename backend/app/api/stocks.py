@@ -184,6 +184,11 @@ async def get_stocks_opportunities():
                     merged["target_upper6"] = float(sigs.get("target_upper6") or item.get("target_upper6") or 0.0)
                     merged["fast_entry_type"] = sigs.get("fast_entry_type") or item.get("fast_entry_type") or ""
                     merged["fast_entry_reason"] = sigs.get("fast_entry_reason") or item.get("fast_entry_reason") or ""
+                    merged["pullback_triggered"] = bool(sigs.get("pullback_triggered") or item.get("pullback_triggered") or False)
+                    merged["pullback_type"] = sigs.get("pullback_type") or item.get("pullback_type") or ""
+                    merged["pullback_order_type"] = sigs.get("pullback_order_type") or item.get("pullback_order_type") or ""
+                    merged["pullback_reason"] = sigs.get("pullback_reason") or item.get("pullback_reason") or ""
+                    merged["pullback_limit_orders"] = sigs.get("pullback_limit_orders") or item.get("pullback_limit_orders") or []
 
                     flattened.append(merged)
                 except Exception as item_e:
