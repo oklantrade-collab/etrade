@@ -22,6 +22,33 @@ from app.core.symbol_state import SymbolStateMachine
 MODULE = "stocks_order_exec"
 
 
+def is_ib_bridge_alive() -> bool:
+    """Retorna True si el agente IBKR Bridge en APOLO reportó heartbeat en los últimos 60 segundos."""
+    try:
+        sb = get_supabase()
+        res = sb.table("stocks_config").select("value").eq("key", "ib_bridge_heartbeat").limit(1).execute()
+        if not res.data:
+            return False
+        val = res.data[0].get("value")
+        if not val:
+            return False
+        import ast, json
+        try:
+            data = json.loads(val)
+        except Exception:
+            data = ast.literal_eval(val)
+        if not data.get("connected"):
+            return False
+        ts_str = data.get("timestamp")
+        if not ts_str:
+            return False
+        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        age_sec = (datetime.now(timezone.utc) - ts).total_seconds()
+        return age_sec <= 60
+    except Exception:
+        return False
+
+
 def _is_after_1515_et(now_dt=None) -> bool:
     """Retorna True si la hora de Nueva York es >= 15:15 ET (últimas 3 velas de mercado)."""
     from datetime import time as dt_time
@@ -112,8 +139,8 @@ def execute_market_order(
 ) -> dict:
     """
     Ejecuta o simula una orden MARKET.
-    En paper mode: registra en stocks_orders + stocks_positions.
-    En live mode: envía a IB TWS API.
+    Si el puente IB TWS (APOLO) está activo: envía orden como 'pending' para ejecución real en TWS Paper Trading.
+    En paper mode sin puente: registra en stocks_orders + stocks_positions directamente.
     """
     sb = get_supabase()
     config = _get_config()
@@ -126,20 +153,12 @@ def execute_market_order(
 
     # ── VALIDACIÓN 0: CUTOFF INTRADÍA 15:15 ET (ÚLTIMAS 3 VELAS) ──
     if direction.lower() == "buy":
-        group_name = str(rule.get("group_name", "")).lower()
-        is_hot_or_intraday = (
-            "hot" in group_name or
-            "scalp" in group_name or
-            "hot" in rule_code.lower() or
-            "scalp" in rule_code.lower() or
-            rule_code in ('Aa30_STK', 'S05', 'S06', 'S07', 'S08')
-        )
         mock_now = context.get("now_dt")
-        if _is_after_1515_et(mock_now) and is_hot_or_intraday:
+        if _is_after_1515_et(mock_now):
             log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Cutoff 15:15 ET alcanzado (últimas 3 velas). Apertura {rule_code} bloqueada.")
             return {
                 "success": False,
-                "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas HOT bloqueadas para evitar liquidación prematura EOD."
+                "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
         # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
@@ -183,6 +202,10 @@ def execute_market_order(
             return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
     now = datetime.now(timezone.utc).isoformat()
+    ib_live = is_ib_bridge_alive()
+
+    # Si el puente IBKR está activo en APOLO, enviar como 'pending' para que TWS ejecute la orden
+    initial_status = "pending" if (ib_live or not paper) else "filled"
 
     # Registrar orden
     order_data = {
@@ -197,9 +220,9 @@ def execute_market_order(
         "tech_score": context.get("tech_score"),
         "movement_type": context.get("movement_type"),
         "rvol": context.get("rvol"),
-        "status": "filled" if paper else "pending",
-        "filled_price": price if paper else None,
-        "filled_at": now if paper else None,
+        "status": initial_status,
+        "filled_price": price if initial_status == "filled" else None,
+        "filled_at": now if initial_status == "filled" else None,
         "created_at": now,
     }
 
@@ -210,17 +233,20 @@ def execute_market_order(
         _close_all_positions(ticker, price)
 
     # En STOCKS solo permitimos LONG (BUY).
-    # Si la orden es SELL, solo ejecutamos el cierre de lo que ya existe.
+    # Si la orden va hacia IBKR TWS (ib_live=True), el callback de TWS abrirá la posición al llenar la orden.
     if direction.lower() == "buy":
-        _open_or_update_position(
-            ticker, price, shares,
-            rule.get("group_name"),
-        )
+        if not ib_live:
+            _open_or_update_position(
+                ticker, price, shares,
+                rule.get("group_name"),
+            )
+        else:
+            log_info(MODULE, f"📡 [IBKR BRIDGE APOLO] Orden BUY {ticker} x{shares} enviada a TWS Paper (puerto 7497).")
     else:
         # Forzar que cualquier SELL sea un cierre total
         _close_all_positions(ticker, price)
 
-    mode_str = "[PAPER]" if paper else "[LIVE]"
+    mode_str = "[IBKR PAPER]" if ib_live else ("[PAPER]" if paper else "[LIVE]")
     log_info(MODULE,
         f"{mode_str} 📊 MARKET {direction.upper()} {ticker} "
         f"x{shares} @ ${price:.2f} (regla: {rule_code})"
@@ -245,6 +271,7 @@ def execute_market_order(
         "price": price,
         "shares": shares,
         "paper": paper,
+        "ib_routed": ib_live,
     }
 
 
@@ -272,20 +299,12 @@ def place_limit_order(
 
     # ── VALIDACIÓN 0: CUTOFF INTRADÍA 15:15 ET (ÚLTIMAS 3 VELAS) ──
     if direction.lower() == "buy":
-        group_name = str(rule.get("group_name", "")).lower()
-        is_hot_or_intraday = (
-            "hot" in group_name or
-            "scalp" in group_name or
-            "hot" in rule_code.lower() or
-            "scalp" in rule_code.lower() or
-            rule_code in ('Aa30_STK', 'S05', 'S06', 'S07', 'S08')
-        )
         mock_now = context.get("now_dt")
-        if _is_after_1515_et(mock_now) and is_hot_or_intraday:
+        if _is_after_1515_et(mock_now):
             log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Cutoff 15:15 ET alcanzado (últimas 3 velas). Apertura {rule_code} bloqueada.")
             return {
                 "success": False,
-                "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas HOT bloqueadas para evitar liquidación prematura EOD."
+                "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
         # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
@@ -635,5 +654,23 @@ def _close_all_positions(ticker: str, price: float):
             f"avg=${avg:.2f} exit=${price:.2f} "
             f"PnL=${pnl:.2f} ({pnl_pct:.2f}%)"
         )
+
+        # Si el puente IBKR está activo en APOLO, despachar orden SELL a TWS Paper
+        if is_ib_bridge_alive() and shares > 0:
+            try:
+                sb.table("stocks_orders").insert({
+                    "ticker": ticker,
+                    "group_name": pos.get("group_name", "STOCKS"),
+                    "rule_code": "CLOSE_ALL_IB",
+                    "order_type": "market",
+                    "direction": "sell",
+                    "shares": int(shares),
+                    "market_price": price,
+                    "status": "pending",
+                    "created_at": now
+                }).execute()
+                log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper.")
+            except Exception as ib_err:
+                log_error(MODULE, f"Error despachando SELL a IB Bridge: {ib_err}")
         
     sm.on_position_closed(ticker, "close_all", all_closed=True)

@@ -542,6 +542,42 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
         .eq('status', 'open') \
         .execute()
     owned_tickers = {p['ticker'] for p in (pos_res.data or [])}
+
+    # ── COOLDOWN POST-CIERRE (60 MIN) Y LISTA NEGRA INTRADÍA ANTE PÉRDIDA/HARD CAP ──
+    cooling_down_tickers = set()
+    blacklisted_tickers = set()
+    try:
+        now_utc = datetime.now(timezone.utc)
+        start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        journal_res = supabase.table('trades_journal') \
+            .select('ticker, exit_date, pnl_pct, exit_reason') \
+            .gte('exit_date', start_of_day_utc) \
+            .execute()
+
+        for jr in (journal_res.data or []):
+            t = jr.get('ticker')
+            if not t:
+                continue
+            exit_d_str = jr.get('exit_date')
+            pnl_p = float(jr.get('pnl_pct') or 0.0)
+            reason = str(jr.get('exit_reason') or '')
+
+            # Si sufrió una pérdida >= 2.5% o fue cortada por hard_cap / stop loss hoy, bloquear por el resto del día
+            if pnl_p <= -2.5 or 'hard_cap' in reason or 'sl_' in reason:
+                blacklisted_tickers.add(t)
+                continue
+
+            # Cooldown de 60 minutos después de cualquier cierre (ej. toma de ganancias o salida manual)
+            if exit_d_str:
+                try:
+                    exit_dt = datetime.fromisoformat(str(exit_d_str).replace('Z', '+00:00'))
+                    mins_since = (now_utc - exit_dt).total_seconds() / 60.0
+                    if mins_since < 60.0:
+                        cooling_down_tickers.add(t)
+                except Exception:
+                    pass
+    except Exception as cd_err:
+        log_warning(MODULE, f"Error verificando cooldown/lista negra intradía: {cd_err}")
     
     # Update owned tickers in the priority queue to maintain consistent DB state
     for t in owned_tickers:
@@ -557,6 +593,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 
     for ticker in tickers:
         if ticker in owned_tickers:
+            continue
+        if ticker in blacklisted_tickers:
+            log_info(MODULE, f"⛔ {ticker}: Bloqueada por Lista Negra intradía (Stop Loss o Hard Cap previo hoy).")
+            continue
+        if ticker in cooling_down_tickers:
+            log_info(MODULE, f"⏳ {ticker}: En Cooldown post-cierre (<60 min). Omitiendo re-entrada prematura.")
             continue
 
         try:
@@ -620,6 +662,21 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             df_15m   = await _get_df(ticker, '15m')
             df_4h    = await _get_df(ticker, '4h')
             df_daily = await _get_df(ticker, '1d')
+
+            # ── ESCUDO ANTI-CLÍMAX PARABÓLICO (NO COMPRAR EL BACKSIDE DE UN PUMP) ──
+            chg_pct = float(snap.get('change_pct') or snap.get('gap_pct') or 0.0)
+            if chg_pct >= 25.0 and df_15m is not None and len(df_15m) >= 10:
+                try:
+                    c15_col = 'Close' if 'Close' in df_15m.columns else 'close'
+                    c15_s = pd.to_numeric(df_15m[c15_col], errors='coerce').dropna()
+                    if len(c15_s) >= 10:
+                        ema9_15 = float(c15_s.ewm(span=9, adjust=False).mean().iloc[-1])
+                        cur_p = float(snap.get('price') or c15_s.iloc[-1])
+                        if cur_p < ema9_15:
+                            log_info(MODULE, f"⛔ {ticker}: Bloqueada por caída post-clímax (+{chg_pct:.1f}% hoy, pero Precio ${cur_p:.2f} < EMA9 15m ${ema9_15:.2f}).")
+                            continue
+                except Exception:
+                    pass
 
             # Calcular APEX Score v2.0
             apex = calculate_apex_score_v2(
@@ -984,12 +1041,18 @@ async def run_orchestrator_cycle(supabase=None):
         return
 
     # ── REGLA 1: Filtro de Horario + After-Hours Toggle ──
-    from app.core.market_hours import is_market_open
+    from app.core.market_hours import is_market_open, get_nyc_now
     is_open, status = is_market_open()
     allow_ah = cfg.get('allow_after_hours', False)
     
     if not is_open and not allow_ah:
         log_info(MODULE, f'⏸️ Ciclo omitido: Mercado cerrado ({status}) y After-hours desactivado.')
+        return
+
+    # ── REGLA 1.5: TOPE EOD PARA NUEVAS COMPRAS (Cutoff 15:15 ET) ──
+    nyc_now = get_nyc_now()
+    if nyc_now.weekday() < 5 and (nyc_now.hour > 15 or (nyc_now.hour == 15 and nyc_now.minute >= 15)) and not allow_ah:
+        log_info(MODULE, f"⏸️ Ciclo de compras omitido: Cutoff EOD 15:15 ET alcanzado ({nyc_now.strftime('%H:%M:%S')} ET). Cero aperturas nuevas en últimos 45 min para evitar cierres EOD en $0.00.")
         return
 
     # 2. Capital disponible

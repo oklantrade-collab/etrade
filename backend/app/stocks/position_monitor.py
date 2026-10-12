@@ -587,6 +587,25 @@ class PositionMonitor:
             except Exception as cap_e:
                 log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
 
+            # 3.5 Si el puente IBKR está activo en APOLO, despachar orden SELL a TWS Paper
+            try:
+                from app.stocks.stocks_order_executor import is_ib_bridge_alive
+                if is_ib_bridge_alive():
+                    sb.table("stocks_orders").insert({
+                        "ticker": ticker,
+                        "group_name": trade.get("group_name", "STOCKS"),
+                        "rule_code": str(exit_reason)[:30],
+                        "order_type": "market",
+                        "direction": "sell",
+                        "shares": shares,
+                        "market_price": exit_price,
+                        "status": "pending",
+                        "created_at": now
+                    }).execute()
+                    log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper.")
+            except Exception as ib_err:
+                log_error(MODULE, f"Error despachando SELL a IB Bridge: {ib_err}")
+
             emoji = "🟢" if result == "win" else "🔴"
             log_info(MODULE, f"{emoji} CLOSED: {ticker} | {exit_reason} | "
                              f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
@@ -653,6 +672,25 @@ class PositionMonitor:
                 "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
             }
             sb.table("trades_journal").insert(journal_entry).execute()
+
+            # 2.5 Si el puente IBKR está activo en APOLO, despachar orden SELL parcial a TWS Paper
+            try:
+                from app.stocks.stocks_order_executor import is_ib_bridge_alive
+                if is_ib_bridge_alive():
+                    sb.table("stocks_orders").insert({
+                        "ticker": ticker,
+                        "group_name": trade.get("group_name", "STOCKS"),
+                        "rule_code": f"PARTIAL_{block_name}"[:30],
+                        "order_type": "market",
+                        "direction": "sell",
+                        "shares": int(shares_to_close),
+                        "market_price": exit_price,
+                        "status": "pending",
+                        "created_at": now
+                    }).execute()
+                    log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL Parcial enviada a APOLO ({shares_to_close}x {ticker}) en TWS Paper.")
+            except Exception as ib_err:
+                log_error(MODULE, f"Error despachando SELL parcial a IB Bridge: {ib_err}")
 
             # 3. Notify
             from app.core.telegram_notifier import send_telegram

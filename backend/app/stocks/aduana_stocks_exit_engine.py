@@ -789,10 +789,21 @@ def evaluate_aduana_stocks_exit(
                 'reason': f"ADUANA EMA3+BB Exit: {trend_exit_res.get('reason')}"
             }
 
+    # Calcular antigüedad de la posición (evitar ahogar rebotes recién comprados en soporte)
+    entry_time_str = position.get('first_buy_at') or position.get('entry_time')
+    age_mins = 999.0
+    if entry_time_str:
+        try:
+            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+            age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+        except Exception:
+            pass
+
     # ── 1. TOPE EOD INTRADÍA (15:15 - 15:50 ET) — ÚLTIMAS 3 VELAS DE 15m ──
     if is_eod_final_candles(now_dt):
-        # Si la estructura de 15m se agotó o quebró: Cierre Total Inmediato para asegurar ganancia
-        if ema_15m.get('is_exhausted') or (not ema_15m.get('is_trend_alive')):
+        # Si la estructura de 15m se agotó o quebró Y tiene ganancia real (>= 1.2%) y maduración (>= 20 min):
+        # No ahogar posiciones recién abiertas en LOWER_5 / LOWER_6 con ganancia de $0.00
+        if (ema_15m.get('is_exhausted') or (not ema_15m.get('is_trend_alive'))) and gain_pct >= 1.2 and age_mins >= 20.0:
             return {
                 'should_close': True,
                 'action': 'CLOSE_TOTAL',
@@ -821,8 +832,8 @@ def evaluate_aduana_stocks_exit(
                 'reason': f"Tope EOD Trailing: Perforó piso de 70% de ganancia máxima (+{peak_gain_pct:.2f}% -> +{gain_pct:.2f}%). Cierre protector."
             }
 
-        # b) Trailing vela a vela en 5m
-        if df_5m is not None and len(df_5m) >= 2:
+        # b) Trailing vela a vela en 5m (solo si ya hay ganancia real >= 1.0% y maduración >= 20 min)
+        if df_5m is not None and len(df_5m) >= 2 and gain_pct >= 1.0 and age_mins >= 20.0:
             closes = _safe_col(df_5m, 'close')
             ema3_5m = closes.ewm(span=3, adjust=False).mean()
             cur_close = float(closes.iloc[-1])

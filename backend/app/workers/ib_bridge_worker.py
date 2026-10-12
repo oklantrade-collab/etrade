@@ -96,8 +96,11 @@ def on_ib_order_status(order_id: int, status_info: dict):
                         "updated_at": now_iso
                     }).eq("id", pos["id"]).execute()
                     log_info(MODULE, f"✅ Posición DCA actualizada para {ticker}: {total_shares} acc @ ${new_avg:.2f}")
-                else:
                     # Nueva posición
+                    atr_fb = exec_price * 0.02
+                    sl_p = round(exec_price - (atr_fb * 2.0), 2)
+                    tp_p = round(exec_price + (atr_fb * 5.0), 2)
+
                     sb.table("stocks_positions").insert({
                         "ticker": ticker,
                         "direction": "long",
@@ -105,13 +108,16 @@ def on_ib_order_status(order_id: int, status_info: dict):
                         "avg_price": exec_price,
                         "total_cost": round(shares * exec_price, 2),
                         "current_price": exec_price,
+                        "stop_loss": sl_p,
+                        "trailing_sl_price": sl_p,
+                        "take_profit": tp_p,
                         "group_name": order_ctx.get("group_name", "IB_PAPER"),
                         "rule_code": order_ctx.get("rule_code", "IB_BRIDGE"),
                         "first_buy_at": now_iso,
                         "status": "open",
                         "updated_at": now_iso
                     }).execute()
-                    log_info(MODULE, f"✅ Nueva posición creada en Supabase para {ticker}: {shares} acc @ ${exec_price:.2f}")
+                    log_info(MODULE, f"✅ Nueva posición creada en Supabase para {ticker}: {shares} acc @ ${exec_price:.2f} (SL: ${sl_p:.2f}, TP: ${tp_p:.2f})")
 
             except Exception as pos_e:
                 log_error(MODULE, f"Error creando/actualizando posición para {ticker}: {pos_e}")
