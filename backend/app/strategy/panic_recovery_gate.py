@@ -46,6 +46,7 @@ def calculate_fibonacci_bands(df: pd.DataFrame, current_price: float) -> dict:
 
     try:
         df_c = df.copy()
+        df_c.columns = [str(col).lower() for col in df_c.columns]
         c = df_c['close']
         last = df_c.iloc[-1]
         

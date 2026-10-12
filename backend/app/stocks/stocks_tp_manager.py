@@ -533,8 +533,8 @@ async def execute_partial_sell(
             'pnl_usd': round(pnl_total, 2),
             'pnl_pct': round(pnl_pct, 2),
             'result': 'win' if pnl_total > 0 else 'loss',
-            'exit_reason': f'TP_B{block}_{action}',
-            'trade_type': position.get('strategy') or position.get('rule_code') or 'V5_INDUSTRIAL',
+            'exit_reason': f'TP_B{block}_{action}'[:50],
+            'trade_type': str(position.get('strategy') or position.get('rule_code') or 'V5_INDUSTRIAL')[:20],
         }
         supabase.table('trades_journal').insert(journal_entry).execute()
         log_info(MODULE, f'📝 Journal recorded: {ticker} TP_B{block} P&L=${pnl_total:.2f}')

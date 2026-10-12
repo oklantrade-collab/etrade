@@ -14,6 +14,26 @@ export default function StocksPositions() {
   const [selectedTicker, setSelectedTicker] = useState('')
   const [closedPage, setClosedPage] = useState(0)
   const [tz, setTz] = useState('America/Lima')
+  const [selectedDiagPos, setSelectedDiagPos] = useState<any>(null)
+  const [refreshingDiag, setRefreshingDiag] = useState(false)
+
+  const handleRefreshDiag = async (posId: string) => {
+    setRefreshingDiag(true)
+    try {
+      const res = await fetch(`/api/v1/stocks/positions/${posId}/diagnostics/refresh`, { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.diagnostics) {
+          setSelectedDiagPos((prev: any) => prev ? { ...prev, diagnostics: data.diagnostics } : null)
+          setPositions(prev => prev.map(p => p.id === posId ? { ...p, diagnostics: data.diagnostics } : p))
+        }
+      }
+    } catch (e) {
+      console.error("Error refreshing diagnostics:", e)
+    } finally {
+      setRefreshingDiag(false)
+    }
+  }
 
   useEffect(() => {
     const handleTzUpdate = () => {
@@ -189,6 +209,14 @@ export default function StocksPositions() {
         </div>
       )}
       {showChart && <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />}
+      {selectedDiagPos && (
+        <PositionDiagnosticsModal 
+          pos={selectedDiagPos} 
+          onClose={() => setSelectedDiagPos(null)} 
+          onRefresh={() => handleRefreshDiag(selectedDiagPos.id)}
+          refreshing={refreshingDiag}
+        />
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '30px' }}>
         <div>
@@ -230,7 +258,8 @@ export default function StocksPositions() {
           {tab === 'open' ? (
             <div style={{ minWidth: '1000px' }}>
               <div style={TableHeadOpenStyle}>
-                 <span>Ticker</span>
+                <span>Ticker</span>
+                <span style={{ textAlign: 'center' }}>Estado</span>
                 <span>Side</span>
                 <span>Grupo</span>
                 <span>Fecha</span>
@@ -257,6 +286,42 @@ export default function StocksPositions() {
                       }}></div>
                       <span style={{ fontWeight: 900, fontSize: '16px', letterSpacing: '-0.02em' }}>{pos.ticker}</span>
                     </div>
+
+                    {/* ESTADO / CHECK DE VALIDACIÓN CON TOOLTIP INTERACTIVO */}
+                    <div style={{ display: 'flex', justifyContent: 'center' }}>
+                      {pos.diagnostics?.is_valid ? (
+                        <div 
+                          onClick={() => setSelectedDiagPos(pos)}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '4px',
+                            background: 'rgba(0,200,150,0.12)', border: '1px solid rgba(0,200,150,0.35)',
+                            borderRadius: '6px', padding: '3px 8px', cursor: 'pointer',
+                            boxShadow: '0 0 10px rgba(0,200,150,0.15)', transition: 'transform 0.15s'
+                          }}
+                          title="✓ Todos los indicadores (BB, EMAs, Fib 1-6) y gestión de riesgo (SL, Trailing SL, TP) están completos y activos. Clic para ver radiografía completa."
+                          onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.06)'}
+                          onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                        >
+                          <span style={{ color: '#00C896', fontWeight: 900, fontSize: '10px', letterSpacing: '0.04em' }}>✓ OK</span>
+                        </div>
+                      ) : (
+                        <div 
+                          onClick={() => setSelectedDiagPos(pos)}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '4px',
+                            background: 'rgba(255,71,87,0.15)', border: '1px solid rgba(255,71,87,0.4)',
+                            borderRadius: '6px', padding: '3px 8px', cursor: 'pointer',
+                            boxShadow: '0 0 12px rgba(255,71,87,0.2)', transition: 'transform 0.15s'
+                          }}
+                          title={`❌ ATENCIÓN: Faltan variables o están en blanco:\n• ${pos.diagnostics?.missing_fields?.join('\n• ') || 'Sin diagnóstico'}\nClic para abrir radiografía.`}
+                          onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.06)'}
+                          onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                        >
+                          <span style={{ color: '#FF4757', fontWeight: 900, fontSize: '10px', letterSpacing: '0.04em' }}>❌ FALTAN</span>
+                        </div>
+                      )}
+                    </div>
+
                     <span style={{ fontSize: '10px', fontWeight: 900, color: pos.side?.toUpperCase() === 'SELL' ? '#FF4757' : '#00C896' }}>{pos.side?.toUpperCase() || 'BUY'}</span>
                     <span><GroupBadge group={pos.group_name} /></span>
                     <div style={{ fontSize: '11px', color: '#666', lineHeight: '1.2' }}>
@@ -284,7 +349,27 @@ export default function StocksPositions() {
                          📊
                        </button>
                     </div>
-                    <div style={{ textAlign: 'right', display: 'flex', gap: '8px', justifyContent: 'flex-end', minWidth: '120px' }}>
+                    <div style={{ textAlign: 'right', display: 'flex', gap: '6px', justifyContent: 'flex-end', minWidth: '125px' }}>
+                       <button 
+                         onClick={() => setSelectedDiagPos(pos)} 
+                         style={{ 
+                           ...DetailButtonStyle, 
+                           background: 'rgba(168,85,247,0.12)', 
+                           color: '#C084FC', 
+                           border: '1px solid rgba(168,85,247,0.3)', 
+                           width: '26px', 
+                           height: '26px', 
+                           padding: 0, 
+                           display: 'flex', 
+                           alignItems: 'center', 
+                           justifyContent: 'center',
+                           fontSize: '12px',
+                           boxShadow: '0 2px 8px rgba(168,85,247,0.2)'
+                         }}
+                         title="Auditoría y Diagnóstico Técnico Flotante"
+                       >
+                         🛡️
+                       </button>
                        <button 
                          onClick={() => setSelectedPos(pos)} 
                          style={{ 
@@ -800,8 +885,8 @@ function TPBlocksProgress({ position }: { position: any }) {
 
 const TableHeadOpenStyle = {
   display: 'grid', 
-  gridTemplateColumns: '80px 50px 75px 95px 70px 80px 80px 95px 110px 40px 100px', 
-  padding: '16px 30px', 
+  gridTemplateColumns: '80px 85px 45px 70px 90px 65px 75px 75px 90px 105px 35px 125px', 
+  padding: '16px 25px', 
   background: 'rgba(255,255,255,0.01)',
   fontSize: '10px', 
   fontWeight: 900, 
@@ -813,8 +898,8 @@ const TableHeadOpenStyle = {
 
 const TableRowOpenStyle = {
   display: 'grid', 
-  gridTemplateColumns: '80px 50px 75px 95px 70px 80px 80px 95px 110px 40px 100px', 
-  padding: '18px 30px', 
+  gridTemplateColumns: '80px 85px 45px 70px 90px 65px 75px 75px 90px 105px 35px 125px', 
+  padding: '18px 25px', 
   borderBottom: '1px solid rgba(255,255,255,0.02)',
   alignItems: 'center'
 }
@@ -1005,6 +1090,318 @@ function SLAdaptiveBadge({ position }: { position: any }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function PositionDiagnosticsModal({ pos, onClose, onRefresh, refreshing }: { pos: any, onClose: () => void, onRefresh: () => void, refreshing: boolean }) {
+  const diag = pos?.diagnostics || {}
+  const risk = diag.risk || {}
+  const bollinger = diag.bollinger || {}
+  const emas = diag.emas || {}
+  const fib = diag.fibonacci || {}
+  const isValid = !!diag.is_valid
+  const missing = diag.missing_fields || []
+  const curPrice = diag.current_price || pos.current_price || pos.avg_price || 0
+
+  return (
+    <div 
+      onClick={onClose}
+      style={{ 
+        position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', 
+        background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(12px)', 
+        zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '20px'
+      }}
+    >
+      <div 
+        onClick={e => e.stopPropagation()}
+        style={{ 
+          background: '#0D111A', width: '760px', maxHeight: '92vh', borderRadius: '24px', 
+          border: '1px solid rgba(255,255,255,0.08)', overflow: 'hidden',
+          boxShadow: '0 30px 60px rgba(0,0,0,0.8), 0 0 40px rgba(0,200,150,0.05)',
+          display: 'flex', flexDirection: 'column'
+        }}
+      >
+        {/* HEADER */}
+        <div style={{ padding: '24px 30px', background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <h2 style={{ fontSize: '24px', fontWeight: 900, margin: 0, color: '#FFF' }}>{pos.ticker}</h2>
+              <span style={{ 
+                fontSize: '11px', fontWeight: 900, 
+                padding: '4px 10px', borderRadius: '6px',
+                background: isValid ? 'rgba(0,200,150,0.15)' : 'rgba(255,71,87,0.15)',
+                color: isValid ? '#00C896' : '#FF4757',
+                border: `1px solid ${isValid ? 'rgba(0,200,150,0.3)' : 'rgba(255,71,87,0.3)'}`
+              }}>
+                {isValid ? '✓ 100% VÁLIDO — OPERACIÓN PROTEGIDA' : `❌ INCOMPLETO (${missing.length} VARIABLES FALTANTES)`}
+              </span>
+            </div>
+            <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#888' }}>
+              Precio actual: <span style={{ color: '#4FC3F7', fontWeight: 700 }}>${curPrice?.toFixed(2)}</span> | Entrada: ${pos.avg_price?.toFixed(2)} | Cantidad: {pos.shares} acciones
+            </p>
+          </div>
+          <button 
+            onClick={onClose} 
+            style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '34px', height: '34px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900, fontSize: '18px' }}
+          >
+            ×
+          </button>
+        </div>
+
+        {/* CONTENIDO SCROLLABLE */}
+        <div style={{ padding: '24px 30px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: '22px' }}>
+          
+          {/* BANNER DE ADVERTENCIA SI NO ES VÁLIDO */}
+          {!isValid && (
+            <div style={{ background: 'rgba(255,71,87,0.08)', border: '1px solid rgba(255,71,87,0.25)', borderRadius: '14px', padding: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                <span style={{ fontSize: '16px' }}>🚨</span>
+                <span style={{ color: '#FF4757', fontWeight: 900, fontSize: '13px', textTransform: 'uppercase' }}>
+                  Compuerta de Seguridad Activa — Faltan Variables Requeridas
+                </span>
+              </div>
+              <p style={{ margin: '0 0 10px 0', fontSize: '12px', color: '#BBB', lineHeight: '1.4' }}>
+                El protocolo de eTrade requiere que el 100% de los parámetros estén presentes sin valores nulos ni en blanco. Si alguna variable crítica falta durante la operación, el monitor cerrará la posición inmediatamente para proteger el capital.
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {missing.map((f: string, i: number) => (
+                  <span key={i} style={{ background: 'rgba(255,71,87,0.2)', color: '#FF7675', border: '1px solid rgba(255,71,87,0.3)', padding: '3px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 800 }}>
+                    ❌ {f}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 1. GESTIÓN DE RIESGO Y SALIDAS */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <span style={{ color: '#FFF', fontSize: '13px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                🛡️ 1. Gestión de Riesgo & Salidas
+              </span>
+              <span style={{ fontSize: '11px', color: '#777' }}>Auditoría de Niveles Críticos</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px' }}>
+              
+              {/* STOP LOSS */}
+              <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '10px', color: '#777', fontWeight: 800, textTransform: 'uppercase' }}>Stop Loss (SL)</span>
+                  <span style={{ fontSize: '9px', fontWeight: 900, color: risk.stop_loss > 0 ? '#00C896' : '#FF4757' }}>
+                    {risk.stop_loss > 0 ? '✓ DEFINIDO' : '❌ EN BLANCO'}
+                  </span>
+                </div>
+                <div style={{ margin: '6px 0', fontSize: '20px', fontWeight: 900, color: risk.stop_loss > 0 ? '#FF4757' : '#777' }}>
+                  {risk.stop_loss > 0 ? `$${risk.stop_loss.toFixed(2)}` : '❌ EN BLANCO'}
+                </div>
+                <span style={{ fontSize: '11px', color: '#AAA' }}>
+                  {risk.stop_loss > 0 ? `${risk.stop_loss_pct > 0 ? '+' : ''}${risk.stop_loss_pct?.toFixed(2)}% vs entrada` : 'Sin nivel de protección'}
+                </span>
+              </div>
+
+              {/* TRAILING STOP */}
+              <div style={{ 
+                background: risk.trailing_stop > 0 ? 'rgba(255,183,77,0.04)' : 'rgba(255,71,87,0.06)', 
+                border: `1px solid ${risk.trailing_stop > 0 ? 'rgba(255,183,77,0.2)' : 'rgba(255,71,87,0.3)'}`, 
+                borderRadius: '12px', padding: '14px' 
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '10px', color: '#FFB74D', fontWeight: 800, textTransform: 'uppercase' }}>Trailing Stop</span>
+                  <span style={{ fontSize: '9px', fontWeight: 900, color: risk.trailing_stop > 0 ? '#00C896' : '#FF4757' }}>
+                    {risk.trailing_stop > 0 ? '✓ ACTIVO' : '❌ EN BLANCO'}
+                  </span>
+                </div>
+                <div style={{ margin: '6px 0', fontSize: '20px', fontWeight: 900, color: risk.trailing_stop > 0 ? '#FFB74D' : '#FF4757' }}>
+                  {risk.trailing_stop > 0 ? `$${risk.trailing_stop.toFixed(2)}` : '❌ EN BLANCO'}
+                </div>
+                <span style={{ fontSize: '11px', color: '#AAA' }}>
+                  {risk.trailing_stop > 0 ? `${risk.trailing_stop_pct > 0 ? '+' : ''}${risk.trailing_stop_pct?.toFixed(2)}% piso ganancia` : 'Obligatorio no nulo'}
+                </span>
+              </div>
+
+              {/* TAKE PROFIT */}
+              <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '12px', padding: '14px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: '10px', color: '#777', fontWeight: 800, textTransform: 'uppercase' }}>Take Profit (TP)</span>
+                  <span style={{ fontSize: '9px', fontWeight: 900, color: risk.take_profit > 0 ? '#00C896' : '#FF4757' }}>
+                    {risk.take_profit > 0 ? '✓ DEFINIDO' : '❌ EN BLANCO'}
+                  </span>
+                </div>
+                <div style={{ margin: '6px 0', fontSize: '20px', fontWeight: 900, color: risk.take_profit > 0 ? '#00C896' : '#777' }}>
+                  {risk.take_profit > 0 ? `$${risk.take_profit.toFixed(2)}` : '❌ EN BLANCO'}
+                </div>
+                <span style={{ fontSize: '11px', color: '#AAA' }}>
+                  {risk.take_profit > 0 ? `+${risk.take_profit_pct?.toFixed(2)}% objetivo` : 'Sin objetivo definido'}
+                </span>
+              </div>
+
+            </div>
+          </div>
+
+          {/* 2. MEDIAS MÓVILES (EMAs) */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <span style={{ color: '#FFF', fontSize: '13px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                📈 2. Medias Móviles Exponenciales (15m)
+              </span>
+              <span style={{ fontSize: '11px', color: '#777' }}>Gatillo & Tendencia</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px' }}>
+              {[
+                { name: 'EMA3', val: emas.ema_3, desc: 'Ultra-Rápida' },
+                { name: 'EMA9', val: emas.ema_9, desc: 'Dinámica' },
+                { name: 'EMA20', val: emas.ema_20, desc: 'Tendencia Corta' },
+                { name: 'EMA50', val: emas.ema_50, desc: 'Intermedia' },
+                { name: 'EMA200', val: emas.ema_200, desc: 'Estructural' },
+              ].map((item, idx) => {
+                const diff = item.val > 0 && curPrice > 0 ? ((curPrice - item.val) / item.val * 100) : null
+                const isAbove = (diff || 0) >= 0
+                return (
+                  <div key={idx} style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px', padding: '12px 10px', textAlign: 'center' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 900, color: '#4FC3F7' }}>{item.name}</span>
+                    <div style={{ fontSize: '15px', fontWeight: 900, margin: '4px 0', color: item.val > 0 ? '#FFF' : '#FF4757' }}>
+                      {item.val > 0 ? `$${item.val.toFixed(2)}` : '❌ NULO'}
+                    </div>
+                    {diff !== null && (
+                      <span style={{ fontSize: '10px', fontWeight: 700, color: isAbove ? '#00C896' : '#FF4757' }}>
+                        {isAbove ? '▲ +' : '▼ '}{diff.toFixed(1)}%
+                      </span>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* 3. BANDAS DE BOLLINGER & VOLATILIDAD */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <span style={{ color: '#FFF', fontSize: '13px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                🌊 3. Bandas de Bollinger & Volatilidad
+              </span>
+              <span style={{ fontSize: '11px', color: '#777' }}>Canal 20, 2σ</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
+              <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px', padding: '12px', textAlign: 'center' }}>
+                <span style={{ fontSize: '10px', color: '#777', fontWeight: 800 }}>BB SUPERIOR</span>
+                <div style={{ fontSize: '16px', fontWeight: 900, color: bollinger.bb_upper > 0 ? '#00C896' : '#FF4757', marginTop: '4px' }}>
+                  {bollinger.bb_upper > 0 ? `$${bollinger.bb_upper.toFixed(2)}` : '❌ NULO'}
+                </div>
+              </div>
+              <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px', padding: '12px', textAlign: 'center' }}>
+                <span style={{ fontSize: '10px', color: '#777', fontWeight: 800 }}>BASIS (MEDIA)</span>
+                <div style={{ fontSize: '16px', fontWeight: 900, color: bollinger.basis > 0 ? '#FFB74D' : '#FF4757', marginTop: '4px' }}>
+                  {bollinger.basis > 0 ? `$${bollinger.basis.toFixed(2)}` : '❌ NULO'}
+                </div>
+              </div>
+              <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px', padding: '12px', textAlign: 'center' }}>
+                <span style={{ fontSize: '10px', color: '#777', fontWeight: 800 }}>BB INFERIOR</span>
+                <div style={{ fontSize: '16px', fontWeight: 900, color: bollinger.bb_lower > 0 ? '#FF4757' : '#FF4757', marginTop: '4px' }}>
+                  {bollinger.bb_lower > 0 ? `$${bollinger.bb_lower.toFixed(2)}` : '❌ NULO'}
+                </div>
+              </div>
+              <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '10px', padding: '12px', textAlign: 'center' }}>
+                <span style={{ fontSize: '10px', color: '#777', fontWeight: 800 }}>ATR (14)</span>
+                <div style={{ fontSize: '16px', fontWeight: 900, color: bollinger.atr > 0 ? '#4FC3F7' : '#777', marginTop: '4px' }}>
+                  {bollinger.atr > 0 ? `$${bollinger.atr.toFixed(2)}` : '—'}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 4. BANDAS FIBONACCI (1 AL 6) */}
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <span style={{ color: '#FFF', fontSize: '13px', fontWeight: 900, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                🌀 4. Bandas Fibonacci de Extensión (1 al 6)
+              </span>
+              <span style={{ fontSize: '11px', color: '#777' }}>Zona Actual: {diag.current_zone !== 0 ? (diag.current_zone > 0 ? `U${diag.current_zone}` : `L${Math.abs(diag.current_zone)}`) : 'Basis'}</span>
+            </div>
+            
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+              
+              {/* ALCISTA: UPPER 1 AL 6 */}
+              <div style={{ background: 'rgba(0,200,150,0.02)', border: '1px solid rgba(0,200,150,0.1)', borderRadius: '12px', padding: '14px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 900, color: '#00C896', textTransform: 'uppercase' }}>Zona Alcista (Upper 1..6)</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+                  {[6, 5, 4, 3, 2, 1].map(idx => {
+                    const val = fib[`upper_${idx}`]
+                    const isZone = diag.current_zone === idx
+                    return (
+                      <div key={idx} style={{ 
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '4px 8px', borderRadius: '6px',
+                        background: isZone ? 'rgba(0,200,150,0.15)' : 'rgba(255,255,255,0.01)',
+                        border: isZone ? '1px solid #00C896' : '1px solid transparent'
+                      }}>
+                        <span style={{ fontSize: '11px', fontWeight: 800, color: isZone ? '#00C896' : '#AAA' }}>UPPER_{idx}</span>
+                        <span style={{ fontSize: '12px', fontWeight: 900, color: val > 0 ? '#FFF' : '#FF4757', fontFamily: 'monospace' }}>
+                          {val > 0 ? `$${val.toFixed(2)}` : '❌ NULO'}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* BAJISTA: LOWER 1 AL 6 */}
+              <div style={{ background: 'rgba(255,71,87,0.02)', border: '1px solid rgba(255,71,87,0.1)', borderRadius: '12px', padding: '14px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 900, color: '#FF7675', textTransform: 'uppercase' }}>Zona Bajista (Lower 1..6)</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+                  {[1, 2, 3, 4, 5, 6].map(idx => {
+                    const val = fib[`lower_${idx}`]
+                    const isZone = diag.current_zone === -idx
+                    return (
+                      <div key={idx} style={{ 
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                        padding: '4px 8px', borderRadius: '6px',
+                        background: isZone ? 'rgba(255,71,87,0.15)' : 'rgba(255,255,255,0.01)',
+                        border: isZone ? '1px solid #FF4757' : '1px solid transparent'
+                      }}>
+                        <span style={{ fontSize: '11px', fontWeight: 800, color: isZone ? '#FF4757' : '#AAA' }}>LOWER_{idx}</span>
+                        <span style={{ fontSize: '12px', fontWeight: 900, color: val > 0 ? '#FFF' : '#FF4757', fontFamily: 'monospace' }}>
+                          {val > 0 ? `$${val.toFixed(2)}` : '❌ NULO'}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+
+        {/* FOOTER */}
+        <div style={{ padding: '18px 30px', background: 'rgba(255,255,255,0.02)', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <button 
+            onClick={onRefresh}
+            disabled={refreshing}
+            style={{ 
+              background: 'rgba(56,189,248,0.1)', border: '1px solid rgba(56,189,248,0.3)',
+              color: '#38BDF8', padding: '10px 18px', borderRadius: '10px',
+              fontWeight: 800, fontSize: '12px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '8px'
+            }}
+          >
+            {refreshing ? '⏳ Recalculando...' : '🔄 Forzar Re-cálculo en Vivo'}
+          </button>
+          
+          <button 
+            onClick={onClose} 
+            style={{ 
+              background: '#00C896', border: 'none', color: '#000', 
+              padding: '10px 24px', borderRadius: '10px', fontWeight: 900, 
+              fontSize: '12px', cursor: 'pointer' 
+            }}
+          >
+            ENTENDIDO
+          </button>
+        </div>
+
+      </div>
     </div>
   )
 }

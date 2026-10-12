@@ -162,7 +162,9 @@ files_to_sync = [
     "app/execution/provider_factory.py",
     "app/execution/binance_connector.py",
     "app/core/position_sizing.py",
-    "app/strategy/dynamic_sl_manager.py",
+    "app/stocks/diagnostic_validator.py",
+    "app/stocks/pullback_engine.py",
+    "app/stocks/buying_force_detector.py",
     "app/stocks/stocks_adaptive_sl.py",
     "app/stocks/stocks_order_executor.py",
     "app/stocks/stocks_adaptive_tp.py",
@@ -249,7 +251,8 @@ frontend_files = [
     ("frontend/app/portfolio/page.tsx", "frontend/app/portfolio/page.tsx"),
     ("frontend/app/settings/page.tsx", "frontend/app/settings/page.tsx"),
     ("frontend/app/stocks/opportunities/page.tsx", "frontend/app/stocks/opportunities/page.tsx"),
-    ("frontend/app/stocks/universe/page.tsx", "frontend/app/stocks/universe/page.tsx")
+    ("frontend/app/stocks/universe/page.tsx", "frontend/app/stocks/universe/page.tsx"),
+    ("frontend/app/stocks/positions/page.tsx", "frontend/app/stocks/positions/page.tsx")
 ]
 
 def check_syntax():

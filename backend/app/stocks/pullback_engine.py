@@ -448,6 +448,37 @@ def evaluate_pullback_setup(
     # ════════════════════════════════════════════════════════════════
     # GATILLO 2: Órdenes LIMIT en EMA9 y EMA20 con Delta Adaptativo
     # ════════════════════════════════════════════════════════════════
+    # Filtro Anti-Cuchillo Cayendo en 15m:
+    # Si la vela de 15m es roja sólida sin mecha (caída libre), no colocar límites
+    # prematuros; esperar a que el precio frene y desarrolle absorción.
+    knife_falling_15m = False
+    if df_15m is not None and len(df_15m) >= 2:
+        try:
+            c15 = _safe_col(df_15m, 'close')
+            o15 = _safe_col(df_15m, 'open')
+            h15 = _safe_col(df_15m, 'high')
+            l15 = _safe_col(df_15m, 'low')
+            c15_last, o15_last, h15_last, l15_last = float(c15.iloc[-1]), float(o15.iloc[-1]), float(h15.iloc[-1]), float(l15.iloc[-1])
+            rng15 = max(1e-6, h15_last - l15_last)
+            wick15 = max(0.0, min(o15_last, c15_last) - l15_last) / rng15 * 100.0
+            if (c15_last < o15_last) and (wick15 < 25.0):
+                knife_falling_15m = True
+        except Exception:
+            pass
+
+    if knife_falling_15m:
+        return {
+            'pullback_triggered': False,
+            'trigger_type': None,
+            'order_type': None,
+            'reason': "Pullback en espera: Vela 15m en caída libre sin mecha inferior (Filtro Anti-Cuchillo). Esperando soporte con absorción.",
+            'recommended_sl': rec_sl,
+            'target_upper5': round(target_u5, 2),
+            'target_upper6': round(target_u6, 2),
+            'macro_details': macro_eval,
+            'limit_orders': []
+        }
+
     # Si el precio está cerca (a <= 2.0%) de EMA9 o EMA20
     dist_ema9 = abs(current_price - ema9_5m) / max(1e-6, ema9_5m)
     dist_ema20 = abs(current_price - ema20_5m) / max(1e-6, ema20_5m)

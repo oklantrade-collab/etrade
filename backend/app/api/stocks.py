@@ -282,6 +282,17 @@ async def get_stocks_positions():
             tickers = [p["ticker"] for p in positions]
             live_prices = await _ib.get_multiple_prices(tickers)
 
+            # 3.1 Fetch Market Snapshots para diagnósticos
+            snap_map = {}
+            try:
+                snap_res = sb.table("market_snapshot").select("*").in_("symbol", tickers).execute()
+                for s in (snap_res.data or []):
+                    snap_map[s["symbol"]] = s
+            except Exception as snap_e:
+                log_debug("stocks_api", f"Error fetching snapshot map: {snap_e}")
+
+            from app.stocks.diagnostic_validator import build_position_diagnostics, check_and_auto_establish_trailing
+
             for pos in positions:
                 ticker = pos["ticker"]
                 
@@ -304,6 +315,12 @@ async def get_stocks_positions():
                 pos["unrealized_pnl"] = round((cur_price - avg_entry) * shares, 2)
                 pos["unrealized_pnl_pct"] = round(((cur_price - avg_entry) / avg_entry * 100), 2) if avg_entry > 0 else 0
                 pos["total_cost"] = round(avg_entry * shares, 2)
+
+                # Garantizar que trailing stop no esté en blanco en BD
+                pos = await check_and_auto_establish_trailing(pos, sb)
+
+                # Adjuntar diagnóstico técnico y de riesgo completo
+                pos["diagnostics"] = build_position_diagnostics(pos, snap_db=snap_map.get(ticker))
 
             return {"positions": positions}
 
@@ -572,6 +589,31 @@ async def manual_close_stock_position(position_id: str):
     except Exception as e:
         log_error("stocks_api", f"Error closing position {position_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/positions/{position_id}/diagnostics/refresh")
+async def refresh_stock_position_diagnostics(position_id: str):
+    """Force an on-demand calculation and refresh of technical diagnostics for a position."""
+    try:
+        sb = get_supabase()
+        res = sb.table("stocks_positions").select("*").eq("id", position_id).execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Posición no encontrada")
+        pos = res.data[0]
+        ticker = pos["ticker"]
+
+        # 1. Fetch Snapshot
+        snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
+        snap_data = snap_res.data[0] if snap_res.data else None
+
+        from app.stocks.diagnostic_validator import build_position_diagnostics, check_and_auto_establish_trailing
+        pos = await check_and_auto_establish_trailing(pos, sb)
+        diag = build_position_diagnostics(pos, snap_db=snap_data)
+
+        return {"success": True, "ticker": ticker, "diagnostics": diag}
+    except Exception as e:
+        log_error("stocks_api", f"Error refreshing diagnostics for position {position_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @router.get("/priority-queue")

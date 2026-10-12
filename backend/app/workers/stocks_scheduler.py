@@ -605,7 +605,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         entry_1h_info = detect_pullback_and_climax_1h(
             current_price=current_price,
             df_1h=df_1h,
-            macro_aligned=macro_1d_info['aligned']
+            macro_aligned=macro_1d_info['aligned'],
+            df_15m=df_15m
         )
 
         ind_15m["macro_1d_aligned"] = macro_1d_info['aligned']
@@ -942,6 +943,19 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 'price': float(current_price),
                 'basis': float(ema20),
                 'fibonacci_zone': int(zone),
+                'atr': float(atr),
+                'upper_1': round(ema20 + (atr * multipliers[0]), 4),
+                'upper_2': round(ema20 + (atr * multipliers[1]), 4),
+                'upper_3': round(ema20 + (atr * multipliers[2]), 4),
+                'upper_4': round(ema20 + (atr * multipliers[3]), 4),
+                'upper_5': round(ema20 + (atr * multipliers[4]), 4),
+                'upper_6': round(ema20 + (atr * multipliers[5]), 4),
+                'lower_1': round(ema20 - (atr * multipliers[0]), 4),
+                'lower_2': round(ema20 - (atr * multipliers[1]), 4),
+                'lower_3': round(ema20 - (atr * multipliers[2]), 4),
+                'lower_4': round(ema20 - (atr * multipliers[3]), 4),
+                'lower_5': round(ema20 - (atr * multipliers[4]), 4),
+                'lower_6': round(ema20 - (atr * multipliers[5]), 4),
                 'updated_at': datetime.now(timezone.utc).isoformat(),
                 'pinescript_signal': str(ps_signal_4h) if ps_signal_4h else None,
                 'apex_4h': apex_result['apex_score_4h'] if apex_result else None,

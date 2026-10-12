@@ -37,6 +37,15 @@ def safe_float(v, default=0.0):
     except (ValueError, TypeError):
         return default
 
+
+def _safe_col(df, col_name: str):
+    if df is None: return None
+    if col_name in df.columns: return df[col_name].astype(float)
+    if col_name.capitalize() in df.columns: return df[col_name.capitalize()].astype(float)
+    if col_name.upper() in df.columns: return df[col_name.upper()].astype(float)
+    return None
+
+
 class PositionMonitor:
     """Monitors active stock positions and manages exits."""
 
@@ -117,6 +126,31 @@ class PositionMonitor:
             if nyc_now.weekday() < 5 and nyc_now.hour == 15 and nyc_now.minute >= 50:
                 log_warning(MODULE, f"⏰ EOD HARD-EXIT (15:50 ET): {ticker} cerrando al 100% para evitar riesgo nocturno. PnL: {pnl_pct:+.2f}%")
                 await self._close_position(trade, current_price, "eod_hard_exit_1550")
+                return
+
+            # ── 1.2 AUTO-ESTABLECER TRAILING STOP SI ESTÁ EN BLANCO/NULO ──
+            from app.stocks.diagnostic_validator import check_and_auto_establish_trailing, build_position_diagnostics
+            trade = await check_and_auto_establish_trailing(trade, sb)
+
+            # ── 1.5 AUDITORÍA DE SEGURIDAD DIAGNÓSTICA (CIERRE SI FALLA VARIABLE) ──
+            snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
+            snap_data = snap_res.data[0] if snap_res.data else None
+            diag = build_position_diagnostics(trade, snap_db=snap_data)
+            if not diag["is_valid"]:
+                missing_str = ", ".join(diag["missing_fields"])
+                log_error(MODULE, f"🚨 CIERRE DE SEGURIDAD {ticker}: Falló variable técnica o de riesgo ({missing_str}). Cerrando posición de inmediato...")
+                try:
+                    from app.stocks.stocks_order_executor import _send_telegram_sync
+                    _send_telegram_sync(
+                        f"🚨 CIERRE DE SEGURIDAD STOCKS\n"
+                        f"Ticker: {ticker}\n"
+                        f"Motivo: Falla en variables requeridas ({missing_str})\n"
+                        f"Precio actual: ${current_price:.2f}\n"
+                        f"Acción: Cierre total a mercado preventivo."
+                    )
+                except Exception:
+                    pass
+                await self._close_position(trade, current_price, "safety_fail_missing_indicator")
                 return
 
             # ── 2. HARD CAP DE SEGURIDAD DEL 5% ──
@@ -221,16 +255,76 @@ class PositionMonitor:
                 }).eq("id", trade["id"]).execute()
                 log_info(MODULE, f"📈 TRAILING STOP ACTIVO: {ticker} SL movido a ${new_trailing:.2f}")
 
-            # ── NUEVO: FLASH EXIT PARA SCALPING (HOT) ──
+            # ── MOTOR UNIVERSAL DE TRAILING STOP Y BLOQUEO BOLLINGER PARA STOCKS ──
+            # 1. Rastrear incondicionalmente el máximo alcanzado para TODAS las posiciones
+            db_highest = trade.get("highest_price_reached")
+            highest = max(safe_float(db_highest or 0), current_price) if db_highest else current_price
+            if db_highest is None or current_price > safe_float(db_highest):
+                sb.table("stocks_positions").update({"highest_price_reached": highest}).eq("id", trade["id"]).execute()
+                trade["highest_price_reached"] = highest
+
+            peak_gain_pct = ((highest - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
+            cur_sl = safe_float(trade.get("stop_loss") or 0.0)
+            proposed_sl = cur_sl
+
+            # 2. Protección de Ganancia Escalonada (Ratchet Trailing)
+            if peak_gain_pct >= 10.0:
+                proposed_sl = max(proposed_sl, round(entry_price * 1.05, 2))  # Bloquea al menos +5%
+            if peak_gain_pct >= 25.0:
+                proposed_sl = max(proposed_sl, round(entry_price * 1.15, 2))  # Bloquea al menos +15%
+            if peak_gain_pct >= 50.0:
+                proposed_sl = max(proposed_sl, round(highest * 0.75, 2))      # Bloquea al menos 75% del pico
+            if peak_gain_pct >= 100.0:
+                proposed_sl = max(proposed_sl, round(highest * 0.80, 2))      # Bloquea al menos 80% del pico
+
+            # 3. Trailing Estructural 1H (ADUANA: Low[t-1] o EMA9 de 1H)
+            if hist_1h is not None and len(hist_1h) >= 5:
+                try:
+                    from app.stocks.aduana_stocks_exit_engine import calculate_1h_trailing_stop
+                    res_1h_trail = calculate_1h_trailing_stop(trade, current_price, hist_1h)
+                    if res_1h_trail.get('should_update'):
+                        proposed_sl = max(proposed_sl, safe_float(res_1h_trail.get('new_sl')))
+                except Exception as e_1h_t:
+                    log_debug(MODULE, f"Error calculando trailing 1H {ticker}: {e_1h_t}")
+
+            # 4. Trailing por Ruptura de Bandas de Bollinger (Al perforar BB Upper, elevar piso)
+            bb_upper_1h = safe_float(snap_val.get('upper_bollinger') or snap_val.get('upper_5') or 0.0)
+            if hist_1h is not None and len(hist_1h) >= 20 and bb_upper_1h <= 0:
+                try:
+                    c1h = _safe_col(hist_1h, 'close')
+                    if c1h is not None:
+                        bb_upper_1h = float(c1h.rolling(20).mean().iloc[-1] + 2.0 * c1h.rolling(20).std().iloc[-1])
+                except Exception:
+                    pass
+
+            if bb_upper_1h > 0 and (highest >= bb_upper_1h * 0.99 or current_price >= bb_upper_1h * 0.99):
+                # Si el precio perforó la Banda Bollinger Superior, el Stop Loss DEBE asegurarse
+                # al menos al nivel de la banda o un piso protegido
+                bb_floor = round(max(entry_price * 1.05, bb_upper_1h * 0.92), 2)
+                proposed_sl = max(proposed_sl, bb_floor)
+
+            # Si el nivel propuesto supera el SL actual y está por debajo del precio actual:
+            if proposed_sl > cur_sl and proposed_sl < current_price:
+                sb.table("stocks_positions").update({
+                    "stop_loss": proposed_sl,
+                    "trailing_sl_price": proposed_sl,
+                    "highest_price_reached": highest,
+                    "sl_type": "trailing_ratchet",
+                    "sl_activation_reason": f"Trailing Ratchet (+{peak_gain_pct:.1f}% pico -> SL ${proposed_sl:.2f})"[:100]
+                }).eq("id", trade["id"]).execute()
+                trade["stop_loss"] = proposed_sl
+                trade["trailing_sl_price"] = proposed_sl
+                log_info(MODULE, f"🛡️ TRAILING RATCHET ACTUALIZADO: {ticker} SL ${cur_sl:.2f} -> ${proposed_sl:.2f} (Pico: ${highest:.2f} / +{peak_gain_pct:.1f}%)")
+
+            # 5. Salida Protectora si el precio perfora el Trailing Stop en Ganancia
+            if trade.get("stop_loss") and current_price <= safe_float(trade["stop_loss"]) and safe_float(trade["stop_loss"]) > entry_price:
+                log_warning(MODULE, f"🎯 TRAILING STOP HIT: {ticker} @ ${current_price:.2f} (SL: ${trade['stop_loss']:.2f}). Asegurando ganancia...")
+                await self._close_position(trade, current_price, "trailing_profit_lock")
+                return
+
+            # ── FLASH EXIT PARA SCALPING (HOT) ──
             group = str(trade.get("group_name", "")).upper()
             if "HOT" in group or "SCALPING" in group:
-                db_highest = trade.get("highest_price_reached")
-                highest = safe_float(db_highest or current_price)
-                if db_highest is None or current_price > highest:
-                    highest = current_price
-                    sb.table("stocks_positions").update({"highest_price_reached": highest}).eq("id", trade["id"]).execute()
-                
-                # Ajuste: Retroceso de 1.5% y Profit Mínimo de 0.8% para Scalping
                 pullback = ((highest - current_price) / highest) * 100
                 if pullback >= 1.5 and pnl_pct >= 0.8:
                     log_warning(MODULE, f"⚡ FLASH EXIT: {ticker} retroceso de {pullback:.1f}% detectado con profit de {pnl_pct:.2f}%. Cerrando.")
@@ -472,8 +566,8 @@ class PositionMonitor:
                 "pnl_usd": pnl_usd,
                 "pnl_pct": pnl_pct,
                 "result": result,
-                "exit_reason": exit_reason,
-                "trade_type": trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL"
+                "exit_reason": str(exit_reason)[:50] if exit_reason else "closed",
+                "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
             }
             sb.table("trades_journal").insert(journal_entry).execute()
 
@@ -532,8 +626,8 @@ class PositionMonitor:
                 f"tp_{block_name}_pnl": pnl_usd,
                 "shares_remaining": shares_rem,
                 "stop_loss": new_sl,
-                "sl_type": "breakeven_plus_1pct",
-                "sl_activation_reason": f"Blindaje tras parcial {block_name} (+1.0% garantizado @ ${new_sl:.2f})",
+                "sl_type": "breakeven_plus_1pct"[:20],
+                "sl_activation_reason": f"Blindaje tras parcial {block_name} (+1.0% garantizado @ ${new_sl:.2f})"[:100],
                 "updated_at": now
             }
             
@@ -555,8 +649,8 @@ class PositionMonitor:
                 "pnl_usd": pnl_usd,
                 "pnl_pct": pnl_pct,
                 "result": "win" if pnl_usd > 0 else "loss",
-                "exit_reason": f"partial_{block_name}_{reason}",
-                "trade_type": trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL"
+                "exit_reason": f"partial_{block_name}_{reason}"[:50],
+                "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
             }
             sb.table("trades_journal").insert(journal_entry).execute()
 

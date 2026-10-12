@@ -244,11 +244,12 @@ def calculate_buying_force_score(
 def detect_pullback_and_climax_1h(
     current_price: float,
     df_1h: Optional[pd.DataFrame],
-    macro_aligned: bool
+    macro_aligned: bool,
+    df_15m: Optional[pd.DataFrame] = None
 ) -> dict:
     """
     Evalúa los Puntos de Entrada Duales en 1 HORA:
-    - Ruta A: Pullback dinámico a EMA3, EMA9 o EMA20 en 1H.
+    - Ruta A: Pullback dinámico a EMA3, EMA9 o EMA20 en 1H con filtro anti-cuchillo de 15M.
     - Ruta B: Rebote Clímax en LOWER_5 o LOWER_6 en 1H.
     """
     if df_1h is None or len(df_1h) < 20 or current_price <= 0:
@@ -316,6 +317,32 @@ def detect_pullback_and_climax_1h(
         # Condición de tendencia en 1H: EMA3 > EMA9 o EMA3 >= EMA20
         trend_1h_bullish = (ema3 >= ema9 * 0.998) or (current_price >= ema20)
 
+        # Análisis de velas 15m para evitar "cuchillos cayendo"
+        knife_falling_15m = False
+        absorption_15m = False
+        if df_15m is not None and len(df_15m) >= 2:
+            try:
+                c15_s = _safe_col(df_15m, 'close')
+                o15_s = _safe_col(df_15m, 'open')
+                h15_s = _safe_col(df_15m, 'high')
+                l15_s = _safe_col(df_15m, 'low')
+
+                c15_last = float(c15_s.iloc[-1])
+                o15_last = float(o15_s.iloc[-1])
+                h15_last = float(h15_s.iloc[-1])
+                l15_last = float(l15_s.iloc[-1])
+
+                rng_15 = max(1e-6, h15_last - l15_last)
+                lower_wick_15 = max(0.0, min(o15_last, c15_last) - l15_last)
+                lower_wick_15_pct = (lower_wick_15 / rng_15) * 100.0
+
+                is_red_15 = c15_last < o15_last
+                # Si la vela de 15m es roja sólida con mecha inferior < 25%, es un cuchillo cayendo
+                knife_falling_15m = is_red_15 and (lower_wick_15_pct < 25.0)
+                absorption_15m = (lower_wick_15_pct >= 28.0) or (c15_last >= o15_last)
+            except Exception as e_15:
+                log_warning(MODULE, f"Error analizando 15m en pullback 1H: {e_15}")
+
         for name, sup_price, tol in supports:
             if sup_price <= 0:
                 continue
@@ -324,9 +351,18 @@ def detect_pullback_and_climax_1h(
             touch_in_candle = (last_low <= sup_price <= last_high) or (dist <= tol)
 
             if touch_in_candle and trend_1h_bullish:
-                # Confirmación de rebote: Cierre verde o mecha de absorción
-                rebote_ok = (last_close >= sup_price * 0.998) and (absorption['has_absorption'] or last_close >= last_open)
+                # REGLA 1: Si es EMA3 pero en 15m las velas están en caída libre sin mecha,
+                # NO comprar en EMA3. Esperar a que el retroceso llegue a EMA9.
+                if name == "EMA3" and knife_falling_15m:
+                    log_info(MODULE, f"Pullback EMA3 1H (${sup_price:.2f}) omitido: 15m en caída libre sin mecha. Esperando EMA9.")
+                    continue
+
+                # REGLA 2: Confirmación de rebote (Cierre verde o mecha de absorción en 1H o 15m)
+                rebote_ok = (last_close >= sup_price * 0.998) and (
+                    absorption['has_absorption'] or last_close >= last_open or absorption_15m
+                )
                 if rebote_ok:
+                    wick_note = " + Absorción 15M" if absorption_15m else ""
                     return {
                         'triggered': True,
                         'route': 'PULLBACK',
@@ -338,7 +374,7 @@ def detect_pullback_and_climax_1h(
                         'ema9': ema9,
                         'ema20': ema20,
                         'absorption': absorption,
-                        'reason': f'Pullback 1H a {name} (${sup_price:.2f}, dist={dist*100:.2f}%) con Rebote/Absorción ✅'
+                        'reason': f'Pullback 1H a {name} (${sup_price:.2f}, dist={dist*100:.2f}%) con Rebote/Absorción{wick_note} ✅'
                     }
 
         return {

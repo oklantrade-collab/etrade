@@ -142,6 +142,17 @@ def execute_market_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas HOT bloqueadas para evitar liquidación prematura EOD."
             }
 
+        # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
+        from app.stocks.diagnostic_validator import can_operate_pre_trade
+        atr_fb = price * 0.02
+        prop_sl = round(price - (atr_fb * 2.0), 2)
+        prop_tp = round(price + (atr_fb * 5.0), 2)
+        can_op, diag_msg, _ = can_operate_pre_trade(ticker, price, prop_sl, prop_tp)
+        if not can_op:
+            log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: {diag_msg}")
+            _send_telegram_sync(f"⛔ COMPRA BLOQUEADA {ticker}\n{diag_msg}")
+            return {"success": False, "reason": diag_msg}
+
     capital = config["total_capital"]
     max_pct = config["max_pct_per_trade"]
     max_total_risk_pct = config["max_total_risk_pct"]
@@ -276,6 +287,17 @@ def place_limit_order(
                 "success": False,
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas HOT bloqueadas para evitar liquidación prematura EOD."
             }
+
+        # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
+        from app.stocks.diagnostic_validator import can_operate_pre_trade
+        atr_fb = limit_price * 0.02
+        prop_sl = round(limit_price - (atr_fb * 2.0), 2)
+        prop_tp = round(limit_price + (atr_fb * 5.0), 2)
+        can_op, diag_msg, _ = can_operate_pre_trade(ticker, limit_price, prop_sl, prop_tp)
+        if not can_op:
+            log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: {diag_msg}")
+            _send_telegram_sync(f"⛔ COMPRA LIMIT BLOQUEADA {ticker}\n{diag_msg}")
+            return {"success": False, "reason": diag_msg}
 
     trigger_pct = float(rule.get("limit_trigger_pct") or 0.005)
 
@@ -549,6 +571,8 @@ def _open_or_update_position(
             "total_cost": round(shares * price, 2),
             "current_price": price,
             "stop_loss": sl_price,
+            "trailing_sl_price": sl_price,
+            "highest_price_reached": price,
             "take_profit": tp_price,
             "unrealized_pnl": 0.0,
             "unrealized_pnl_pct": 0.0,
