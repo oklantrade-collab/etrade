@@ -26,7 +26,7 @@ from app.stocks.stocks_adaptive_tp_v2 import evaluate_stock_tp_v2
 
 
 MODULE = "position_monitor"
-MIN_HOLDING_MINUTES = 6.0  # Esperar al menos 6 min (1 vela de 5m + margen) antes de evaluar salidas
+MIN_HOLDING_MINUTES = 15.0  # Mínimo 15 min (3 velas de 5m) para filtrar ruido intradía antes de evaluar salidas técnicas/proactivas
 
 
 
@@ -148,11 +148,43 @@ class PositionMonitor:
                 await self._close_position(trade, current_price, "eod_hard_exit_1550")
                 return
 
-            # ── 1.2 AUTO-ESTABLECER TRAILING STOP SI ESTÁ EN BLANCO/NULO ──
-            from app.stocks.diagnostic_validator import check_and_auto_establish_trailing, build_position_diagnostics
-            trade = await check_and_auto_establish_trailing(trade, sb)
+            # ── 1.2 AUTO-REPAIR / AUTO-ESTABLECER PARÁMETROS DE RIESGO SI FALTAN ──
+            sl_val = safe_float(trade.get("stop_loss"))
+            tsl_val = safe_float(trade.get("trailing_sl_price") or trade.get("tp_trailing_sl") or trade.get("sl_dynamic_price"))
+            tp_val = safe_float(trade.get("take_profit") or trade.get("tp_block1_price"))
+
+            repair_needed = False
+            repair_updates = {}
+            atr_calc = max(0.05, current_price * 0.02)
+
+            if sl_val <= 0:
+                sl_val = round(max(0.01, entry_price - (atr_calc * 2.0)), 2)
+                repair_updates["stop_loss"] = sl_val
+                trade["stop_loss"] = sl_val
+                repair_needed = True
+
+            if tsl_val <= 0:
+                tsl_val = sl_val
+                repair_updates["trailing_sl_price"] = tsl_val
+                trade["trailing_sl_price"] = tsl_val
+                repair_needed = True
+
+            if tp_val <= 0:
+                tp_val = round(entry_price + (atr_calc * 5.0), 2)
+                repair_updates["take_profit"] = tp_val
+                trade["take_profit"] = tp_val
+                repair_needed = True
+
+            if repair_needed:
+                repair_updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+                try:
+                    sb.table("stocks_positions").update(repair_updates).eq("id", trade["id"]).execute()
+                    log_info(MODULE, f"🛡️ [AUTO-REPAIR] Parámetros de riesgo auto-reparados para {ticker}: SL=${sl_val:.2f}, TP=${tp_val:.2f}, TSL=${tsl_val:.2f}")
+                except Exception as rep_err:
+                    log_warning(MODULE, f"Error actualizando auto-repair para {ticker}: {rep_err}")
 
             # ── 1.5 AUDITORÍA DE SEGURIDAD DIAGNÓSTICA (CIERRE SI FALLA VARIABLE) ──
+            from app.stocks.diagnostic_validator import build_position_diagnostics
             snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
             snap_data = snap_res.data[0] if snap_res.data else None
             diag = build_position_diagnostics(trade, snap_db=snap_data)
@@ -196,9 +228,11 @@ class PositionMonitor:
                     log_debug(MODULE, f"Error calculando age para {ticker}: {age_e}")
 
             # ── Cierre Proactivo AaPX51/BbPX51 ──
-            closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, pnl_pct, sb)
-            if closed:
-                return
+            # Requiere al menos MIN_HOLDING_MINUTES (15 min) salvo ganancia de clímax >= 2.5%
+            if age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5:
+                closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, pnl_pct, sb)
+                if closed:
+                    return
 
             # ── NUEVO: Stop Loss Dinámico y Trailing Stop ──
             # Reutilizamos el motor SIPV adaptado para Stocks
@@ -250,6 +284,12 @@ class PositionMonitor:
             )
 
             sl_action = sl_res['action']
+
+            # Salvaguarda inmediata: Stop Loss Duro de Emergencia (NUNCA bloqueado por el tiempo de permanencia)
+            if stop_loss > 0 and current_price <= stop_loss:
+                log_warning(MODULE, f"🔴 EMERGENCY HARD STOP LOSS HIT: {ticker} @ ${current_price:.2f} <= SL ${stop_loss:.2f}. Cerrando inmediatamente...")
+                await self._close_position(trade, current_price, "sl_hard_exit")
+                return
 
             # Si el precio perforó el Stop Loss o Dynamic SL, cerrar limpiamente
             if sl_action in ('close_backstop', 'trigger_dynamic_sl'):
@@ -366,14 +406,14 @@ class PositionMonitor:
             group = str(trade.get("group_name", "")).upper()
             if "HOT" in group or "SCALPING" in group:
                 pullback = ((highest - current_price) / highest) * 100
-                if pullback >= 1.5 and pnl_pct >= 0.8:
+                if pullback >= 1.5 and (pnl_pct >= 2.5 or (pnl_pct >= 0.8 and age_mins >= MIN_HOLDING_MINUTES)):
                     log_warning(MODULE, f"⚡ FLASH EXIT: {ticker} retroceso de {pullback:.1f}% detectado con profit de {pnl_pct:.2f}%. Cerrando.")
                     await self._close_position(trade, current_price, "hot_pullback_exit")
                     return
 
             # ── NUEVO: BLUE PROACTIVE EXIT (Salidas Rápidas 5m para APEX AZUL) ──
             rule_code_pos = str(trade.get("rule_code", "") or trade.get("strategy", "") or "")
-            if rule_code_pos.startswith("BLUE_"):
+            if rule_code_pos.startswith("BLUE_") and (age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5):
                 try:
                     hist_5m_blue = t_obj.history(period="2d", interval="5m")
 
@@ -450,54 +490,57 @@ class PositionMonitor:
 
             # ── NUEVO: Adaptive TP v2 (Stocks) ──
             try:
-                if hist_15m is None or hist_15m.empty:
-                    hist_15m = t_obj.history(period="5d", interval="15m")
-                if hist_5m is None or hist_5m.empty:
-                    hist_5m = t_obj.history(period="2d", interval="5m")
-                
-                # Fetch recent RVOL (simplified)
-                rvol = 1.0
-                if not hist_15m.empty:
-                    vol_ema = hist_15m['Volume'].rolling(20).mean().iloc[-1]
-                    cur_vol = hist_15m['Volume'].iloc[-1]
-                    if vol_ema > 0: rvol = cur_vol / vol_ema
-
-                tp_res = evaluate_stock_tp_v2(
-                    ticker=ticker,
-                    position=trade,
-                    current_price=current_price,
-                    snap=snap_val,
-                    df_15m=hist_15m,
-                    df_5m=hist_5m,
-                    df_1h=hist_1h,
-                    df_4h=hist_4h,
-                    rvol=rvol,
-                    sar_15m=snap_val.get('sar_trend_15m', 1)
-                )
-
-                # Actualizar indicadores en DB (NUEVOS CAMPOS)
-                debug = tp_res.get('debug_indicators', {})
-                ema_info = debug.get('ema', {})
-                sipv15 = debug.get('sipv_15m', {})
-                sipv4h = debug.get('sipv_4h', {})
-                fib_info = debug.get('fib', {})
-
-                sb.table("stocks_positions").update({
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }).eq("id", trade["id"]).execute()
-
-                if tp_res['action'] == 'close_total':
-                    log_warning(MODULE, f"🎯 TP V2 CLOSE TOTAL: {ticker} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
-                    await self._close_position(trade, current_price, f"tp_v2_total_{tp_res.get('trigger', 'signal')}")
-                    return
-
-                if tp_res['action'] in ['close_block1', 'close_block2', 'close_block3']:
-                    block_name = tp_res['action'].replace('close_', '')
-                    log_info(MODULE, f"🎯 TP V2 PARTIAL: {ticker} {block_name.upper()} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
-                    await self._execute_partial_close(trade, current_price, tp_res['shares'], block_name, tp_res['reason'])
-                    # No retornamos aquí porque la posición sigue abierta (parcialmente)
+                # Si la posición tiene menos de MIN_HOLDING_MINUTES (15 min) y la ganancia no es clímax (>= 2.5%),
+                # omitir la evaluación de TP/Aduana para filtrar ruido intradía
+                if age_mins < MIN_HOLDING_MINUTES and pnl_pct < 2.5:
+                    log_debug(MODULE, f"Skipping adaptive TP for {ticker}: age {age_mins:.1f} < {MIN_HOLDING_MINUTES} y pnl {pnl_pct:.2f}% < 2.5%")
                 else:
-                    log_debug(MODULE, f"Skipping adaptive TP for {ticker}: age {age_mins:.1f} < {MIN_HOLDING_MINUTES}")
+                    if hist_15m is None or hist_15m.empty:
+                        hist_15m = t_obj.history(period="5d", interval="15m")
+                    if hist_5m is None or hist_5m.empty:
+                        hist_5m = t_obj.history(period="2d", interval="5m")
+                    
+                    # Fetch recent RVOL (simplified)
+                    rvol = 1.0
+                    if not hist_15m.empty:
+                        vol_ema = hist_15m['Volume'].rolling(20).mean().iloc[-1]
+                        cur_vol = hist_15m['Volume'].iloc[-1]
+                        if vol_ema > 0: rvol = cur_vol / vol_ema
+
+                    tp_res = evaluate_stock_tp_v2(
+                        ticker=ticker,
+                        position=trade,
+                        current_price=current_price,
+                        snap=snap_val,
+                        df_15m=hist_15m,
+                        df_5m=hist_5m,
+                        df_1h=hist_1h,
+                        df_4h=hist_4h,
+                        rvol=rvol,
+                        sar_15m=snap_val.get('sar_trend_15m', 1)
+                    )
+
+                    # Actualizar indicadores en DB (NUEVOS CAMPOS)
+                    debug = tp_res.get('debug_indicators', {})
+                    ema_info = debug.get('ema', {})
+                    sipv15 = debug.get('sipv_15m', {})
+                    sipv4h = debug.get('sipv_4h', {})
+                    fib_info = debug.get('fib', {})
+
+                    sb.table("stocks_positions").update({
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", trade["id"]).execute()
+
+                    if tp_res['action'] == 'close_total':
+                        log_warning(MODULE, f"🎯 TP V2 CLOSE TOTAL: {ticker} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
+                        await self._close_position(trade, current_price, f"tp_v2_total_{tp_res.get('trigger', 'signal')}")
+                        return
+
+                    if tp_res['action'] in ['close_block1', 'close_block2', 'close_block3']:
+                        block_name = tp_res['action'].replace('close_', '')
+                        log_info(MODULE, f"🎯 TP V2 PARTIAL: {ticker} {block_name.upper()} @ ${current_price:.2f} | Reason: {tp_res['reason']}")
+                        await self._execute_partial_close(trade, current_price, tp_res['shares'], block_name, tp_res['reason'])
+                        # No retornamos aquí porque la posición sigue abierta (parcialmente)
 
             except Exception as tp_e:
                 log_error(MODULE, f"Error en Adaptive TP V2 para {ticker}: {tp_e}")
@@ -633,10 +676,25 @@ class PositionMonitor:
             try:
                 from app.stocks.stocks_order_executor import is_ib_bridge_alive
                 if is_ib_bridge_alive():
+                    # Mapear exit_reason a una regla válida en stocks_rules para respetar FK
+                    sell_rule = "ADUANA_TP_CLOSE" if pnl_usd > 0 else "STOP_LOSS_INITIAL"
+                    if exit_reason in [
+                        "STOP_LOSS_INITIAL", "ADUANA_TP_CLOSE", "EMERGENCY_EXIT",
+                        "PRO_CANDLE_SELL", "HOT_CANDLE_SELL", "ADUANA_STRUCTURAL_1H_BREAK_EXIT",
+                        "PULLBACK_ZOMBIE_TIME_EXIT", "BOLLINGER_EXPLOSION"
+                    ]:
+                        sell_rule = exit_reason
+                    elif "tp" in str(exit_reason).lower() or "profit" in str(exit_reason).lower():
+                        sell_rule = "ADUANA_TP_CLOSE"
+                    elif "sl" in str(exit_reason).lower() or "stop" in str(exit_reason).lower() or "loss" in str(exit_reason).lower():
+                        sell_rule = "STOP_LOSS_INITIAL"
+                    else:
+                        sell_rule = "EMERGENCY_EXIT"
+
                     sb.table("stocks_orders").insert({
                         "ticker": ticker,
                         "group_name": trade.get("group_name", "STOCKS"),
-                        "rule_code": str(exit_reason)[:30],
+                        "rule_code": sell_rule,
                         "order_type": "market",
                         "direction": "sell",
                         "shares": shares,
@@ -644,7 +702,7 @@ class PositionMonitor:
                         "status": "pending",
                         "created_at": now
                     }).execute()
-                    log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper.")
+                    log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper (regla: {sell_rule}).")
             except Exception as ib_err:
                 log_error(MODULE, f"Error despachando SELL a IB Bridge: {ib_err}")
 

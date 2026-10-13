@@ -96,6 +96,7 @@ def on_ib_order_status(order_id: int, status_info: dict):
                         "updated_at": now_iso
                     }).eq("id", pos["id"]).execute()
                     log_info(MODULE, f"✅ Posición DCA actualizada para {ticker}: {total_shares} acc @ ${new_avg:.2f}")
+                else:
                     # Nueva posición
                     atr_fb = exec_price * 0.02
                     sl_p = round(exec_price - (atr_fb * 2.0), 2)
@@ -110,9 +111,9 @@ def on_ib_order_status(order_id: int, status_info: dict):
                         "current_price": exec_price,
                         "stop_loss": sl_p,
                         "trailing_sl_price": sl_p,
+                        "highest_price_reached": exec_price,
                         "take_profit": tp_p,
                         "group_name": order_ctx.get("group_name", "IB_PAPER"),
-                        "rule_code": order_ctx.get("rule_code", "IB_BRIDGE"),
                         "first_buy_at": now_iso,
                         "status": "open",
                         "updated_at": now_iso

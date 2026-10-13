@@ -162,7 +162,28 @@ def get_technical_indicators_snapshot(
         _INDICATOR_CACHE[ticker] = result
         return result
 
-    return {}
+    # 4. Fallback sintético seguro para activos nuevos/IPOs sin historial suficiente
+    cur_p = safe_float(snap_db.get("price") if snap_db else 0.0) or 5.0
+    atr_fb = max(0.05, cur_p * 0.02)
+    fib_up = {f"upper_{i}": round(cur_p + (atr_fb * mult), 4) for i, mult in enumerate(FIB_MULTIPLIERS, start=1)}
+    fib_lo = {f"lower_{i}": max(0.01, round(cur_p - (atr_fb * mult), 4)) for i, mult in enumerate(FIB_MULTIPLIERS, start=1)}
+    fallback_res = {
+        "current_price": cur_p,
+        "basis": cur_p,
+        "bb_upper": round(cur_p + (atr_fb * 2.0), 4),
+        "bb_lower": max(0.01, round(cur_p - (atr_fb * 2.0), 4)),
+        "atr": atr_fb,
+        "ema_3": cur_p,
+        "ema_9": cur_p,
+        "ema_20": cur_p,
+        "ema_50": cur_p,
+        "ema_200": cur_p,
+        **fib_up,
+        **fib_lo,
+        "_cached_at": now_ts
+    }
+    _INDICATOR_CACHE[ticker] = fallback_res
+    return fallback_res
 
 
 def build_position_diagnostics(

@@ -161,6 +161,30 @@ def execute_market_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
+        # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15 MINUTOS) ANTI-CHURNING ──
+        # Evita re-abrir la misma posición si cerró hace menos de 15 minutos
+        try:
+            now_u = datetime.now(timezone.utc)
+            last_tj = sb.table('trades_journal') \
+                .select('exit_date, pnl_pct, exit_reason') \
+                .eq('ticker', ticker) \
+                .order('exit_date', desc=True) \
+                .limit(1) \
+                .execute()
+            if last_tj.data:
+                ex_dt_str = last_tj.data[0].get('exit_date')
+                if ex_dt_str:
+                    ex_dt = datetime.fromisoformat(str(ex_dt_str).replace('Z', '+00:00'))
+                    mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
+                    if mins_since_exit < 15.0 and not context.get('force_buy', False):
+                        log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< 15 min). Re-apertura bloqueada.")
+                        return {
+                            "success": False,
+                            "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: 15 minutos."
+                        }
+        except Exception as e_cd:
+            log_debug(MODULE, f"Error validando cooldown de salida para {ticker}: {e_cd}")
+
         # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
         from app.stocks.diagnostic_validator import can_operate_pre_trade
         atr_fb = price * 0.02
@@ -661,7 +685,7 @@ def _close_all_positions(ticker: str, price: float):
                 sb.table("stocks_orders").insert({
                     "ticker": ticker,
                     "group_name": pos.get("group_name", "STOCKS"),
-                    "rule_code": "CLOSE_ALL_IB",
+                    "rule_code": "EMERGENCY_EXIT",
                     "order_type": "market",
                     "direction": "sell",
                     "shares": int(shares),
