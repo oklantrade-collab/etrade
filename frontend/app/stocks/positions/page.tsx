@@ -723,15 +723,18 @@ function StrategyBadge({ strategy }: { strategy: string }) {
 }
 
 function GroupBadge({ group }: { group: string }) {
-  const isPro = group === 'inversiones_pro'
+  const gUpper = String(group || '').toUpperCase()
+  const isAlpha = gUpper.includes('ALPHA_RUNNER') || gUpper.includes('ALPHA')
+  const isPro = group === 'inversiones_pro' || gUpper.includes('GIANT') || gUpper.includes('LEADER')
   return (
     <span style={{ 
       fontSize: '9px', fontWeight: 800, 
-      color: isPro ? '#4FC3F7' : '#FF8A65',
-      background: isPro ? 'rgba(79,195,247,0.1)' : 'rgba(255,138,101,0.1)',
+      color: isAlpha ? '#F59E0B' : (isPro ? '#4FC3F7' : '#FF8A65'),
+      background: isAlpha ? 'rgba(245,158,11,0.14)' : (isPro ? 'rgba(79,195,247,0.1)' : 'rgba(255,138,101,0.1)'),
+      border: isAlpha ? '1px solid rgba(245,158,11,0.35)' : 'none',
       padding: '4px 8px', borderRadius: '4px', textTransform: 'uppercase'
     }}>
-      {isPro ? 'PRO' : 'HOT'}
+      {isAlpha ? '⚡ ALPHA' : (isPro ? 'PRO' : 'HOT')}
     </span>
   )
 }
@@ -741,6 +744,12 @@ const REASON_MAP: Record<string, { label: string, desc: string }> = {
   'V2_TOTAL_EMA_DOWN_OR_NEUTRAL': { label: 'TENDENCIA BAJISTA', desc: 'Las EMAs se han cruzado a la baja o están en modo neutral.' },
   'V2_TOTAL_EMA_UP_MID_SAR_NEG': { label: 'SAR NEGATIVO', desc: 'Reversión del SAR Parabolic mientras la tendencia EMA era alcista.' },
   'TP_V2_TOTAL_SIP_V_4H_SELL': { label: 'SIPV SELL (4H)', desc: 'Patrón de velas bajista detectado en temporalidad de 4 horas.' },
+  'tp_v2_total_ALPHA_EXIT_2A_15M_WICK15_OPEN_RED': { label: 'CIERRE 2a (15M MECHA+ROJO)', desc: 'Vela 15m > BB Superior con mecha >=15% y toque de OPEN en rojo.' },
+  'tp_v2_total_ALPHA_EXIT_2B_5M_WICK15_OPEN_RED': { label: 'CIERRE 2b (5M MECHA+ROJO)', desc: 'Vela 5m Open > BB Superior con mecha >=15% y toque de OPEN en rojo.' },
+  'tp_v2_total_ALPHA_EXIT_2D3_5M_OPEN_ABOVE_BB_FIRST_RED': { label: 'CIERRE 2d-3 (5M 1ER ROJO)', desc: 'Vela 5m abrió sobre BB Superior y giró a rojo tocando OPEN.' },
+  'ALPHA_EXIT_1B_UPPER6_1H_TP50': { label: 'PARCIAL 1b (UPPER_6 1H)', desc: 'Cierre parcial del 50% al tocar UPPER_6 en temporalidad de 1 Hora.' },
+  'trailing_profit_lock': { label: 'TRAILING STOP B.5', desc: 'Ganancia asegurada por el Trailing Stop escalonado de 3 etapas.' },
+  'eod_hard_exit_1550': { label: 'CIERRE EOD 15:50 ET', desc: 'Liquidación obligatoria de fin de día para cero riesgo overnight.' },
   'tp_band': { label: 'TAKE PROFIT BANDA', desc: 'El precio ha alcanzado la banda superior de Fibonacci (U6/L6).' },
   'sl': { label: 'STOP LOSS', desc: 'El precio ha tocado el límite de pérdida configurado.' },
   'tp': { label: 'TAKE PROFIT', desc: 'El precio ha alcanzado el objetivo de ganancia estándar.' },
@@ -753,6 +762,12 @@ const STRATEGY_MAP: Record<string, { label: string, desc: string }> = {
   'HOT_CANDLE_BUY': { label: 'HOT CANDLE', desc: 'Entrada por momentum tras vela de alta convicción en zonas de soporte dinámico.' },
   'EMA_REVERSAL': { label: 'EMA REVERSAL', desc: 'Detección de cambio de tendencia mediante cruce optimizado de medias móviles.' },
   'BOLLINGER_EXT': { label: 'BOLLINGER EXT', desc: 'Explotación de extremos en bandas de Bollinger con confirmación de RSI.' },
+  'PULLBACK_3A_EMA3_1H_DIP': { label: 'REGLA 3a (EMA3 1H)', desc: 'Compra en retroceso 1H Open<=EMA3 con extremo 5m/15m en BB_Lower o LOWER_5/6.' },
+  'PULLBACK_4A_EMA1H_PINE_BUY': { label: 'REGLA 4a (PINE BUY)', desc: 'Rebote en EMA9/20 de 1H con señal PineScript BUY (< UPPER_3).' },
+  'PULLBACK_4B_EMA1H_CROSS_3_9': { label: 'REGLA 4b (CRUCE 3/9)', desc: 'Rebote en EMA9/20 de 1H con cruce fresco EMA3 > EMA9 en 5m/15m.' },
+  'PULLBACK_4C_EMA1H_BB5M_LOWER': { label: 'REGLA 4c (BB_LOW-Δ)', desc: 'Rebote en EMA9/20 de 1H tocando (BB_Inferior_5m - Delta).' },
+  'PULLBACK_4D_EMA1H_SIPV_FIB': { label: 'REGLA 4d (SIPV FIB)', desc: 'Rebote en EMA9/20 de 1H con vela SIPV de cambio de tendencia en Basis..Upper_3.' },
+  'PULLBACK_LOWER_ABSORPTION': { label: 'ABSORCIÓN LOWER 5/6', desc: 'Rebote con absorción de mecha inferior en banda extrema LOWER_5/6.' },
 }
 
 function ReasonBadge({ reason }: { reason: string }) {

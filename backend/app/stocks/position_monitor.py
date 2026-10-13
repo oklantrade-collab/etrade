@@ -70,6 +70,26 @@ class PositionMonitor:
         for trade in active.data:
             await self._check_position(trade, stocks_config)
 
+    async def check_fast_tick_positions(self):
+        """
+        Sub-ciclo rápido (cada 15s) para monitoreo intraminuto de Regla 2d-3, 2a, 2b y Trailing Stop
+        en posiciones ALPHA_RUNNER o cuyo precio haya perforado la Banda Superior de Bollinger.
+        """
+        sb = get_supabase()
+        active = sb.table("stocks_positions").select("*").eq("status", "open").execute()
+        if not active.data:
+            return
+
+        config_res = sb.table("stocks_config").select("key, value").execute()
+        stocks_config = {r["key"]: r["value"] for r in (config_res.data or [])}
+
+        for trade in active.data:
+            group = str(trade.get("group_name", "") or trade.get("pool_type", "")).upper()
+            rule = str(trade.get("rule_code", "") or trade.get("strategy", "")).upper()
+            pnl_pct = safe_float(trade.get("unrealized_pnl_pct", 0.0))
+            if "ALPHA" in group or "ALPHA" in rule or "PULLBACK" in rule or pnl_pct >= 1.5 or pnl_pct <= -1.5:
+                await self._check_position(trade, stocks_config)
+
     async def _check_position(self, trade: dict, stocks_config: dict):
         """Check a single position for exit conditions."""
         ticker = trade["ticker"]
@@ -186,6 +206,8 @@ class PositionMonitor:
             t_obj = yf.Ticker(ticker)
             hist_1h = t_obj.history(period="15d", interval="1h")
             hist_1d = t_obj.history(period="30d", interval="1d")
+            hist_15m = t_obj.history(period="5d", interval="15m")
+            hist_5m = t_obj.history(period="2d", interval="5m")
             hist_4h = None
             if not hist_1h.empty:
                 try:
@@ -266,6 +288,7 @@ class PositionMonitor:
             peak_gain_pct = ((highest - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
             cur_sl = safe_float(trade.get("stop_loss") or 0.0)
             proposed_sl = cur_sl
+            ratchet_reason = f"Trailing Ratchet (+{peak_gain_pct:.1f}% pico -> SL ${proposed_sl:.2f})"
 
             # 2. Protección de Ganancia Escalonada (Ratchet Trailing)
             if peak_gain_pct >= 10.0:
@@ -276,6 +299,23 @@ class PositionMonitor:
                 proposed_sl = max(proposed_sl, round(highest * 0.75, 2))      # Bloquea al menos 75% del pico
             if peak_gain_pct >= 100.0:
                 proposed_sl = max(proposed_sl, round(highest * 0.80, 2))      # Bloquea al menos 80% del pico
+
+            # 2.5 NUEVO: TRAILING STOP ESCALONADO EN 3 ETAPAS (SECCIÓN B.5 & 2C)
+            try:
+                from app.stocks.aduana_stocks_exit_engine import calculate_alpha_escalating_trailing_stop
+                alpha_tsl_res = calculate_alpha_escalating_trailing_stop(
+                    position=trade,
+                    current_price=current_price,
+                    df_5m=hist_5m,
+                    df_15m=hist_15m
+                )
+                if alpha_tsl_res.get('should_update'):
+                    cand_alpha_sl = safe_float(alpha_tsl_res.get('new_sl'))
+                    if cand_alpha_sl > proposed_sl and cand_alpha_sl < current_price:
+                        proposed_sl = cand_alpha_sl
+                        ratchet_reason = alpha_tsl_res.get('reason', ratchet_reason)
+            except Exception as e_atsl:
+                log_debug(MODULE, f"Error calculando TSL Escalonado B.5 para {ticker}: {e_atsl}")
 
             # 3. Trailing Estructural 1H (ADUANA: Low[t-1] o EMA9 de 1H)
             if hist_1h is not None and len(hist_1h) >= 5:
@@ -310,11 +350,11 @@ class PositionMonitor:
                     "trailing_sl_price": proposed_sl,
                     "highest_price_reached": highest,
                     "sl_type": "trailing_ratchet",
-                    "sl_activation_reason": f"Trailing Ratchet (+{peak_gain_pct:.1f}% pico -> SL ${proposed_sl:.2f})"[:100]
+                    "sl_activation_reason": str(ratchet_reason)[:100]
                 }).eq("id", trade["id"]).execute()
                 trade["stop_loss"] = proposed_sl
                 trade["trailing_sl_price"] = proposed_sl
-                log_info(MODULE, f"🛡️ TRAILING RATCHET ACTUALIZADO: {ticker} SL ${cur_sl:.2f} -> ${proposed_sl:.2f} (Pico: ${highest:.2f} / +{peak_gain_pct:.1f}%)")
+                log_info(MODULE, f"🛡️ TRAILING RATCHET ACTUALIZADO: {ticker} SL ${cur_sl:.2f} -> ${proposed_sl:.2f} ({ratchet_reason})")
 
             # 5. Salida Protectora si el precio perfora el Trailing Stop en Ganancia
             if trade.get("stop_loss") and current_price <= safe_float(trade["stop_loss"]) and safe_float(trade["stop_loss"]) > entry_price:
@@ -410,8 +450,10 @@ class PositionMonitor:
 
             # ── NUEVO: Adaptive TP v2 (Stocks) ──
             try:
-                hist_15m = t_obj.history(period="5d", interval="15m")
-                hist_5m = t_obj.history(period="2d", interval="5m")
+                if hist_15m is None or hist_15m.empty:
+                    hist_15m = t_obj.history(period="5d", interval="15m")
+                if hist_5m is None or hist_5m.empty:
+                    hist_5m = t_obj.history(period="2d", interval="5m")
                 
                 # Fetch recent RVOL (simplified)
                 rvol = 1.0

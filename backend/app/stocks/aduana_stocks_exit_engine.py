@@ -691,6 +691,395 @@ def evaluate_accelerated_trailing_stop(
         }
 
 
+def evaluate_alpha_runner_sharp_exit(
+    position: dict,
+    current_price: float,
+    df_5m: Optional[pd.DataFrame] = None,
+    df_15m: Optional[pd.DataFrame] = None,
+    df_1h: Optional[pd.DataFrame] = None,
+) -> dict:
+    """
+    MOTOR AGUDO DE CIERRE DE POSICIÓN (SECCIÓN A - DISEÑO WFF / ALPHA RUNNERS):
+    1. Temporalidad 1 Hora (Cierre Total / Parcial en Extremos):
+       - 1a: Vela 1H cuyo HIGH > BB_Upper_1H y su tamaño (HIGH - LOW) es mayor que cada una
+             de las 9 velas anteriores de 1H -> activa búsqueda de cierre total en 2a o 2b.
+       - 1b: Cuando el precio llega al UPPER_6 en 1H -> Cierre parcial 50% inmediato (y remanente sujeto a 2a/2b/2d).
+    2. Temporalidad 15m y 5m:
+       - 2a: Vela 15m con Close/High > BB_Upper_15m + mecha superior >= 15% del rango (High-Low)
+             + precio toca el OPEN de 15m terminando en rojo (current_price <= Open_15m).
+       - 2b: En 5m, OPEN > BB_Upper_5m + mecha superior >= 15% del rango (High-Low en 15m o 5m)
+             + precio toca el OPEN de 5m en rojo (current_price <= Open_5m).
+       - 2c: Si precio > BB_Upper, el Trailing Stop se mueve a (OPEN - Delta).
+       - 2d: 3 Características de deterioro:
+             * 2d-1: EMA3_15m reduce su pendiente o deja de ser ascendente -> vigila 2a y 2b.
+             * 2d-2: BB_Upper_15m deja de subir (slope <= 0) o BB_Lower_15m empieza a subir (slope >= 0) -> vigila 2a y 2b.
+             * 2d-3: En 5m, las velas abren con OPEN > BB_Upper_5m; mientras sean verdes (Close > Open) -> HOLD,
+                     pero al PRIMER ROJO (current_price <= Open_5m) -> cerrar posición inmediatamente al tocar OPEN.
+    """
+    res = {
+        'should_close': False,
+        'action': 'HOLD',
+        'pct_to_close': 0,
+        'rule_code': 'NONE',
+        'reason': '',
+        'climax_1h_1a': False,
+        'deterioration_2d1': False,
+        'deterioration_2d2': False,
+        'suggested_tsl_2c': 0.0,
+    }
+    if not position or current_price <= 0:
+        return res
+
+    side = str(position.get('side', 'long')).lower()
+    if side not in ('long', 'buy'):
+        return res
+
+    entry_p = float(position.get('avg_price') or position.get('entry_price') or 0.0)
+    shares = int(float(position.get('shares_remaining') or position.get('shares') or 0))
+    if entry_p <= 0 or shares <= 0:
+        return res
+
+    gain_pct = (current_price - entry_p) / entry_p * 100.0
+    group_name = str(position.get('group_name', '') or position.get('pool_type', '')).upper()
+    rule_pos = str(position.get('rule_code', '') or position.get('strategy', '')).upper()
+    is_alpha_runner = ('ALPHA_RUNNER' in group_name) or ('ALPHA' in rule_pos) or ('PULLBACK_' in rule_pos)
+    partial_done = bool(position.get('tp_block1_executed') or position.get('tp_1h_executed'))
+
+    # ── 1. EVALUACIÓN 1 HORA (1a y 1b) ──
+    climax_1h_1a = False
+    if df_1h is not None and len(df_1h) >= 10:
+        try:
+            c1h = _safe_col(df_1h, 'close')
+            h1h = _safe_col(df_1h, 'high')
+            l1h = _safe_col(df_1h, 'low')
+
+            sma20_1h = float(c1h.rolling(20, min_periods=10).mean().iloc[-1])
+            std20_1h = float(c1h.rolling(20, min_periods=10).std().fillna(0).iloc[-1])
+            bb_up_1h = sma20_1h + 2.0 * std20_1h
+
+            cur_h_1h = max(float(h1h.iloc[-1]), current_price)
+            cur_l_1h = min(float(l1h.iloc[-1]), current_price)
+            cur_range_1h = cur_h_1h - cur_l_1h
+
+            # Rango de las 9 velas anteriores de 1H
+            prev_9_ranges = (h1h.iloc[-10:-1] - l1h.iloc[-10:-1]).values
+            max_prev_9_range = float(np.max(prev_9_ranges)) if len(prev_9_ranges) > 0 else 0.0
+
+            # Condición 1a: High_1H > BB_Upper_1H y tamaño actual > las 9 velas previas
+            if bb_up_1h > 0 and cur_h_1h > bb_up_1h and max_prev_9_range > 0 and cur_range_1h > max_prev_9_range:
+                climax_1h_1a = True
+                res['climax_1h_1a'] = True
+
+            # Condición 1b: Precio llega al UPPER_6 en 1 Hora
+            fib_1h = calculate_fibonacci_bands(df_1h, current_price)
+            upper_6_1h = float(fib_1h.get('upper_6') or 0.0)
+            if upper_6_1h > 0 and current_price >= upper_6_1h * 0.998 and gain_pct >= 1.5:
+                if not partial_done and shares >= 2:
+                    res.update({
+                        'should_close': True,
+                        'action': 'CLOSE_PARTIAL_50',
+                        'pct_to_close': 50,
+                        'shares_to_close': max(1, int(shares * 0.5)),
+                        'rule_code': 'ALPHA_EXIT_1B_UPPER6_1H_TP50',
+                        'reason': (
+                            f"Regla 1b (1H UPPER_6): Precio (${current_price:.2f}) alcanzó UPPER_6 de 1H (${upper_6_1h:.2f}). "
+                            f"Cierre parcial 50% (+{gain_pct:.2f}%), remanente vigilado por 2a/2b/2d."
+                        )
+                    })
+                    return res
+        except Exception as e1h:
+            log_warning(MODULE, f"Error en evaluación 1H (1a/1b): {e1h}")
+
+    # ── 2. EVALUACIÓN 15 MINUTOS (2d-1, 2d-2, 2a, 2c) ──
+    deterioration_2d1 = False
+    deterioration_2d2 = False
+    wick_15m_pct = 0.0
+    open_15m_cur = 0.0
+    bb_up_15m_cur = 0.0
+
+    if df_15m is not None and len(df_15m) >= 6:
+        try:
+            c15 = _safe_col(df_15m, 'close')
+            o15 = _safe_col(df_15m, 'open')
+            h15 = _safe_col(df_15m, 'high')
+            l15 = _safe_col(df_15m, 'low')
+
+            ema3_15 = c15.ewm(span=3, adjust=False).mean()
+            slope_ema3_now = float(ema3_15.iloc[-1] - ema3_15.iloc[-2])
+            slope_ema3_prev = float(ema3_15.iloc[-2] - ema3_15.iloc[-3])
+
+            # 2d-1: EMA3 en 15m reduce su pendiente o deja de ser creciente/ascendente
+            if slope_ema3_now <= 0 or (slope_ema3_prev > 0 and slope_ema3_now < slope_ema3_prev * 0.85):
+                deterioration_2d1 = True
+                res['deterioration_2d1'] = True
+
+            # Bollinger 15m
+            sma20_15 = c15.rolling(20, min_periods=5).mean()
+            std20_15 = c15.rolling(20, min_periods=5).std().fillna(0)
+            bb_up_15 = sma20_15 + 2.0 * std20_15
+            bb_lo_15 = sma20_15 - 2.0 * std20_15
+
+            bb_up_15m_cur = float(bb_up_15.iloc[-1])
+            bb_up_slope_15 = float(bb_up_15.iloc[-1] - bb_up_15.iloc[-2])
+            bb_lo_slope_15 = float(bb_lo_15.iloc[-1] - bb_lo_15.iloc[-2])
+
+            # 2d-2: Banda superior se diluye (slope <= 0) o banda inferior empieza a ser positiva (slope >= 0)
+            if bb_up_slope_15 <= 0 or bb_lo_slope_15 >= 0:
+                deterioration_2d2 = True
+                res['deterioration_2d2'] = True
+
+            # Datos de la vela 15m actual y previa
+            open_15m_cur = float(o15.iloc[-1])
+            high_15m_cur = max(float(h15.iloc[-1]), current_price)
+            low_15m_cur = min(float(l15.iloc[-1]), current_price)
+            rng_15m_cur = max(1e-6, high_15m_cur - low_15m_cur)
+            top_body_15m = max(open_15m_cur, current_price)
+            wick_15m_pct = (high_15m_cur - top_body_15m) / rng_15m_cur
+
+            # También revisar si la vela cerrada previa de 15m cerró > BB_Upper con mecha >= 15%
+            prev_c15 = float(c15.iloc[-2])
+            prev_o15 = float(o15.iloc[-2])
+            prev_h15 = float(h15.iloc[-2])
+            prev_l15 = float(l15.iloc[-2])
+            prev_bb_up15 = float(bb_up_15.iloc[-2])
+            prev_rng15 = max(1e-6, prev_h15 - prev_l15)
+            prev_wick15_pct = (prev_h15 - max(prev_o15, prev_c15)) / prev_rng15
+
+            # 2c: Si precio > BB_Upper_15m, sugerir Trailing Stop en (Open_15m - Delta)
+            atr_15 = float((h15 - l15).rolling(14, min_periods=3).mean().iloc[-1])
+            delta_15 = max(0.01, min(current_price * 0.003, 0.15 * atr_15))
+            if bb_up_15m_cur > 0 and (current_price > bb_up_15m_cur or high_15m_cur > bb_up_15m_cur):
+                cand_2c = round(open_15m_cur - delta_15, 2)
+                if cand_2c > entry_p and cand_2c < current_price:
+                    res['suggested_tsl_2c'] = max(res['suggested_tsl_2c'], cand_2c)
+
+            # Condición 2a:
+            # Vela de 15m supera BB_Upper_15m (prev_c15 > prev_bb_up15 o high_15m_cur > bb_up_15m_cur),
+            # forma mecha superior >= 15% del rango (High - Low),
+            # y el precio toca el OPEN de 15m volviendo la vela roja (current_price <= open_15m_cur).
+            above_bb_15m = (bb_up_15m_cur > 0 and (high_15m_cur > bb_up_15m_cur or prev_c15 > prev_bb_up15))
+            has_15pct_wick_15m = (wick_15m_pct >= 0.15) or (prev_c15 > prev_bb_up15 and prev_wick15_pct >= 0.15)
+            touched_open_15m_red = (current_price <= open_15m_cur)
+
+            if above_bb_15m and has_15pct_wick_15m and touched_open_15m_red and gain_pct >= 0.8:
+                close_total = (is_alpha_runner or climax_1h_1a or partial_done or deterioration_2d1 or deterioration_2d2 or shares < 2)
+                pct = 100 if close_total else 50
+                return {
+                    **res,
+                    'should_close': True,
+                    'action': 'CLOSE_TOTAL' if pct == 100 else 'CLOSE_PARTIAL_50',
+                    'pct_to_close': pct,
+                    'shares_to_close': shares if pct == 100 else max(1, int(shares * 0.5)),
+                    'rule_code': 'ALPHA_EXIT_2A_15M_WICK15_OPEN_RED',
+                    'reason': (
+                        f"Regla 2a (15m > BB_Upper + Mecha {max(wick_15m_pct, prev_wick15_pct)*100:.1f}% >= 15% + Toque OPEN en Rojo): "
+                        f"Precio (${current_price:.2f}) <= Open_15m (${open_15m_cur:.2f}) "
+                        f"[1a={climax_1h_1a}, 2d1={deterioration_2d1}, 2d2={deterioration_2d2}]. Cierre {pct}% (+{gain_pct:.2f}%)."
+                    )
+                }
+        except Exception as e15:
+            log_warning(MODULE, f"Error en evaluación 15m (2a/2d): {e15}")
+
+    # ── 3. EVALUACIÓN 5 MINUTOS (2b, 2c, 2d-3) ──
+    if df_5m is not None and len(df_5m) >= 6:
+        try:
+            c5 = _safe_col(df_5m, 'close')
+            o5 = _safe_col(df_5m, 'open')
+            h5 = _safe_col(df_5m, 'high')
+            l5 = _safe_col(df_5m, 'low')
+
+            sma20_5 = c5.rolling(20, min_periods=5).mean()
+            std20_5 = c5.rolling(20, min_periods=5).std().fillna(0)
+            bb_up_5 = sma20_5 + 2.0 * std20_5
+
+            bb_up_5m_cur = float(bb_up_5.iloc[-1])
+            open_5m_cur = float(o5.iloc[-1])
+            high_5m_cur = max(float(h5.iloc[-1]), current_price)
+            low_5m_cur = min(float(l5.iloc[-1]), current_price)
+            rng_5m_cur = max(1e-6, high_5m_cur - low_5m_cur)
+            wick_5m_pct = (high_5m_cur - max(open_5m_cur, current_price)) / rng_5m_cur
+
+            atr_5 = float((h5 - l5).rolling(14, min_periods=3).mean().iloc[-1])
+            delta_5 = max(0.01, min(current_price * 0.0025, 0.15 * atr_5))
+
+            # 2c en 5m: Si precio > BB_Upper_5m, mover TSL a (Open_5m - Delta)
+            if bb_up_5m_cur > 0 and (current_price > bb_up_5m_cur or open_5m_cur > bb_up_5m_cur):
+                cand_2c_5m = round(open_5m_cur - delta_5, 2)
+                if cand_2c_5m > entry_p and cand_2c_5m < current_price:
+                    res['suggested_tsl_2c'] = max(res['suggested_tsl_2c'], cand_2c_5m)
+
+            # Condición 2d-3 (Seguimiento a minuto cuando 5m abre OPEN > BB_Upper_5m):
+            # Mientras sea verde (current_price > open_5m_cur) -> HOLD.
+            # Al PRIMER ROJO (current_price <= open_5m_cur cuando abrio sobre BB_Upper_5m) -> Cierre Total Inmediato!
+            if bb_up_5m_cur > 0 and open_5m_cur > bb_up_5m_cur:
+                if current_price <= open_5m_cur and gain_pct >= 0.5:
+                    return {
+                        **res,
+                        'should_close': True,
+                        'action': 'CLOSE_TOTAL',
+                        'pct_to_close': 100,
+                        'shares_to_close': shares,
+                        'rule_code': 'ALPHA_EXIT_2D3_5M_OPEN_ABOVE_BB_FIRST_RED',
+                        'reason': (
+                            f"Regla 2d-3 (5m Open ${open_5m_cur:.2f} > BB_Upper ${bb_up_5m_cur:.2f} + Primer Giro Rojo): "
+                            f"Precio (${current_price:.2f}) tocó el OPEN de 5m (${open_5m_cur:.2f}). "
+                            f"Cierre Total inmediato asegurando +{gain_pct:.2f}%."
+                        )
+                    }
+
+            # Condición 2b:
+            # En 5m, Open > BB_Upper_5m (o la vela previa de 5m abrió > BB_Upper_5m),
+            # mecha >= 15% en 15m o 5m, y el precio toca el OPEN de 5m terminando en rojo.
+            prev_o5 = float(o5.iloc[-2])
+            prev_bb_up5 = float(bb_up_5.iloc[-2])
+            opened_above_bb5 = (bb_up_5m_cur > 0 and (open_5m_cur > bb_up_5m_cur or prev_o5 > prev_bb_up5))
+            has_15pct_wick = (wick_15m_pct >= 0.15) or (wick_5m_pct >= 0.15)
+            touched_open_5m_red = (current_price <= open_5m_cur)
+
+            if opened_above_bb5 and has_15pct_wick and touched_open_5m_red and gain_pct >= 0.6:
+                close_total = (is_alpha_runner or climax_1h_1a or partial_done or deterioration_2d1 or deterioration_2d2 or shares < 2)
+                pct = 100 if close_total else 50
+                return {
+                    **res,
+                    'should_close': True,
+                    'action': 'CLOSE_TOTAL' if pct == 100 else 'CLOSE_PARTIAL_50',
+                    'pct_to_close': pct,
+                    'shares_to_close': shares if pct == 100 else max(1, int(shares * 0.5)),
+                    'rule_code': 'ALPHA_EXIT_2B_5M_WICK15_OPEN_RED',
+                    'reason': (
+                        f"Regla 2b (5m Open > BB_Upper + Mecha >= 15% + Toque OPEN 5m en Rojo): "
+                        f"Precio (${current_price:.2f}) <= Open_5m (${open_5m_cur:.2f}). Cierre {pct}% (+{gain_pct:.2f}%)."
+                    )
+                }
+        except Exception as e5:
+            log_warning(MODULE, f"Error en evaluación 5m (2b/2d-3): {e5}")
+
+    return res
+
+
+def calculate_alpha_escalating_trailing_stop(
+    position: dict,
+    current_price: float,
+    df_5m: Optional[pd.DataFrame] = None,
+    df_15m: Optional[pd.DataFrame] = None,
+) -> dict:
+    """
+    SECCIÓN B.5 & 2C — TRAILING STOP ESCALONADO EN 3 ETAPAS + DOBLE CONTROL:
+    Aplica a entradas 3a, 4a, 4b, 4c, 4d y activos ALPHA_RUNNER:
+    - Regla 2c (Inmediata si Precio > BB_Upper):
+      Trailing Stop sube a (OPEN - Delta).
+    - Pasadas 3 velas de 5 minutos (>= 15 minutos desde la compra):
+      * Etapa 1 (Mínima Ganancia 5m): Se coloca en el OPEN de la vela de 5m cuyo OPEN > precio de compra.
+      * Etapa 2 (Tendencia Media 15m): Se coloca en (EMA9_15m - Delta).
+      * Etapa 3 (Aceleración Parabólica 15m): Cuando (OPEN > BB_Upper) y (CLOSE > OPEN),
+        se mueve agresivamente a (EMA3_15m - Delta).
+    El ratchet es estrictamente unidireccional: new_tsl = max(current_sl, current_tsl, candidatos).
+    """
+    current_sl = float(position.get('stop_loss') or 0.0)
+    current_tsl = float(position.get('trailing_sl_price') or current_sl)
+    entry_p = float(position.get('avg_price') or position.get('entry_price') or 0.0)
+
+    if entry_p <= 0 or current_price <= 0:
+        return {'should_update': False, 'new_sl': current_sl, 'stage': 'NONE', 'reason': 'Precios inválidos'}
+
+    # Calcular antigüedad en minutos
+    entry_time_str = position.get('first_buy_at') or position.get('entry_time')
+    age_mins = 0.0
+    if entry_time_str:
+        try:
+            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+            age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+        except Exception:
+            age_mins = 0.0
+
+    best_sl = max(current_sl, current_tsl)
+    active_stage = 'INITIAL'
+    reasons = []
+
+    try:
+        # Calcular Delta dinámico basado en ATR de 15m/5m
+        delta = max(0.01, round(current_price * 0.0025, 4))
+        if df_15m is not None and len(df_15m) >= 5:
+            h15 = _safe_col(df_15m, 'high')
+            l15 = _safe_col(df_15m, 'low')
+            atr15 = float((h15 - l15).rolling(14, min_periods=3).mean().iloc[-1])
+            if atr15 > 0:
+                delta = max(0.01, min(current_price * 0.0035, 0.15 * atr15))
+
+        # ── A. Regla 2c: Si Precio > BB_Upper (en 5m o 15m), mover TSL a (Open - Delta) ──
+        if df_5m is not None and len(df_5m) >= 6:
+            c5 = _safe_col(df_5m, 'close')
+            o5 = _safe_col(df_5m, 'open')
+            bb_up_5 = float((c5.rolling(20, min_periods=5).mean() + 2.0 * c5.rolling(20, min_periods=5).std().fillna(0)).iloc[-1])
+            open_5_now = float(o5.iloc[-1])
+            if bb_up_5 > 0 and current_price > bb_up_5:
+                cand_2c = round(open_5_now - delta, 2)
+                if cand_2c > best_sl and cand_2c < current_price * 0.998:
+                    best_sl = cand_2c
+                    active_stage = 'STAGE_2C_OPEN_MINUS_DELTA'
+                    reasons.append(f"2c(Open5m ${open_5_now:.2f}-Δ=${cand_2c:.2f})")
+
+        # ── B. Regla B.5: Pasadas 3 velas de 5 minutos (age_mins >= 15.0) ──
+        if age_mins >= 15.0:
+            # Etapa 1: Precio OPEN de la vela de 5m superior al precio de compra
+            if df_5m is not None and len(df_5m) >= 3:
+                o5 = _safe_col(df_5m, 'open')
+                # Buscar entre las últimas 6 velas de 5m aquellas cuyo OPEN > entry_p y < current_price
+                recent_opens = [float(x) for x in o5.iloc[-6:].values if entry_p < float(x) < current_price * 0.997]
+                if recent_opens:
+                    cand_s1 = round(max(recent_opens), 2)
+                    if cand_s1 > best_sl:
+                        best_sl = cand_s1
+                        active_stage = 'STAGE_1_OPEN5M_ABOVE_ENTRY'
+                        reasons.append(f"Etapa1(Open5m>${entry_p:.2f} -> ${cand_s1:.2f})")
+
+            # Etapa 2 y Etapa 3 en 15 minutos
+            if df_15m is not None and len(df_15m) >= 9:
+                c15 = _safe_col(df_15m, 'close')
+                o15 = _safe_col(df_15m, 'open')
+                ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                bb_up_15 = float((c15.rolling(20, min_periods=5).mean() + 2.0 * c15.rolling(20, min_periods=5).std().fillna(0)).iloc[-1])
+                open_15_now = float(o15.iloc[-1])
+
+                # Etapa 2: (EMA9_15m - Delta)
+                cand_s2 = round(ema9_15 - delta, 2)
+                if cand_s2 > best_sl and cand_s2 < current_price * 0.997 and cand_s2 >= entry_p * 0.985:
+                    best_sl = cand_s2
+                    active_stage = 'STAGE_2_EMA9_15M_MINUS_DELTA'
+                    reasons.append(f"Etapa2(EMA9_15m ${ema9_15:.2f}-Δ=${cand_s2:.2f})")
+
+                # Etapa 3: Si ((OPEN > BB_Upper) y (CLOSE > OPEN)) en 15m o 5m -> mover a (EMA3_15m - Delta)
+                is_accel_15m = (bb_up_15 > 0 and open_15_now > bb_up_15 and current_price > open_15_now)
+                is_accel_5m = False
+                if df_5m is not None and len(df_5m) >= 6:
+                    c5 = _safe_col(df_5m, 'close')
+                    o5 = _safe_col(df_5m, 'open')
+                    bb_up_5 = float((c5.rolling(20, min_periods=5).mean() + 2.0 * c5.rolling(20, min_periods=5).std().fillna(0)).iloc[-1])
+                    open_5_now = float(o5.iloc[-1])
+                    is_accel_5m = (bb_up_5 > 0 and open_5_now > bb_up_5 and current_price > open_5_now)
+
+                if is_accel_15m or is_accel_5m:
+                    cand_s3 = round(ema3_15 - delta, 2)
+                    if cand_s3 > best_sl and cand_s3 < current_price * 0.997:
+                        best_sl = cand_s3
+                        active_stage = 'STAGE_3_EMA3_15M_MINUS_DELTA'
+                        reasons.append(f"Etapa3(EMA3_15m ${ema3_15:.2f}-Δ=${cand_s3:.2f})")
+
+        if best_sl > current_sl and best_sl < current_price:
+            return {
+                'should_update': True,
+                'new_sl': best_sl,
+                'stage': active_stage,
+                'reason': f"TSL Escalonado [{active_stage}]: SL ${current_sl:.2f} -> ${best_sl:.2f} ({', '.join(reasons)})"
+            }
+
+        return {'should_update': False, 'new_sl': current_sl, 'stage': active_stage, 'reason': 'Sin cambio en TSL'}
+    except Exception as e:
+        log_warning(MODULE, f"Error en calculate_alpha_escalating_trailing_stop: {e}")
+        return {'should_update': False, 'new_sl': current_sl, 'stage': 'ERROR', 'reason': str(e)}
+
+
 def evaluate_aduana_stocks_exit(
     position: dict,
     current_price: float,
@@ -703,8 +1092,8 @@ def evaluate_aduana_stocks_exit(
 ) -> dict:
     """
     FUNCIÓN MAESTRA DEL MOTOR ADUANA DE SALIDAS PARA STOCKS (v6.0).
-    Evalúa PnL, Eje Estructural 15m (EMA3 vs EMA9), Maduración (>= +1.5%),
-    Sub-Bandas Fibonacci en 3 Zonas, Micro-Gatillos 5m, Bollinger Macro y EOD Kinetic Trailing.
+    Evalúa PnL, Motor Agudo Sección A (1a, 1b, 2a, 2b, 2c, 2d), Eje Estructural 15m (EMA3 vs EMA9),
+    Maduración (>= +1.5%), Sub-Bandas Fibonacci en 3 Zonas, Micro-Gatillos 5m, Bollinger Macro y EOD Kinetic Trailing.
     """
     if not position or current_price <= 0:
         return {'should_close': False, 'action': 'HOLD', 'reason': 'Sin posición o precio inválido'}
@@ -721,8 +1110,6 @@ def evaluate_aduana_stocks_exit(
     pnl_usd = (current_price - entry_p) * shares if is_long else (entry_p - current_price) * shares
 
     # ── 0. CIERRE FORZOSO EOD INCONDICIONAL (15:50 ET - CERO OVERNIGHT) ──
-    # A las 15:50 ET o más tarde, se liquida el 100% incondicionalmente
-    # sin importar si la posición está en ganancia o pérdida, erradicando el riesgo nocturno.
     if is_eod_hard_deadline(now_dt):
         return {
             'should_close': True,
@@ -736,7 +1123,6 @@ def evaluate_aduana_stocks_exit(
         }
 
     # ── CASO A: SI LA POSICIÓN ESTÁ EN PÉRDIDA O BREAKEVEN (gain_pct <= 0) ──
-    # El motor de TP/Salida con Ganancia no interfiere; la gestión de pérdida la maneja el SL / Panic Recovery Gate.
     if gain_pct <= 0:
         return {
             'should_close': False,
@@ -747,6 +1133,27 @@ def evaluate_aduana_stocks_exit(
         }
 
     # ── CASO B: POSICIÓN EN GANANCIA (gain_pct > 0) ──
+    # 0.5 EVALUACIÓN DEL MOTOR AGUDO SECCIÓN A (1a, 1b, 2a, 2b, 2c, 2d)
+    sharp_res = evaluate_alpha_runner_sharp_exit(
+        position=position,
+        current_price=current_price,
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h
+    )
+    if sharp_res.get('should_close'):
+        return {
+            'should_close': True,
+            'action': sharp_res['action'],
+            'shares_to_close': sharp_res.get('shares_to_close', shares),
+            'pct_to_close': sharp_res.get('pct_to_close', 100),
+            'rule_code': sharp_res.get('rule_code', 'ALPHA_SHARP_EXIT'),
+            'gain_pct': round(gain_pct, 2),
+            'pnl_usd': round(pnl_usd, 2),
+            'reason': sharp_res.get('reason', 'Cierre Agudo Sección A'),
+            'suggested_tsl_2c': sharp_res.get('suggested_tsl_2c', 0.0),
+        }
+
     # 1. Bandas de Fibonacci en 15m y Sub-Bandas (Zonas 1, 2, 3)
     fib_15m = calculate_fibonacci_bands(df_15m, current_price)
     sub_bands = calculate_fibonacci_sub_bands(current_price, fib_15m, side)

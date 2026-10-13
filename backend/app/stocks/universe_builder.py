@@ -119,22 +119,31 @@ class UniverseBuilder:
             f_results = await asyncio.gather(*tasks)
             
             for i, f_data in enumerate(f_results):
+                is_ar = candidates[i].get("_is_alpha_runner", False)
                 if f_data:
                     candidates[i].update(f_data)
                 else:
                     # Fallback si falla el fundamental
                     candidates[i]["fundamental_score"] = 0
+                if is_ar:
+                    existing_pt = str(candidates[i].get("pool_type", "") or "").strip()
+                    if "ALPHA_RUNNER" not in existing_pt:
+                        candidates[i]["pool_type"] = f"ALPHA_RUNNER, {existing_pt}".strip(", ") if existing_pt else "ALPHA_RUNNER"
+                    # Alpha Runners no deben ser bloqueados por 'Biotech Pre-Revenue' o 'Chronic Losses' si cumplen liquidez explosiva
+                    if candidates[i].get("_rvol", 0) >= 2.5 or candidates[i].get("_volume", 0) >= 2_000_000:
+                        candidates[i]["quality_flag"] = "PASS"
 
         if candidates:
             await self._save_to_db(candidates)
             self.last_scan_tickers = [c["ticker"] for c in candidates]
             
             # Preparar estadisticas para el Dashboard
-            counts = {"FUTURE_GIANT": 0, "GROWTH_LEADER": 0, "TOTAL": len(candidates)}
+            counts = {"FUTURE_GIANT": 0, "GROWTH_LEADER": 0, "ALPHA_RUNNER": 0, "TOTAL": len(candidates)}
             for c in candidates:
                 pt = str(c.get("pool_type", ""))
                 if "GIANT" in pt: counts["FUTURE_GIANT"] += 1
                 if "LEADER" in pt: counts["GROWTH_LEADER"] += 1
+                if "ALPHA_RUNNER" in pt: counts["ALPHA_RUNNER"] += 1
             
             log_info(MODULE, f"✅ Universe Sweep Complete: {counts}")
             return candidates
@@ -195,6 +204,8 @@ class UniverseBuilder:
                         "ticker": ticker,
                         "catalyst_score": max(1, 10 - r.get("rank", 50) // 5),
                         "source": "ib_top_gainers",
+                        "_is_alpha_runner": True,
+                        "pool_type": "ALPHA_RUNNER",
                     })
             
             log_info(MODULE, f"IB Scanners merged: {len(merged)} unique tickers "
@@ -218,55 +229,109 @@ class UniverseBuilder:
     ) -> list[dict]:
         """
         Uses yfinance's built-in Screener API to query Yahoo Finance's
-        real-time stock database. This dynamically discovers ALL US equities
-        matching the user's 4 criteria — no hardcoded ticker lists.
-
-        Returns stocks sorted by volume (descending), matching:
-          - Price: $min_price to $max_price
-          - Volume: > min_volume
-          - Market Cap: > min_market_cap
-          - Region: US only
+        real-time stock database across 3 complementary tracks:
+          1. Standard Volume Leaders (MCap >= min_market_cap, sorted by dayvolume)
+          2. Top % Gainers / Alpha Runners ($50M <= MCap, sorted by percentchange)
+          3. Hyper-Liquid Micro-Cap Alpha Runners ($15M - $50M MCap, Vol >= 3M, RVOL >= 5.0x, Price >= $1.20)
         """
         try:
             from yfinance.screener import EquityQuery, screen
 
-            # Build the query matching all 4 criteria
-            query = EquityQuery('AND', [
+            # Effective MCap floor for Track 1 & 2 (at most $50M so $50M-$500M Alpha Runners enter)
+            effective_mcap = min(min_market_cap, 50_000_000)
+
+            query_main = EquityQuery('AND', [
                 EquityQuery('EQ', ['region', 'us']),
-                EquityQuery('GT', ['intradaymarketcap', min_market_cap]),
+                EquityQuery('GT', ['intradaymarketcap', effective_mcap]),
                 EquityQuery('GT', ['dayvolume', min_volume]),
                 EquityQuery('LT', ['intradayprice', max_price]),
                 EquityQuery('GT', ['intradayprice', min_price]),
             ])
 
-            # Fetch from Yahoo — get a large pool, then filter by RVOL locally
-            # Yahoo max size is 250. We fetch all matching, then rank by RVOL.
-            fetch_size = min(250, max(max_results * 3, 100))
-            res = screen(query, size=fetch_size, sortField='dayvolume', sortAsc=False)
+            # Track 3: Special Hyper-Liquid Micro-Cap Track ($15M - $50M, Vol >= 3M, Price >= $1.20)
+            query_hyper_micro = EquityQuery('AND', [
+                EquityQuery('EQ', ['region', 'us']),
+                EquityQuery('GT', ['intradaymarketcap', 15_000_000]),
+                EquityQuery('LT', ['intradaymarketcap', 50_000_000]),
+                EquityQuery('GT', ['dayvolume', 3_000_000]),
+                EquityQuery('LT', ['intradayprice', max_price]),
+                EquityQuery('GT', ['intradayprice', max(min_price, 1.20)]),
+            ])
 
-            if not res or not res.get('quotes'):
-                log_warning(MODULE, "Yahoo Screener: no results returned")
+            fetch_size = min(250, max(max_results * 3, 120))
+            raw_quotes = []
+            seen_syms = set()
+
+            # 1) Fetch by dayvolume
+            try:
+                res_vol = screen(query_main, size=fetch_size, sortField='dayvolume', sortAsc=False)
+                if res_vol and res_vol.get('quotes'):
+                    for q in res_vol['quotes']:
+                        s = q.get('symbol', '')
+                        if s and s not in seen_syms:
+                            seen_syms.add(s)
+                            raw_quotes.append(q)
+            except Exception as e_vol:
+                log_warning(MODULE, f"Yahoo Screener (dayvolume) warning: {e_vol}")
+
+            # 2) Fetch by percentchange (Top Gainers — catches SKYA, BMBL, LNKS, etc.)
+            try:
+                res_gain = screen(query_main, size=fetch_size, sortField='percentchange', sortAsc=False)
+                if res_gain and res_gain.get('quotes'):
+                    added_gain = 0
+                    for q in res_gain['quotes']:
+                        s = q.get('symbol', '')
+                        if s and s not in seen_syms:
+                            seen_syms.add(s)
+                            raw_quotes.append(q)
+                            added_gain += 1
+                    log_info(MODULE, f"Yahoo Screener (percentchange): added {added_gain} Top Gainer candidates")
+            except Exception as e_gain:
+                log_warning(MODULE, f"Yahoo Screener (percentchange) warning: {e_gain}")
+
+            # 3) Fetch Hyper-Liquid Micro-Caps ($15M-$50M, Vol >= 3M)
+            try:
+                res_micro = screen(query_hyper_micro, size=60, sortField='percentchange', sortAsc=False)
+                if res_micro and res_micro.get('quotes'):
+                    added_micro = 0
+                    for q in res_micro['quotes']:
+                        s = q.get('symbol', '')
+                        if s and s not in seen_syms:
+                            seen_syms.add(s)
+                            q['_from_hyper_micro'] = True
+                            raw_quotes.append(q)
+                            added_micro += 1
+                    if added_micro > 0:
+                        log_info(MODULE, f"Yahoo Screener (Hyper-Micro $15M-$50M): added {added_micro} candidates")
+            except Exception as e_micro:
+                log_warning(MODULE, f"Yahoo Screener (hyper_micro) warning: {e_micro}")
+
+            if not raw_quotes:
+                log_warning(MODULE, "Yahoo Screener: no results returned across queries")
                 return []
 
-            total_in_yahoo = res.get('total', 0)
-            log_info(MODULE, f"Yahoo Screener: {total_in_yahoo} total matches in US market, "
-                             f"fetched {len(res['quotes'])} by volume")
+            log_info(MODULE, f"Yahoo Screener: {len(raw_quotes)} unique US quotes combined across Volume + Top Gainers + Hyper-Micro")
 
             candidates = []
-            for rank, q in enumerate(res['quotes']):
+            for rank, q in enumerate(raw_quotes):
                 sym = q.get('symbol', '')
-                if not sym or '.' in sym:  # Skip ADRs with dots
+                if not sym or '.' in sym:  # Skip ADRs/Warrants with dots
                     continue
 
-                price = q.get('regularMarketPrice', 0)
-                vol = q.get('regularMarketVolume', 0)
-                avg_vol = q.get('averageDailyVolume3Month', 1)
-                mcap = q.get('marketCap', 0)
-                chg_pct = q.get('regularMarketChangePercent', 0)
+                price = float(q.get('regularMarketPrice') or 0)
+                vol = int(q.get('regularMarketVolume') or 0)
+                avg_vol = int(q.get('averageDailyVolume3Month') or 1)
+                mcap = float(q.get('marketCap') or 0)
+                chg_pct = float(q.get('regularMarketChangePercent') or 0)
                 name = q.get('shortName', '')
 
                 # Compute RVOL (today's volume / 3-month average)
-                rvol = vol / avg_vol if avg_vol > 0 else 0
+                rvol = vol / avg_vol if avg_vol > 0 else 0.0
+
+                # Strict gate for Hyper-Micro ($15M - $50M): require RVOL >= 5.0 and Vol >= 3M and Price >= $1.20
+                if q.get('_from_hyper_micro') or (0 < mcap < 50_000_000):
+                    if vol < 3_000_000 or rvol < 5.0 or price < 1.20:
+                        continue
 
                 # Volatilidad intradía estimada
                 day_high = float(q.get('regularMarketDayHigh') or price)
@@ -277,10 +342,20 @@ class UniverseBuilder:
                 if price > 0 and today_range_pct < 1.2 and abs(chg_pct) < 0.8 and rvol < 1.2:
                     continue
 
+                # Clasificación ALPHA_RUNNER:
+                # 1) Small/Mid-Cap Runner ($15M - $500M MCap) con RVOL >= 1.8 o Change >= +4.0%
+                # 2) Cualquier activo explosivo con Change >= +6.0% y RVOL >= 2.5
+                is_alpha_runner = (
+                    (15_000_000 <= mcap <= 500_000_000 and (rvol >= 1.8 or chg_pct >= 4.0 or today_range_pct >= 5.0))
+                    or (chg_pct >= 6.0 and rvol >= 2.5)
+                )
+
                 candidates.append({
                     "ticker": sym.upper(),
-                    "catalyst_score": max(1, min(10, int(vol / 5_000_000))),
-                    "source": "yf_screener",
+                    "catalyst_score": max(1, min(10, int(vol / 3_000_000) + (3 if is_alpha_runner else 0))),
+                    "source": "yf_alpha_runner" if is_alpha_runner else "yf_screener",
+                    "pool_type": "ALPHA_RUNNER" if is_alpha_runner else "",
+                    "_is_alpha_runner": is_alpha_runner,
                     # Extra metadata for downstream processing
                     "_price": price,
                     "_volume": vol,
@@ -292,25 +367,41 @@ class UniverseBuilder:
                     "_today_range_pct": today_range_pct,
                 })
 
-            # To ensure we don't miss high volume leaders (like OPEN, SOFI), 
-            # we will keep the top 50% by raw volume, and the top 50% by RVOL.
-            candidates_by_vol = sorted(candidates, key=lambda x: x.get("_volume", 0), reverse=True)
+            # Keep balanced mix:
+            # 1) Top 40% Alpha Runners (sorted by change_pct * rvol)
+            # 2) Top 30% by RVOL
+            # 3) Top 30% by Volume
+            alpha_Quota = max(15, int(max_results * 0.45))
+            rvol_Quota = max(15, int(max_results * 0.80))
+
+            alpha_list = sorted(
+                [c for c in candidates if c.get("_is_alpha_runner")],
+                key=lambda x: (x.get("_change_pct", 0) * max(1.0, min(x.get("_rvol", 1.0), 10.0))),
+                reverse=True
+            )
             candidates_by_rvol = sorted(candidates, key=lambda x: x.get("_rvol", 0), reverse=True)
-            
-            half_results = max_results // 2
-            
+            candidates_by_vol = sorted(candidates, key=lambda x: x.get("_volume", 0), reverse=True)
+
             final_candidates_set = set()
             final_candidates = []
-            
-            # 1. Add top by RVOL
-            for c in candidates_by_rvol:
-                if len(final_candidates) >= half_results:
+
+            # 1. Add top Alpha Runners first so explosive movers are never dropped
+            for c in alpha_list:
+                if len(final_candidates) >= alpha_Quota:
                     break
                 if c["ticker"] not in final_candidates_set:
                     final_candidates.append(c)
                     final_candidates_set.add(c["ticker"])
-                    
-            # 2. Add top by Volume
+
+            # 2. Add top by RVOL
+            for c in candidates_by_rvol:
+                if len(final_candidates) >= rvol_Quota:
+                    break
+                if c["ticker"] not in final_candidates_set:
+                    final_candidates.append(c)
+                    final_candidates_set.add(c["ticker"])
+
+            # 3. Add top by Volume up to max_results
             for c in candidates_by_vol:
                 if len(final_candidates) >= max_results:
                     break
@@ -318,11 +409,10 @@ class UniverseBuilder:
                     final_candidates.append(c)
                     final_candidates_set.add(c["ticker"])
 
-            # Log RVOL distribution for debugging
             rvol_above_15 = sum(1 for c in final_candidates if c.get("_rvol", 0) >= 1.5)
-            rvol_above_10 = sum(1 for c in final_candidates if c.get("_rvol", 0) >= 1.0)
-            log_info(MODULE, f"Yahoo Screener: {len(candidates)} US stocks fetched | "
-                             f"Kept {len(final_candidates)} | RVOL>=1.5: {rvol_above_15} | RVOL>=1.0: {rvol_above_10}")
+            alpha_count = sum(1 for c in final_candidates if c.get("_is_alpha_runner"))
+            log_info(MODULE, f"Yahoo Screener: {len(candidates)} US stocks filtered | "
+                             f"Kept {len(final_candidates)} | ALPHA_RUNNER: {alpha_count} | RVOL>=1.5: {rvol_above_15}")
 
             return final_candidates
 

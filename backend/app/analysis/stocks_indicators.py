@@ -514,6 +514,8 @@ def upsert_technical_score(
                 "pullback_type": indicators.get("pullback_type", ""),
                 "pullback_order_type": indicators.get("pullback_order_type", ""),
                 "pullback_reason": indicators.get("pullback_reason", ""),
+                "pool_type": indicators.get("pool_type", "HOT"),
+                "recommended_sl": float(indicators.get("recommended_sl", 0.0) or 0.0),
             },
             "apex_4h": indicators.get("apex_4h"),
             "apex_1d": indicators.get("apex_1d"),

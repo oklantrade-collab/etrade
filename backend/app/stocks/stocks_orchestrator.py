@@ -543,9 +543,10 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
         .execute()
     owned_tickers = {p['ticker'] for p in (pos_res.data or [])}
 
-    # ── COOLDOWN POST-CIERRE (60 MIN) Y LISTA NEGRA INTRADÍA ANTE PÉRDIDA/HARD CAP ──
+    # ── COOLDOWN POST-CIERRE (60 MIN), LISTA NEGRA Y GUARDIA POST-CLÍMAX 1H ──
     cooling_down_tickers = set()
     blacklisted_tickers = set()
+    climax_exited_tickers = set()
     try:
         now_utc = datetime.now(timezone.utc)
         start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -560,12 +561,16 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 continue
             exit_d_str = jr.get('exit_date')
             pnl_p = float(jr.get('pnl_pct') or 0.0)
-            reason = str(jr.get('exit_reason') or '')
+            reason = str(jr.get('exit_reason') or '').lower()
 
             # Si sufrió una pérdida >= 2.5% o fue cortada por hard_cap / stop loss hoy, bloquear por el resto del día
             if pnl_p <= -2.5 or 'hard_cap' in reason or 'sl_' in reason:
                 blacklisted_tickers.add(t)
                 continue
+
+            # Si salió hoy por Clímax 1H (1a/1b UPPER_6), registrar para evitar re-entrada prematura en 3a
+            if '1b_upper6' in reason or 'climax' in reason or '2d3_' in reason:
+                climax_exited_tickers.add(t)
 
             # Cooldown de 60 minutos después de cualquier cierre (ej. toma de ganancias o salida manual)
             if exit_d_str:
@@ -613,6 +618,16 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 
             if not snap or not snap.get('price'):
                 continue
+
+            # Enriquecer snap con signals_json de technical_scores (para disponer de pullback_triggered, pool_type, etc.)
+            try:
+                ts_res = supabase.table('technical_scores').select('signals_json').eq('ticker', ticker).limit(1).execute()
+                if ts_res.data and isinstance(ts_res.data[0].get('signals_json'), dict):
+                    for k_sig, v_sig in ts_res.data[0]['signals_json'].items():
+                        if snap.get(k_sig) is None:
+                            snap[k_sig] = v_sig
+            except Exception:
+                pass
 
             # Obtener fundamentales
             fund_res = supabase \
@@ -739,6 +754,16 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             is_trap = bool(snap.get('is_trap', False))
             is_intraday_alpha = bool(snap.get('is_intraday_alpha', False)) and (not is_trap)
 
+            # Sección B: Gatillos de Compra/Recompra (3a, 4a, 4b, 4c, 4d)
+            pullback_triggered = bool(snap.get('pullback_triggered', False)) and (not is_trap)
+            pullback_type = str(snap.get('pullback_type') or '')
+            # Guardia Post-Clímax 1H: Si ya salió por clímax 1H hoy, bloquear re-entrada 3a en EMA3_1H
+            if ticker in climax_exited_tickers and '3A' in pullback_type.upper():
+                log_info(MODULE, f"⛔ {ticker}: Regla 3a bloqueada porque el activo ya ejecutó salida de Clímax 1H hoy.")
+                pullback_triggered = False
+
+            enters_by_pullback = pullback_triggered and (not overbought['blocked'] or 'LOWER' in pullback_type.upper() or '3A' in pullback_type.upper() or '4C' in pullback_type.upper())
+
             is_high_growth = bool(snap.get('is_high_growth_opp', False)) or (bf_score >= 70 and not overbought['blocked'])
             enters_by_growth = is_high_growth and bool(snap.get('entry_route_1h'))
             enters_by_alpha = is_intraday_alpha and (not overbought['blocked'])
@@ -752,7 +777,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             )
             enters_by_breakout = breakout_5m.get('triggered', False)
 
-            if enters_by_alpha:
+            if enters_by_pullback:
+                log_info(MODULE, f'🎯 {ticker}: Gatillo Sección B [{pullback_type}] — {snap.get("pullback_reason", "")}')
+            elif enters_by_alpha:
                 log_info(MODULE, f'🚀 {ticker}: Intraday Alpha Sweet-Spot (Potencial +{snap.get("growth_potential_pct", 5.0)}%, Gap +{snap.get("gap_pct", 0.0)}%)')
             elif enters_by_breakout:
                 log_info(MODULE, f'🎯 {ticker}: {breakout_5m["reason"]}')
@@ -760,12 +787,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 log_info(MODULE, f'🔥 {ticker}: High Growth Swing 1H ({snap.get("entry_route_1h")} en {snap.get("entry_support_1h")}) | BF Score={bf_score}')
 
             # Definir estado inicial
-            # Si tiene señal de regla, alto crecimiento, intraday alpha o score alto -> pending (lista para comprar)
-            # Si no -> watching (solo monitoreo)
-            status = 'pending' if (enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
+            status = 'pending' if (enters_by_pullback or enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
 
-            # Recalcular rank con boost si es intraday alpha o alto crecimiento
-            if enters_by_alpha:
+            # Recalcular rank con boost si es pullback Sección B, intraday alpha o alto crecimiento
+            if enters_by_pullback:
+                rank = 98.8
+            elif enters_by_alpha:
                 rank = 98.5
             elif enters_by_growth:
                 rank = calculate_composite_rank(
@@ -776,7 +803,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 )
 
             entry_reason = 'apex_auto'
-            if enters_by_alpha:
+            if enters_by_pullback:
+                entry_reason = f'{pullback_type}: {snap.get("pullback_reason", "")}'[:100]
+            elif enters_by_alpha:
                 entry_reason = f'intraday_alpha_pot_{snap.get("growth_potential_pct", 5.0)}%'
             elif enters_by_growth:
                 entry_reason = f'high_growth_1h_{snap.get("entry_route_1h", "pullback")}_{snap.get("entry_support_1h", "")}'
@@ -785,19 +814,25 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             elif enters_by_rule:
                 entry_reason = f'rule_{rule_signal.get("rule_code", "")}'
 
+            group_val = str(snap.get('pool_type') or fund.get('pool_type', '') or '')
+            if is_intraday_alpha and 'ALPHA_RUNNER' not in group_val:
+                group_val = f"ALPHA_RUNNER, {group_val}".strip(", ") if group_val else "ALPHA_RUNNER"
+
             candidate = {
                 'ticker':            ticker,
-                'group_name':        fund.get('pool_type', ''),
+                'group_name':        group_val,
                 'apex_4h':           apex_4h,
                 'apex_1d':           apex_1d,
                 'return_expected':   ret_exp,
                 'confidence':        conf,
                 'composite_rank':    rank,
-                'is_overbought':     overbought['blocked'],
+                'is_overbought':     False if enters_by_pullback else overbought['blocked'],
                 'overbought_reason': overbought.get('reason', ''),
                 'rsi':               overbought['rsi'],
                 'fib_zone':          overbought['fib_zone'],
-                'has_rule_signal':   enters_by_rule or enters_by_breakout or enters_by_growth,
+                'has_rule_signal':   enters_by_pullback or enters_by_rule or enters_by_breakout or enters_by_growth,
+                'is_pullback_b':     enters_by_pullback,
+                'pullback_rule_code': pullback_type if enters_by_pullback else '',
                 'is_breakout_5m':    enters_by_breakout,
                 'is_high_growth_opp': enters_by_growth,
                 'buying_force_score': bf_score,
@@ -818,14 +853,15 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             log_warning(MODULE, f'{ticker}: {e}')
             continue
 
-    # Ordenar la cola (Alto Crecimiento 1H y Breakout tienen máxima prioridad)
+    # Ordenar la cola (Pullback Sección B, Alto Crecimiento 1H y Breakout tienen máxima prioridad)
     def sort_key(c):
+        is_pb          = c.get('is_pullback_b', False)
         is_growth      = c.get('is_high_growth_opp', False)
         is_breakout    = c.get('is_breakout_5m', False)
         has_rule       = c['has_rule_signal']
         not_overbought = not c['is_overbought']
         rank           = c['composite_rank']
-        return (is_growth and not_overbought, is_breakout, has_rule and not_overbought, not_overbought, rank)
+        return (is_pb and not_overbought, is_growth and not_overbought, is_breakout, has_rule and not_overbought, not_overbought, rank)
 
     queue_candidates.sort(key=sort_key, reverse=True)
 
@@ -892,8 +928,12 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase)
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
-        # Breakout 5m override — Fast Track
-        if candidate.get('is_breakout_5m'):
+        # Prioridad 1: Gatillo Estructural Sección B (3a, 4a, 4b, 4c, 4d)
+        if candidate.get('is_pullback_b') and candidate.get('pullback_rule_code'):
+            rule_code = candidate['pullback_rule_code']
+            order_type = 'market'
+        # Prioridad 2: Breakout 5m override — Fast Track
+        elif candidate.get('is_breakout_5m'):
             rule_code = 'Aa30_STK'
             order_type = 'market'
         elif rule_sig.get('has_signal'):

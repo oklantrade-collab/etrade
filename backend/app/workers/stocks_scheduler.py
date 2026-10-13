@@ -367,10 +367,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             log_info(MODULE, f"🚫 Blocking {ticker}: Gap Down ({gap_pct}%). Bearish sentiment for the day.")
             return None
 
-        # Case 3: Extreme Extension
-        # Un gap positivo inmenso (+8%) deja a la acción agotada y vulnerable a masivas tomas de ganancia.
-        if gap_pct > 8.0:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Gap ({gap_pct}%). High reversal risk.")
+        # Case 3: Extreme Parabolic Extension (> 45% governed by TrapShield)
+        if gap_pct > 45.0:
+            log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Parabolic Gap ({gap_pct}%). High reversal risk.")
             return None
 
         # 4. TECHNICAL RULES
@@ -682,8 +681,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["plus_di_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('plus_di', 0)
         ind_15m["minus_di_5m"] = fast_entry_res['adx_metrics'].get('5m', {}).get('minus_di', 0)
 
-        # ── NUEVO: PULLBACK BUYING ENGINE (MACRO 1H/15M + LOWER_5/6 + LIMIT EMA9/20) ──
+        # ── NUEVO: PULLBACK & STRUCTURAL BUY ENGINE (SECCIÓN B: 3a, 4a, 4b, 4c, 4d) ──
         from app.stocks.pullback_engine import evaluate_pullback_setup
+        pine_sig_str = str(ind_15m.get("last_pinescript_signal") or ind_5m.get("last_pinescript_signal") or "")
         pullback_res = evaluate_pullback_setup(
             current_price=current_price,
             df_5m=df_5m,
@@ -691,7 +691,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             df_1h=df_1h,
             bands_15m=movement_15m.get('bands') or {},
             vwap=trap_shield_res.get('vwap', 0.0),
-            spread=0.02
+            spread=0.02,
+            pinescript_signal=pine_sig_str,
+            sipv_signal_15m=sipv_signal_15m
         )
 
         ind_15m["pullback_triggered"] = pullback_res['pullback_triggered']
@@ -699,6 +701,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["pullback_order_type"] = pullback_res['order_type']
         ind_15m["pullback_reason"] = pullback_res['reason']
         ind_15m["pullback_limit_orders"] = pullback_res.get('limit_orders', [])
+        if pullback_res['pullback_triggered'] and pullback_res.get('recommended_sl', 0) > 0:
+            ind_15m["recommended_sl"] = pullback_res['recommended_sl']
 
         ind_15m["is_trap"] = trap_shield_res['is_trap']
         ind_15m["trap_type"] = trap_shield_res['trap_type']
@@ -708,6 +712,18 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["is_intraday_alpha"] = trap_shield_res['is_intraday_alpha']
         ind_15m["growth_potential_pct"] = trap_shield_res['growth_potential_pct']
         ind_15m["intraday_alpha_score"] = trap_shield_res.get('intraday_alpha_score', 0)
+
+        # Clasificar categoría ALPHA_RUNNER explícitamente si es runner de $15M-$500M o Intraday Alpha
+        is_alpha_runner_cat = (
+            trap_shield_res.get('is_intraday_alpha', False)
+            or (15_000_000 <= mcap <= 500_000_000 and (rvol_1h_val >= 1.8 or abs(float(ind_15m.get("change_pct") or 0)) >= 4.0))
+            or ("ALPHA_RUNNER" in str(ind_15m.get("pool_type", "")))
+        )
+        if is_alpha_runner_cat and not trap_shield_res['is_trap']:
+            cur_pt = str(ind_15m.get("pool_type", "") or "").strip()
+            if "ALPHA_RUNNER" not in cur_pt:
+                ind_15m["pool_type"] = f"ALPHA_RUNNER, {cur_pt}".strip(", ") if cur_pt and cur_pt != "HOT" else "ALPHA_RUNNER"
+            ind_15m["is_intraday_alpha"] = True
 
         # ── GESTIÓN DE COLA DE ALTA PRIORIDAD & EXCLUSIÓN DE TRAMPAS ──
         # 1. Si es TRAMPA: Bloquear en la cola para erradicar compras no deseadas
@@ -1917,6 +1933,27 @@ async def start_stocks_scheduler(force=False):
         trigger=IntervalTrigger(minutes=5),
         id="stocks_tp_cycle",
         name="Stocks TP Manager (3 Blocks, 5m)",
+        max_instances=1,
+        replace_existing=True,
+    )
+
+    # 1c. FAST-TICK POSITION MONITOR (15 segundos): Seguimiento al minuto/15s para Regla 2d-3, 2a, 2b y TSL B.5
+    async def run_fast_tick_position_monitor():
+        is_open, _ = is_market_open()
+        if not is_open:
+            return
+        try:
+            from app.stocks.position_monitor import PositionMonitor
+            pm = PositionMonitor()
+            await pm.check_fast_tick_positions()
+        except Exception as ft_err:
+            log_warning(MODULE, f"Fast-tick position monitor warning: {ft_err}")
+
+    scheduler.add_job(
+        run_fast_tick_position_monitor,
+        trigger=IntervalTrigger(seconds=15),
+        id="stocks_fast_tick_monitor",
+        name="Alpha Runner Fast-Tick Monitor (15s)",
         max_instances=1,
         replace_existing=True,
     )
