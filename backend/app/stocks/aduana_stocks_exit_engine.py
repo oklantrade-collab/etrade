@@ -962,6 +962,7 @@ def calculate_alpha_escalating_trailing_stop(
     current_price: float,
     df_5m: Optional[pd.DataFrame] = None,
     df_15m: Optional[pd.DataFrame] = None,
+    now_dt: Optional[datetime] = None,
 ) -> dict:
     """
     SECCIÓN B.5 & 2C — TRAILING STOP ESCALONADO EN 3 ETAPAS + DOBLE CONTROL:
@@ -988,7 +989,11 @@ def calculate_alpha_escalating_trailing_stop(
     if entry_time_str:
         try:
             entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
-            age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+            ref_now = now_dt if now_dt is not None else datetime.now(timezone.utc)
+            if getattr(ref_now, 'tzinfo', None) is not None and getattr(entry_dt, 'tzinfo', None) is not None:
+                age_mins = (ref_now - entry_dt).total_seconds() / 60.0
+            else:
+                age_mins = (ref_now.replace(tzinfo=None) - entry_dt.replace(tzinfo=None)).total_seconds() / 60.0
         except Exception:
             age_mins = 0.0
 
@@ -1042,9 +1047,9 @@ def calculate_alpha_escalating_trailing_stop(
                 bb_up_15 = float((c15.rolling(20, min_periods=5).mean() + 2.0 * c15.rolling(20, min_periods=5).std().fillna(0)).iloc[-1])
                 open_15_now = float(o15.iloc[-1])
 
-                # Etapa 2: (EMA9_15m - Delta)
+                # Etapa 2: (EMA9_15m - Delta) — solo se activa cuando asegura mínima ganancia (> entry_p)
                 cand_s2 = round(ema9_15 - delta, 2)
-                if cand_s2 > best_sl and cand_s2 < current_price * 0.997 and cand_s2 >= entry_p * 0.985:
+                if cand_s2 > best_sl and cand_s2 > entry_p * 1.001 and cand_s2 < current_price * 0.997:
                     best_sl = cand_s2
                     active_stage = 'STAGE_2_EMA9_15M_MINUS_DELTA'
                     reasons.append(f"Etapa2(EMA9_15m ${ema9_15:.2f}-Δ=${cand_s2:.2f})")
@@ -1061,7 +1066,7 @@ def calculate_alpha_escalating_trailing_stop(
 
                 if is_accel_15m or is_accel_5m:
                     cand_s3 = round(ema3_15 - delta, 2)
-                    if cand_s3 > best_sl and cand_s3 < current_price * 0.997:
+                    if cand_s3 > best_sl and cand_s3 > entry_p * 1.002 and cand_s3 < current_price * 0.997:
                         best_sl = cand_s3
                         active_stage = 'STAGE_3_EMA3_15M_MINUS_DELTA'
                         reasons.append(f"Etapa3(EMA3_15m ${ema3_15:.2f}-Δ=${cand_s3:.2f})")
@@ -1109,6 +1114,20 @@ def evaluate_aduana_stocks_exit(
     gain_pct = ((current_price - entry_p) / entry_p * 100.0) if is_long else ((entry_p - current_price) / entry_p * 100.0)
     pnl_usd = (current_price - entry_p) * shares if is_long else (entry_p - current_price) * shares
 
+    # Calcular antigüedad real de la posición en minutos (compatible con simulación y tiempo real)
+    entry_time_str = position.get('first_buy_at') or position.get('entry_time')
+    age_mins = 0.0
+    if entry_time_str:
+        try:
+            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+            ref_now = now_dt if now_dt is not None else datetime.now(timezone.utc)
+            if getattr(ref_now, 'tzinfo', None) is not None and getattr(entry_dt, 'tzinfo', None) is not None:
+                age_mins = (ref_now - entry_dt).total_seconds() / 60.0
+            else:
+                age_mins = (ref_now.replace(tzinfo=None) - entry_dt.replace(tzinfo=None)).total_seconds() / 60.0
+        except Exception:
+            age_mins = 0.0
+
     # ── 0. CIERRE FORZOSO EOD INCONDICIONAL (15:50 ET - CERO OVERNIGHT) ──
     if is_eod_hard_deadline(now_dt):
         return {
@@ -1122,8 +1141,63 @@ def evaluate_aduana_stocks_exit(
             'reason': f"Hard-Exit EOD (15:50 ET): Liquidación forzosa incondicional del 100% para erradicar riesgo nocturno/dilución ({gain_pct:+.2f}% / ${pnl_usd:+.2f} USD)."
         }
 
+    # ── 0.1 CIERRE POR ESTANCAMIENTO / ZOMBIE TRADE (age_mins >= 45m sin tracción) ──
+    # Evita que posiciones laterales terminen en ADUANA_STK_EOD_HARD_EXIT o STOP_LOSS_INITIAL
+    if age_mins >= 45.0 and -0.45 <= gain_pct <= 0.25 and df_15m is not None and len(df_15m) >= 9 and df_5m is not None and len(df_5m) >= 3:
+        try:
+            c15 = _safe_col(df_15m, 'close')
+            ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+            c5_now = float(_safe_col(df_5m, 'close').iloc[-1])
+            o5_now = float(_safe_col(df_5m, 'open').iloc[-1])
+            if ema3_15 <= ema9_15 * 1.0005 and c5_now <= o5_now:
+                return {
+                    'should_close': True,
+                    'action': 'CLOSE_TOTAL',
+                    'shares_to_close': shares,
+                    'pct_to_close': 100,
+                    'rule_code': 'ADUANA_ZOMBIE_TIME_EXIT',
+                    'gain_pct': round(gain_pct, 2),
+                    'pnl_usd': round(pnl_usd, 2),
+                    'reason': f"Cierre por Estancamiento ({age_mins:.0f}m en posición, {gain_pct:+.2f}%): EMA3_15m <= EMA9_15m sin tracción alcista. Libera slot y evita EOD_HARD_EXIT."
+                }
+        except Exception:
+            pass
+
     # ── CASO A: SI LA POSICIÓN ESTÁ EN PÉRDIDA O BREAKEVEN (gain_pct <= 0) ──
     if gain_pct <= 0:
+        # 0.2 ESCUDO DE INVALIDACIÓN ESTRUCTURAL 1H (Corte temprano antes del STOP_LOSS_INITIAL)
+        if age_mins >= 15.0 and gain_pct <= -0.50 and df_5m is not None and len(df_5m) >= 6 and df_15m is not None and len(df_15m) >= 9:
+            try:
+                c5 = _safe_col(df_5m, 'close')
+                o5 = _safe_col(df_5m, 'open')
+                ema3_5 = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_5 = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
+                c15 = _safe_col(df_15m, 'close')
+                ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+
+                broke_1h_ema20 = False
+                if df_1h is not None and len(df_1h) >= 6:
+                    c1h = _safe_col(df_1h, 'close')
+                    ema20_1h = float(c1h.ewm(span=20, adjust=False).mean().iloc[-1])
+                    if ema20_1h > 0 and current_price < ema20_1h * 0.995:
+                        broke_1h_ema20 = True
+
+                if (broke_1h_ema20 or ema3_15 < ema9_15 * 0.994) and float(c5.iloc[-1]) < float(o5.iloc[-1]) and ema3_5 < ema9_5:
+                    return {
+                        'should_close': True,
+                        'action': 'CLOSE_TOTAL',
+                        'shares_to_close': shares,
+                        'pct_to_close': 100,
+                        'rule_code': 'ADUANA_STRUCTURAL_1H_BREAK_EXIT',
+                        'gain_pct': round(gain_pct, 2),
+                        'pnl_usd': round(pnl_usd, 2),
+                        'reason': f"Corte Temprano por Invalidación Estructural ({gain_pct:+.2f}%): Pérdida de EMA20_1H / EMA9_15m tras {age_mins:.0f}m. Evita recorrido hasta STOP_LOSS_INITIAL."
+                    }
+            except Exception:
+                pass
+
         return {
             'should_close': False,
             'action': 'HOLD',

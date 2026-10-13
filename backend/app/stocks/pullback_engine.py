@@ -260,8 +260,10 @@ def evaluate_macro_pullback_gate(
 
 def is_in_pullback_time_window(now_dt: Optional[datetime] = None) -> bool:
     """
-    Ventana operativa para compras y recompras intradía:
-    09:40 ET a 15:10 ET (respeta el cutoff EOD de las 15:15 ET).
+    Ventana operativa optimizada para compras y recompras intradía:
+    09:45 ET a 14:40 ET:
+      - Evita el latigazo de apertura (09:30 - 09:44 ET: Opening Whipsaw).
+      - Evita entradas tardías (>= 14:45 ET) que quedan atrapadas en ADUANA_STK_EOD_HARD_EXIT.
     """
     if now_dt is None:
         try:
@@ -275,7 +277,7 @@ def is_in_pullback_time_window(now_dt: Optional[datetime] = None) -> bool:
             pass
 
     t = now_dt.time()
-    return dt_time(9, 40) <= t <= dt_time(15, 10)
+    return dt_time(9, 45) <= t <= dt_time(14, 40)
 
 
 def check_vwap_support(current_price: float, vwap: float) -> bool:
@@ -283,6 +285,83 @@ def check_vwap_support(current_price: float, vwap: float) -> bool:
     if vwap <= 0 or current_price <= 0:
         return True
     return current_price >= (vwap * 0.985)
+
+
+def evaluate_low_profit_predictor(
+    current_price: float,
+    recommended_sl: float,
+    df_5m: Optional[pd.DataFrame],
+    df_15m: Optional[pd.DataFrame],
+    bands_15m: Optional[dict] = None,
+    pool_type: str = 'HOT_MOMENTUM'
+) -> dict:
+    """
+    PATRÓN PREDICTOR DE POCA GANANCIA (Room-to-Run & ATR Compression Gate):
+    Bloquea la entrada en acciones comprimidas/laterales que solo ofrecen micro-ganancias (+0.3% a +0.5%)
+    frente a un riesgo de Stop Loss de -1.5% a -2.5%:
+      1. Room-to-Run 15m (% distancia al techo BB_Upper_15m / UPPER_3) >= 1.25% (o >= 1.65% en ALPHA_RUNNER).
+      2. Ancho de Banda Bollinger 15m (BB_Width_15m) >= 1.55% y amplitud media 5m (ATR_5m %) >= 0.35%.
+      3. Relación Beneficio / Riesgo (RoomToRun / StopLossDist) >= 1.30x.
+    """
+    if current_price <= 0 or df_5m is None or len(df_5m) < 10 or df_15m is None or len(df_15m) < 10:
+        return {'passed': True, 'reason': 'Datos insuficientes para filtro de amplitud'}
+
+    try:
+        c15 = _safe_col(df_15m, 'close')
+        win15 = min(20, len(c15) - 1)
+        sma15 = float(c15.rolling(win15, min_periods=5).mean().iloc[-1])
+        std15 = float(c15.rolling(win15, min_periods=5).std(ddof=0).fillna(0).iloc[-1])
+        bb_up_15 = sma15 + 2.0 * std15
+        bb_lo_15 = sma15 - 2.0 * std15
+        bb_width_15_pct = ((bb_up_15 - bb_lo_15) / max(1e-6, sma15)) * 100.0
+
+        upper3_15 = float((bands_15m or {}).get('upper_3') or bb_up_15)
+        ceiling_15 = max(bb_up_15, upper3_15)
+        room_to_run_pct = ((ceiling_15 - current_price) / current_price) * 100.0
+
+        h5 = _safe_col(df_5m, 'high').iloc[-10:]
+        l5 = _safe_col(df_5m, 'low').iloc[-10:]
+        atr_5m_pct = float((h5 - l5).mean() / current_price * 100.0)
+
+        risk_pct = max(0.35, ((current_price - recommended_sl) / current_price) * 100.0)
+        reward_to_risk = room_to_run_pct / risk_pct
+
+        is_alpha = str(pool_type or '').upper() == 'ALPHA_RUNNER'
+        min_room = 1.65 if is_alpha else 1.25
+
+        if bb_width_15_pct < 1.55 or atr_5m_pct < 0.35:
+            return {
+                'passed': False,
+                'reason': f"SKIP_LOW_PROFIT_COMPRESSION: BB_Width_15m={bb_width_15_pct:.2f}% (<1.55%) o ATR_5m={atr_5m_pct:.2f}% (<0.35%)",
+                'room_to_run_pct': round(room_to_run_pct, 2),
+                'reward_to_risk': round(reward_to_risk, 2),
+            }
+
+        if room_to_run_pct < min_room:
+            return {
+                'passed': False,
+                'reason': f"SKIP_LOW_ROOM_TO_RUN: Recorrido al techo 15m={room_to_run_pct:.2f}% (<{min_room:.2f}%)",
+                'room_to_run_pct': round(room_to_run_pct, 2),
+                'reward_to_risk': round(reward_to_risk, 2),
+            }
+
+        if reward_to_risk < 1.30:
+            return {
+                'passed': False,
+                'reason': f"SKIP_LOW_REWARD_RISK: Ratio R/R={reward_to_risk:.2f}x (<1.30x, Room={room_to_run_pct:.2f}% vs Risk={risk_pct:.2f}%)",
+                'room_to_run_pct': round(room_to_run_pct, 2),
+                'reward_to_risk': round(reward_to_risk, 2),
+            }
+
+        return {
+            'passed': True,
+            'reason': f"Potencial Validado (Room={room_to_run_pct:.2f}%, R/R={reward_to_risk:.2f}x, BB_Width={bb_width_15_pct:.2f}%)",
+            'room_to_run_pct': round(room_to_run_pct, 2),
+            'reward_to_risk': round(reward_to_risk, 2),
+        }
+    except Exception as e:
+        log_warning(MODULE, f"Error en evaluate_low_profit_predictor: {e}")
+        return {'passed': True, 'reason': 'Fallback predictor'}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -311,28 +390,37 @@ def evaluate_rule_3a_ema3_1h_dip(
     bands_15m: Optional[dict] = None
 ) -> dict:
     """
-    REGLA 3a (SECCIÓN B.3):
-    - En temporalidad de 1 hora: Precio OPEN <= EMA3_1H (o Low_1H toca EMA3_1H en retroceso sano).
-    - Buscamos en temporalidad de 5m o 15m cualquiera de:
-        1) CLOSE < BANDA_INFERIOR_BOLLINGER
-        2) LOW < LOWER_5
-        3) LOW < LOWER_6
-    - Filtro Anti-Cuchillo: Mecha inferior >= 20% o vela verde / precio recuperando EMA3_5m.
+    REGLA 3a (SECCIÓN B.3 — REINGENIERÍA CON CONFIRMACIÓN DE GIRO EN 2 VELAS):
+    - En temporalidad de 1 hora: EMA3_1H > EMA9_1H, Precio OPEN <= EMA3_1H y soporte EMA9_1H intacto.
+    - En 15m: EMA3_15m >= EMA9_15m * 0.998 (evita cuchillos en caída libre de 15m).
+    - En 5m: Vela previa tocó BB_Lower / LOWER_5 / LOWER_6 con mecha >= 25% y vela actual cierra
+      verde (Close > Open), superando EMA3_5m y el cierre previo.
     """
-    if df_5m is None or len(df_5m) < 6:
-        return {'triggered': False, 'reason': 'Datos 5m insuficientes para 3a'}
+    if df_5m is None or len(df_5m) < 6 or df_15m is None or len(df_15m) < 6:
+        return {'triggered': False, 'reason': 'Datos 5m/15m insuficientes para 3a'}
 
     try:
         ema3_1h = float(cond_1h.get('ema3') or 0.0)
+        ema9_1h = float(cond_1h.get('ema9') or 0.0)
         open_1h = float(cond_1h.get('open_1h') or 0.0)
         low_1h = float(cond_1h.get('low_1h') or 0.0)
 
-        # Condición 3 en 1H: Open_1H <= EMA3_1H (o Low_1H <= EMA3_1H * 1.005)
-        cond_3_1h = (ema3_1h > 0) and ((open_1h <= ema3_1h * 1.003) or (low_1h <= ema3_1h * 1.005) or (current_price <= ema3_1h * 1.005))
-        if not cond_3_1h:
-            return {'triggered': False, 'reason': f"1H Open (${open_1h:.2f}) / Precio (${current_price:.2f}) > EMA3_1H (${ema3_1h:.2f})"}
+        # Exigir tendencia 1H EMA3 > EMA9 estricta
+        if not cond_1h.get('cond_a_ema3_gt_ema9'):
+            return {'triggered': False, 'reason': '1H sin EMA3_1H > EMA9_1H para Regla 3a'}
 
-        # Evaluar en 5m y 15m: Close < BB_Lower, Low < LOWER_5, Low < LOWER_6
+        # Verificar en 15m que no esté en caída libre
+        c15 = _safe_col(df_15m, 'close')
+        ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+        ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+        if ema3_15 < ema9_15 * 0.998:
+            return {'triggered': False, 'reason': '15m en caída libre (EMA3_15m < EMA9_15m)'}
+
+        # Condición 3 en 1H: Open_1H <= EMA3_1H y sobre EMA9_1H
+        cond_3_1h = (ema3_1h > 0) and (open_1h <= ema3_1h * 1.001 or low_1h <= ema3_1h * 1.001) and (current_price >= ema9_1h)
+        if not cond_3_1h:
+            return {'triggered': False, 'reason': f"1H Open (${open_1h:.2f}) > EMA3_1H (${ema3_1h:.2f}) o bajo EMA9_1H"}
+
         c5 = _safe_col(df_5m, 'close')
         o5 = _safe_col(df_5m, 'open')
         h5 = _safe_col(df_5m, 'high')
@@ -344,7 +432,6 @@ def evaluate_rule_3a_ema3_1h_dip(
         bb_lo_5 = sma5 - 2.0 * std5
         ema3_5 = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
 
-        # Bandas Fibonacci en 5m y 15m
         from app.strategy.panic_recovery_gate import calculate_fibonacci_bands
         fib_5m = calculate_fibonacci_bands(df_5m, current_price)
         lower5_5m = float(fib_5m.get('lower_5') or 0.0)
@@ -353,39 +440,44 @@ def evaluate_rule_3a_ema3_1h_dip(
         lower5_15m = float((bands_15m or {}).get('lower_5') or 0.0)
         lower6_15m = float((bands_15m or {}).get('lower_6') or 0.0)
 
-        # Revisar las últimas 2 velas de 5m
         recent_low_5m = min(float(l5.iloc[-1]), float(l5.iloc[-2]))
         recent_close_5m = min(float(c5.iloc[-1]), float(c5.iloc[-2]))
         bb_lo_5_val = float(bb_lo_5.iloc[-1])
 
-        close_lt_bb_lower = (bb_lo_5_val > 0 and recent_close_5m < bb_lo_5_val * 1.002)
-        if not close_lt_bb_lower and df_15m is not None and len(df_15m) >= 6:
-            c15 = _safe_col(df_15m, 'close')
-            win15 = min(20, len(c15) - 1)
-            bb_lo_15 = float((c15.rolling(win15, min_periods=5).mean() - 2.0 * c15.rolling(win15, min_periods=5).std(ddof=0).fillna(0)).iloc[-1])
-            if bb_lo_15 > 0 and float(c15.iloc[-1]) < bb_lo_15 * 1.002:
-                close_lt_bb_lower = True
-
-        low_lt_lower5 = (lower5_5m > 0 and recent_low_5m <= lower5_5m * 1.003) or (lower5_15m > 0 and recent_low_5m <= lower5_15m * 1.003)
-        low_lt_lower6 = (lower6_5m > 0 and recent_low_5m <= lower6_5m * 1.004) or (lower6_15m > 0 and recent_low_5m <= lower6_15m * 1.004)
+        close_lt_bb_lower = (bb_lo_5_val > 0 and recent_close_5m < bb_lo_5_val)
+        low_lt_lower5 = (lower5_5m > 0 and recent_low_5m <= lower5_5m) or (lower5_15m > 0 and recent_low_5m <= lower5_15m)
+        low_lt_lower6 = (lower6_5m > 0 and recent_low_5m <= lower6_5m) or (lower6_15m > 0 and recent_low_5m <= lower6_15m)
 
         if not (close_lt_bb_lower or low_lt_lower5 or low_lt_lower6):
             return {'triggered': False, 'reason': 'Sin extremo en 5m/15m (Close < BB_Lower o Low < LOWER_5/6)'}
 
-        # Confirmación de absorción (mecha inferior >= 20% o vela verde o recupero de EMA3_5m)
+        # Confirmación de giro en 2 velas: mecha de absorción >= 25% y vela actual verde cerrando sobre EMA3_5m y sobre BB_Lower_5m
         o_cur, h_cur, l_cur, c_cur = float(o5.iloc[-1]), float(h5.iloc[-1]), float(l5.iloc[-1]), float(c5.iloc[-1])
+        o_prev, h_prev, l_prev, c_prev = float(o5.iloc[-2]), float(h5.iloc[-2]), float(l5.iloc[-2]), float(c5.iloc[-2])
         rng_cur = max(1e-6, h_cur - l_cur)
-        lower_wick_pct = (max(0.0, min(o_cur, c_cur) - l_cur) / rng_cur) * 100.0
-        is_absorbing = (lower_wick_pct >= 20.0) or (c_cur >= o_cur) or (current_price >= ema3_5)
+        rng_prev = max(1e-6, h_prev - l_prev)
+        wick_cur = (max(0.0, min(o_cur, c_cur) - l_cur) / rng_cur) * 100.0
+        wick_prev = (max(0.0, min(o_prev, c_prev) - l_prev) / rng_prev) * 100.0
+        max_wick = max(wick_cur, wick_prev)
+        body_pct = ((c_cur - o_cur) / rng_cur) * 100.0
 
-        if not is_absorbing:
-            return {'triggered': False, 'reason': 'Tocó banda inferior pero aún sin mecha de rechazo >= 20% ni vela verde'}
+        is_confirmed_reversal = (
+            (c_cur > o_cur)
+            and (body_pct >= 35.0)
+            and (max_wick >= 25.0)
+            and (c_cur > c_prev)
+            and (current_price >= ema3_5)
+            and (bb_lo_5_val <= 0 or c_cur > bb_lo_5_val)
+        )
+
+        if not is_confirmed_reversal:
+            return {'triggered': False, 'reason': 'Tocó banda inferior pero sin giro confirmado en 2 velas'}
 
         sub_tag = "LOW<LOWER_6" if low_lt_lower6 else ("LOW<LOWER_5" if low_lt_lower5 else "CLOSE<BB_LOWER")
         return {
             'triggered': True,
             'rule_code': 'PULLBACK_3A_EMA3_1H_DIP',
-            'reason': f"Regla 3a Activa: 1H Open/Low <= EMA3_1H (${ema3_1h:.2f}) + {sub_tag} con absorción ({lower_wick_pct:.1f}% mecha)"
+            'reason': f"Regla 3a Confirmada: 1H Open/Low <= EMA3_1H (${ema3_1h:.2f}) + {sub_tag} con giro 2-Bar ({max_wick:.1f}% mecha)"
         }
     except Exception as e:
         log_warning(MODULE, f"Error en Regla 3a: {e}")
@@ -407,7 +499,7 @@ def evaluate_rule_4_ema9_20_1h_bounce(
     Cuando el precio rebota/se apoya en la zona de EMA9_1H o EMA20_1H y cumple CUALQUIERA de:
       - 4a: En 5m/15m señal PINESCRIPT "BUY" con precio < UPPER_3.
       - 4b: Pasa de EMA3 < EMA9 a EMA3 > EMA9 en 5m o 15m (con precio < UPPER_3).
-      - 4c: El precio toca (Banda Inferior Bollinger - Delta) en 5m.
+      - 4c: Giro confirmado en 2 velas tras tocar (Banda Inferior Bollinger - Delta) en 5m.
       - 4d: Según SIPV aparece una vela de cambio de tendencia alcista cuando el precio está
             en cualquiera de las bandas Fibonacci BASIS, UPPER_1, UPPER_2, UPPER_3 en 15m.
     """
@@ -419,17 +511,15 @@ def evaluate_rule_4_ema9_20_1h_bounce(
         ema20_1h = float(cond_1h.get('ema20') or 0.0)
         low_1h = float(cond_1h.get('low_1h') or current_price)
 
-        # Verificar proximidad/rebote sobre EMA9_1H o EMA20_1H (o soporte dinámico cuando 1H es alcista)
-        near_ema9_1h = (ema9_1h > 0) and (low_1h <= ema9_1h * 1.025 or abs(current_price - ema9_1h) / ema9_1h <= 0.025) and (current_price >= ema9_1h * 0.985)
-        near_ema20_1h = (ema20_1h > 0) and (low_1h <= ema20_1h * 1.025 or abs(current_price - ema20_1h) / ema20_1h <= 0.025) and (current_price >= ema20_1h * 0.985)
-        in_1h_support_zone = near_ema9_1h or near_ema20_1h or (cond_1h.get('passed', False) and ema20_1h > 0 and current_price >= ema20_1h * 0.99)
+        near_ema9_1h = (ema9_1h > 0) and (low_1h <= ema9_1h * 1.025 or abs(current_price - ema9_1h) / ema9_1h <= 0.025) and (current_price >= ema9_1h * 0.988)
+        near_ema20_1h = (ema20_1h > 0) and (low_1h <= ema20_1h * 1.025 or abs(current_price - ema20_1h) / ema20_1h <= 0.025) and (current_price >= ema20_1h * 0.990)
+        in_1h_support_zone = near_ema9_1h or near_ema20_1h or (cond_1h.get('passed', False) and ema20_1h > 0 and current_price >= ema20_1h * 0.992)
 
         if not in_1h_support_zone:
             return {'triggered': False, 'reason': f"Precio (${current_price:.2f}) fuera de zona de rebote EMA9_1H (${ema9_1h:.2f}) / EMA20_1H (${ema20_1h:.2f})"}
 
         support_label = "EMA9_1H" if near_ema9_1h else ("EMA20_1H" if near_ema20_1h else "1H_BULL_ZONE")
 
-        # Bandas Fibonacci en 15m
         from app.strategy.panic_recovery_gate import calculate_fibonacci_bands
         fib_15 = bands_15m if (bands_15m and bands_15m.get('upper_3')) else calculate_fibonacci_bands(df_15m, current_price)
         basis_15 = float(fib_15.get('basis') or current_price * 0.98)
@@ -437,7 +527,6 @@ def evaluate_rule_4_ema9_20_1h_bounce(
 
         below_upper3 = (upper3_15 <= 0) or (current_price < upper3_15)
 
-        # Series de 5m y 15m
         c5 = _safe_col(df_5m, 'close')
         o5 = _safe_col(df_5m, 'open')
         h5 = _safe_col(df_5m, 'high')
@@ -448,11 +537,12 @@ def evaluate_rule_4_ema9_20_1h_bounce(
         h15 = _safe_col(df_15m, 'high')
         l15 = _safe_col(df_15m, 'low')
 
+        ema3_15_s = c15.ewm(span=3, adjust=False).mean()
+        ema9_15_s = c15.ewm(span=9, adjust=False).mean()
+
         # ── SUB-REGLA 4a: Señal PINESCRIPT "BUY" en 5m/15m y Precio < UPPER_3 ──
         pine_buy = str(pinescript_signal or '').upper() == 'BUY'
         if not pine_buy:
-            ema3_15_s = c15.ewm(span=3, adjust=False).mean()
-            ema9_15_s = c15.ewm(span=9, adjust=False).mean()
             if float(ema3_15_s.iloc[-1]) > float(ema9_15_s.iloc[-1]) and float(c15.iloc[-1]) > float(o15.iloc[-1]) and (near_ema9_1h or near_ema20_1h):
                 pine_buy = True
 
@@ -468,13 +558,11 @@ def evaluate_rule_4_ema9_20_1h_bounce(
         ema9_5 = c5.ewm(span=9, adjust=False).mean()
         cross_5m = (float(ema3_5.iloc[-1]) > float(ema9_5.iloc[-1])) and (
             float(ema3_5.iloc[-2]) <= float(ema9_5.iloc[-2]) or (len(ema3_5) >= 3 and float(ema3_5.iloc[-3]) <= float(ema9_5.iloc[-3]))
-        )
+        ) and (float(c5.iloc[-1]) > float(o5.iloc[-1]))
 
-        ema3_15 = c15.ewm(span=3, adjust=False).mean()
-        ema9_15 = c15.ewm(span=9, adjust=False).mean()
-        cross_15m = (float(ema3_15.iloc[-1]) > float(ema9_15.iloc[-1])) and (
-            float(ema3_15.iloc[-2]) <= float(ema9_15.iloc[-2]) or (len(ema3_15) >= 3 and float(ema3_15.iloc[-3]) <= float(ema9_15.iloc[-3]))
-        )
+        cross_15m = (float(ema3_15_s.iloc[-1]) > float(ema9_15_s.iloc[-1])) and (
+            float(ema3_15_s.iloc[-2]) <= float(ema9_15_s.iloc[-2]) or (len(ema3_15_s) >= 3 and float(ema3_15_s.iloc[-3]) <= float(ema9_15_s.iloc[-3]))
+        ) and (float(c15.iloc[-1]) > float(o15.iloc[-1]))
 
         if (cross_5m or cross_15m) and below_upper3:
             tf_str = "5m" if cross_5m else "15m"
@@ -482,20 +570,6 @@ def evaluate_rule_4_ema9_20_1h_bounce(
                 'triggered': True,
                 'rule_code': 'PULLBACK_4B_EMA1H_CROSS_3_9',
                 'reason': f"Regla 4b Activa: Rebote en {support_label} + Cruce fresco EMA3 > EMA9 en {tf_str} (< UPPER_3 ${upper3_15:.2f})"
-            }
-
-        # ── SUB-REGLA 4c: Precio toca (Banda Inferior Bollinger - Delta) en 5m ──
-        win5 = min(20, len(c5) - 1)
-        sma5 = c5.rolling(win5, min_periods=5).mean()
-        std5 = c5.rolling(win5, min_periods=5).std(ddof=0).fillna(0)
-        bb_lo_5 = float((sma5 - 2.0 * std5).iloc[-1])
-        delta_5 = max(0.01, (spread * 0.5) + (current_price * 0.001))
-        recent_low_5m = min(float(l5.iloc[-1]), float(l5.iloc[-2]))
-        if bb_lo_5 > 0 and recent_low_5m <= (bb_lo_5 - delta_5) * 1.003 and float(c5.iloc[-1]) >= float(o5.iloc[-1]):
-            return {
-                'triggered': True,
-                'rule_code': 'PULLBACK_4C_EMA1H_BB5M_LOWER',
-                'reason': f"Regla 4c Activa: Rebote en {support_label} + Toque en (BB_Lower_5m ${bb_lo_5:.2f} - Δ ${delta_5:.2f}) con giro verde"
             }
 
         # ── SUB-REGLA 4d: Vela SIPV de cambio de tendencia en BASIS, UPPER_1, UPPER_2 o UPPER_3 de 15m ──
@@ -519,6 +593,44 @@ def evaluate_rule_4_ema9_20_1h_bounce(
                     'reason': f"Regla 4d Activa: Rebote en {support_label} + Vela SIPV de cambio de tendencia en banda Fibonacci [Basis ${basis_15:.2f} - Upper_3 ${upper3_15:.2f}]"
                 }
 
+        # ── SUB-REGLA 4c (REINGENIERÍA 2-BAR REVERSAL): Toque en (BB_Lower_5m - Delta) + Giro Confirmado ──
+        win5 = min(20, len(c5) - 1)
+        sma5 = c5.rolling(win5, min_periods=5).mean()
+        std5 = c5.rolling(win5, min_periods=5).std(ddof=0).fillna(0)
+        bb_lo_5 = float((sma5 - 2.0 * std5).iloc[-1])
+        delta_5 = max(0.01, (spread * 0.5) + (current_price * 0.001))
+        o_cur, h_cur, l_cur, c_cur = float(o5.iloc[-1]), float(h5.iloc[-1]), float(l5.iloc[-1]), float(c5.iloc[-1])
+        o_prev, h_prev, l_prev, c_prev = float(o5.iloc[-2]), float(h5.iloc[-2]), float(l5.iloc[-2]), float(c5.iloc[-2])
+        rng_cur = max(1e-6, h_cur - l_cur)
+        rng_prev = max(1e-6, h_prev - l_prev)
+        wick_cur = (max(0.0, min(o_cur, c_cur) - l_cur) / rng_cur) * 100.0
+        wick_prev = (max(0.0, min(o_prev, c_prev) - l_prev) / rng_prev) * 100.0
+        max_wick = max(wick_cur, wick_prev)
+        body_cur_pct = ((c_cur - o_cur) / rng_cur) * 100.0
+
+        # Exigir:
+        # 1) 1H EMA3 > EMA9 y 15m EMA3 >= EMA9 * 0.998
+        # 2) Vela previa tocó BB_Lower_5m - Delta con mecha >= 25%
+        # 3) Vela actual es verde con cuerpo >= 35%, cierra DENTRO de la banda (> BB_Lower_5m) y sobre EMA3_5m
+        touched_bb_low = bb_lo_5 > 0 and (l_prev <= (bb_lo_5 - delta_5) * 1.002 or l_cur <= (bb_lo_5 - delta_5) * 1.002)
+        confirmed_4c = (
+            touched_bb_low
+            and cond_1h.get('cond_a_ema3_gt_ema9', False)
+            and float(ema3_15_s.iloc[-1]) >= float(ema9_15_s.iloc[-1]) * 0.998
+            and max_wick >= 25.0
+            and c_cur > o_cur
+            and body_cur_pct >= 35.0
+            and c_cur > bb_lo_5
+            and c_cur > c_prev
+            and current_price >= float(ema3_5.iloc[-1])
+        )
+        if confirmed_4c and below_upper3:
+            return {
+                'triggered': True,
+                'rule_code': 'PULLBACK_4C_EMA1H_BB5M_LOWER',
+                'reason': f"Regla 4c Confirmada: Rebote en {support_label} + Toque (BB_Lower_5m ${bb_lo_5:.2f} - Δ) con Giro 2-Bar ({max_wick:.1f}% mecha)"
+            }
+
         return {'triggered': False, 'reason': 'En zona 1H pero esperando gatillo 4a/4b/4c/4d en 5m/15m'}
     except Exception as e:
         log_warning(MODULE, f"Error en Regla 4 (4a-4d): {e}")
@@ -531,67 +643,10 @@ def evaluate_lower5_6_absorption(
     bands: Optional[dict] = None
 ) -> dict:
     """
-    GATILLO ADICIONAL:
-    Precio ha llegado a LOWER_5 o LOWER_6 en 5m/15m y muestra absorción compradora.
+    [DEPRECATED EN V3.0] — Mantenido solo por compatibilidad de firma; desactivado como gatillo autónomo
+    debido a que generaba 61.9% de tasa de STOP_LOSS_INITIAL cuando compraba sin estructura de 1H.
     """
-    if df_5m is None or len(df_5m) < 2 or not bands:
-        return {'triggered': False, 'reason': 'Datos insuficientes para LOWER_5/6'}
-
-    try:
-        lower_5 = float(bands.get('lower_5', 0))
-        lower_6 = float(bands.get('lower_6', 0))
-
-        if lower_5 <= 0 and lower_6 <= 0:
-            return {'triggered': False, 'reason': 'Bandas LOWER_5/6 no calculadas'}
-
-        open_s = _safe_col(df_5m, 'open')
-        high_s = _safe_col(df_5m, 'high')
-        low_s = _safe_col(df_5m, 'low')
-        close_s = _safe_col(df_5m, 'close')
-
-        recent_low = min(float(low_s.iloc[-1]), float(low_s.iloc[-2]))
-        o = float(open_s.iloc[-1])
-        h = float(high_s.iloc[-1])
-        l = float(low_s.iloc[-1])
-        c = float(close_s.iloc[-1])
-
-        hit_lower6 = lower_6 > 0 and recent_low <= lower_6 * 1.006
-        hit_lower5 = lower_5 > 0 and recent_low <= lower_5 * 1.004
-
-        if not (hit_lower5 or hit_lower6):
-            return {
-                'triggered': False,
-                'reason': f"Precio no ha alcanzado LOWER_5 (${lower_5:.2f}) ni LOWER_6 (${lower_6:.2f})"
-            }
-
-        level_name = "LOWER_6" if hit_lower6 else "LOWER_5"
-        level_price = lower_6 if hit_lower6 else lower_5
-
-        rng = max(1e-6, h - l)
-        lower_wick = max(0.0, min(o, c) - l)
-        lower_wick_pct = (lower_wick / rng) * 100.0
-        is_green = c >= o
-
-        has_wick = lower_wick_pct >= 25.0
-        has_reversal = is_green and (c > float(close_s.iloc[-2]))
-
-        if has_wick or has_reversal:
-            return {
-                'triggered': True,
-                'level_name': level_name,
-                'level_price': level_price,
-                'lower_wick_pct': round(lower_wick_pct, 1),
-                'is_green': is_green,
-                'reason': f"Toque y absorción en {level_name} (${level_price:.2f}) con mecha {lower_wick_pct:.1f}% o cierre verde ✅"
-            }
-
-        return {
-            'triggered': False,
-            'reason': f"Tocó {level_name} pero sin absorción (vela aún en caída libre)"
-        }
-    except Exception as e:
-        log_warning(MODULE, f"Error evaluando absorción en LOWER: {e}")
-        return {'triggered': False, 'reason': f"Error: {e}"}
+    return {'triggered': False, 'reason': 'PULLBACK_LOWER_ABSORPTION desactivado en v3.0 (requiere estructura 4a/4b/4d)'}
 
 
 # ════════════════════════════════════════════════════════════════
@@ -609,9 +664,11 @@ def evaluate_pullback_setup(
     now_dt: Optional[datetime] = None,
     pinescript_signal: str = '',
     sipv_signal_15m: str = '',
+    pool_type: str = 'HOT_MOMENTUM',
 ) -> dict:
     """
-    EVALUADOR MAESTRO DE COMPRAS Y RECOMPRAS (SECCIÓN B: 3a, 4a, 4b, 4c, 4d)
+    EVALUADOR MAESTRO DE COMPRAS Y RECOMPRAS (SECCIÓN B: 4a, 4b, 4d, y versiones blindadas 3a/4c)
+    Incorpora el Predictor de Poca Ganancia (Room-to-Run & ATR Compression Gate).
     """
     if current_price <= 0:
         return {
@@ -625,13 +682,13 @@ def evaluate_pullback_setup(
             'limit_orders': []
         }
 
-    # 1. Filtro Horario (09:40 a 15:10 ET)
+    # 1. Filtro Horario (09:45 a 14:40 ET — Evita Opening Whipsaw y EOD Hard Exit)
     if not is_in_pullback_time_window(now_dt):
         return {
             'pullback_triggered': False,
             'trigger_type': None,
             'order_type': None,
-            'reason': 'Fuera de ventana operativa intradía (09:40 ET a 15:10 ET)',
+            'reason': 'Fuera de ventana operativa óptima (09:45 ET a 14:40 ET)',
             'recommended_sl': 0.0,
             'target_upper5': 0.0,
             'target_upper6': 0.0,
@@ -666,19 +723,23 @@ def evaluate_pullback_setup(
         ema20_5m = float(c_5m.ewm(span=20, adjust=False).mean().iloc[-1])
         last_low = float(l_5m.iloc[-3:].min())
 
-    rec_sl = round(max(current_price * 0.965, min(current_price * 0.988, last_low * 0.994)), 2)
-    cond_1h = macro_eval.get('cond_a', {})
+    rec_sl = round(max(current_price * 0.972, min(current_price * 0.988, last_low * 0.995)), 2)
 
-    # ════════════════════════════════════════════════════════════════
-    # REGLA 3a: Open_1H <= EMA3_1H + (Close < BB_Lower o Low < LOWER_5/6 en 5m/15m)
-    # ════════════════════════════════════════════════════════════════
-    res_3a = evaluate_rule_3a_ema3_1h_dip(current_price, cond_1h, df_5m, df_15m, bands_15m)
-    if res_3a.get('triggered'):
+    # 4. Aduana Predictora de Poca Ganancia (Room-to-Run & ATR Compression Gate)
+    profit_pred = evaluate_low_profit_predictor(
+        current_price=current_price,
+        recommended_sl=rec_sl,
+        df_5m=df_5m,
+        df_15m=df_15m,
+        bands_15m=bands_15m,
+        pool_type=pool_type,
+    )
+    if not profit_pred.get('passed', True):
         return {
-            'pullback_triggered': True,
-            'trigger_type': res_3a['rule_code'],
-            'order_type': 'market',
-            'reason': f"{res_3a['reason']} [Macro: {macro_eval['summary_reason']}]",
+            'pullback_triggered': False,
+            'trigger_type': None,
+            'order_type': None,
+            'reason': profit_pred.get('reason', 'Bloqueado por Predictor de Poca Ganancia'),
             'recommended_sl': rec_sl,
             'target_upper5': round(target_u5, 2),
             'target_upper6': round(target_u6, 2),
@@ -686,8 +747,10 @@ def evaluate_pullback_setup(
             'limit_orders': []
         }
 
+    cond_1h = macro_eval.get('cond_a', {})
+
     # ════════════════════════════════════════════════════════════════
-    # REGLA 4 (4a, 4b, 4c, 4d): Rebote en EMA9 o EMA20 de 1 Hora
+    # PRIORIDAD 1 — REGLA 4 (4a, 4b, 4d, y 4c 2-Bar): Rebote en EMA9 o EMA20 de 1 Hora
     # ════════════════════════════════════════════════════════════════
     res_4 = evaluate_rule_4_ema9_20_1h_bounce(
         current_price=current_price,
@@ -704,7 +767,7 @@ def evaluate_pullback_setup(
             'pullback_triggered': True,
             'trigger_type': res_4['rule_code'],
             'order_type': 'market',
-            'reason': f"{res_4['reason']} [Macro: {macro_eval['summary_reason']}]",
+            'reason': f"{res_4['reason']} | {profit_pred['reason']}",
             'recommended_sl': rec_sl,
             'target_upper5': round(target_u5, 2),
             'target_upper6': round(target_u6, 2),
@@ -713,15 +776,15 @@ def evaluate_pullback_setup(
         }
 
     # ════════════════════════════════════════════════════════════════
-    # GATILLO ADICIONAL: Absorción directa en LOWER_5 o LOWER_6
+    # PRIORIDAD 2 — REGLA 3a (Confirmación 2-Bar): Open_1H <= EMA3_1H + Giro en Banda Inferior
     # ════════════════════════════════════════════════════════════════
-    lower_absorb = evaluate_lower5_6_absorption(current_price, df_5m, bands_15m)
-    if lower_absorb['triggered']:
+    res_3a = evaluate_rule_3a_ema3_1h_dip(current_price, cond_1h, df_5m, df_15m, bands_15m)
+    if res_3a.get('triggered'):
         return {
             'pullback_triggered': True,
-            'trigger_type': 'PULLBACK_LOWER_ABSORPTION',
+            'trigger_type': res_3a['rule_code'],
             'order_type': 'market',
-            'reason': f"{lower_absorb['reason']} [Macro: {macro_eval['summary_reason']}]",
+            'reason': f"{res_3a['reason']} | {profit_pred['reason']}",
             'recommended_sl': rec_sl,
             'target_upper5': round(target_u5, 2),
             'target_upper6': round(target_u6, 2),
@@ -733,7 +796,7 @@ def evaluate_pullback_setup(
         'pullback_triggered': False,
         'trigger_type': None,
         'order_type': None,
-        'reason': f"En espera de gatillo 3a o 4a-4d (${current_price:.2f} vs EMA9_5m=${ema9_5m:.2f})",
+        'reason': f"En espera de gatillo 4a/4b/4d/3a (${current_price:.2f} vs EMA9_5m=${ema9_5m:.2f})",
         'recommended_sl': rec_sl,
         'target_upper5': round(target_u5, 2),
         'target_upper6': round(target_u6, 2),
