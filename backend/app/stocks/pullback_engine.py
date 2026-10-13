@@ -57,14 +57,66 @@ def _safe_col(df: pd.DataFrame, col_name: str) -> pd.Series:
 
 
 # ════════════════════════════════════════════════════════════════
-# 1. EVALUADORES MACRO (CONDICIONES BÁSICAS 1H a/b Y 15M)
 # ════════════════════════════════════════════════════════════════
+# 1. EVALUADORES MACRO (CONDICIONES BÁSICAS 1H a/b, ADX/DMI Y 15M)
+# ════════════════════════════════════════════════════════════════
+
+def calculate_adx_1h(df_1h: Optional[pd.DataFrame], period: int = 14) -> dict:
+    """
+    Calcula ADX y DMI (+DI / -DI) en temporalidad de 1 Hora:
+    - ADX >= 20.0: Mercado en tendencia activa (filtra consolidación lateral).
+    - +DI > -DI: Fuerza direccional alcista dominante (filtra trampas en tendencias bajistas).
+    """
+    if df_1h is None or len(df_1h) < period + 3:
+        return {'adx': 25.0, 'plus_di': 30.0, 'minus_di': 15.0, 'is_bullish_trend': True, 'reason': 'Datos 1H mínimos'}
+    try:
+        h = _safe_col(df_1h, 'high').values
+        l = _safe_col(df_1h, 'low').values
+        c = _safe_col(df_1h, 'close').values
+
+        tr = np.maximum(h[1:] - l[1:], np.maximum(np.abs(h[1:] - c[:-1]), np.abs(l[1:] - c[:-1])))
+        up_move = h[1:] - h[:-1]
+        down_move = l[:-1] - l[1:]
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        win = min(period, len(tr))
+        tr_s = pd.Series(tr).rolling(win, min_periods=3).mean().values
+        pdm_s = pd.Series(plus_dm).rolling(win, min_periods=3).mean().values
+        mdm_s = pd.Series(minus_dm).rolling(win, min_periods=3).mean().values
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            denom = np.where(tr_s == 0, 1e-6, tr_s)
+            pdi = 100.0 * (pdm_s / denom)
+            mdi = 100.0 * (mdm_s / denom)
+            di_sum = np.where((pdi + mdi) == 0, 1e-6, (pdi + mdi))
+            dx = 100.0 * np.abs(pdi - mdi) / di_sum
+
+        adx_s = pd.Series(dx).rolling(win, min_periods=3).mean().values
+        curr_adx = float(adx_s[-1]) if not np.isnan(adx_s[-1]) else 25.0
+        curr_pdi = float(pdi[-1]) if not np.isnan(pdi[-1]) else 25.0
+        curr_mdi = float(mdi[-1]) if not np.isnan(mdi[-1]) else 20.0
+
+        is_bearish_trend = (curr_adx >= 20.0 and curr_mdi > curr_pdi * 1.20)
+        is_bullish = not is_bearish_trend and (curr_pdi >= curr_mdi * 0.90 or curr_adx < 22.0)
+        return {
+            'adx': round(curr_adx, 2),
+            'plus_di': round(curr_pdi, 2),
+            'minus_di': round(curr_mdi, 2),
+            'is_bullish_trend': is_bullish,
+            'reason': f"ADX_1H={curr_adx:.1f} (+DI={curr_pdi:.1f} vs -DI={curr_mdi:.1f})"
+        }
+    except Exception as e:
+        return {'adx': 25.0, 'plus_di': 25.0, 'minus_di': 20.0, 'is_bullish_trend': True, 'reason': f"Fallback ADX: {e}"}
+
 
 def evaluate_macro_1h_condition(df_1h: Optional[pd.DataFrame]) -> dict:
     """
     Condiciones Básicas en 1 Hora (Sección B):
       a. En temporalidad de 1 hora, EMA3 > EMA9
       b. Banda superior Bollinger ascendente y Banda inferior Bollinger descendente, en temporalidad de 1 hora
+      c. Filtro Direccional ADX 1H (ADX >= 20 y +DI > -DI)
     """
     if df_1h is None or len(df_1h) < 6:
         return {
@@ -78,7 +130,9 @@ def evaluate_macro_1h_condition(df_1h: Optional[pd.DataFrame]) -> dict:
             'cond_a_ema3_gt_ema9': False,
             'cond_b_bb_1h_expanding': False,
             'ema3_rising': False,
-            'ema3_gt_ema9': False
+            'ema3_gt_ema9': False,
+            'adx_info': {},
+            'is_bullish_trend': True
         }
 
     try:
@@ -117,7 +171,10 @@ def evaluate_macro_1h_condition(df_1h: Optional[pd.DataFrame]) -> dict:
             bb_lo_slope_1h = float(lo1h.iloc[-1] - lo1h.iloc[-2])
             cond_b = (bb_up_slope_1h > 0) and (bb_lo_slope_1h < 0)
 
-        passed = cond_a or cond_b or ema3_rising
+        # Filtro Direccional ADX 1H
+        adx_info = calculate_adx_1h(df_1h)
+
+        passed = (cond_a or cond_b or ema3_rising) and adx_info.get('is_bullish_trend', True)
         reasons = []
         if cond_a:
             reasons.append(f"1H(a): EMA3({ema3_curr:.2f})>EMA9({ema9_curr:.2f})")
@@ -125,6 +182,8 @@ def evaluate_macro_1h_condition(df_1h: Optional[pd.DataFrame]) -> dict:
             reasons.append(f"1H(b): BB_Up↑({bb_up_slope_1h:+.3f}) & BB_Lo↓({bb_lo_slope_1h:+.3f})")
         if not reasons and ema3_rising:
             reasons.append("1H: EMA3 ascendente")
+        if not adx_info.get('is_bullish_trend', True):
+            reasons.append(f"ADX_1H No Alcista ({adx_info.get('reason')})")
 
         return {
             'passed': passed,
@@ -139,7 +198,9 @@ def evaluate_macro_1h_condition(df_1h: Optional[pd.DataFrame]) -> dict:
             'cond_a_ema3_gt_ema9': cond_a,
             'cond_b_bb_1h_expanding': cond_b,
             'ema3_rising': ema3_rising,
-            'ema3_gt_ema9': cond_a
+            'ema3_gt_ema9': cond_a,
+            'adx_info': adx_info,
+            'is_bullish_trend': adx_info.get('is_bullish_trend', True)
         }
     except Exception as e:
         log_warning(MODULE, f"Error evaluando macro 1H: {e}")
@@ -520,17 +581,25 @@ def evaluate_rule_4_ema9_20_1h_bounce(
 
         support_label = "EMA9_1H" if near_ema9_1h else ("EMA20_1H" if near_ema20_1h else "1H_BULL_ZONE")
 
+        # ── VERIFICACIÓN ADX 1H: Tendencia estructural activa y alcista (+DI > -DI) ──
+        adx_1h = cond_1h.get('adx_info', {})
+        if adx_1h and not adx_1h.get('is_bullish_trend', True):
+            return {'triggered': False, 'reason': f"Filtro ADX 1H No Alcista: {adx_1h.get('reason')}"}
+
+        # Bandas Fibonacci en 15m
         from app.strategy.panic_recovery_gate import calculate_fibonacci_bands
         fib_15 = bands_15m if (bands_15m and bands_15m.get('upper_3')) else calculate_fibonacci_bands(df_15m, current_price)
         basis_15 = float(fib_15.get('basis') or current_price * 0.98)
         upper3_15 = float(fib_15.get('upper_3') or current_price * 1.05)
 
-        below_upper3 = (upper3_15 <= 0) or (current_price < upper3_15)
+        dist_upper3_pct = ((upper3_15 - current_price) / current_price * 100.0) if upper3_15 > 0 else 99.0
+        below_upper3 = (upper3_15 <= 0) or (dist_upper3_pct >= 1.20)
 
         c5 = _safe_col(df_5m, 'close')
         o5 = _safe_col(df_5m, 'open')
         h5 = _safe_col(df_5m, 'high')
         l5 = _safe_col(df_5m, 'low')
+        v5 = _safe_col(df_5m, 'volume')
 
         c15 = _safe_col(df_15m, 'close')
         o15 = _safe_col(df_15m, 'open')
@@ -540,36 +609,66 @@ def evaluate_rule_4_ema9_20_1h_bounce(
         ema3_15_s = c15.ewm(span=3, adjust=False).mean()
         ema9_15_s = c15.ewm(span=9, adjust=False).mean()
 
-        # ── SUB-REGLA 4a: Señal PINESCRIPT "BUY" en 5m/15m y Precio < UPPER_3 ──
+        # Cálculo de RVOL_5m (vs media de 10 periodos) y ATR_5m
+        rvol_5m = 1.0
+        if len(v5) >= 10:
+            mean_v = float(v5.iloc[-10:-1].mean())
+            rvol_5m = float(v5.iloc[-1]) / max(1.0, mean_v)
+
+        atr_5m = float((h5 - l5).iloc[-14:].mean()) if len(h5) >= 14 else (current_price * 0.01)
+        candle_rng_5m = float(h5.iloc[-1] - l5.iloc[-1])
+
+        # ── SUB-REGLA 4a: Señal PINESCRIPT "BUY" + Holgura UPPER_3 >= 1.5% + RVOL_5m >= 1.2x ──
         pine_buy = str(pinescript_signal or '').upper() == 'BUY'
         if not pine_buy:
             if float(ema3_15_s.iloc[-1]) > float(ema9_15_s.iloc[-1]) and float(c15.iloc[-1]) > float(o15.iloc[-1]) and (near_ema9_1h or near_ema20_1h):
                 pine_buy = True
 
-        if pine_buy and below_upper3 and (near_ema9_1h or near_ema20_1h):
+        has_room_4a = (upper3_15 <= 0) or (dist_upper3_pct >= 1.50)
+        has_vol_4a = (rvol_5m >= 1.20) or (len(v5) < 10)
+
+        if pine_buy and has_room_4a and has_vol_4a and (near_ema9_1h or near_ema20_1h):
             return {
                 'triggered': True,
                 'rule_code': 'PULLBACK_4A_EMA1H_PINE_BUY',
-                'reason': f"Regla 4a Activa: Rebote en {support_label} + Señal PineScript BUY con Precio (${current_price:.2f}) < UPPER_3 (${upper3_15:.2f})"
+                'reason': (
+                    f"Regla 4a Activa: Rebote en {support_label} + PineScript BUY + "
+                    f"Holgura UPPER_3 (+{dist_upper3_pct:.2f}% >= 1.5%) + RVOL_5m {rvol_5m:.2f}x >= 1.2x"
+                )
             }
 
-        # ── SUB-REGLA 4b: Pasa de EMA3 < EMA9 a EMA3 > EMA9 en 5m o 15m ──
+        # ── SUB-REGLA 4b: Cruce fresco EMA3 > EMA9 con Separación Angular >= 0.10% y Filtro Anti-Clímax ──
         ema3_5 = c5.ewm(span=3, adjust=False).mean()
         ema9_5 = c5.ewm(span=9, adjust=False).mean()
-        cross_5m = (float(ema3_5.iloc[-1]) > float(ema9_5.iloc[-1])) and (
+        ema3_5_val = float(ema3_5.iloc[-1])
+        ema9_5_val = float(ema9_5.iloc[-1])
+        angle_5m_pct = ((ema3_5_val - ema9_5_val) / max(1e-6, ema9_5_val)) * 100.0
+
+        cross_5m = (ema3_5_val > ema9_5_val) and (
             float(ema3_5.iloc[-2]) <= float(ema9_5.iloc[-2]) or (len(ema3_5) >= 3 and float(ema3_5.iloc[-3]) <= float(ema9_5.iloc[-3]))
-        ) and (float(c5.iloc[-1]) > float(o5.iloc[-1]))
+        ) and (float(c5.iloc[-1]) > float(o5.iloc[-1])) and (angle_5m_pct >= 0.10)
 
-        cross_15m = (float(ema3_15_s.iloc[-1]) > float(ema9_15_s.iloc[-1])) and (
+        ema3_15_val = float(ema3_15_s.iloc[-1])
+        ema9_15_val = float(ema9_15_s.iloc[-1])
+        angle_15m_pct = ((ema3_15_val - ema9_15_val) / max(1e-6, ema9_15_val)) * 100.0
+
+        cross_15m = (ema3_15_val > ema9_15_val) and (
             float(ema3_15_s.iloc[-2]) <= float(ema9_15_s.iloc[-2]) or (len(ema3_15_s) >= 3 and float(ema3_15_s.iloc[-3]) <= float(ema9_15_s.iloc[-3]))
-        ) and (float(c15.iloc[-1]) > float(o15.iloc[-1]))
+        ) and (float(c15.iloc[-1]) > float(o15.iloc[-1])) and (angle_15m_pct >= 0.10)
 
-        if (cross_5m or cross_15m) and below_upper3:
+        # Filtro Anti-Sobreextensión (Vela no debe exceder 1.8 * ATR_5m)
+        not_overextended = candle_rng_5m <= (1.80 * atr_5m)
+
+        if (cross_5m or cross_15m) and below_upper3 and not_overextended:
             tf_str = "5m" if cross_5m else "15m"
+            ang_val = angle_5m_pct if cross_5m else angle_15m_pct
             return {
                 'triggered': True,
                 'rule_code': 'PULLBACK_4B_EMA1H_CROSS_3_9',
-                'reason': f"Regla 4b Activa: Rebote en {support_label} + Cruce fresco EMA3 > EMA9 en {tf_str} (< UPPER_3 ${upper3_15:.2f})"
+                'reason': (
+                    f"Regla 4b Activa: Rebote en {support_label} + Cruce fresco EMA3 > EMA9 en {tf_str} "
+                    f"(Ángulo {ang_val:+.2f}% >= 0.10%, Vela {candle_rng_5m:.2f} <= 1.8x ATR {atr_5m:.2f}, < UPPER_3 ${upper3_15:.2f})"
+                )
             }
 
         # ── SUB-REGLA 4d: Vela SIPV de cambio de tendencia en BASIS, UPPER_1, UPPER_2 o UPPER_3 de 15m ──
@@ -709,21 +808,26 @@ def evaluate_pullback_setup(
             'limit_orders': []
         }
 
-    # 3. Objetivos y Stop Loss Inicial Doble Control
+    # 3. Objetivos y Stop Loss Inicial Dinámico por Volatilidad (1.5 * ATR_14_5m bajo Anchor Low)
     target_u5 = float(bands_15m.get('upper_5', current_price * 1.05)) if bands_15m else current_price * 1.05
     target_u6 = float(bands_15m.get('upper_6', current_price * 1.08)) if bands_15m else current_price * 1.08
 
     ema9_5m = current_price
     ema20_5m = current_price
-    last_low = current_price * 0.98
     if df_5m is not None and len(df_5m) >= 10:
         c_5m = _safe_col(df_5m, 'close')
+        h_5m = _safe_col(df_5m, 'high')
         l_5m = _safe_col(df_5m, 'low')
         ema9_5m = float(c_5m.ewm(span=9, adjust=False).mean().iloc[-1])
         ema20_5m = float(c_5m.ewm(span=20, adjust=False).mean().iloc[-1])
-        last_low = float(l_5m.iloc[-3:].min())
-
-    rec_sl = round(max(current_price * 0.972, min(current_price * 0.988, last_low * 0.995)), 2)
+        atr_5m_val = float((h_5m - l_5m).iloc[-14:].mean()) if len(h_5m) >= 14 else (current_price * 0.01)
+        anchor_low = float(min(l_5m.iloc[-3:].min(), current_price))
+        raw_sl = anchor_low - (1.50 * atr_5m_val)
+        min_sl = current_price * 0.9675  # -3.25% Máximo riesgo tolerado
+        max_sl = current_price * 0.9900  # -1.00% Mínimo espacio para respirar
+        rec_sl = round(max(min_sl, min(max_sl, raw_sl)), 2)
+    else:
+        rec_sl = round(current_price * 0.98, 2)
 
     # 4. Aduana Predictora de Poca Ganancia (Room-to-Run & ATR Compression Gate)
     profit_pred = evaluate_low_profit_predictor(

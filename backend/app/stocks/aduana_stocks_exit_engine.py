@@ -1167,10 +1167,11 @@ def evaluate_aduana_stocks_exit(
     # ── CASO A: SI LA POSICIÓN ESTÁ EN PÉRDIDA O BREAKEVEN (gain_pct <= 0) ──
     if gain_pct <= 0:
         # 0.2 ESCUDO DE INVALIDACIÓN ESTRUCTURAL 1H (Corte temprano antes del STOP_LOSS_INITIAL)
-        if age_mins >= 15.0 and gain_pct <= -0.50 and df_5m is not None and len(df_5m) >= 6 and df_15m is not None and len(df_15m) >= 9:
+        if age_mins >= 15.0 and gain_pct <= -0.45 and df_5m is not None and len(df_5m) >= 6 and df_15m is not None and len(df_15m) >= 9:
             try:
                 c5 = _safe_col(df_5m, 'close')
                 o5 = _safe_col(df_5m, 'open')
+                v5 = _safe_col(df_5m, 'volume')
                 ema3_5 = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
                 ema9_5 = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
                 c15 = _safe_col(df_15m, 'close')
@@ -1184,7 +1185,12 @@ def evaluate_aduana_stocks_exit(
                     if ema20_1h > 0 and current_price < ema20_1h * 0.995:
                         broke_1h_ema20 = True
 
-                if (broke_1h_ema20 or ema3_15 < ema9_15 * 0.994) and float(c5.iloc[-1]) < float(o5.iloc[-1]) and ema3_5 < ema9_5:
+                # Confirmación de volumen vendedor real (Volume_5m >= SMA_Volume_10_5m * 0.90)
+                mean_v5 = float(v5.iloc[-10:-1].mean()) if len(v5) >= 10 else 0.0
+                curr_v5 = float(v5.iloc[-1]) if len(v5) >= 1 else 0.0
+                has_selling_volume = (mean_v5 <= 0) or (curr_v5 >= mean_v5 * 0.90)
+
+                if (broke_1h_ema20 or ema3_15 < ema9_15 * 0.994) and float(c5.iloc[-1]) < float(o5.iloc[-1]) and ema3_5 < ema9_5 and has_selling_volume:
                     return {
                         'should_close': True,
                         'action': 'CLOSE_TOTAL',
@@ -1193,7 +1199,7 @@ def evaluate_aduana_stocks_exit(
                         'rule_code': 'ADUANA_STRUCTURAL_1H_BREAK_EXIT',
                         'gain_pct': round(gain_pct, 2),
                         'pnl_usd': round(pnl_usd, 2),
-                        'reason': f"Corte Temprano por Invalidación Estructural ({gain_pct:+.2f}%): Pérdida de EMA20_1H / EMA9_15m tras {age_mins:.0f}m. Evita recorrido hasta STOP_LOSS_INITIAL."
+                        'reason': f"Corte Temprano por Invalidación Estructural ({gain_pct:+.2f}%): Pérdida de EMA20_1H / EMA9_15m con volumen vendedor tras {age_mins:.0f}m. Evita recorrido hasta STOP_LOSS_INITIAL."
                     }
             except Exception:
                 pass
