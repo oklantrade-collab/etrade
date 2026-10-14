@@ -201,16 +201,24 @@ def build_position_diagnostics(
     current_price = safe_float(pos.get("current_price") or tech.get("current_price") or pos.get("avg_price"))
     avg_price = safe_float(pos.get("avg_price") or pos.get("entry_price"))
 
-    # Gestión de Riesgo de la posición
+    # Gestión de Riesgo de la posición (con auto-repair seguro si falta)
+    atr_val = safe_float(tech.get("atr")) or (avg_price * 0.02 if avg_price > 0 else 0.1)
     stop_loss = safe_float(pos.get("stop_loss"))
-    take_profit = safe_float(pos.get("take_profit") or pos.get("tp_block1_price"))
+    if stop_loss <= 0 and avg_price > 0:
+        stop_loss = round(max(0.01, avg_price - (atr_val * 2.0)), 2)
 
-    # Trailing Stop: Prioridad trailing_sl_price > tp_trailing_sl > sl_dynamic_price
+    take_profit = safe_float(pos.get("take_profit") or pos.get("tp_block1_price"))
+    if take_profit <= 0 and avg_price > 0:
+        take_profit = round(avg_price + (atr_val * 5.0), 2)
+
+    # Trailing Stop: Prioridad trailing_sl_price > tp_trailing_sl > sl_dynamic_price > stop_loss
     trailing_sl = pos.get("trailing_sl_price")
     if trailing_sl is None or safe_float(trailing_sl) <= 0:
         trailing_sl = pos.get("tp_trailing_sl")
     if trailing_sl is None or safe_float(trailing_sl) <= 0:
         trailing_sl = pos.get("sl_dynamic_price")
+    if trailing_sl is None or safe_float(trailing_sl) <= 0:
+        trailing_sl = stop_loss
 
     trailing_stop = safe_float(trailing_sl)
 

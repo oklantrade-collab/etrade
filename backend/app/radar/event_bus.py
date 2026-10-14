@@ -8,7 +8,7 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 
-from app.core.logger import log_info, log_error, log_warning
+from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.radar.config import RADAR_PARAMS, MODULE
 
 
@@ -88,6 +88,7 @@ class RadarEventBus:
     def _save_to_disk(self) -> None:
         """
         Saves all in-memory events to the local cache JSON file.
+        Uses fallback path if permission or directory errors occur.
         """
         try:
             os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
@@ -98,7 +99,14 @@ class RadarEventBus:
             with open(self.cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data_to_save, f, indent=2, default=str)
         except Exception as e:
-            log_error(MODULE, f"Failed to persist events to disk ({self.cache_file}): {e}")
+            # Fallback a directorio /tmp o temporal en caso de permisos restringidos
+            try:
+                fallback_path = os.path.join('/tmp', 'radar_events_cache.json')
+                with open(fallback_path, 'w', encoding='utf-8') as f:
+                    json.dump(data_to_save, f, indent=2, default=str)
+                log_debug(MODULE, f"Disk persistence shifted to fallback ({fallback_path}): {e}")
+            except Exception:
+                log_warning(MODULE, f"Failed to persist events to disk ({self.cache_file}): {e}")
 
     def _load_from_disk(self) -> None:
         """

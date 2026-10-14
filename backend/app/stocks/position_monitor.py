@@ -183,27 +183,14 @@ class PositionMonitor:
                 except Exception as rep_err:
                     log_warning(MODULE, f"Error actualizando auto-repair para {ticker}: {rep_err}")
 
-            # ── 1.5 AUDITORÍA DE SEGURIDAD DIAGNÓSTICA (CIERRE SI FALLA VARIABLE) ──
+            # ── 1.5 AUDITORÍA DE SEGURIDAD DIAGNÓSTICA (AUTO-REPARAR, PRESERVAR POSICIÓN) ──
             from app.stocks.diagnostic_validator import build_position_diagnostics
             snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
             snap_data = snap_res.data[0] if snap_res.data else None
             diag = build_position_diagnostics(trade, snap_db=snap_data)
             if not diag["is_valid"]:
                 missing_str = ", ".join(diag["missing_fields"])
-                log_error(MODULE, f"🚨 CIERRE DE SEGURIDAD {ticker}: Falló variable técnica o de riesgo ({missing_str}). Cerrando posición de inmediato...")
-                try:
-                    from app.stocks.stocks_order_executor import _send_telegram_sync
-                    _send_telegram_sync(
-                        f"🚨 CIERRE DE SEGURIDAD STOCKS\n"
-                        f"Ticker: {ticker}\n"
-                        f"Motivo: Falla en variables requeridas ({missing_str})\n"
-                        f"Precio actual: ${current_price:.2f}\n"
-                        f"Acción: Cierre total a mercado preventivo."
-                    )
-                except Exception:
-                    pass
-                await self._close_position(trade, current_price, "safety_fail_missing_indicator")
-                return
+                log_warning(MODULE, f"⚠️ [DIAGNOSTICS] {ticker}: Variables requeridas ausentes ({missing_str}). Parámetros auto-reparados; posición preservada sin liquidación forzada.")
 
             # ── 2. HARD CAP DE SEGURIDAD DEL 5% ──
             if pnl_pct <= -5.0:
