@@ -211,6 +211,12 @@ def execute_market_order(
 
     # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
     shares = _calculate_shares(capital, max_pct, price)
+    if rule_code == "FT_RUNNER_BUY":
+        # Tranche inicial ligero (30%) para permitir Scaling-In / Pyramiding
+        shares = max(5, int((shares * 0.30) // 5) * 5)
+    elif rule_code == "FT_REENTRY_BUY":
+        # Tranche de recompra (35%) para añadir a posición ganadora
+        shares = max(5, int((shares * 0.35) // 5) * 5)
     
     if shares < 5:
         log_warning(MODULE, f"Aborting MARKET order for {ticker}: Insufficient capital for min batch of 5 (Target: ${capital * max_pct:.0f} vs Need: ${5*price:.0f})")

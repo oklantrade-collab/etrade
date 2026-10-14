@@ -60,6 +60,8 @@ class IBConnection(EWrapper, EClient):
         self._order_statuses: dict = {}      # {order_id: status_dict}
         self._order_callback: Optional[Callable] = None
         self.accounts: list[str] = []
+        self._positions: Dict[str, dict] = {}
+        self._positions_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     # ── Connection ────────────────────────────────────────
@@ -197,6 +199,41 @@ class IBConnection(EWrapper, EClient):
     def set_order_callback(self, callback: Callable):
         """Register a callback function to receive orderStatus events."""
         self._order_callback = callback
+
+    # ── Portfolio & Positions Callbacks ────────────────────
+
+    def position(self, account: str, contract: "Contract", position: float, avgCost: float):
+        """Called by TWS during reqPositions stream."""
+        if not contract:
+            return
+        symbol = getattr(contract, "symbol", "").upper()
+        if not symbol:
+            return
+        log_info(MODULE, f"[IB Position] Account={account} Symbol={symbol} Qty={position} AvgCost=${avgCost:.4f}")
+        self._positions[symbol] = {
+            "account": account,
+            "symbol": symbol,
+            "shares": float(position),
+            "avg_cost": float(avgCost),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+
+    def positionEnd(self):
+        """Called by TWS when all open positions have been sent."""
+        log_info(MODULE, f"[IB PositionEnd] Positions sync finished. Total active symbols: {len(self._positions)}")
+        self._positions_event.set()
+
+    def request_broker_positions(self, timeout: float = 6.0) -> Dict[str, dict]:
+        """Request all open positions from TWS and wait until positionEnd."""
+        self._positions = {}
+        self._positions_event.clear()
+        try:
+            self.reqPositions()
+            self._positions_event.wait(timeout=timeout)
+            self.cancelPositions()
+        except Exception as e:
+            log_warning(MODULE, f"Error requesting positions from TWS: {e}")
+        return self._positions
 
     # ── Contract Builder ──────────────────────────────────
 

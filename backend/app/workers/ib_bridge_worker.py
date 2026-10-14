@@ -28,6 +28,7 @@ MODULE = "ib_bridge"
 # Mapa local para relacionar orderId de IB con id de Supabase
 # { ib_order_id: supabase_order_row }
 PENDING_IB_ORDERS = {}
+ACTIVE_BRIDGE = None
 
 
 def send_telegram_alert(message: str):
@@ -173,6 +174,13 @@ def on_ib_order_status(order_id: int, status_info: dict):
         # Limpiar de seguimiento activo
         PENDING_IB_ORDERS.pop(order_id, None)
 
+        # Confirmación y reconciliación inmediata con el Broker
+        if ACTIVE_BRIDGE:
+            try:
+                ACTIVE_BRIDGE.reconcile_broker_portfolio()
+            except Exception as r_err:
+                log_warning(MODULE, f"Error en reconciliación post-fill: {r_err}")
+
     elif status in ["cancelled", "inactive"]:
         try:
             sb.table("stocks_orders").update({
@@ -201,11 +209,13 @@ class IBBridgeWorker:
     """Worker permanente para el puente APOLO <-> IBKR TWS <-> Supabase."""
 
     def __init__(self, host=None, port=None, client_id=None):
+        global ACTIVE_BRIDGE
         self.host = host or get_default_ib_host()
         self.port = port or int(os.getenv("IB_PORT", "7497"))
         self.client_id = client_id or int(os.getenv("IB_CLIENT_ID", "25"))
         self.ib = None
         self.running = True
+        ACTIVE_BRIDGE = self
 
     def initialize_ib(self) -> bool:
         """Establece conexión inicial con TWS en el puerto 7497."""
@@ -311,6 +321,111 @@ class IBBridgeWorker:
         except Exception as e:
             log_error(MODULE, f"Error revisando órdenes pendientes: {e}")
 
+    def reconcile_broker_portfolio(self):
+        """
+        Consulta las posiciones reales en Interactive Brokers TWS (Paper)
+        y reconcilia la tabla stocks_positions en Supabase para que predomine
+        el Broker sobre cualquier estado local ("El Broker es la verdad absoluta").
+        """
+        if not self.ib or not self.ib.connected:
+            return
+
+        try:
+            sb = get_supabase()
+            broker_positions = self.ib.request_broker_positions(timeout=6.0)
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Guardar el snapshot del portfolio real en stocks_config
+            try:
+                sb.table("stocks_config").upsert({
+                    "key": "ib_broker_portfolio",
+                    "value": str(broker_positions),
+                    "description": "Cartera de posiciones reales en Interactive Brokers TWS",
+                    "updated_at": now_iso
+                }, on_conflict="key").execute()
+            except Exception:
+                pass
+
+            # 1. Obtener posiciones actualmente abiertas en Supabase
+            sb_pos_res = sb.table("stocks_positions").select("*").eq("status", "open").execute()
+            sb_open = {p["ticker"]: p for p in (sb_pos_res.data or [])}
+
+            # 2. Reconciliar cada posición existente en el Broker
+            for sym, b_data in broker_positions.items():
+                qty = int(b_data["shares"])
+                if qty <= 0:
+                    continue
+                avg_cost = float(b_data["avg_cost"])
+
+                cur_p = self.ib._prices.get(sym, avg_cost) if hasattr(self.ib, '_prices') else avg_cost
+                if cur_p <= 0:
+                    cur_p = avg_cost
+
+                atr_fb = max(0.05, cur_p * 0.02)
+                sl_calc = round(max(0.01, avg_cost - (atr_fb * 2.0)), 2)
+                tp_calc = round(avg_cost + (atr_fb * 5.0), 2)
+                pnl_usd = round((cur_p - avg_cost) * qty, 2)
+                pnl_pct = round(((cur_p - avg_cost) / avg_cost * 100), 2) if avg_cost > 0 else 0.0
+
+                if sym in sb_open:
+                    existing_pos = sb_open[sym]
+                    old_shares = int(existing_pos.get("shares") or 0)
+                    old_avg = float(existing_pos.get("avg_price") or 0)
+                    # Si difiere la cantidad o el precio promedio, el broker manda
+                    if old_shares != qty or abs(old_avg - avg_cost) > 0.01:
+                        update_payload = {
+                            "shares": qty,
+                            "avg_price": round(avg_cost, 4),
+                            "total_cost": round(qty * avg_cost, 2),
+                            "current_price": cur_p,
+                            "unrealized_pnl": pnl_usd,
+                            "unrealized_pnl_pct": pnl_pct,
+                            "updated_at": now_iso
+                        }
+                        if not existing_pos.get("stop_loss") or float(existing_pos.get("stop_loss")) <= 0:
+                            update_payload["stop_loss"] = sl_calc
+                            update_payload["trailing_sl_price"] = sl_calc
+                        if not existing_pos.get("take_profit") or float(existing_pos.get("take_profit")) <= 0:
+                            update_payload["take_profit"] = tp_calc
+
+                        sb.table("stocks_positions").update(update_payload).eq("id", existing_pos["id"]).execute()
+                        log_info(MODULE, f"🔄 [SYNC BROKER] Posición ajustada para {sym}: {old_shares} -> {qty} acc @ ${avg_cost:.2f}")
+                else:
+                    # Crear posición nueva en Supabase que existe en el Broker
+                    new_pos = {
+                        "ticker": sym,
+                        "direction": "long",
+                        "shares": qty,
+                        "avg_price": round(avg_cost, 4),
+                        "total_cost": round(qty * avg_cost, 2),
+                        "current_price": cur_p,
+                        "unrealized_pnl": pnl_usd,
+                        "unrealized_pnl_pct": pnl_pct,
+                        "stop_loss": sl_calc,
+                        "trailing_sl_price": sl_calc,
+                        "highest_price_reached": max(avg_cost, cur_p),
+                        "take_profit": tp_calc,
+                        "group_name": "IB_PAPER",
+                        "first_buy_at": now_iso,
+                        "status": "open",
+                        "updated_at": now_iso
+                    }
+                    sb.table("stocks_positions").insert(new_pos).execute()
+                    log_info(MODULE, f"📥 [SYNC BROKER] Posición del Broker restaurada en Supabase: {sym} {qty} acc @ ${avg_cost:.2f}")
+
+            # 3. Cerrar en Supabase cualquier posición que el Broker ya no tenga (qty == 0)
+            if broker_positions:
+                for sym, p_data in sb_open.items():
+                    if sym not in broker_positions or int(broker_positions[sym]["shares"]) <= 0:
+                        sb.table("stocks_positions").update({
+                            "status": "closed",
+                            "updated_at": now_iso
+                        }).eq("id", p_data["id"]).execute()
+                        log_info(MODULE, f"📤 [SYNC BROKER] Posición cerrada en Supabase porque ya no existe en el Broker: {sym}")
+
+        except Exception as sync_e:
+            log_error(MODULE, f"Error en reconciliación con el broker: {sync_e}")
+
     def run_loop(self):
         """Bucle principal de ejecución del puente."""
         print("=" * 65)
@@ -321,6 +436,7 @@ class IBBridgeWorker:
         self.initialize_ib()
 
         last_heartbeat = 0
+        last_reconcile = 0
         last_reconnect_attempt = time.time()
         reconnect_cooldown = 15  # Intentar reconectar a TWS cada 15 segundos
 
@@ -338,6 +454,11 @@ class IBBridgeWorker:
                 if time.time() - last_heartbeat > 15:
                     self.update_heartbeat()
                     last_heartbeat = time.time()
+
+                # 2.5 Reconciliación continua con el Broker cada 30 segundos
+                if self.ib and self.ib.connected and (time.time() - last_reconcile > 30):
+                    self.reconcile_broker_portfolio()
+                    last_reconcile = time.time()
 
                 # 3. Procesar órdenes pendientes si estamos conectados
                 if self.ib and self.ib.connected:

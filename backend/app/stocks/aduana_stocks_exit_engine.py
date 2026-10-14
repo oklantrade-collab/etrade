@@ -745,6 +745,16 @@ def evaluate_alpha_runner_sharp_exit(
     is_alpha_runner = ('ALPHA_RUNNER' in group_name) or ('ALPHA' in rule_pos) or ('PULLBACK_' in rule_pos)
     partial_done = bool(position.get('tp_block1_executed') or position.get('tp_1h_executed'))
 
+    # Antigüedad de la posición en minutos (Mínimo de maduración 15 minutos salvo clímax >= 2.5%)
+    entry_time_str = position.get('first_buy_at') or position.get('entry_time')
+    age_mins = 0.0
+    if entry_time_str:
+        try:
+            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+            age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+        except Exception:
+            age_mins = 0.0
+
     # ── 1. EVALUACIÓN 1 HORA (1a y 1b) ──
     climax_1h_1a = False
     if df_1h is not None and len(df_1h) >= 10:
@@ -858,10 +868,9 @@ def evaluate_alpha_runner_sharp_exit(
             # forma mecha superior >= 15% del rango (High - Low),
             # y el precio toca el OPEN de 15m volviendo la vela roja (current_price <= open_15m_cur).
             above_bb_15m = (bb_up_15m_cur > 0 and (high_15m_cur > bb_up_15m_cur or prev_c15 > prev_bb_up15))
-            has_15pct_wick_15m = (wick_15m_pct >= 0.15) or (prev_c15 > prev_bb_up15 and prev_wick15_pct >= 0.15)
+            has_15pct_wick_15m = (wick_15m_pct >= 0.15) or (prev_wick15_pct >= 0.15)
             touched_open_15m_red = (current_price <= open_15m_cur)
-
-            if above_bb_15m and has_15pct_wick_15m and touched_open_15m_red and gain_pct >= 0.8:
+            if above_bb_15m and has_15pct_wick_15m and touched_open_15m_red and (gain_pct >= 2.5 or (gain_pct >= 0.8 and age_mins >= 15.0)):
                 close_total = (is_alpha_runner or climax_1h_1a or partial_done or deterioration_2d1 or deterioration_2d2 or shares < 2)
                 pct = 100 if close_total else 50
                 return {
@@ -910,9 +919,10 @@ def evaluate_alpha_runner_sharp_exit(
 
             # Condición 2d-3 (Seguimiento a minuto cuando 5m abre OPEN > BB_Upper_5m):
             # Mientras sea verde (current_price > open_5m_cur) -> HOLD.
-            # Al PRIMER ROJO (current_price <= open_5m_cur cuando abrio sobre BB_Upper_5m) -> Cierre Total Inmediato!
+            # Al PRIMER ROJO (current_price <= open_5m_cur cuando abrio sobre BB_Upper_5m):
+            # Requiere 15 min de maduración salvo ganancia de clímax >= 2.5%
             if bb_up_5m_cur > 0 and open_5m_cur > bb_up_5m_cur:
-                if current_price <= open_5m_cur and gain_pct >= 0.5:
+                if current_price <= open_5m_cur and (gain_pct >= 2.5 or (gain_pct >= 0.5 and age_mins >= 15.0)):
                     return {
                         **res,
                         'should_close': True,
@@ -930,13 +940,14 @@ def evaluate_alpha_runner_sharp_exit(
             # Condición 2b:
             # En 5m, Open > BB_Upper_5m (o la vela previa de 5m abrió > BB_Upper_5m),
             # mecha >= 15% en 15m o 5m, y el precio toca el OPEN de 5m terminando en rojo.
+            # Requiere 15 min de maduración salvo ganancia de clímax >= 2.5%
             prev_o5 = float(o5.iloc[-2])
             prev_bb_up5 = float(bb_up_5.iloc[-2])
             opened_above_bb5 = (bb_up_5m_cur > 0 and (open_5m_cur > bb_up_5m_cur or prev_o5 > prev_bb_up5))
             has_15pct_wick = (wick_15m_pct >= 0.15) or (wick_5m_pct >= 0.15)
             touched_open_5m_red = (current_price <= open_5m_cur)
 
-            if opened_above_bb5 and has_15pct_wick and touched_open_5m_red and gain_pct >= 0.6:
+            if opened_above_bb5 and has_15pct_wick and touched_open_5m_red and (gain_pct >= 2.5 or (gain_pct >= 0.6 and age_mins >= 15.0)):
                 close_total = (is_alpha_runner or climax_1h_1a or partial_done or deterioration_2d1 or deterioration_2d2 or shares < 2)
                 pct = 100 if close_total else 50
                 return {
@@ -955,6 +966,64 @@ def evaluate_alpha_runner_sharp_exit(
             log_warning(MODULE, f"Error en evaluación 5m (2b/2d-3): {e5}")
 
     return res
+
+
+def calculate_ipo_super_runner_trailing_stop(
+    position: dict,
+    current_price: float,
+    df_5m: Optional[pd.DataFrame] = None,
+    now_dt: Optional[datetime] = None,
+) -> dict:
+    """
+    TRAILING STOP PARA FAST-TRACK IPO SUPER-RUNNERS (5 MINUTOS):
+    - Stop Loss inicial fijado debajo de (EMA9_5m - Delta).
+    - Conforme aparece cada vela verde en 5m (Close_5m > Open_5m),
+      el Trailing Stop se actualiza ratcheteando hacia arriba a (EMA9_5m - Delta).
+    - En velas rojas (Close <= Open) o doji, el stop NO se reduce (es unidireccional ascendente).
+    - Si el precio perfora el Trailing Stop, se activa la salida.
+    """
+    current_sl = float(position.get('stop_loss') or 0.0)
+    current_tsl = float(position.get('trailing_sl_price') or current_sl)
+    entry_p = float(position.get('avg_price') or position.get('entry_price') or 0.0)
+    best_sl = max(current_sl, current_tsl)
+
+    if entry_p <= 0 or current_price <= 0 or df_5m is None or len(df_5m) < 3:
+        return {'should_update': False, 'new_sl': best_sl, 'stage': 'NONE', 'reason': 'Datos 5m insuficientes'}
+
+    try:
+        c5 = _safe_col(df_5m, 'close')
+        o5 = _safe_col(df_5m, 'open')
+        h5 = _safe_col(df_5m, 'high')
+        l5 = _safe_col(df_5m, 'low')
+
+        ema9_5 = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
+        atr5 = float((h5 - l5).rolling(14, min_periods=3).mean().iloc[-1])
+        delta = max(0.01, min(current_price * 0.0035, 0.15 * atr5 if atr5 > 0 else 0.05))
+
+        # Comprobar si la vela actual o previa de 5m es verde (Close > Open)
+        cur_c = float(c5.iloc[-1])
+        cur_o = float(o5.iloc[-1])
+        is_cur_green = (cur_c > cur_o) or (current_price > cur_o)
+
+        prev_c = float(c5.iloc[-2]) if len(c5) >= 2 else cur_c
+        prev_o = float(o5.iloc[-2]) if len(o5) >= 2 else cur_o
+        is_prev_green = (prev_c > prev_o)
+
+        if is_cur_green or is_prev_green:
+            cand_sl = round(ema9_5 - delta, 2)
+            if cand_sl > best_sl and cand_sl < current_price:
+                best_sl = cand_sl
+                return {
+                    'should_update': True,
+                    'new_sl': best_sl,
+                    'stage': 'IPO_TRAIL_EMA9_5M_GREEN_CANDLE',
+                    'reason': f"IPO Super-Runner Vela Verde 5m: SL elevado a EMA9_5m (${ema9_5:.2f})-Δ=${best_sl:.2f}"
+                }
+
+        return {'should_update': False, 'new_sl': best_sl, 'stage': 'IPO_HOLD', 'reason': 'Vela no verde o SL ya óptimo'}
+    except Exception as e:
+        log_warning("IPO_EXIT", f"Error calculando trailing stop IPO: {e}")
+        return {'should_update': False, 'new_sl': best_sl, 'stage': 'ERROR', 'reason': str(e)}
 
 
 def calculate_alpha_escalating_trailing_stop(
@@ -1000,6 +1069,15 @@ def calculate_alpha_escalating_trailing_stop(
     best_sl = max(current_sl, current_tsl)
     active_stage = 'INITIAL'
     reasons = []
+
+    # ── IPO SUPER-RUNNER FAST-TRACK TRAILING STOP (EMA9_5m - Delta en velas verdes) ──
+    group_name = str(position.get('group_name', '') or position.get('pool_type', '')).upper()
+    rule_pos = str(position.get('rule_code', '') or position.get('strategy', '')).upper()
+    is_ipo = ('IPO' in group_name) or ('IPO' in rule_pos)
+    if is_ipo and df_5m is not None and len(df_5m) >= 3:
+        ipo_res = calculate_ipo_super_runner_trailing_stop(position, current_price, df_5m, now_dt)
+        if ipo_res.get('should_update'):
+            return ipo_res
 
     try:
         # Calcular Delta dinámico basado en ATR de 15m/5m
@@ -1140,6 +1218,40 @@ def evaluate_aduana_stocks_exit(
             'pnl_usd': round(pnl_usd, 2),
             'reason': f"Hard-Exit EOD (15:50 ET): Liquidación forzosa incondicional del 100% para erradicar riesgo nocturno/dilución ({gain_pct:+.2f}% / ${pnl_usd:+.2f} USD)."
         }
+
+    # ── 0.05 EVALUACIÓN PRIORITARIA FAST-TRACK IPO SUPER-RUNNER & ALPHA RUNNERS ──
+    group_name = str(position.get('group_name', '') or position.get('pool_type', '')).upper()
+    rule_pos = str(position.get('rule_code', '') or position.get('strategy', '')).upper()
+    is_ft_eligible = ('FAST_TRACK' in group_name) or ('IPO_SUPER_RUNNER' in group_name) or ('ALPHA' in group_name) or ('FT_' in rule_pos) or ('FAST' in rule_pos) or ('IPO' in rule_pos) or (df_1d is not None and len(df_1d) <= 15)
+
+    if is_ft_eligible:
+        try:
+            from app.stocks.fast_track_runner_engine import evaluate_fast_track_exits
+            ft_res = evaluate_fast_track_exits(
+                position=position,
+                df_5m=df_5m,
+                df_15m=df_15m,
+                df_1h=df_1h,
+                current_price=current_price
+            )
+            if ft_res.get('should_exit'):
+                pct = ft_res.get('pct_to_sell', 100)
+                action_str = 'CLOSE_TOTAL' if pct >= 100 else f"CLOSE_PARTIAL_{pct}"
+                return {
+                    'should_close': True,
+                    'action': action_str,
+                    'shares_to_close': ft_res.get('shares_to_sell', shares),
+                    'pct_to_close': pct,
+                    'rule_code': ft_res.get('rule_code', 'FT_PARTIAL_SELL'),
+                    'gain_pct': round(gain_pct, 2),
+                    'pnl_usd': round(pnl_usd, 2),
+                    'reason': ft_res.get('reason', 'Fast-Track Exit'),
+                    'should_update_sl': ft_res.get('should_update_sl', False),
+                    'new_stop_loss': ft_res.get('new_stop_loss', 0.0),
+                    'sl_reason': ft_res.get('sl_reason', '')
+                }
+        except Exception as e_ft:
+            log_warning(MODULE, f"Error en evaluate_fast_track_exits: {e_ft}")
 
     # ── 0.1 CIERRE POR ESTANCAMIENTO / ZOMBIE TRADE (age_mins >= 45m sin tracción) ──
     # Evita que posiciones laterales terminen en ADUANA_STK_EOD_HARD_EXIT o STOP_LOSS_INITIAL

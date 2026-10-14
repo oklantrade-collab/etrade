@@ -749,6 +749,93 @@ def evaluate_lower5_6_absorption(
 
 
 # ════════════════════════════════════════════════════════════════
+# 3.5. FAST-TRACK PARA IPO SUPER-RUNNERS (NUEVA CATEGORÍA)
+# ════════════════════════════════════════════════════════════════
+
+def evaluate_ipo_super_runner_setup(
+    current_price: float,
+    df_5m: Optional[pd.DataFrame],
+    df_15m: Optional[pd.DataFrame] = None,
+    bands_15m: Optional[dict] = None,
+) -> dict:
+    """
+    NUEVA CATEGORÍA: FAST-TRACK PARA IPO SUPER-RUNNERS
+    Aplica para IPOs recientes o acciones con Super-Gap y alto volumen (sin historial de 50-200 días):
+      1. Entrada en 5m:
+         - Precio sobre EMA9_5m (current_price >= ema9_5m * 0.998).
+         - Vela de 5m Verde (Close > Open) o vela previa verde sólida (Close_prev > Open_prev y Close > Close_prev).
+         - Confirmación de volumen relativo en 5m (Volume_5m >= SMA_Volume_10_5m * 0.95).
+      2. Stop Loss Inicial:
+         - Debajo de (EMA9_5m - Delta), donde Delta = max(0.02, 0.5 * ATR_5m).
+         - Con techo de pérdida máxima de -3.5%.
+    """
+    if df_5m is None or len(df_5m) < 6:
+        return {'triggered': False, 'reason': 'Datos 5m insuficientes para IPO Super-Runner'}
+
+    try:
+        c5 = _safe_col(df_5m, 'close')
+        o5 = _safe_col(df_5m, 'open')
+        h5 = _safe_col(df_5m, 'high')
+        l5 = _safe_col(df_5m, 'low')
+        v5 = _safe_col(df_5m, 'volume')
+
+        ema9_5 = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
+        atr_5 = float((h5 - l5).iloc[-14:].mean()) if len(h5) >= 14 else (current_price * 0.02)
+        delta = max(0.02, 0.50 * atr_5)
+
+        c_cur = float(c5.iloc[-1])
+        o_cur = float(o5.iloc[-1])
+        c_prev = float(c5.iloc[-2])
+        o_prev = float(o5.iloc[-2])
+
+        is_green_cur = (c_cur > o_cur)
+        is_green_prev = (c_prev > o_prev)
+        green_momentum = is_green_cur or (is_green_prev and c_cur >= c_prev * 0.995)
+
+        # Confirmación de volumen en 5m
+        v_cur = float(v5.iloc[-1]) if len(v5) > 0 else 0
+        v_sma10 = float(v5.iloc[-10:].mean()) if len(v5) >= 10 else 1.0
+        has_volume = (v_sma10 <= 0) or (v_cur >= v_sma10 * 0.95)
+
+        above_ema9 = (current_price >= ema9_5 * 0.995)
+
+        if not above_ema9:
+            return {'triggered': False, 'reason': f"IPO Runner: Precio (${current_price:.2f}) < EMA9_5m (${ema9_5:.2f})"}
+
+        if not green_momentum:
+            return {'triggered': False, 'reason': "IPO Runner: En espera de vela verde (Close > Open) en 5m"}
+
+        if not has_volume:
+            return {'triggered': False, 'reason': f"IPO Runner: Volumen 5m insuficiente ({v_cur:,.0f} < SMA10 {v_sma10:,.0f})"}
+
+        # Stop loss inicial: estrictamente debajo de (EMA9_5m - Delta)
+        raw_sl = round(ema9_5 - delta, 2)
+        min_sl = round(current_price * 0.965, 2)  # Máximo 3.5% de riesgo tolerado
+        max_sl = round(current_price * 0.992, 2)  # Mínimo espacio
+        rec_sl = max(min_sl, min(max_sl, raw_sl))
+
+        target_u5 = float(bands_15m.get('upper_5', current_price * 1.08)) if bands_15m else current_price * 1.08
+        target_u6 = float(bands_15m.get('upper_6', current_price * 1.15)) if bands_15m else current_price * 1.15
+
+        return {
+            'triggered': True,
+            'rule_code': 'IPO_SUPER_RUNNER_BUY',
+            'order_type': 'market',
+            'reason': (
+                f"IPO Super-Runner Trigger: Precio (${current_price:.2f}) >= EMA9_5m (${ema9_5:.2f}) "
+                f"+ Vela Verde 5m con Vol Confirmado. SL Inicial en (EMA9 - Delta) = ${rec_sl:.2f} (-{((current_price-rec_sl)/current_price*100):.1f}%)."
+            ),
+            'recommended_sl': rec_sl,
+            'target_upper5': round(target_u5, 2),
+            'target_upper6': round(target_u6, 2),
+            'limit_orders': []
+        }
+    except Exception as e:
+        log_warning(MODULE, f"Error en evaluate_ipo_super_runner_setup: {e}")
+        return {'triggered': False, 'reason': str(e)}
+
+
+# ════════════════════════════════════════════════════════════════
 # 4. EVALUADOR MAESTRO DE COMPRA EN RETROCESO (SECCIÓN B MASTER)
 # ════════════════════════════════════════════════════════════════
 
@@ -764,9 +851,10 @@ def evaluate_pullback_setup(
     pinescript_signal: str = '',
     sipv_signal_15m: str = '',
     pool_type: str = 'HOT_MOMENTUM',
+    is_ipo_runner: bool = False,
 ) -> dict:
     """
-    EVALUADOR MAESTRO DE COMPRAS Y RECOMPRAS (SECCIÓN B: 4a, 4b, 4d, y versiones blindadas 3a/4c)
+    EVALUADOR MAESTRO DE COMPRAS Y RECOMPRAS (SECCIÓN B: 4a, 4b, 4d, versiones 3a/4c e IPO_SUPER_RUNNER).
     Incorpora el Predictor de Poca Ganancia (Room-to-Run & ATR Compression Gate).
     """
     if current_price <= 0:
@@ -780,6 +868,27 @@ def evaluate_pullback_setup(
             'target_upper6': 0.0,
             'limit_orders': []
         }
+
+    # 0. VÍA RÁPIDA: FAST-TRACK IPO SUPER-RUNNER (Evaluación de 5m con SL en EMA9 - Delta)
+    if is_ipo_runner or 'IPO' in str(pool_type):
+        ipo_res = evaluate_ipo_super_runner_setup(
+            current_price=current_price,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            bands_15m=bands_15m,
+        )
+        if ipo_res.get('triggered'):
+            return {
+                'pullback_triggered': True,
+                'trigger_type': ipo_res['rule_code'],
+                'order_type': ipo_res['order_type'],
+                'reason': ipo_res['reason'],
+                'recommended_sl': ipo_res['recommended_sl'],
+                'target_upper5': ipo_res['target_upper5'],
+                'target_upper6': ipo_res['target_upper6'],
+                'macro_details': {'is_ipo_runner': True},
+                'limit_orders': []
+            }
 
     # 1. Filtro Horario (09:45 a 14:40 ET — Evita Opening Whipsaw y EOD Hard Exit)
     if not is_in_pullback_time_window(now_dt):

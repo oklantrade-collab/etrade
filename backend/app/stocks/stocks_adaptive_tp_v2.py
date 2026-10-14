@@ -504,13 +504,15 @@ def evaluate_stock_tp_v2(
         if aduana_res.get('should_close'):
             action = aduana_res.get('action')
             shares_to_sell = aduana_res.get('shares_to_close', 0)
-            if action == 'CLOSE_PARTIAL_50':
+            if action.startswith('CLOSE_PARTIAL_') or action == 'CLOSE_PARTIAL_50':
+                pct = aduana_res.get('pct_to_close', 50)
+                block = 'block1' if not position.get('tp_block1_executed') else 'block2'
                 return {
-                    'action': 'close_block1',
+                    'action': f'close_{block}',
                     'shares': shares_to_sell,
-                    'pct': 50,
-                    'trigger': aduana_res.get('rule_code', 'ADUANA_TP50'),
-                    'reason': aduana_res.get('reason', 'ADUANA Parcial 50%'),
+                    'pct': pct,
+                    'trigger': aduana_res.get('rule_code', 'ADUANA_TP_CLOSE'),
+                    'reason': aduana_res.get('reason', f'ADUANA Parcial {pct}%'),
                     'debug_indicators': {}
                 }
             elif action in ('CLOSE_TOTAL', 'CLOSE_MAJOR_75'):

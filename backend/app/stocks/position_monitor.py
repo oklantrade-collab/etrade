@@ -777,10 +777,11 @@ class PositionMonitor:
             try:
                 from app.stocks.stocks_order_executor import is_ib_bridge_alive
                 if is_ib_bridge_alive():
+                    partial_rule = "FT_PARTIAL_SELL" if ("FT" in str(reason).upper() or "FAST" in str(trade.get("rule_code", "")).upper()) else "ADUANA_TP_CLOSE"
                     sb.table("stocks_orders").insert({
                         "ticker": ticker,
                         "group_name": trade.get("group_name", "STOCKS"),
-                        "rule_code": f"PARTIAL_{block_name}"[:30],
+                        "rule_code": partial_rule,
                         "order_type": "market",
                         "direction": "sell",
                         "shares": int(shares_to_close),

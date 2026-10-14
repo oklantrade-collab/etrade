@@ -7,6 +7,9 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
+_backend_env = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
+if os.path.exists(_backend_env):
+    load_dotenv(_backend_env)
 
 
 class Settings(BaseModel):

@@ -66,12 +66,12 @@ def get_technical_indicators_snapshot(
     if snap_db and safe_float(snap_db.get("basis")) > 0 and safe_float(snap_db.get("upper_6")) > 0:
         has_full_snap = True
 
-    # Si no tenemos df_15m y snap_db está incompleto, descargar barras recientes
-    if df_15m is None or df_15m.empty:
+    # Si snap_db tiene datos básicos de precio, evitar llamadas lentas a yfinance
+    if (df_15m is None or df_15m.empty) and not (snap_db and safe_float(snap_db.get("price")) > 0):
         try:
             import yfinance as yf
             t_obj = yf.Ticker(ticker)
-            df_15m = t_obj.history(period="30d", interval="15m")
+            df_15m = t_obj.history(period="5d", interval="15m")
         except Exception as e:
             log_warning("diagnostic_validator", f"Error descargando barras para {ticker}: {e}")
 

@@ -368,9 +368,16 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             return None
 
         # Case 3: Extreme Parabolic Extension (> 45% governed by TrapShield)
+        # Fast-Track para IPO Super-Runners: Si la acción tiene <= 15 velas diarias o es IPO con volumen fuerte (>= 1.5M o RVOL >= 2.0),
+        # permitimos el paso a la categoría especializada IPO_SUPER_RUNNER con stops de 5m en vez de vetarlo.
+        rvol_1d_init = float(ind_1d.get("rvol", 1.0))
+        is_ipo_runner = (len(df_1d) <= 15 and (volume_24h >= 1_500_000 or rvol_1d_init >= 2.0)) or ("IPO" in str(f_data.get("pool_type", "") if f_data else ""))
         if gap_pct > 45.0:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Parabolic Gap ({gap_pct}%). High reversal risk.")
-            return None
+            if is_ipo_runner:
+                log_info(MODULE, f"🚀 FAST-TRACK IPO SUPER-RUNNER for {ticker}: Gap {gap_pct:.1f}% admitido por volumen masivo ({volume_24h:,.0f}) e historial joven ({len(df_1d)} velas 1D).")
+            else:
+                log_info(MODULE, f"🚫 Blocking {ticker}: Extremely extended Parabolic Gap ({gap_pct}%). High reversal risk.")
+                return None
 
         # 4. TECHNICAL RULES
         # ── MOMENTUM FAST-TRACK: Relax rules for high-RVOL explosive movers ──
@@ -693,7 +700,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             vwap=trap_shield_res.get('vwap', 0.0),
             spread=0.02,
             pinescript_signal=pine_sig_str,
-            sipv_signal_15m=sipv_signal_15m
+            sipv_signal_15m=sipv_signal_15m,
+            is_ipo_runner=is_ipo_runner,
         )
 
         ind_15m["pullback_triggered"] = pullback_res['pullback_triggered']
@@ -703,6 +711,12 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["pullback_limit_orders"] = pullback_res.get('limit_orders', [])
         if pullback_res['pullback_triggered'] and pullback_res.get('recommended_sl', 0) > 0:
             ind_15m["recommended_sl"] = pullback_res['recommended_sl']
+
+        # Si es IPO Super-Runner, inmunizar del filtro de trampa por gap genérico (salvo dilución tóxica)
+        if is_ipo_runner and not trap_shield_res.get('is_toxic_dilution', False):
+            trap_shield_res['is_trap'] = False
+            ind_15m["pool_type"] = "IPO_SUPER_RUNNER, ALPHA_RUNNER"
+            ind_15m["is_intraday_alpha"] = True
 
         ind_15m["is_trap"] = trap_shield_res['is_trap']
         ind_15m["trap_type"] = trap_shield_res['trap_type']
@@ -721,7 +735,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         )
         if is_alpha_runner_cat and not trap_shield_res['is_trap']:
             cur_pt = str(ind_15m.get("pool_type", "") or "").strip()
-            if "ALPHA_RUNNER" not in cur_pt:
+            if "ALPHA_RUNNER" not in cur_pt and "IPO_SUPER_RUNNER" not in cur_pt:
                 ind_15m["pool_type"] = f"ALPHA_RUNNER, {cur_pt}".strip(", ") if cur_pt and cur_pt != "HOT" else "ALPHA_RUNNER"
             ind_15m["is_intraday_alpha"] = True
 
@@ -749,6 +763,76 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 log_warning(MODULE, f"🚫 TRAMPA BLOQUEADA EN COLA: {ticker} ({trap_shield_res['trap_reason']})")
             except Exception as q_err:
                 log_warning(MODULE, f"Error bloqueando trampa para {ticker}: {q_err}")
+
+        # 1.5 Si es candidato FAST-TRACK IPO SUPER-RUNNER / ALPHA RUNNER: Máxima Prioridad Rank 99.5
+        elif (is_ipo_runner or is_alpha_runner_cat) and not trap_shield_res.get('is_toxic_dilution', False):
+            try:
+                from app.stocks.fast_track_runner_engine import evaluate_fast_track_entry, evaluate_fast_track_reentry
+                pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+                active_pos = pos_res.data[0] if (pos_res.data and len(pos_res.data) > 0) else None
+
+                if active_pos is None:
+                    ft_entry_res = evaluate_fast_track_entry(
+                        ticker=ticker,
+                        df_5m=df_5m,
+                        df_15m=df_15m,
+                        df_1h=df_1h,
+                        df_1d=df_1d,
+                        gap_pct=float(trap_shield_res.get('gap_pct', 0.0)),
+                        config=config
+                    )
+                    if ft_entry_res.get('is_valid'):
+                        rank_boost = 99.5
+                        sb.table("stocks_priority_queue").upsert({
+                            'ticker': ticker,
+                            'group_name': 'IPO_SUPER_RUNNER',
+                            'price_at_rank': current_price,
+                            'apex_score_4h': 98.0,
+                            'apex_score_1d': 98.0,
+                            'return_expected': trap_shield_res.get('growth_potential_pct', 25.0) or 25.0,
+                            'confidence': 'high',
+                            'composite_rank': rank_boost,
+                            'status': 'pending',
+                            'entry_reason': ft_entry_res['reason'],
+                            'triggered_rule': ft_entry_res['rule_code'],
+                            'is_overbought': False,
+                            'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                            'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                            'last_updated': datetime.now(timezone.utc).isoformat()
+                        }, on_conflict='ticker').execute()
+                        log_info(MODULE, f"🚀 GATILLO FAST-TRACK RUNNER 99.5: {ticker} | {ft_entry_res['reason']}")
+                else:
+                    ft_reentry_res = evaluate_fast_track_reentry(
+                        position=active_pos,
+                        df_5m=df_5m,
+                        df_15m=df_15m,
+                        df_1h=df_1h,
+                        current_price=current_price
+                    )
+                    if ft_reentry_res.get('should_reenter'):
+                        cur_shares = int(active_pos.get('shares', 0))
+                        re_shares = max(5, int(cur_shares * 0.35 // 5) * 5)
+                        sb.table("stocks_orders").insert({
+                            "ticker": ticker,
+                            "group_name": "FAST_TRACK",
+                            "rule_code": "FT_REENTRY_BUY",
+                            "order_type": "market",
+                            "direction": "buy",
+                            "shares": re_shares,
+                            "market_price": current_price,
+                            "status": "pending",
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        }).execute()
+                        new_sl = ft_reentry_res.get('new_global_sl')
+                        new_count = int(active_pos.get('reentry_count') or 0) + 1
+                        sb.table("stocks_positions").update({
+                            "stop_loss": new_sl,
+                            "reentry_count": new_count,
+                            "last_reentry_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", active_pos["id"]).execute()
+                        log_info(MODULE, f"🔥 RECOMPRA PYRAMIDING DISPARADA: {ticker} +{re_shares} sh @ ${current_price:.2f} (SL a ${new_sl:.2f})")
+            except Exception as e_ft_sched:
+                log_warning(MODULE, f"Error en Fast-Track Scheduler para {ticker}: {e_ft_sched}")
 
         # 2. Si GATILLO DE ENTRADA RÁPIDA (FAST ENTRY) está activo: Máxima Prioridad Rank 99.0
         elif fast_entry_res['fast_entry_triggered']:

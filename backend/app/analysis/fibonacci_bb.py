@@ -42,18 +42,21 @@ def fibonacci_bollinger(
 
     src = df[src_col]
 
-    # Basis (VWMA)
+    # Basis (VWMA) con soporte adaptativo para IPOs recientes
+    win = min(length, max(3, len(df)))
     typical_vol = src * df["volume"]
-    vol_sum = df["volume"].rolling(window=length).sum()
-    basis = typical_vol.rolling(window=length).sum() / vol_sum
+    vol_sum = df["volume"].rolling(window=win, min_periods=min(2, win)).sum()
+    basis = typical_vol.rolling(window=win, min_periods=min(2, win)).sum() / vol_sum.replace(0, 1e-6)
     
-    # Fallback to SMA if VWMA fails (common in Forex if volume is erratic)
-    basis = basis.fillna(src.rolling(window=length).mean())
+    # Fallback to SMA if VWMA fails
+    basis = basis.fillna(src.rolling(window=win, min_periods=1).mean())
+    basis = basis.bfill().ffill()
     
     df["basis"] = basis
 
     # Standard Deviation (Population)
-    dev = mult * src.rolling(window=length).std(ddof=0)
+    dev = mult * src.rolling(window=win, min_periods=min(2, win)).std(ddof=0)
+    dev = dev.fillna(src * 0.02)
 
     # Fibonacci Bands 1..6
     # Ratios: 1:0.236, 2:0.382, 3:0.500, 4:0.618, 5:0.764, 6:1.000

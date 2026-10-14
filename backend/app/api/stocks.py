@@ -271,16 +271,13 @@ async def get_stocks_positions():
                         strategy_map[o["ticker"]] = o["rule_code"]
             except: pass
 
-            # 2.5 Try to connect to IB if not connected
-            try:
-                if _ib.conn and not _ib.conn.connected:
-                    # Async connection attempt (non-blocking if it fails)
-                    _ib.conn.connect_tws(client_id=99)
-            except: pass
-
-            # 3. Assemble with Live Prices from IB
-            tickers = [p["ticker"] for p in positions]
-            live_prices = await _ib.get_multiple_prices(tickers)
+            # 2.5 Only use IB prices if already connected (never block HTTP request)
+            live_prices = {}
+            if _ib.conn and _ib.conn.connected:
+                try:
+                    live_prices = await _ib.get_multiple_prices(tickers)
+                except Exception:
+                    pass
 
             # 3.1 Fetch Market Snapshots para diagnósticos
             snap_map = {}
