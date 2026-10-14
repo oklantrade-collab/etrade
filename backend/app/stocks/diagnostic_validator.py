@@ -144,17 +144,24 @@ def get_technical_indicators_snapshot(
             fib_upper[f"upper_{idx}"] = safe_float(snap_db.get(f"upper_{idx}")) or round(basis + (atr * mult), 4)
             fib_lower[f"lower_{idx}"] = max(0.01, safe_float(snap_db.get(f"lower_{idx}")) or round(basis - (atr * mult), 4))
 
+        cur_p = cur_price or 5.0
+        b_val = basis if basis > 0 else cur_p
+        ema_3_val = safe_float(snap_db.get("ema3_15m") or snap_db.get("ema_3")) or cur_p
+        ema_9_val = safe_float(snap_db.get("ema9_15m") or snap_db.get("ema_9")) or round((cur_p + b_val) / 2.0, 4)
+        ema_50_val = safe_float(snap_db.get("ema_50")) or b_val
+        ema_200_val = safe_float(snap_db.get("ema_200")) or b_val
+
         result = {
             "current_price": cur_price,
             "basis": basis,
             "bb_upper": bb_upper,
             "bb_lower": bb_lower,
             "atr": atr,
-            "ema_3": safe_float(snap_db.get("ema3_15m") or snap_db.get("ema_3")),
-            "ema_9": safe_float(snap_db.get("ema9_15m") or snap_db.get("ema_9")),
+            "ema_3": ema_3_val,
+            "ema_9": ema_9_val,
             "ema_20": basis,
-            "ema_50": safe_float(snap_db.get("ema_50")),
-            "ema_200": safe_float(snap_db.get("ema_200")),
+            "ema_50": ema_50_val,
+            "ema_200": ema_200_val,
             **fib_upper,
             **fib_lower,
             "_cached_at": now_ts
@@ -222,12 +229,14 @@ def build_position_diagnostics(
 
     trailing_stop = safe_float(trailing_sl)
 
-    # Medias Móviles (combinar tech con posibles columnas en posición)
-    ema_3 = safe_float(tech.get("ema_3") or pos.get("ema3_15m"))
-    ema_9 = safe_float(tech.get("ema_9") or pos.get("ema9_15m"))
-    ema_20 = safe_float(tech.get("ema_20") or tech.get("basis"))
-    ema_50 = safe_float(tech.get("ema_50"))
-    ema_200 = safe_float(tech.get("ema_200"))
+    # Medias Móviles (combinar tech con posibles columnas en posición y fallbacks seguros)
+    cur_p = current_price or avg_price or 5.0
+    basis_val = safe_float(tech.get("basis")) or cur_p
+    ema_3 = safe_float(tech.get("ema_3") or pos.get("ema3_15m")) or cur_p
+    ema_9 = safe_float(tech.get("ema_9") or pos.get("ema9_15m")) or round((cur_p + basis_val) / 2.0, 4)
+    ema_20 = safe_float(tech.get("ema_20") or tech.get("basis")) or basis_val
+    ema_50 = safe_float(tech.get("ema_50")) or basis_val
+    ema_200 = safe_float(tech.get("ema_200")) or basis_val
 
     # Bollinger
     basis = safe_float(tech.get("basis"))
