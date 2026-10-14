@@ -258,6 +258,38 @@ def detect_p2_entry_signal(
         except Exception as e:
             log_error('EREP_MACRO_4H', f"Error calculando Macro 4H: {e}")
 
+    # ── GUARDIA MACRO 1H: Bloquear P2 si la pendiente de EMA3(1H) es plana o descendente ──
+    if df_1h is not None and len(df_1h) >= 3:
+        try:
+            col_close_1h = 'close' if 'close' in df_1h.columns else ('c' if 'c' in df_1h.columns else '')
+            if col_close_1h:
+                c1h = pd.to_numeric(df_1h[col_close_1h], errors='coerce').ffill()
+                ema3_1h_series = c1h.ewm(span=3, adjust=False).mean()
+                e3_curr = float(ema3_1h_series.iloc[-1])
+                e3_prev = float(ema3_1h_series.iloc[-2])
+                slope_1h = (e3_curr - e3_prev) / max(1e-6, e3_prev) * 100.0
+
+                if is_long and slope_1h <= 0.0:
+                    return {
+                        'has_signal': False,
+                        'signals': [],
+                        'count': 0,
+                        'best': None,
+                        'rsi': float(snap.get('rsi_14', 50)),
+                        'reason': f'P2 bloqueado: EMA3 1H sin impulso alcista (pendiente {slope_1h:.3f}% <= 0). Modo Defensivo.',
+                    }
+                elif not is_long and slope_1h >= 0.0:
+                    return {
+                        'has_signal': False,
+                        'signals': [],
+                        'count': 0,
+                        'best': None,
+                        'rsi': float(snap.get('rsi_14', 50)),
+                        'reason': f'P2 bloqueado: EMA3 1H sin impulso bajista (pendiente {slope_1h:.3f}% >= 0). Modo Defensivo.',
+                    }
+        except Exception as e:
+            log_error('EREP_MACRO_1H_SLOPE', f"Error evaluando pendiente EMA3 1H para P2: {e}")
+
     # ── SEÑAL A: SIPV (vela del 15m) & Bollinger / Fibonacci extremas ──────────
     if df_15m is not None and len(df_15m) >= 2:
         # Asegurar cálculo de bandas de Bollinger si no están en el DataFrame
@@ -855,6 +887,7 @@ def evaluate_erep_phase(
     if market_type == 'crypto_futures':
         timeout_m = timeout_m * 3  # Scale by 3 since Crypto monitor runs every 5m instead of 15m
     cycles     = int(position.get('erep_cycles_elapsed', 0))
+    p1         = float(position.get('erep_p1_price') or position.get('entry_price') or position.get('avg_entry_price') or 0)
     p3_avg     = float(position.get('erep_p3_avg') or 0)
 
     fast_p = int(cfg.get('ema_period_fast', 3))
@@ -966,38 +999,29 @@ def evaluate_erep_phase(
     # ── FASE 2: Esperando señal para P2 ───────
     elif phase == 2:
         entry_p = float(position.get('avg_entry_price', position.get('entry_price', current_price)))
-        p1 = float(position.get('erep_p1_price') or entry_p)
-        max_loss = float(cfg.get('max_loss_pct_to_activate', 6.0)) * 1.5
+        panic_loss_threshold = float(position.get('erep_max_loss_pct') or cfg.get('sl_wait_threshold') or cfg.get('max_loss_pct_to_activate', 8.0))
+        ref_price = p1 if p1 > 0 else entry_p
         current_loss = 0.0
 
-        if p1 > 0:
+        if ref_price > 0:
             if is_long:
-                current_loss = (p1 - current_price) / p1 * 100
+                current_loss = (ref_price - current_price) / ref_price * 100
             else:
-                current_loss = (current_price - p1) / p1 * 100
+                current_loss = (current_price - ref_price) / ref_price * 100
 
-        if cycles >= timeout_m:
-            if current_loss > 0:
-                # 🛡️ Evitar el cierre en pérdida. Aumentamos los ciclos de espera.
-                return {
-                    'action': 'wait_p2_signal',
-                    'cycles': cycles,
-                    'max':    timeout_m + 4,
-                    'reason': f'🛡️ TIMEOUT EVITADO POR PNL NEGATIVO: Esperando señal P2 (ciclo {cycles}/{timeout_m + 4}).',
-                }
+        # 🛑 HARD PANIC CUT INCONDICIONAL: Si la pérdida toca o supera el límite tolerable
+        if ref_price > 0 and current_loss >= panic_loss_threshold:
             return {
-                'action':  'close_all',
-                'reason': f'TIMEOUT fase 2: {cycles}/{timeout_m} ciclos sin señal P2. Cerrar todo.',
-                'close_type': 'timeout_phase2',
+                'action': 'close_all',
+                'close_type': 'hard_panic_cut',
+                'reason': f'🛑 HARD PANIC CUT: Pérdida actual ({current_loss:.2f}%) alcanzó o superó el límite tolerable ({panic_loss_threshold:.2f}%). Corte incondicional a mercado.',
             }
 
-        if p1 > 0 and current_loss > max_loss:
-            # 🛡️ Si es pérdida extrema, preferimos mantenerla abierta en Modo Recuperación Virtual en vez de consolidar pérdida
+        if cycles >= timeout_m:
             return {
-                'action': 'wait_p2_signal',
-                'cycles': cycles,
-                'max':    timeout_m,
-                'reason': f'🛡️ PÉRDIDA MÁXIMA DETECTADA ({current_loss:.2f}%): Bloqueando cierre en pérdida extrema. Esperando señal P2.',
+                'action':  'close_all',
+                'reason': f'TIMEOUT fase 2: {cycles}/{timeout_m} ciclos sin señal P2 válida. Cerrando posición para no acumular riesgo.',
+                'close_type': 'timeout_phase2',
             }
 
         signal = detect_p2_entry_signal(
@@ -1033,20 +1057,18 @@ def evaluate_erep_phase(
         if p3_avg > 0:
             current_loss = (p3_avg - current_price) / p3_avg * 100 if is_long else (current_price - p3_avg) / p3_avg * 100
 
+        panic_loss_threshold = float(position.get('erep_max_loss_pct') or cfg.get('sl_wait_threshold') or cfg.get('max_loss_pct_to_activate', 8.0))
+        if p3_avg > 0 and current_loss >= panic_loss_threshold:
+            return {
+                'action': 'close_all',
+                'close_type': 'hard_panic_cut',
+                'reason': f'🛑 HARD PANIC CUT en Fase 3: Pérdida promedio ({current_loss:.2f}%) superó el límite tolerable ({panic_loss_threshold:.2f}%). Corte inmediato.',
+            }
+
         if cycles >= timeout_m * 2:
-            if current_loss > 0:
-                # 🛡️ Evitar cierre por timeout
-                return {
-                    'action':   'wait_p3',
-                    'p3_avg':   p3_avg,
-                    'distance': round(abs(current_price - p3_avg), 6),
-                    'cycles':   cycles,
-                    'ema_ok':   True,
-                    'reason':   f'🛡️ TIMEOUT FASE 3 EVITADO POR PNL NEGATIVO: Esperando P3 (ciclo {cycles}).',
-                }
             return {
                 'action':  'close_all',
-                'reason': f'TIMEOUT fase 3: {cycles} ciclos. Cerrar todo.',
+                'reason': f'TIMEOUT fase 3: {cycles} ciclos agotados esperando P3. Cerrando posición.',
                 'close_type': 'timeout_phase3',
             }
 

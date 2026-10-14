@@ -84,7 +84,7 @@ def _get_config() -> dict:
             "total_capital": float(cfg.get("total_capital_usd", 5000)),
             "max_pct_per_trade": pct_trade,
             "max_total_risk_pct": pct_max_total,
-            "max_positions": int(cfg.get("max_concurrent_positions", 5)),
+            "max_positions": int(cfg.get("max_active_stocks") or cfg.get("max_concurrent_positions", 3)),
         }
     except Exception as e:
         log_warning(MODULE, f"Config load error: {e}")
@@ -217,6 +217,13 @@ def execute_market_order(
     elif rule_code == "FT_REENTRY_BUY":
         # Tranche de recompra (35%) para añadir a posición ganadora
         shares = max(5, int((shares * 0.35) // 5) * 5)
+
+    # HARD CAP DE SEGURIDAD POR ACCIÓN: Máximo 10% del capital total en una sola acción
+    max_trade_cap_usd = capital * min(max_pct, 0.10)
+    if (shares * price) > max_trade_cap_usd:
+        shares = int(max_trade_cap_usd // (price * 5)) * 5
+        if shares < 5 and max_trade_cap_usd >= (5 * price):
+            shares = 5
     
     if shares < 5:
         log_warning(MODULE, f"Aborting MARKET order for {ticker}: Insufficient capital for min batch of 5 (Target: ${capital * max_pct:.0f} vs Need: ${5*price:.0f})")

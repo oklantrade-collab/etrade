@@ -437,16 +437,20 @@ def evaluate_panic_and_erep_status(
 
     else:
         # ── ZONA INTERMEDIA (Zonas 1 a 4): MODO PÁNICO REGULAR ──
-        # 1. Corte si la pérdida alcanza el 5% del capital invertido
+        # 1. Corte si la pérdida alcanza el límite tolerable de pánico (8% para stocks, 5% para crypto/forex o configurado)
         loss_pct_of_capital = abs(pnl_usd) / capital_invested * 100.0
-        if loss_pct_of_capital >= 5.0 or pnl_pct <= -5.0:
+        is_stocks = position.get('market_type') == 'stocks_spot' or position.get('shares') is not None
+        default_limit = 8.0 if is_stocks else 5.0
+        panic_limit = float(position.get('erep_max_loss_pct') or position.get('sl_wait_threshold') or default_limit)
+        if loss_pct_of_capital >= panic_limit or pnl_pct <= -panic_limit:
+            action_code = 'HARD_CAP_5PCT_EXIT' if panic_limit == 5.0 else 'HARD_CAP_PANIC_EXIT'
             return {
                 'should_exit': True,
-                'action': 'HARD_CAP_5PCT_EXIT',
+                'action': action_code,
                 'in_extreme_zone': False,
                 'immunity_active': False,
-                'rule_code': 'PANIC_HARD_CAP_5PCT',
-                'reason': f"Hard Cap de Inversión alcanzado: Pérdida ${abs(pnl_usd):.2f} representa {loss_pct_of_capital:.1f}% del capital invertido (>= 5.0%). Corte incondicional."
+                'rule_code': 'PANIC_HARD_CAP_5PCT' if action_code == 'HARD_CAP_5PCT_EXIT' else 'PANIC_HARD_CAP_CUT',
+                'reason': f"Hard Cap de Inversión alcanzado: Pérdida ${abs(pnl_usd):.2f} representa {loss_pct_of_capital:.1f}% del capital (>= {panic_limit:.1f}%). Corte incondicional.",
             }
 
         # 2. Corte por Apertura Explosiva de Bandas de Bollinger en 15m en contra

@@ -221,6 +221,26 @@ async def get_stocks_opportunities():
                 if filtered_count > 0:
                     log_info("stocks_api", f"APEX filter: {filtered_count} opportunities hidden (APEX < {apex_min})")
 
+            # ── 4. INTEGRACIÓN DE LIVE ALPHA RUNNERS (TOP GAINERS) & FUERZA COMPRADORA ──
+            try:
+                from app.stocks.alpha_runner_scanner import scan_top_gainers_live
+                live_gainers = scan_top_gainers_live(limit=25)
+                existing_map = {item.get("ticker"): item for item in flattened if item.get("ticker")}
+
+                for g in live_gainers:
+                    sym = g.get("ticker")
+                    if sym in existing_map:
+                        existing_map[sym].update(g)
+                    else:
+                        flattened.append(g)
+            except Exception as e_live:
+                log_warning("stocks_api", f"Live top gainers scan skipped: {e_live}")
+
+            # Re-rankear y ordenar por rank_score descendente
+            flattened.sort(key=lambda x: float(x.get("rank_score") or x.get("buying_force_5m") or 0.0), reverse=True)
+            for idx, item in enumerate(flattened, 1):
+                item["rank"] = idx
+
             return {
                 "opportunities": flattened,
                 "total": len(flattened),
@@ -233,6 +253,27 @@ async def get_stocks_opportunities():
                 continue
             log_error("stocks_api", f"Error in get_stocks_opportunities: {e}")
             return {"opportunities": [], "total": 0, "market_status": {"is_open": False, "status": "ERROR"}}
+
+@router.get("/news/{ticker}")
+async def get_ticker_news_endpoint(ticker: str):
+    """
+    Retorna el resumen de noticias y catalizadores clasificados para un ticker
+    para el modal flotante en la UI.
+    """
+    try:
+        from app.stocks.news_catalyst_service import fetch_stock_news
+        news_data = fetch_stock_news(ticker)
+        return news_data
+    except Exception as e:
+        log_error("stocks_api", f"Error fetching news for {ticker}: {e}")
+        return {
+            "ticker": ticker.upper(),
+            "has_news": False,
+            "catalyst_badge": None,
+            "bonus_points": 0,
+            "top_headline": "",
+            "articles": []
+        }
 
 @router.get("/positions")
 async def get_stocks_positions():

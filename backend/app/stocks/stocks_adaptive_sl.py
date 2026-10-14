@@ -483,6 +483,23 @@ def calculate_bounce_score(
                 'score_add': -1.0,
             }
 
+    # ── C6: Tendencia Intradía Viva (EMA3 > EMA9 en 15m) ──
+    if df_15m is not None and len(df_15m) >= 5:
+        c_col = 'close' if 'close' in df_15m.columns else ('c' if 'c' in df_15m.columns else '')
+        if c_col:
+            c15 = pd.to_numeric(df_15m[c_col], errors='coerce').dropna()
+            if len(c15) >= 5:
+                e3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                e9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                if e3_15 > e9_15:
+                    score += 2.0
+                    components['trend_guard_15m'] = {
+                        'status': 'bullish_intact',
+                        'ema3': e3_15,
+                        'ema9': e9_15,
+                        'score_add': 2.0,
+                    }
+
     # Normalizar 0-10
     score = max(0, min(10.0, score))
 
@@ -596,10 +613,10 @@ def evaluate_adaptive_sl(
         cfg.get('sl_close_threshold', 2.0)
     )
     wait_thr  = -float(
-        cfg.get('sl_wait_threshold', 5.0)
+        cfg.get('sl_wait_threshold', 8.0)
     )
     hard_thr  = -float(
-        cfg.get('sl_max_loss_hard', 12.0)
+        cfg.get('sl_wait_threshold') or cfg.get('sl_max_loss_hard', 8.0)
     )
     max_days  = int(
         cfg.get('sl_max_wait_days', 5)

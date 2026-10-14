@@ -221,12 +221,12 @@ def test_shield_circuit_breaker_and_bypass():
     register_sl_event(sym, 'short', now)
     register_sl_event(sym, 'short', now)
 
-    # Comprobamos que para una entrada normal se bloquea por Circuit Breaker
-    check_normal = can_open_position(sym, 'short', is_macro_extreme=False)
+    # Comprobamos que para una entrada normal se bloquea por Circuit Breaker (pasando open_positions=[] para aislar de DB)
+    check_normal = can_open_position(sym, 'short', is_macro_extreme=False, open_positions=[])
     assert check_normal['allowed'] is False
     assert 'Circuit Breaker Diario activo' in check_normal['reason']
 
     # Comprobamos que si es una Oportunidad Macro Extrema (is_macro_extreme=True), se anula el bloqueo
-    check_bypass = can_open_position(sym, 'short', is_macro_extreme=True)
+    check_bypass = can_open_position(sym, 'short', is_macro_extreme=True, open_positions=[])
     assert check_bypass['allowed'] is True
     assert 'Bypass de Zona Extrema Macro' in check_bypass['reason']

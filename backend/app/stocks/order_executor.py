@@ -47,7 +47,7 @@ class OrderExecutor:
             self.total_capital = float(cfg.get("total_capital_usd", "5000"))
             self.max_pct_per_trade = float(cfg.get("max_pct_per_trade", "5.0"))
             self.max_exposure_pct = float(cfg.get("max_total_risk_pct", "30.0"))
-            self.max_positions = int(cfg.get("max_concurrent_positions", "6"))
+            self.max_positions = int(cfg.get("max_active_stocks") or cfg.get("max_concurrent_positions", "3"))
             self.max_daily_loss = float(cfg.get("max_daily_loss_usd", "100.0"))
         except Exception as e:
             log_warning(MODULE, f"Config load error, using defaults: {e}")

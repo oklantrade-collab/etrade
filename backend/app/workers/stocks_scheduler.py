@@ -1699,6 +1699,7 @@ async def check_sl_with_erep(
     market_type:   str,
     supabase,
     df_5m:         pd.DataFrame = None,
+    df_1h:         pd.DataFrame = None,
 ) -> bool:
     """
     Verifica si el precio tocó el SL y decide si cerrar normalmente o activar EREP para Stocks.
@@ -1706,7 +1707,15 @@ async def check_sl_with_erep(
     Se llama en el ciclo de monitoreo de Stocks SOLO cuando el precio está cerca o en el SL.
     """
     from app.strategy.erep_manager import evaluate_erep_phase, execute_erep_action
+    from app.core.market_hours import get_nyc_now
     
+    # ── PROTECCIÓN EOD (15:50 ET): NUNCA DEJAR POSICIONES EN NEGATIVO / EREP OVERNIGHT ──
+    nyc_now = get_nyc_now()
+    if nyc_now.weekday() < 5 and (nyc_now.hour > 15 or (nyc_now.hour == 15 and nyc_now.minute >= 50)):
+        log_warning(MODULE, f"⏰ EOD HARD-EXIT (15:50+ ET): {symbol} en zona EREP/SL liquidando a mercado para evitar riesgo nocturno.")
+        await close_stock_position(symbol, 'long', float(position.get('shares', 0)), current_price, 'eod_hard_exit_1550', supabase)
+        return True
+
     sl_price = float(position.get('stop_loss_price') or
                      position.get('sl_dynamic_price') or
                      position.get('stop_loss') or 0)
@@ -1732,8 +1741,6 @@ async def check_sl_with_erep(
         await open_stock_position(symbol, side, size, price, reason, supabase)
 
     async def close_position(*args, **kwargs):
-        # Support both positional: close_position(symbol, price, reason, supabase)
-        # and keyword: close_position(symbol, side, size, price, reason, supabase)
         price = current_price
         reason = 'erep_close'
         if len(args) >= 3:
@@ -1754,7 +1761,8 @@ async def check_sl_with_erep(
     if erep_active:
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type, df_5m
+            snap, df_15m, df_4h, market_type, df_5m,
+            df_1h=df_1h
         )
         result = await execute_erep_action(
             action        = action,
@@ -1787,9 +1795,9 @@ async def check_sl_with_erep(
 
         action = evaluate_erep_phase(
             position, current_price,
-            snap, df_15m, df_4h, market_type, df_5m
+            snap, df_15m, df_4h, market_type, df_5m,
+            df_1h=df_1h
         )
-
 
         await execute_erep_action(
             action, position, current_price,
@@ -1816,6 +1824,7 @@ async def check_stocks_erep(
     """
     market_type = 'stocks_spot'
     df_4h = await get_df(ticker, '4h', supabase)
+    df_1h = await get_df(ticker, '1h', supabase)
 
     return await check_sl_with_erep(
         symbol=ticker,
@@ -1826,7 +1835,8 @@ async def check_stocks_erep(
         df_4h=df_4h,
         market_type=market_type,
         supabase=supabase,
-        df_5m=df_5m
+        df_5m=df_5m,
+        df_1h=df_1h
     )
 
 

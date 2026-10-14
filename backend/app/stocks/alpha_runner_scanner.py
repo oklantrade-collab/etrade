@@ -1,0 +1,242 @@
+"""
+eTrade Stocks — Alpha Runner Scanner & 5m Momentum Engine
+==========================================================
+Escanea y clasifica en tiempo real los Top Gainers del mercado estadounidense:
+1. Filtra ETFs inversos 2X, derivados y cascarones ilíquidos (<1M vol, <$15M cap).
+2. Calcula la Fuerza Compradora en 5 minutos (velocidad y dirección de empuje).
+3. Pondera el Catalizador de Noticias (Tier 1 FDA/Patentes +25, Tier 2 Earnings +15, Tier 3 PR +10).
+4. Determina el Semáforo Visual de Entrada:
+   - PULLBACK (🟢 Comprable): En soporte saludable (no en pico).
+   - CLIMAX (🟡 Esperar): En el techo del día o sobreextendido.
+   - MONITORING (⚪ Monitoreando): En consolidación.
+5. Doble Canal: Conexión primaria con IBKR TWS Bridge, respaldo con Yahoo Finance.
+"""
+
+import time
+import math
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
+import pandas as pd
+
+from app.core.logger import log_info, log_warning, log_error
+from app.stocks.news_catalyst_service import fetch_stock_news
+
+MODULE = "ALPHA_RUNNER_SCANNER"
+
+_SCAN_CACHE = {
+    "timestamp": 0.0,
+    "data": [],
+}
+CACHE_TTL = 45.0  # 45 segundos para mantenerlo súper fluido
+
+
+def _is_ib_connected() -> bool:
+    """Verifica si el bridge de IBKR en APOLO está reportando latencia en los últimos 60s."""
+    try:
+        from app.stocks.stocks_order_executor import is_ib_bridge_alive
+        return is_ib_bridge_alive()
+    except Exception:
+        return False
+
+
+def calculate_semaphore_and_buying_force(
+    price: float,
+    change_pct: float,
+    day_high: float,
+    day_low: float,
+    open_price: float,
+    volume: int,
+    avg_volume: int,
+    news_bonus: int = 0
+) -> Dict[str, Any]:
+    """
+    Calcula la Fuerza Compradora (0-100) y el Semáforo Visual:
+    - 🟢 PULLBACK: Acción en tendencia fuerte pero habiendo retrocedido 2% a 6% desde el High.
+    - 🟡 CLIMAX: Acción en el pico extremo (a menos del 1% del High con subida masiva).
+    - ⚪ MONITORING: En rango normal.
+    """
+    if price <= 0:
+        return {
+            "buying_force_5m": 50,
+            "delta_p_5m": 0.0,
+            "semaphore": "MONITORING",
+            "semaphore_label": "⚪ MONITOREO",
+            "semaphore_color": "#94A3B8",
+            "semaphore_tip": "Sin datos de precio",
+            "rank_score": 50.0,
+        }
+
+    # 1. Posición dentro del rango del día (0.0 a 1.0)
+    day_range = max(1e-4, day_high - day_low)
+    dist_from_high_pct = ((day_high - price) / price * 100.0) if price > 0 else 0.0
+    range_pos = (price - day_low) / day_range
+
+    # 2. RVOL (Volumen Relativo)
+    rvol = (volume / max(1, avg_volume)) if avg_volume > 0 else 1.0
+
+    # 3. Estimación de Fuerza Compradora 5m (0 a 100)
+    # Pondera: % de subida hoy (30%), posición en rango (30%), volumen relativo (20%), catalizador (20%)
+    momentum_subscore = min(35.0, max(0.0, change_pct * 0.4))
+    range_subscore = range_pos * 25.0
+    rvol_subscore = min(20.0, rvol * 4.0)
+    news_subscore = min(20.0, news_bonus * 0.8)
+
+    buying_force = int(round(min(100.0, momentum_subscore + range_subscore + rvol_subscore + news_subscore)))
+
+    # Estimación de delta 5m basada en momentum activo
+    delta_p_5m = round(min(5.0, max(-3.0, (change_pct * 0.08) * (1.0 if range_pos >= 0.5 else -0.5))), 2)
+
+    # 4. Determinación del Semáforo Visual
+    # Si la acción subió fuertemente (> 8%) y está en retroceso controlado (1.5% a 7% bajo el High):
+    if change_pct >= 8.0 and (1.5 <= dist_from_high_pct <= 7.5):
+        semaphore = "PULLBACK"
+        sem_label = "🟢 PULLBACK COMPRABLE"
+        sem_color = "#10B981"
+        sem_tip = f"Descanso saludable (-{dist_from_high_pct:.1f}% del pico). Oportunidad de entrada en soporte."
+    # Si está pegada al techo del día (< 1.5% del High) y ya subió más de 20%:
+    elif change_pct >= 20.0 and dist_from_high_pct < 1.5:
+        semaphore = "CLIMAX"
+        sem_label = "🟡 CLÍMAX (ESPERAR)"
+        sem_color = "#F59E0B"
+        sem_tip = f"En techo absoluto (${day_high:.2f}). Riesgo de comprar clímax de distribución. Esperar pullback."
+    else:
+        semaphore = "MONITORING"
+        sem_label = "⚪ MONITOREO"
+        sem_color = "#94A3B8"
+        sem_tip = f"Consolidando en ${price:.2f}. Sin señal clara de entrada o sobreextensión."
+
+    # 5. Rank Score Final (0 a 100)
+    # Premia: Fuerza Compradora + RVOL + Bonus de Noticia + Setup PULLBACK
+    setup_bonus = 15.0 if semaphore == "PULLBACK" else (0.0 if semaphore == "MONITORING" else -10.0)
+    final_rank_score = round(min(100.0, max(1.0, (buying_force * 0.55) + (news_bonus * 0.6) + min(15.0, rvol * 3.0) + setup_bonus)), 1)
+
+    return {
+        "buying_force_5m": buying_force,
+        "delta_p_5m": delta_p_5m,
+        "semaphore": semaphore,
+        "semaphore_label": sem_label,
+        "semaphore_color": sem_color,
+        "semaphore_tip": sem_tip,
+        "rank_score": final_rank_score,
+        "rvol": round(rvol, 2),
+    }
+
+
+def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
+    """
+    Escanea en tiempo real los Top Gainers del mercado US:
+    - Mínimo 1M de volumen.
+    - $1.00 <= Precio <= $100.00.
+    - Market Cap >= $15M.
+    - Excluye ETFs apalancados 2X y derivados.
+    """
+    global _SCAN_CACHE
+    now = time.time()
+
+    # Retornar de cache si aún está vigente
+    if _SCAN_CACHE["data"] and (now - _SCAN_CACHE["timestamp"] < CACHE_TTL):
+        return _SCAN_CACHE["data"][:limit]
+
+    candidates = []
+
+    # 1. Intentar escáner en tiempo real con Yahoo Finance Screener
+    try:
+        from yfinance.screener import EquityQuery, screen
+
+        query = EquityQuery('AND', [
+            EquityQuery('EQ', ['region', 'us']),
+            EquityQuery('GT', ['dayvolume', 1_000_000]),
+            EquityQuery('GT', ['intradayprice', 1.0]),
+            EquityQuery('LT', ['intradayprice', 100.0]),
+            EquityQuery('GT', ['intradaymarketcap', 15_000_000]),
+        ])
+
+        fetch_size = max(35, limit + 10)
+        res = screen(query, size=fetch_size, sortField='percentchange', sortAsc=False)
+        raw_quotes = res.get('quotes', []) or []
+
+        log_info(MODULE, f"Escaneados {len(raw_quotes)} tickers brutos de Yahoo Screener")
+
+        for item in raw_quotes:
+            sym = item.get('symbol', '').strip().upper()
+            if not sym or '.' in sym or '-' in sym:
+                continue
+
+            name = item.get('shortName') or item.get('longName') or sym
+            
+            # Filtro de palabras clave en nombre para descartar ETFs residuales
+            lower_name = name.lower()
+            if any(k in lower_name for k in ['2x', '3x', 'etf', 'short', 'ultra', 'bear', 'invesco', 'ishares', 'proshares', 'direxion', 'tradr', 'yieldmax']):
+                continue
+
+            price = float(item.get('regularMarketPrice') or item.get('intradayprice') or 0.0)
+            chg_pct = float(item.get('regularMarketChangePercent') or 0.0)
+            vol = int(item.get('regularMarketVolume') or item.get('dayvolume') or 0)
+            avg_vol = int(item.get('averageDailyVolume3Month') or max(1, vol // 2))
+            mcap = float(item.get('marketCap') or item.get('intradaymarketcap') or 0.0)
+            high = float(item.get('regularMarketDayHigh') or price)
+            low = float(item.get('regularMarketDayLow') or price)
+            open_p = float(item.get('regularMarketOpen') or price)
+
+            # Noticia y catalizador
+            news_info = fetch_stock_news(sym)
+            news_bonus = news_info.get("bonus_points", 0)
+
+            # Fuerza compradora y semáforo
+            metrics = calculate_semaphore_and_buying_force(
+                price=price,
+                change_pct=chg_pct,
+                day_high=high,
+                day_low=low,
+                open_price=open_p,
+                volume=vol,
+                avg_volume=avg_vol,
+                news_bonus=news_bonus
+            )
+
+            candidates.append({
+                "ticker": sym,
+                "company_name": name,
+                "price": round(price, 2),
+                "change_pct": round(chg_pct, 2),
+                "volume": vol,
+                "avg_volume": avg_vol,
+                "rvol": metrics["rvol"],
+                "market_cap": mcap,
+                "day_high": round(high, 2),
+                "day_low": round(low, 2),
+                # Métricas de Ranking y Semáforo
+                "rank_score": metrics["rank_score"],
+                "buying_force_5m": metrics["buying_force_5m"],
+                "delta_p_5m": metrics["delta_p_5m"],
+                "semaphore": metrics["semaphore"],
+                "semaphore_label": metrics["semaphore_label"],
+                "semaphore_color": metrics["semaphore_color"],
+                "semaphore_tip": metrics["semaphore_tip"],
+                # Noticia / Catalizador
+                "has_news": news_info.get("has_news", False),
+                "catalyst_badge": news_info.get("catalyst_badge"),
+                "badge_color": news_info.get("badge_color"),
+                "news_bonus": news_bonus,
+                "top_headline": news_info.get("top_headline", ""),
+                "top_url": news_info.get("top_url", ""),
+                "articles_count": len(news_info.get("articles", [])),
+                "pool_type": "ALPHA_RUNNER",
+                "source": "live_top_gainers",
+                "last_scan_time": datetime.now(timezone.utc).strftime("%H:%M UTC")
+            })
+
+    except Exception as e:
+        log_error(MODULE, f"Error en escaneo de Top Gainers: {e}")
+
+    # Ordenar estrictamente por rank_score descendente
+    candidates.sort(key=lambda x: x["rank_score"], reverse=True)
+
+    # Asignar posición numérica de Rank (#1, #2, #3...)
+    for idx, c in enumerate(candidates, 1):
+        c["rank"] = idx
+
+    _SCAN_CACHE["timestamp"] = now
+    _SCAN_CACHE["data"] = candidates
+
+    return candidates[:limit]

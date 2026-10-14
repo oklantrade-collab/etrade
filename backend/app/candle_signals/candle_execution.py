@@ -1398,18 +1398,13 @@ def _close_all_stocks_positions(ticker: str, price: float, strategy_code: str):
                 pnl = (price - avg) * shares
                 pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
 
-                # 🛡️ PROTECCIÓN ANTI-PÉRDIDAS & EREP PARA STOCKS 🛡️
-                # Si el cierre sugerido por vela genera menos de $1.00 USD de ganancia, no cerramos la posición.
-                # En su lugar, la enviamos a EREP Fase 1 para intentar recuperación.
-                if pnl < 1.0:
-                    log_warning(MODULE, f"🛡️ [ANTI-LOSS CANDLE EXIT] Intento de cierre de vela para {ticker} con ganancia insuficiente/pérdida: ${pnl:.2f} ({pnl_pct:.2f}%). Enrutando a EREP Fase 1.")
-                    sb.table("stocks_positions").update({
-                        "erep_phase": 1,
-                        "erep_p1_price": avg,
-                        "erep_q1": shares,
-                        "erep_market_type": "stocks_spot",
-                        "updated_at": now_iso,
-                    }).eq("id", pos["id"]).execute()
+                # 🛡️ GESTIÓN DE SALIDA DE VELA PARA STOCKS 🛡️
+                # Si la pérdida supera el límite de pánico (>= 8%), ejecutar cierre a mercado inmediato
+                if pnl_pct <= -8.0:
+                    log_warning(MODULE, f"🛑 [SELL SIGNAL PANIC CUT] {ticker} en pérdida severa ({pnl_pct:.2f}%). Cierre técnico inmediato.")
+                elif pnl < 1.0 and pos.get("erep_active") and pnl_pct > -8.0:
+                    # Si ya está bajo rescate activo EREP y dentro del margen tolerable, dejar que EREP gestione
+                    log_info(MODULE, f"🛡️ [EREP IN PROGRESS] {ticker} en rescate activo (${pnl:.2f}, {pnl_pct:.2f}%). Continuando flujo EREP.")
                     continue
 
                 log_info(MODULE,

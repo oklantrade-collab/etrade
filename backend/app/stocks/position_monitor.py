@@ -143,10 +143,13 @@ class PositionMonitor:
             # ── 1. PROTECCIÓN EOD (Fin de Día a las 15:50 ET - Cero Retención Nocturna) ──
             from app.core.market_hours import get_nyc_now
             nyc_now = get_nyc_now()
-            if nyc_now.weekday() < 5 and nyc_now.hour == 15 and nyc_now.minute >= 50:
-                log_warning(MODULE, f"⏰ EOD HARD-EXIT (15:50 ET): {ticker} cerrando al 100% para evitar riesgo nocturno. PnL: {pnl_pct:+.2f}%")
-                await self._close_position(trade, current_price, "eod_hard_exit_1550")
-                return
+            is_eod_window = nyc_now.weekday() < 5 and (nyc_now.hour > 15 or (nyc_now.hour == 15 and nyc_now.minute >= 50))
+            if is_eod_window:
+                allow_ah = str(stocks_config.get("allow_after_hours", "false")).lower() == "true"
+                if not allow_ah or pnl_pct < 0 or trade.get('erep_active'):
+                    log_warning(MODULE, f"⏰ EOD HARD-EXIT (15:50+ ET): {ticker} cerrando al 100% para evitar riesgo nocturno. PnL: {pnl_pct:+.2f}%")
+                    await self._close_position(trade, current_price, "eod_hard_exit_1550")
+                    return
 
             # ── 1.2 AUTO-REPAIR / AUTO-ESTABLECER PARÁMETROS DE RIESGO SI FALTAN ──
             sl_val = safe_float(trade.get("stop_loss"))
@@ -192,10 +195,12 @@ class PositionMonitor:
                 missing_str = ", ".join(diag["missing_fields"])
                 log_warning(MODULE, f"⚠️ [DIAGNOSTICS] {ticker}: Variables requeridas ausentes ({missing_str}). Parámetros auto-reparados; posición preservada sin liquidación forzada.")
 
-            # ── 2. HARD CAP DE SEGURIDAD DEL 5% ──
-            if pnl_pct <= -5.0:
-                log_warning(MODULE, f"🛑 HARD CAP 5% HIT: {ticker} @ ${current_price:.2f} ({pnl_pct:.2f}% <= -5.0%). Cortando a mercado incondicionalmente...")
-                await self._close_position(trade, current_price, "hard_cap_5pct_exit")
+            # ── 2. HARD PANIC CUT INCONDICIONAL (Pérdida Máxima de Pánico Configurable) ──
+            panic_threshold_cfg = safe_float(stocks_config.get("sl_wait_threshold") or stocks_config.get("sl_max_loss_hard"), 8.0)
+            panic_limit_pct = -abs(panic_threshold_cfg)
+            if pnl_pct <= panic_limit_pct:
+                log_warning(MODULE, f"🛑 HARD PANIC CUT HIT: {ticker} @ ${current_price:.2f} ({pnl_pct:.2f}% <= {panic_limit_pct:.2f}%). Cortando a mercado incondicionalmente...")
+                await self._close_position(trade, current_price, "hard_panic_cut_exit")
                 return
 
             # ── 3. POSICIONES EN GANANCIA vs RESCATE EREP ──
@@ -243,6 +248,54 @@ class PositionMonitor:
                     log_error(MODULE, f"Error resampling 1h to 4h for {ticker}: {e_resample}")
                     hist_4h = hist_1h.copy()
 
+            # ── ANÁLISIS DE RÉGIMEN 1H: PENDIENTE EMA3(1H) Y AGOTAMIENTO BOLLINGER ──
+            slope_1h = 0.0
+            regime_1h_defensive = False
+            bb_1h_exhaustion = False
+            l_curr_1h = 0.0
+
+            if hist_1h is not None and len(hist_1h) >= 3:
+                c1h_s = _safe_col(hist_1h, 'close')
+                h1h_s = _safe_col(hist_1h, 'high')
+                l1h_s = _safe_col(hist_1h, 'low')
+                if c1h_s is not None and len(c1h_s) >= 3:
+                    e3_1h_s = c1h_s.ewm(span=3, adjust=False).mean()
+                    e3_curr_1h = float(e3_1h_s.iloc[-1])
+                    e3_prev_1h = float(e3_1h_s.iloc[-2])
+                    slope_1h = ((e3_curr_1h - e3_prev_1h) / max(1e-6, e3_prev_1h)) * 100.0
+
+                    # Si la pendiente es plana o descendente tras el periodo de gracia
+                    if age_mins >= 15.0 and slope_1h <= 0.0:
+                        regime_1h_defensive = True
+                        log_info(MODULE, f"🛡️ [1H REGIME DEFENSIVE] {ticker}: EMA3 1H plana/descendente ({slope_1h:.3f}% <= 0). Modo Defensivo Activo.")
+
+                # Detección de Agotamiento de Rango en Banda Superior 1H
+                if len(hist_1h) >= 20 and h1h_s is not None and l1h_s is not None and c1h_s is not None:
+                    bb_up_1h = float(c1h_s.rolling(20).mean().iloc[-1] + 2.0 * c1h_s.rolling(20).std().iloc[-1])
+                    h_curr = float(h1h_s.iloc[-1])
+                    l_curr_1h = float(l1h_s.iloc[-1])
+                    range_curr = h_curr - l_curr_1h
+                    h_prev = float(h1h_s.iloc[-2])
+                    l_prev = float(l1h_s.iloc[-2])
+                    range_prev = h_prev - l_prev
+                    if h_curr >= bb_up_1h and range_curr < range_prev and range_prev > 0:
+                        bb_1h_exhaustion = True
+                        regime_1h_defensive = True
+                        log_info(MODULE, f"⚠️ [1H BB EXHAUSTION] {ticker}: High ${h_curr:.2f} >= BB Upper ${bb_up_1h:.2f} con rango comprimido ({range_curr:.2f} < {range_prev:.2f}). Modo Defensivo Activo.")
+
+            # ── ESCUDO DE TENDENCIA INTRADÍA 15M/5M (ANTI SHAKE-OUT) ──
+            trend_15m_bullish = False
+            ema3_15m_val = 0.0
+            ema9_15m_val = 0.0
+            if hist_15m is not None and len(hist_15m) >= 10:
+                c15_s = _safe_col(hist_15m, 'close')
+                if c15_s is not None and len(c15_s) >= 10:
+                    e3_15m_s = c15_s.ewm(span=3, adjust=False).mean()
+                    e9_15m_s = c15_s.ewm(span=9, adjust=False).mean()
+                    ema3_15m_val = float(e3_15m_s.iloc[-1])
+                    ema9_15m_val = float(e9_s15 := e9_15m_s.iloc[-1])
+                    trend_15m_bullish = ema3_15m_val > ema9_15m_val
+
             # Mapeo a formato estándar para el evaluador
             pos_std = {
                 'id': trade['id'],
@@ -272,17 +325,27 @@ class PositionMonitor:
 
             sl_action = sl_res['action']
 
-            # Salvaguarda inmediata: Stop Loss Duro de Emergencia (NUNCA bloqueado por el tiempo de permanencia)
+            # Evaluación de Stop Loss con Escudo de Tendencia:
+            # Si el precio toca el SL intradía, verificamos si está protegido por el Escudo de Tendencia
             if stop_loss > 0 and current_price <= stop_loss:
-                log_warning(MODULE, f"🔴 EMERGENCY HARD STOP LOSS HIT: {ticker} @ ${current_price:.2f} <= SL ${stop_loss:.2f}. Cerrando inmediatamente...")
-                await self._close_position(trade, current_price, "sl_hard_exit")
-                return
+                # Si el régimen 1H es defensivo (impulso 1H frenado o en agotamiento) O si la tendencia 15m ya se quebró:
+                if regime_1h_defensive or not trend_15m_bullish:
+                    log_warning(MODULE, f"🔴 STOP LOSS CONFIRMADO: {ticker} @ ${current_price:.2f} <= SL ${stop_loss:.2f} con tendencia rota/defensiva (1H slope={slope_1h:.2f}%, 15m bullish={trend_15m_bullish}). Cerrando...")
+                    await self._close_position(trade, current_price, "sl_hard_exit_defensive")
+                    return
+                else:
+                    # ESCUDO DE TENDENCIA ACTIVO: EMA3 > EMA9 en 15m y 1H con impulso alcista
+                    # No cortar por simple mecha o retroceso de 1 vela si no ha tocado el Hard Panic Cut
+                    log_info(MODULE, f"🛡️ [TREND SHIELD ACTIVE] {ticker}: Precio ${current_price:.2f} bajo SL ${stop_loss:.2f}, pero EMA3_15m (${ema3_15m_val:.2f}) > EMA9_15m (${ema9_15m_val:.2f}) y 1H alcista. Evitando corte por sacudida intradía.")
 
-            # Si el precio perforó el Stop Loss o Dynamic SL, cerrar limpiamente
+            # Si el precio perforó el Stop Loss o Dynamic SL evaluado técnicamente
             if sl_action in ('close_backstop', 'trigger_dynamic_sl'):
-                log_warning(MODULE, f"🔴 STOP LOSS HIT: {ticker} @ ${current_price:.2f} ({sl_action}). Ejecutando cierre a mercado...")
-                await self._close_position(trade, current_price, f"sl_{sl_action}")
-                return
+                if regime_1h_defensive or not trend_15m_bullish:
+                    log_warning(MODULE, f"🔴 STOP LOSS HIT: {ticker} @ ${current_price:.2f} ({sl_action}). Ejecutando cierre a mercado...")
+                    await self._close_position(trade, current_price, f"sl_{sl_action}")
+                    return
+                else:
+                    log_info(MODULE, f"🛡️ [TREND SHIELD ACTIVE] {ticker}: SL Action ({sl_action}) suspendida por tendencia alcista activa 15m/1H.")
 
             if sl_action == 'activate_dynamic_sl':
                 new_sl = sl_res['sl_price']
@@ -369,6 +432,15 @@ class PositionMonitor:
                 # al menos al nivel de la banda o un piso protegido
                 bb_floor = round(max(entry_price * 1.05, bb_upper_1h * 0.92), 2)
                 proposed_sl = max(proposed_sl, bb_floor)
+
+            # 4.5 MODO DEFENSIVO POR RÉGIMEN 1H (Slope <= 0 o Agotamiento BB Upper): Asegurar ganancias
+            if regime_1h_defensive and pnl_pct > 0:
+                defensive_floor = round(entry_price * 1.002, 2)  # Breakeven + fees
+                if bb_1h_exhaustion and l_curr_1h > 0 and l_curr_1h < current_price:
+                    defensive_floor = max(defensive_floor, round(l_curr_1h, 2))  # Lock al mínimo de la vela 1H de agotamiento
+                if defensive_floor > proposed_sl and defensive_floor < current_price:
+                    proposed_sl = defensive_floor
+                    ratchet_reason = "1H Defensive Regime Profit Lock"
 
             # Si el nivel propuesto supera el SL actual y está por debajo del precio actual:
             if proposed_sl > cur_sl and proposed_sl < current_price:
