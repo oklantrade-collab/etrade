@@ -226,6 +226,27 @@ class StocksRuleEngine:
                 if ema_3_15m < ema_9_15m and ema_9_15m < ema_20_15m:
                     failures.append(f"15m Bearish Waterfall (No Buy): EMA3 ({ema_3_15m:.2f}) < EMA9 ({ema_9_15m:.2f}) < EMA20 ({ema_20_15m:.2f})")
 
+        # ── CHECK 0.1: Universal EMA3 1H Slope & SIPV Guard (Anti-Distribution Filter) ──
+        if direction == "buy":
+            is_ema3_1h_ascending = context.get("is_ema3_1h_ascending")
+            ema3_slope_1h = context.get("ema3_slope_1h")
+
+            if is_ema3_1h_ascending is None:
+                ticker = context.get("ticker")
+                if ticker:
+                    try:
+                        from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+                        live_1h = get_live_1h_candle_and_sipv(ticker, current_price)
+                        is_ema3_1h_ascending = live_1h.get("is_ema3_1h_ascending", True)
+                        ema3_slope_1h = live_1h.get("ema3_slope_1h", 0.0)
+                        if live_1h.get("sipv_upper_rejection"):
+                            failures.append(f"Rechazo SIPV 1H en techo: Mecha superior {live_1h.get('upper_wick_ratio',0)*100:.0f}% en vela horaria en formación")
+                    except Exception:
+                        is_ema3_1h_ascending = True
+
+            if is_ema3_1h_ascending is False or (ema3_slope_1h is not None and float(ema3_slope_1h) <= 0.0001):
+                failures.append(f"COMPRA BLOQUEADA (EMA3 1H Descendente): Pendiente horaria {float(ema3_slope_1h or 0):+.4f} <= 0. Prohibido entrar en agotamiento.")
+
         # ── CHECK 0.5: Global Intraday Exhaustion Filter ──
         if direction == "buy":
             rsi_15m_val = float(context.get("rsi_14") or 50.0)

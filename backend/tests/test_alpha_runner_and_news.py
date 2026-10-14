@@ -133,6 +133,77 @@ def test_semaphore_monitoring():
     assert "MONITOREO" in res["semaphore_label"]
 
 
+def test_semaphore_descending_ema3_1h():
+    # Price is up 60% on the day, but 1H EMA3 is flat/descending (slope <= 0)
+    res = calculate_semaphore_and_buying_force(
+        price=3.65,
+        change_pct=64.9,
+        day_high=4.15,
+        day_low=2.20,
+        open_price=2.25,
+        volume=164000000,
+        avg_volume=12000000,
+        news_bonus=25,
+        is_ema3_1h_ascending=False,
+        ema3_slope_1h=-0.0476,
+        delta_p_5m=-2.60
+    )
+    assert res["semaphore"] == "DESCENDING"
+    assert "EMA3 1H DESCENDENTE" in res["semaphore_label"]
+    assert res["semaphore_color"] == "#EF4444"
+    # Buying force should be severely penalized
+    assert res["buying_force_5m"] <= 35
+    # Rank score should be heavily penalized by -45 pts
+    assert res["rank_score"] <= 30.0
+
+
+def test_semaphore_sipv_upper_rejection():
+    # 1H candle has a large upper wick (>40% of range), showing distribution at highs
+    res = calculate_semaphore_and_buying_force(
+        price=24.0,
+        change_pct=25.0,
+        day_high=26.5,
+        day_low=19.0,
+        open_price=20.0,
+        volume=5000000,
+        avg_volume=1000000,
+        news_bonus=25,
+        is_ema3_1h_ascending=True,
+        sipv_upper_rejection=True
+    )
+    assert res["semaphore"] == "CLIMAX"
+    assert "RECHAZO SIPV" in res["semaphore_label"]
+    assert res["semaphore_color"] == "#F59E0B"
+
+
+def test_rule_engine_blocks_buy_when_ema3_1h_is_descending():
+    from app.stocks.stocks_rule_engine import StocksRuleEngine
+    re_instance = StocksRuleEngine.get_instance()
+    
+    rule = {
+        "rule_code": "PRO_DIP_BUY",
+        "direction": "buy",
+        "order_type": "market"
+    }
+    # Context with descending EMA3 1H
+    context = {
+        "ticker": "GLND",
+        "close": 3.65,
+        "is_ema3_1h_ascending": False,
+        "ema3_slope_1h": -0.0476,
+        "ema_20_1d": 2.5,
+        "ema_50_1d": 2.0,
+        "ema_3_1d": 3.0,
+        "ema_9_1d": 2.8,
+        "ema_3": 3.6,
+        "ema_9": 3.5,
+        "ema_20": 3.4
+    }
+    eval_res = re_instance.evaluate_rule(rule, context)
+    assert eval_res["triggered"] is False
+    assert any("EMA3 1H Descendente" in f for f in eval_res["failures"])
+
+
 def test_max_active_stocks_reading():
     from app.stocks.stocks_order_executor import _get_config
     

@@ -161,6 +161,20 @@ def execute_market_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
+        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO ──
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            live_1h = get_live_1h_candle_and_sipv(ticker, price)
+            if not live_1h.get("is_ema3_1h_ascending", True):
+                slope = live_1h.get("ema3_slope_1h", 0.0)
+                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H es descendente/plana ({slope:+.4f}). No se compran acciones en modo descendente.")
+                return {
+                    "success": False,
+                    "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
+                }
+        except Exception as e_1h:
+            log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
+
         # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15 MINUTOS) ANTI-CHURNING ──
         # Evita re-abrir la misma posición si cerró hace menos de 15 minutos
         try:
@@ -343,6 +357,20 @@ def place_limit_order(
                 "success": False,
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
+
+        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO ──
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            live_1h = get_live_1h_candle_and_sipv(ticker, limit_price)
+            if not live_1h.get("is_ema3_1h_ascending", True):
+                slope = live_1h.get("ema3_slope_1h", 0.0)
+                log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: EMA3 1H es descendente/plana ({slope:+.4f}). No se compran acciones en modo descendente.")
+                return {
+                    "success": False,
+                    "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
+                }
+        except Exception as e_1h:
+            log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
 
         # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
         from app.stocks.diagnostic_validator import can_operate_pre_trade

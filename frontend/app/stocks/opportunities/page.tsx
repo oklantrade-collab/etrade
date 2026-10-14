@@ -290,11 +290,12 @@ function RankingHeaderTooltip() {
             Rank = BF(5m) 40% + RVOL 20% + Noticia 25% + Vela 15%
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', color: '#CCC', fontSize: '10px' }}>
-            <div><b style={{ color: '#FFF' }}>• Fuerza Compradora (5m):</b> Velocidad y dirección de empuje del precio en los últimos 5 minutos (ΔP 5m).</div>
+            <div><b style={{ color: '#FFF' }}>• Fuerza Compradora (5m):</b> Velocidad y dirección de empuje en 5 minutos (castigo inmediato si ΔP 5m es negativo).</div>
             <div><b style={{ color: '#FFF' }}>• RVOL (Volumen Relativo):</b> Aceleración del volumen vs promedio del día.</div>
             <div><b style={{ color: '#FFF' }}>• Catalizador Noticia:</b> Bonus por eventos de hoy/ayer (Tier 1 FDA/Patente +25, Tier 2 Earnings +15, Tier 3 PR +10).</div>
-            <div><b style={{ color: '#FFF' }}>• Calidad Vela 5m:</b> Cierre en máximos sin mecha superior de venta.</div>
-            <div><b style={{ color: '#10B981' }}>• Bonus Semáforo:</b> +15 pts si está en 🟢 PULLBACK; -10 pts si está en 🟡 CLÍMAX.</div>
+            <div><b style={{ color: '#EF4444' }}>• Candado EMA3 1H:</b> -45 pts si la EMA3 de 1H está plana o descendente (🚫 PROHIBIDO COMPRAR / AGOTAMIENTO).</div>
+            <div><b style={{ color: '#F59E0B' }}>• Rechazo SIPV 1H:</b> -15 pts si la vela 1H viva tiene mecha superior &gt; 40% (absorción vendedora).</div>
+            <div><b style={{ color: '#10B981' }}>• Bonus Pullback:</b> +25 pts si retrocede sanamente a soporte con EMA3 1H ascendente.</div>
           </div>
         </div>
       )}
@@ -958,7 +959,10 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
 
       {/* 9. Estado */}
       <div style={{ display: 'flex', justifyContent: 'center' }}>
-        <StatusBadge status={opp.queue_status} isOB={opp.is_overbought_queue} />
+        <StatusBadge 
+          status={opp.semaphore === 'DESCENDING' || opp.is_ema3_1h_descending ? 'blocked' : opp.queue_status} 
+          isOB={opp.is_overbought_queue || opp.semaphore === 'DESCENDING' || Boolean(opp.is_ema3_1h_descending)} 
+        />
       </div>
 
       {/* 10. Acción */}

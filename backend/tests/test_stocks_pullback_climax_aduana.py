@@ -131,7 +131,9 @@ def test_stocks_rule_engine_pullback_1h():
         'adr_14_pct': 4.5,
         'entry_route_1h': 'PULLBACK',
         'entry_support_1h': 'EMA9',
-        'pool_type': 'HOT'
+        'pool_type': 'HOT',
+        'is_ema3_1h_ascending': True,
+        'ema3_slope_1h': 0.15
     }
 
     rule_obj = {

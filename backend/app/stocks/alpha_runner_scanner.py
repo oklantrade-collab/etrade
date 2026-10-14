@@ -20,6 +20,7 @@ import pandas as pd
 
 from app.core.logger import log_info, log_warning, log_error
 from app.stocks.news_catalyst_service import fetch_stock_news
+from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
 
 MODULE = "ALPHA_RUNNER_SCANNER"
 
@@ -47,12 +48,17 @@ def calculate_semaphore_and_buying_force(
     open_price: float,
     volume: int,
     avg_volume: int,
-    news_bonus: int = 0
+    news_bonus: int = 0,
+    is_ema3_1h_ascending: bool = True,
+    ema3_slope_1h: float = 0.0,
+    sipv_upper_rejection: bool = False,
+    delta_p_5m: Optional[float] = None
 ) -> Dict[str, Any]:
     """
-    Calcula la Fuerza Compradora (0-100) y el Semáforo Visual:
-    - 🟢 PULLBACK: Acción en tendencia fuerte pero habiendo retrocedido 2% a 6% desde el High.
-    - 🟡 CLIMAX: Acción en el pico extremo (a menos del 1% del High con subida masiva).
+    Calcula la Fuerza Compradora (0-100), Semáforo Visual y Rank Score:
+    - 🔴 DESCENDING: EMA3 de 1H plana o en caída (penalización severa -45 pts, prohibido comprar).
+    - 🟡 CLIMAX: Sobreextendida en el High o con rechazo SIPV superior.
+    - 🟢 PULLBACK: Acción en tendencia fuerte con EMA3 1H ascendente y descanso controlado (1.5% a 7.5%).
     - ⚪ MONITORING: En rango normal.
     """
     if price <= 0:
@@ -64,6 +70,7 @@ def calculate_semaphore_and_buying_force(
             "semaphore_color": "#94A3B8",
             "semaphore_tip": "Sin datos de precio",
             "rank_score": 50.0,
+            "rvol": 1.0,
         }
 
     # 1. Posición dentro del rango del día (0.0 a 1.0)
@@ -74,41 +81,67 @@ def calculate_semaphore_and_buying_force(
     # 2. RVOL (Volumen Relativo)
     rvol = (volume / max(1, avg_volume)) if avg_volume > 0 else 1.0
 
-    # 3. Estimación de Fuerza Compradora 5m (0 a 100)
-    # Pondera: % de subida hoy (30%), posición en rango (30%), volumen relativo (20%), catalizador (20%)
+    # 3. Estimación de delta 5m si no viene explícito
+    if delta_p_5m is None:
+        delta_p_5m = round(min(5.0, max(-3.0, (change_pct * 0.08) * (1.0 if range_pos >= 0.5 else -0.5))), 2)
+
+    # 4. Fuerza Compradora 5m (0 a 100)
     momentum_subscore = min(35.0, max(0.0, change_pct * 0.4))
     range_subscore = range_pos * 25.0
     rvol_subscore = min(20.0, rvol * 4.0)
     news_subscore = min(20.0, news_bonus * 0.8)
 
-    buying_force = int(round(min(100.0, momentum_subscore + range_subscore + rvol_subscore + news_subscore)))
+    raw_buying_force = momentum_subscore + range_subscore + rvol_subscore + news_subscore
 
-    # Estimación de delta 5m basada en momentum activo
-    delta_p_5m = round(min(5.0, max(-3.0, (change_pct * 0.08) * (1.0 if range_pos >= 0.5 else -0.5))), 2)
+    # Castigo severo si el delta de 5m es negativo (presión vendedora activa en la ventana):
+    if delta_p_5m < 0:
+        penalty_5m = min(40.0, abs(delta_p_5m) * 15.0)
+        raw_buying_force -= penalty_5m
 
-    # 4. Determinación del Semáforo Visual
-    # Si la acción subió fuertemente (> 8%) y está en retroceso controlado (1.5% a 7% bajo el High):
-    if change_pct >= 8.0 and (1.5 <= dist_from_high_pct <= 7.5):
-        semaphore = "PULLBACK"
-        sem_label = "🟢 PULLBACK COMPRABLE"
-        sem_color = "#10B981"
-        sem_tip = f"Descanso saludable (-{dist_from_high_pct:.1f}% del pico). Oportunidad de entrada en soporte."
-    # Si está pegada al techo del día (< 1.5% del High) y ya subió más de 20%:
+    # Castigo severo si la EMA3 de 1H está plana o descendente:
+    if not is_ema3_1h_ascending:
+        raw_buying_force = min(raw_buying_force * 0.5, 30.0)
+
+    buying_force = int(round(min(100.0, max(5.0, raw_buying_force))))
+
+    # 5. Determinación del Semáforo Visual y Ajuste al Ranking
+    # CASO A: EMA3 DE 1H PLANA O DESCENDENTE (Prioridad de bloqueo)
+    if not is_ema3_1h_ascending:
+        semaphore = "DESCENDING"
+        sem_label = "🔴 EMA3 1H DESCENDENTE (AGOTAMIENTO)"
+        sem_color = "#EF4444"
+        sem_tip = f"EMA3 de 1H cayendo ({ema3_slope_1h:+.4f}). Fase de distribución. PROHIBIDO COMPRAR."
+        setup_bonus = -45.0
+    # CASO B: RECHAZO SIPV EN TECHO (Mecha superior prominente en 1H)
+    elif sipv_upper_rejection:
+        semaphore = "CLIMAX"
+        sem_label = "🟡 CLÍMAX / RECHAZO SIPV"
+        sem_color = "#F59E0B"
+        sem_tip = "Rechazo SIPV en el techo de la hora (mecha superior prominente). Venta institucional, esperar pullback."
+        setup_bonus = -15.0
+    # CASO C: SOBREEXTENSIÓN EN MÁXIMO DEL DÍA (< 1.5% del High)
     elif change_pct >= 20.0 and dist_from_high_pct < 1.5:
         semaphore = "CLIMAX"
         sem_label = "🟡 CLÍMAX (ESPERAR)"
         sem_color = "#F59E0B"
         sem_tip = f"En techo absoluto (${day_high:.2f}). Riesgo de comprar clímax de distribución. Esperar pullback."
+        setup_bonus = -10.0
+    # CASO D: PULLBACK SALUDABLE CON EMA3 1H ASCENDENTE
+    elif change_pct >= 8.0 and (1.5 <= dist_from_high_pct <= 7.5):
+        semaphore = "PULLBACK"
+        sem_label = "🟢 PULLBACK COMPRABLE"
+        sem_color = "#10B981"
+        sem_tip = f"Descanso saludable (-{dist_from_high_pct:.1f}% del pico) con EMA3 1H ascendente. Oportunidad en soporte."
+        setup_bonus = 25.0
     else:
         semaphore = "MONITORING"
         sem_label = "⚪ MONITOREO"
         sem_color = "#94A3B8"
         sem_tip = f"Consolidando en ${price:.2f}. Sin señal clara de entrada o sobreextensión."
+        setup_bonus = 0.0
 
-    # 5. Rank Score Final (0 a 100)
-    # Premia: Fuerza Compradora + RVOL + Bonus de Noticia + Setup PULLBACK
-    setup_bonus = 15.0 if semaphore == "PULLBACK" else (0.0 if semaphore == "MONITORING" else -10.0)
-    final_rank_score = round(min(100.0, max(1.0, (buying_force * 0.55) + (news_bonus * 0.6) + min(15.0, rvol * 3.0) + setup_bonus)), 1)
+    # 6. Rank Score Final (0 a 100)
+    final_rank_score = round(min(100.0, max(1.0, (buying_force * 0.50) + (news_bonus * 0.5) + min(15.0, rvol * 3.0) + setup_bonus)), 1)
 
     return {
         "buying_force_5m": buying_force,
@@ -182,6 +215,9 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             news_info = fetch_stock_news(sym)
             news_bonus = news_info.get("bonus_points", 0)
 
+            # Vela de 1H en formación y análisis SIPV
+            live_1h = get_live_1h_candle_and_sipv(sym, price)
+
             # Fuerza compradora y semáforo
             metrics = calculate_semaphore_and_buying_force(
                 price=price,
@@ -191,7 +227,10 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 open_price=open_p,
                 volume=vol,
                 avg_volume=avg_vol,
-                news_bonus=news_bonus
+                news_bonus=news_bonus,
+                is_ema3_1h_ascending=live_1h.get("is_ema3_1h_ascending", True),
+                ema3_slope_1h=live_1h.get("ema3_slope_1h", 0.0),
+                sipv_upper_rejection=live_1h.get("sipv_upper_rejection", False),
             )
 
             candidates.append({
@@ -213,6 +252,14 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "semaphore_label": metrics["semaphore_label"],
                 "semaphore_color": metrics["semaphore_color"],
                 "semaphore_tip": metrics["semaphore_tip"],
+                # Vela 1H en Formación & SIPV
+                "is_ema3_1h_ascending": live_1h.get("is_ema3_1h_ascending", True),
+                "is_ema3_1h_descending": live_1h.get("is_ema3_1h_descending", False),
+                "ema3_slope_1h": live_1h.get("ema3_slope_1h", 0.0),
+                "ema3_1h_live": live_1h.get("ema3_1h_live", 0.0),
+                "sipv_upper_rejection": live_1h.get("sipv_upper_rejection", False),
+                "sipv_lower_absorption": live_1h.get("sipv_lower_absorption", False),
+                "sipv_status_reason": live_1h.get("status_reason", ""),
                 # Noticia / Catalizador
                 "has_news": news_info.get("has_news", False),
                 "catalyst_badge": news_info.get("catalyst_badge"),
