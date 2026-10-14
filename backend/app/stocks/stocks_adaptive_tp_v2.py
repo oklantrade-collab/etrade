@@ -609,18 +609,20 @@ def _evaluate_stock_tp_v2_core(
             # están 100% gobernadas por evaluate_aduana_stocks_exit para garantizar
             # el piso de maduración (>= +1.5%) y evitar cierres de centavos en 60 segundos.
 
-            # Si está perdiendo y EMA stack se rompió, cortar pérdidas rápido
+            # Si está perdiendo y EMA stack se rompió, cortar pérdidas leves rápidas,
+            # pero NUNCA si la posición está en recuperación EREP o pérdida significativa (>= 5%)
             if gain_pct < -1.0 and ema3_val < ema9_val:
-                return {
-                    'action':  'close_total',
-                    'pct':     100,
-                    'shares':  shares_rem,
-                    'gain_pct': round(gain_pct, 2),
-                    'debug_indicators': {},
-                    'reason': (
-                        f'Aa30_STK Stop Momentum 5m: Pérdida {gain_pct:.2f}% + EMA stack rota. Cortando.'
-                    ),
-                }
+                if not position.get('erep_active') and gain_pct > -5.0:
+                    return {
+                        'action':  'close_total',
+                        'pct':     100,
+                        'shares':  shares_rem,
+                        'gain_pct': round(gain_pct, 2),
+                        'debug_indicators': {},
+                        'reason': (
+                            f'Aa30_STK Stop Momentum 5m: Pérdida leve {gain_pct:.2f}% + EMA stack rota. Cortando.'
+                        ),
+                    }
         except Exception as e_30:
             pass  # Fallback al flujo normal si hay error
 

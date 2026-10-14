@@ -1773,7 +1773,7 @@ async def check_sl_with_erep(
         entry = float(position.get('avg_price') or position.get('entry_price') or current_price)
         q1 = float(position.get('shares_remaining') or position.get('shares') or 0)
         
-        await supabase.table('stocks_positions').update({
+        supabase.table('stocks_positions').update({
             'erep_phase':   1,
             'erep_p1_price': entry,
             'erep_q1':      q1,
@@ -1838,6 +1838,12 @@ async def run_stocks_tp_v2_cycle():
     nyc_now = get_nyc_now()
     # Si es fin de semana, el mercado bursátil está completamente cerrado
     if nyc_now.weekday() > 4:
+        return
+
+    # Si el mercado regular de acciones está cerrado (después de 16:00 ET o antes de 09:30 ET),
+    # NO evaluar salidas intradiarias por momentum o estancamiento de TP v2.
+    is_open, _ = is_market_open()
+    if not is_open:
         return
 
     sb = get_supabase()
