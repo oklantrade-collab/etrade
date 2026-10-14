@@ -155,24 +155,28 @@ async def cleanup_database() -> dict:
     # 2.1 Tablas que referencian a otras (Hijas)
     # Jerarquía: Orders -> Trading_Signals -> Volume_Spikes
     child_tables = {
-        "pending_orders":  {"days": 7,  "time_col": "created_at"},
-        "orders":          {"days": 14, "time_col": "created_at"},
-        "trading_signals": {"days": 14, "time_col": "created_at"},
+        "pending_orders":      {"days": 7,  "time_col": "created_at"},
+        "orders":              {"days": 14, "time_col": "created_at"},
+        "stocks_orders":       {"days": 14, "time_col": "created_at"},
+        "trade_opportunities": {"days": 7,  "time_col": "created_at"},
+        "trading_signals":     {"days": 14, "time_col": "created_at"},
     }
 
     for table_name, config in child_tables.items():
         try:
             cutoff = datetime.now(timezone.utc) - timedelta(days=config["days"])
-            query = sb.table(table_name).delete().lt(config["time_col"], cutoff.isoformat())
+            query = sb.table(table_name).delete(count="exact").lt(config["time_col"], cutoff.isoformat())
             
             # Filtros específicos por estado para no borrar órdenes abiertas
             if table_name == "pending_orders":
                 query = query.in_("status", ["cancelled", "expired", "triggered"])
             elif table_name == "orders":
                 query = query.in_("status", ["FILLED", "CANCELLED", "EXPIRED", "REJECTED"])
+            elif table_name == "stocks_orders":
+                query = query.in_("status", ["filled", "cancelled", "expired", "rejected", "FILLED", "CANCELLED", "EXPIRED", "REJECTED"])
             
             del_res = query.execute()
-            results[table_name] = len(del_res.data) if del_res.data else 0
+            results[table_name] = del_res.count if del_res.count is not None else (len(del_res.data or []))
         except Exception as e:
             log_warning(MODULE, f"{table_name} cleanup failed: {e}")
             results[table_name] = 0
@@ -232,8 +236,8 @@ async def cleanup_database() -> dict:
                             sub_start = sub_end
                     cur_start = cur_end
             else:
-                del_res = sb.table(table_name).delete().lt(config["time_col"], cutoff.isoformat()).execute()
-                total_del_table = len(del_res.data) if del_res.data else 0
+                del_res = sb.table(table_name).delete(count="exact").lt(config["time_col"], cutoff.isoformat()).execute()
+                total_del_table = del_res.count if del_res.count is not None else (len(del_res.data or []))
 
             results[table_name] = total_del_table
         except Exception as e:
