@@ -10,15 +10,16 @@ import toast from 'react-hot-toast'
 
 function StatusBadge({ status, isOB }: { status: string, isOB: boolean }) {
   const configs: any = {
-    'pending':  { label: 'PENDING',  color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', icon: '⏳' },
-    'buying':   { label: 'BUYING',   color: '#38BDF8', bg: 'rgba(56,189,248,0.15)', icon: '⚡' },
-    'owned':    { label: 'OWNED',    color: '#22C55E', bg: 'rgba(34,197,94,0.15)',  icon: '💎' },
-    'blocked':  { label: 'BLOCKED',  color: '#EF4444', bg: 'rgba(239,68,68,0.15)',  icon: '🚫' },
-    'watching': { label: 'WATCHING', color: '#94A3B8', bg: 'rgba(148,163,184,0.1)', icon: '👁️' },
+    'pending':    { label: 'PENDING',    color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', icon: '⏳' },
+    'buying':     { label: 'BUYING',     color: '#38BDF8', bg: 'rgba(56,189,248,0.15)', icon: '⚡' },
+    'owned':      { label: 'OWNED',      color: '#22C55E', bg: 'rgba(34,197,94,0.15)',  icon: '💎' },
+    'blocked':    { label: 'BLOCKED',    color: '#EF4444', bg: 'rgba(239,68,68,0.15)',  icon: '🚫' },
+    'exhaustion': { label: 'GAP >25%',   color: '#EAB308', bg: 'rgba(234,179,8,0.15)',  icon: '⚠️' },
+    'watching':   { label: 'WATCHING',   color: '#94A3B8', bg: 'rgba(148,163,184,0.1)', icon: '👁️' },
   };
   
   let s = status?.toLowerCase() || 'pending';
-  if (isOB) s = 'blocked';
+  if (isOB && s !== 'exhaustion') s = 'blocked';
   
   const cfg = configs[s] || configs['pending'];
   
@@ -293,6 +294,8 @@ function RankingHeaderTooltip() {
             <div><b style={{ color: '#FFF' }}>• Fuerza Compradora (5m):</b> Velocidad y dirección de empuje en 5 minutos (castigo inmediato si ΔP 5m es negativo).</div>
             <div><b style={{ color: '#FFF' }}>• RVOL (Volumen Relativo):</b> Aceleración del volumen vs promedio del día.</div>
             <div><b style={{ color: '#FFF' }}>• Catalizador Noticia:</b> Bonus por eventos de hoy/ayer (Tier 1 FDA/Patente +25, Tier 2 Earnings +15, Tier 3 PR +10).</div>
+            <div><b style={{ color: '#EAB308' }}>• Candado Gap &gt; 25%:</b> -20 pts y bloqueo de apertura (09:30-10:15 ET) (Anti-LQDA / Clímax).</div>
+            <div><b style={{ color: '#10B981' }}>• Sweet Spot (+5% a +25%):</b> +30 pts con confirmación 5m y Piramidación en 3 Tercios (Caso WFF).</div>
             <div><b style={{ color: '#EF4444' }}>• Candado EMA3 1H:</b> -45 pts si la EMA3 de 1H está plana o descendente (🚫 PROHIBIDO COMPRAR / AGOTAMIENTO).</div>
             <div><b style={{ color: '#94A3B8' }}>• Candado EMA3 &gt; EMA9:</b> -10 pts y bloqueo si EMA3 &le; EMA9 en 1H (falta confirmación alcista horaria).</div>
             <div><b style={{ color: '#F59E0B' }}>• Rechazo SIPV 1H:</b> -15 pts si la vela 1H viva tiene mecha superior &gt; 40% (absorción vendedora).</div>
@@ -961,8 +964,8 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
       {/* 9. Estado */}
       <div style={{ display: 'flex', justifyContent: 'center' }}>
         <StatusBadge 
-          status={opp.semaphore === 'DESCENDING' || opp.semaphore === 'BELOW_EMA9' || opp.is_ema3_1h_descending || opp.is_ema3_above_ema9 === false ? 'blocked' : opp.queue_status} 
-          isOB={opp.is_overbought_queue || opp.semaphore === 'DESCENDING' || opp.semaphore === 'BELOW_EMA9' || Boolean(opp.is_ema3_1h_descending) || opp.is_ema3_above_ema9 === false} 
+          status={opp.semaphore === 'EXHAUSTION_GAP' ? 'exhaustion' : (opp.semaphore === 'DESCENDING' || opp.semaphore === 'BELOW_EMA9' || opp.is_ema3_1h_descending || opp.is_ema3_above_ema9 === false ? 'blocked' : opp.queue_status)} 
+          isOB={opp.is_overbought_queue || opp.semaphore === 'DESCENDING' || opp.semaphore === 'BELOW_EMA9' || opp.semaphore === 'EXHAUSTION_GAP' || Boolean(opp.is_ema3_1h_descending) || opp.is_ema3_above_ema9 === false} 
         />
       </div>
 

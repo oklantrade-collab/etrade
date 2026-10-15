@@ -207,6 +207,26 @@ def execute_market_order(
         except Exception as e_cd:
             log_debug(MODULE, f"Error validando cooldown de salida para {ticker}: {e_cd}")
 
+        # ── VALIDACIÓN 0.3: BLOQUEO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA) ──
+        gap_pct = float(context.get("gap_pct") or 0.0)
+        is_opening_window = context.get("is_opening_window")
+        if is_opening_window is None:
+            try:
+                from zoneinfo import ZoneInfo
+                now_ny = datetime.now(ZoneInfo("America/New_York"))
+                mkt_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+                cutoff_opening = now_ny.replace(hour=10, minute=15, second=0, microsecond=0)
+                is_opening_window = (mkt_open <= now_ny <= cutoff_opening)
+            except Exception:
+                is_opening_window = False
+
+        if gap_pct > 25.0 and is_opening_window:
+            log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Gap Up excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de agotamiento en apertura (Filtro Anti-LQDA).")
+            return {
+                "success": False,
+                "reason": f"Bloqueo Gap Exhaustion: Gap excesivo ({gap_pct:+.1f}% > +25%). Prohibido comprar en primeros 45 minutos (Filtro Anti-LQDA)."
+            }
+
         # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
         from app.stocks.diagnostic_validator import can_operate_pre_trade
         atr_fb = price * 0.02
@@ -233,7 +253,36 @@ def execute_market_order(
 
     # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
     shares = _calculate_shares(capital, max_pct, price)
-    if rule_code == "FT_RUNNER_BUY":
+
+    # Manejo de Tranches en Sweet Spot (+5% a +25%, Caso WFF)
+    is_sweet_spot = context.get("is_sweet_spot", False) or (5.0 <= gap_pct <= 25.0 and rule_code in ["PRO_BUY_MKT", "SWEET_SPOT_BUY", "ALPHA_RUNNER_BUY"])
+    tranche_step = int(context.get("tranche_step") or 1)
+
+    if is_sweet_spot or rule_code == "SWEET_SPOT_BUY":
+        # Verificaciones de Piramidación Livermore para Tranche 2 y 3
+        if tranche_step in [2, 3]:
+            if context.get("prev_candle_green") is False:
+                log_warning(MODULE, f"⛔ Aborting Tranche {tranche_step} for {ticker}: Vela previa fue ROJA. Prohibido piramidar en debilidad.")
+                return {
+                    "success": False,
+                    "reason": f"Abortado Tranche {tranche_step}: Vela previa fue ROJA. Solo se piramida en velas positivas."
+                }
+            if context.get("open_ge_close") is False:
+                log_warning(MODULE, f"⛔ Aborting Tranche {tranche_step} for {ticker}: Open < Close anterior (gap bajista).")
+                return {
+                    "success": False,
+                    "reason": f"Abortado Tranche {tranche_step}: Open < Close anterior. Falta continuidad alcista."
+                }
+
+        # Asignación de 1/3 por cada paso (33%, 33%, 34%)
+        if tranche_step == 1:
+            shares = max(5, int((shares * 0.33) // 5) * 5)
+        elif tranche_step == 2:
+            shares = max(5, int((shares * 0.33) // 5) * 5)
+        elif tranche_step == 3:
+            shares = max(5, int((shares * 0.34) // 5) * 5)
+
+    elif rule_code == "FT_RUNNER_BUY":
         # Tranche inicial ligero (30%) para permitir Scaling-In / Pyramiding
         shares = max(5, int((shares * 0.30) // 5) * 5)
     elif rule_code == "FT_REENTRY_BUY":
@@ -387,6 +436,26 @@ def place_limit_order(
                 }
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
+
+        # ── VALIDACIÓN 0.3: BLOQUEO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA) ──
+        gap_pct = float(context.get("gap_pct") or 0.0)
+        is_opening_window = context.get("is_opening_window")
+        if is_opening_window is None:
+            try:
+                from zoneinfo import ZoneInfo
+                now_ny = datetime.now(ZoneInfo("America/New_York"))
+                mkt_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+                cutoff_opening = now_ny.replace(hour=10, minute=15, second=0, microsecond=0)
+                is_opening_window = (mkt_open <= now_ny <= cutoff_opening)
+            except Exception:
+                is_opening_window = False
+
+        if gap_pct > 25.0 and is_opening_window:
+            log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Gap Up excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de agotamiento en apertura (Filtro Anti-LQDA).")
+            return {
+                "success": False,
+                "reason": f"Bloqueo Gap Exhaustion: Gap excesivo ({gap_pct:+.1f}% > +25%). Prohibido comprar en primeros 45 minutos (Filtro Anti-LQDA)."
+            }
 
         # ── VALIDACIÓN 0.5: DIAGNÓSTICO TÉCNICO EN ROJO (NO OPERAR) ──
         from app.stocks.diagnostic_validator import can_operate_pre_trade

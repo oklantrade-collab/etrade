@@ -261,6 +261,23 @@ class StocksRuleEngine:
             if is_ema3_above_ema9 is False:
                 failures.append(f"COMPRA BLOQUEADA (EMA3 <= EMA9 en 1H): EMA3={float(ema3_1h_live or 0):.2f} <= EMA9={float(ema9_1h or 0):.2f}. Requiere cruce y confirmación alcista de 1H.")
 
+        # ── CHECK 0.2: Gap Exhaustion Shield (Anti-LQDA / Climax Gap Lock > 25%) ──
+        if direction == "buy":
+            gap_pct = float(context.get("gap_pct") or 0.0)
+            is_opening_window = context.get("is_opening_window")
+            if is_opening_window is None:
+                try:
+                    from zoneinfo import ZoneInfo
+                    now_ny = datetime.now(ZoneInfo("America/New_York"))
+                    mkt_open = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+                    cutoff_opening = now_ny.replace(hour=10, minute=15, second=0, microsecond=0)
+                    is_opening_window = (mkt_open <= now_ny <= cutoff_opening)
+                except Exception:
+                    is_opening_window = False
+
+            if gap_pct > 25.0 and is_opening_window:
+                failures.append(f"COMPRA BLOQUEADA (Gap Exhaustion Shield): Gap de apertura excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de dilución/clímax pre-market (Filtro Anti-LQDA). Prohibido comprar en primeros 45m.")
+
         # ── CHECK 0.5: Global Intraday Exhaustion Filter ──
         if direction == "buy":
             rsi_15m_val = float(context.get("rsi_14") or 50.0)

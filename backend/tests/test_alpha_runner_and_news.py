@@ -277,3 +277,167 @@ def test_rule_engine_blocks_buy_when_ema3_below_ema9():
     assert eval_res["triggered"] is False
     assert any("EMA3 <= EMA9 en 1H" in f for f in eval_res["failures"])
 
+
+def test_semaphore_exhaustion_gap_above_25():
+    res = calculate_semaphore_and_buying_force(
+        price=36.5,
+        change_pct=35.0,
+        day_high=37.0,
+        day_low=27.0,
+        open_price=36.0,
+        volume=5000000,
+        avg_volume=500000,
+        news_bonus=25,
+        gap_pct=35.0,
+        is_ema3_1h_ascending=True,
+        is_ema3_above_ema9=True,
+    )
+    assert res["semaphore"] == "EXHAUSTION_GAP"
+    assert "CLÍMAX GAP" in res["semaphore_label"]
+    assert res["semaphore_color"] == "#F59E0B"
+    assert "Anti-LQDA" in res["semaphore_tip"]
+
+
+def test_semaphore_sweet_spot_continuation_under_25():
+    res = calculate_semaphore_and_buying_force(
+        price=11.3,
+        change_pct=18.0,
+        day_high=11.5,
+        day_low=9.5,
+        open_price=10.0,
+        volume=4000000,
+        avg_volume=800000,
+        news_bonus=20,
+        gap_pct=12.0,
+        candle_1_green=True,
+        plus_di_5m=26.0,
+        minus_di_5m=12.0,
+        adx_5m=22.0,
+        open_ge_close=True,
+        is_ema3_1h_ascending=True,
+        is_ema3_above_ema9=True,
+    )
+    assert res["semaphore"] == "SWEET_SPOT"
+    assert "SWEET SPOT" in res["semaphore_label"]
+    assert res["semaphore_color"] == "#10B981"
+    assert "3 tercios" in res["semaphore_tip"]
+    assert res["rank_score"] >= 60.0
+
+
+def test_rule_engine_blocks_exhaustion_gap_in_opening_window():
+    from app.stocks.stocks_rule_engine import StocksRuleEngine
+    re_instance = StocksRuleEngine.get_instance()
+    
+    rule = {
+        "rule_code": "PRO_DIP_BUY",
+        "direction": "buy",
+        "order_type": "market"
+    }
+    context = {
+        "ticker": "LQDA",
+        "close": 36.5,
+        "gap_pct": 35.0,
+        "is_opening_window": True,
+        "is_ema3_1h_ascending": True,
+        "ema3_slope_1h": 0.05,
+        "is_ema3_above_ema9": True,
+        "ema_20_1d": 25.0,
+        "ema_50_1d": 20.0,
+        "ema_3_1d": 30.0,
+        "ema_9_1d": 28.0,
+        "ema_3": 36.0,
+        "ema_9": 34.0,
+        "ema_20": 30.0
+    }
+    eval_res = re_instance.evaluate_rule(rule, context)
+    assert eval_res["triggered"] is False
+    assert any("Gap Exhaustion Shield" in f for f in eval_res["failures"])
+
+
+@patch("app.stocks.live_1h_candle_service.get_live_1h_candle_and_sipv", return_value={"is_ema3_1h_ascending": True, "is_ema3_above_ema9": True})
+@patch("app.stocks.stocks_order_executor.get_supabase")
+def test_order_executor_blocks_gap_exhaustion(mock_sb, mock_1h):
+    from app.stocks.stocks_order_executor import execute_market_order
+    mock_instance = MagicMock()
+    mock_sb.return_value = mock_instance
+    mock_instance.table().select().eq().order().limit().execute.return_value.data = []
+
+    res = execute_market_order(
+        ticker="LQDA",
+        direction="buy",
+        rule_code="PRO_BUY_MKT",
+        context={
+            "ticker": "LQDA",
+            "price": 36.5,
+            "gap_pct": 35.0,
+            "is_opening_window": True,
+            "now_dt": datetime(2026, 10, 14, 10, 0, tzinfo=timezone.utc),
+        },
+        rule={"rule_code": "PRO_BUY_MKT", "direction": "buy"}
+    )
+    assert res["success"] is False
+    assert "Bloqueo Gap Exhaustion" in res["reason"]
+
+
+@patch("app.stocks.diagnostic_validator.can_operate_pre_trade", return_value=(True, "OK", {}))
+@patch("app.stocks.live_1h_candle_service.get_live_1h_candle_and_sipv", return_value={"is_ema3_1h_ascending": True, "is_ema3_above_ema9": True})
+@patch("app.stocks.stocks_order_executor._get_config", return_value={"total_capital": 10000, "max_pct_per_trade": 0.1, "max_total_risk_pct": 0.5, "max_positions": 5, "paper_mode": True})
+@patch("app.stocks.stocks_order_executor.get_supabase")
+def test_order_executor_tranche_abort_on_red_candle(mock_sb, mock_cfg, mock_1h, mock_diag):
+    from app.stocks.stocks_order_executor import execute_market_order
+    mock_instance = MagicMock()
+    mock_sb.return_value = mock_instance
+    mock_instance.table().select().eq().order().limit().execute.return_value.data = []
+    mock_instance.table().select().eq().execute.return_value.data = []
+
+    res = execute_market_order(
+        ticker="WFF",
+        direction="buy",
+        rule_code="SWEET_SPOT_BUY",
+        context={
+            "ticker": "WFF",
+            "price": 10.0,
+            "gap_pct": 12.0,
+            "is_opening_window": False,
+            "tranche_step": 2,
+            "prev_candle_green": False,
+            "open_ge_close": True,
+            "now_dt": datetime(2026, 10, 14, 10, 0, tzinfo=timezone.utc),
+        },
+        rule={"rule_code": "SWEET_SPOT_BUY", "direction": "buy"}
+    )
+    assert res["success"] is False
+    assert "Vela previa fue ROJA" in res["reason"]
+
+
+@patch("app.stocks.diagnostic_validator.can_operate_pre_trade", return_value=(True, "OK", {}))
+@patch("app.stocks.live_1h_candle_service.get_live_1h_candle_and_sipv", return_value={"is_ema3_1h_ascending": True, "is_ema3_above_ema9": True})
+@patch("app.stocks.stocks_order_executor._get_config", return_value={"total_capital": 10000, "max_pct_per_trade": 0.1, "max_total_risk_pct": 0.5, "max_positions": 5, "paper_mode": True})
+@patch("app.stocks.stocks_order_executor.get_supabase")
+def test_order_executor_tranche_abort_on_down_gap(mock_sb, mock_cfg, mock_1h, mock_diag):
+    from app.stocks.stocks_order_executor import execute_market_order
+    mock_instance = MagicMock()
+    mock_sb.return_value = mock_instance
+    mock_instance.table().select().eq().order().limit().execute.return_value.data = []
+    mock_instance.table().select().eq().execute.return_value.data = []
+
+    res = execute_market_order(
+        ticker="WFF",
+        direction="buy",
+        rule_code="SWEET_SPOT_BUY",
+        context={
+            "ticker": "WFF",
+            "price": 10.0,
+            "gap_pct": 12.0,
+            "is_opening_window": False,
+            "tranche_step": 2,
+            "prev_candle_green": True,
+            "open_ge_close": False,
+            "now_dt": datetime(2026, 10, 14, 10, 0, tzinfo=timezone.utc),
+        },
+        rule={"rule_code": "SWEET_SPOT_BUY", "direction": "buy"}
+    )
+    assert res["success"] is False
+    assert "Open < Close anterior" in res["reason"]
+
+

@@ -53,12 +53,20 @@ def calculate_semaphore_and_buying_force(
     ema3_slope_1h: float = 0.0,
     is_ema3_above_ema9: bool = True,
     sipv_upper_rejection: bool = False,
-    delta_p_5m: Optional[float] = None
+    delta_p_5m: Optional[float] = None,
+    gap_pct: Optional[float] = None,
+    candle_1_green: bool = True,
+    adx_5m: float = 25.0,
+    plus_di_5m: float = 25.0,
+    minus_di_5m: float = 15.0,
+    open_ge_close: bool = True
 ) -> Dict[str, Any]:
     """
     Calcula la Fuerza Compradora (0-100), Semáforo Visual y Rank Score:
     - 🔴 DESCENDING: EMA3 de 1H plana o en caída (penalización severa -45 pts, prohibido comprar).
     - ⚪ BELOW_EMA9: EMA3 <= EMA9 en 1H (penalización -10 pts, sin confirmación alcista horaria).
+    - 🟡 EXHAUSTION_GAP: Gap Up > +25% (penalización -20 pts, riesgo de dilución/clímax pre-market, Filtro Anti-LQDA).
+    - 🟢 SWEET_SPOT: Gap orgánico (+5% a +25%) con vela 1 verde, +DI > -DI y ADX >= 18 (bonus +30 pts, Caso WFF).
     - 🟡 CLIMAX: Sobreextendida en el High o con rechazo SIPV superior.
     - 🟢 PULLBACK: Acción en tendencia fuerte con EMA3 1H ascendente y sobre EMA9 con descanso controlado (1.5% a 7.5%).
     - ⚪ MONITORING: En rango normal.
@@ -106,6 +114,9 @@ def calculate_semaphore_and_buying_force(
     elif not is_ema3_above_ema9:
         # Tope de fuerza si aún no ha roto por encima de EMA9 en 1H
         raw_buying_force = min(raw_buying_force, 45.0)
+    elif gap_pct is not None and gap_pct > 25.0:
+        # Castigo de fuerza compradora para Gaps excesivos por sobreextensión en apertura
+        raw_buying_force = min(raw_buying_force, 45.0)
 
     buying_force = int(round(min(100.0, max(5.0, raw_buying_force))))
 
@@ -124,6 +135,13 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#94A3B8"
         sem_tip = "EMA3 <= EMA9 en 1H. Falta cruce alcista y confirmación de tendencia en 1 hora. Entrada no permitida."
         setup_bonus = -10.0
+    # CASO A.3: CANDADO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA)
+    elif gap_pct is not None and gap_pct > 25.0:
+        semaphore = "EXHAUSTION_GAP"
+        sem_label = f"🟡 CLÍMAX GAP (+{gap_pct:.1f}% > 25%)"
+        sem_color = "#F59E0B"
+        sem_tip = f"Gap de apertura excesivo (+{gap_pct:.1f}% > 25%). Riesgo extremo de agotamiento y dilución pre-market (Filtro Anti-LQDA). Prohibido comprar en primeros 45m."
+        setup_bonus = -20.0
     # CASO B: RECHAZO SIPV EN TECHO (Mecha superior prominente en 1H)
     elif sipv_upper_rejection:
         semaphore = "CLIMAX"
@@ -138,7 +156,14 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#F59E0B"
         sem_tip = f"En techo absoluto (${day_high:.2f}). Riesgo de comprar clímax de distribución. Esperar pullback."
         setup_bonus = -10.0
-    # CASO D: PULLBACK SALUDABLE CON EMA3 1H ASCENDENTE Y EMA3 > EMA9
+    # CASO D.1: SWEET SPOT GAP (+5% A +25% CON IMPULSO 5M CONFIRMADO - CASO WFF)
+    elif (gap_pct is not None and 5.0 <= gap_pct <= 25.0) and candle_1_green and (plus_di_5m >= minus_di_5m) and adx_5m >= 18.0 and buying_force >= 60 and open_ge_close:
+        semaphore = "SWEET_SPOT"
+        sem_label = "🟢 SWEET SPOT CONTINUATION (1/3)"
+        sem_color = "#10B981"
+        sem_tip = f"Gap orgánico (+{gap_pct:.1f}%). Vela 1 verde con +DI>-DI y ADX={adx_5m:.0f} confirmando. Habilitada entrada escalonada en 3 tercios (Caso WFF)."
+        setup_bonus = 30.0
+    # CASO D.2: PULLBACK SALUDABLE CON EMA3 1H ASCENDENTE Y EMA3 > EMA9
     elif change_pct >= 8.0 and (1.5 <= dist_from_high_pct <= 7.5):
         semaphore = "PULLBACK"
         sem_label = "🟢 PULLBACK COMPRABLE"
@@ -227,8 +252,12 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             news_info = fetch_stock_news(sym)
             news_bonus = news_info.get("bonus_points", 0)
 
-            # Vela de 1H en formación y análisis SIPV
+            # Vela de 1H en formación y análisis SIPV + 5m
             live_1h = get_live_1h_candle_and_sipv(sym, price)
+
+            # Cálculo del Gap de apertura respecto al cierre previo
+            prev_close = float(item.get('regularMarketPreviousClose') or (price / (1.0 + (chg_pct / 100.0)) if chg_pct != -100 else price))
+            gap_pct = round(((open_p - prev_close) / prev_close * 100.0), 2) if prev_close > 0 else 0.0
 
             # Fuerza compradora y semáforo
             metrics = calculate_semaphore_and_buying_force(
@@ -244,6 +273,12 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 ema3_slope_1h=live_1h.get("ema3_slope_1h", 0.0),
                 is_ema3_above_ema9=live_1h.get("is_ema3_above_ema9", False),
                 sipv_upper_rejection=live_1h.get("sipv_upper_rejection", False),
+                gap_pct=gap_pct,
+                candle_1_green=live_1h.get("is_candle_1_green", True),
+                adx_5m=live_1h.get("adx_5m", 25.0),
+                plus_di_5m=live_1h.get("plus_di_5m", 25.0),
+                minus_di_5m=live_1h.get("minus_di_5m", 15.0),
+                open_ge_close=live_1h.get("open_ge_close_prev", True),
             )
 
             candidates.append({
@@ -265,7 +300,8 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "semaphore_label": metrics["semaphore_label"],
                 "semaphore_color": metrics["semaphore_color"],
                 "semaphore_tip": metrics["semaphore_tip"],
-                # Vela 1H en Formación & SIPV
+                "gap_pct": gap_pct,
+                # Vela 1H en Formación & SIPV + 5m
                 "is_ema3_1h_ascending": live_1h.get("is_ema3_1h_ascending", True),
                 "is_ema3_1h_descending": live_1h.get("is_ema3_1h_descending", False),
                 "is_ema3_above_ema9": live_1h.get("is_ema3_above_ema9", False),
@@ -275,6 +311,11 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "sipv_upper_rejection": live_1h.get("sipv_upper_rejection", False),
                 "sipv_lower_absorption": live_1h.get("sipv_lower_absorption", False),
                 "sipv_status_reason": live_1h.get("status_reason", ""),
+                "adx_5m": live_1h.get("adx_5m", 25.0),
+                "plus_di_5m": live_1h.get("plus_di_5m", 25.0),
+                "minus_di_5m": live_1h.get("minus_di_5m", 15.0),
+                "is_candle_1_green": live_1h.get("is_candle_1_green", True),
+                "open_ge_close": live_1h.get("open_ge_close_prev", True),
                 # Noticia / Catalizador
                 "has_news": news_info.get("has_news", False),
                 "catalyst_badge": news_info.get("catalyst_badge"),
