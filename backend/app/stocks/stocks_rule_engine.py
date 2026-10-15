@@ -230,22 +230,36 @@ class StocksRuleEngine:
         if direction == "buy":
             is_ema3_1h_ascending = context.get("is_ema3_1h_ascending")
             ema3_slope_1h = context.get("ema3_slope_1h")
+            is_ema3_above_ema9 = context.get("is_ema3_above_ema9")
+            ema3_1h_live = context.get("ema3_1h_live")
+            ema9_1h = context.get("ema9_1h")
 
-            if is_ema3_1h_ascending is None:
+            if is_ema3_1h_ascending is None or is_ema3_above_ema9 is None:
                 ticker = context.get("ticker")
                 if ticker:
                     try:
                         from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
                         live_1h = get_live_1h_candle_and_sipv(ticker, current_price)
-                        is_ema3_1h_ascending = live_1h.get("is_ema3_1h_ascending", True)
-                        ema3_slope_1h = live_1h.get("ema3_slope_1h", 0.0)
+                        if is_ema3_1h_ascending is None:
+                            is_ema3_1h_ascending = live_1h.get("is_ema3_1h_ascending", True)
+                            ema3_slope_1h = live_1h.get("ema3_slope_1h", 0.0)
+                        if is_ema3_above_ema9 is None:
+                            is_ema3_above_ema9 = live_1h.get("is_ema3_above_ema9", True)
+                            ema3_1h_live = live_1h.get("ema3_1h_live", 0.0)
+                            ema9_1h = live_1h.get("ema9_1h", 0.0)
                         if live_1h.get("sipv_upper_rejection"):
                             failures.append(f"Rechazo SIPV 1H en techo: Mecha superior {live_1h.get('upper_wick_ratio',0)*100:.0f}% en vela horaria en formación")
                     except Exception:
-                        is_ema3_1h_ascending = True
+                        if is_ema3_1h_ascending is None:
+                            is_ema3_1h_ascending = True
+                        if is_ema3_above_ema9 is None:
+                            is_ema3_above_ema9 = True
 
             if is_ema3_1h_ascending is False or (ema3_slope_1h is not None and float(ema3_slope_1h) <= 0.0001):
                 failures.append(f"COMPRA BLOQUEADA (EMA3 1H Descendente): Pendiente horaria {float(ema3_slope_1h or 0):+.4f} <= 0. Prohibido entrar en agotamiento.")
+
+            if is_ema3_above_ema9 is False:
+                failures.append(f"COMPRA BLOQUEADA (EMA3 <= EMA9 en 1H): EMA3={float(ema3_1h_live or 0):.2f} <= EMA9={float(ema9_1h or 0):.2f}. Requiere cruce y confirmación alcista de 1H.")
 
         # ── CHECK 0.5: Global Intraday Exhaustion Filter ──
         if direction == "buy":

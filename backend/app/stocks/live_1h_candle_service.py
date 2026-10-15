@@ -42,12 +42,15 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             cached_data["ema3_slope_1h"] = round(slope, 4)
             cached_data["is_ema3_1h_ascending"] = bool(slope > 0.0001)
             cached_data["is_ema3_1h_descending"] = bool(slope <= 0.0001)
+            ema9_curr = cached_data.get("ema9_1h", 0.0)
+            cached_data["is_ema3_above_ema9"] = bool(live_ema3 > ema9_curr) if ema9_curr > 0 else False
         return cached_data
 
     fallback_data = {
         "ticker": clean_ticker,
-        "is_ema3_1h_ascending": True,
-        "is_ema3_1h_descending": False,
+        "is_ema3_1h_ascending": False,
+        "is_ema3_1h_descending": True,
+        "is_ema3_above_ema9": False,
         "ema3_1h_live": current_price or 0.0,
         "ema3_1h_prev": current_price or 0.0,
         "ema3_slope_1h": 0.0,
@@ -68,6 +71,23 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         t = yf.Ticker(clean_ticker)
         df_1h = t.history(period="3d", interval="1h")
         if df_1h is None or df_1h.empty or len(df_1h) < 4:
+            # Intentar resamplear desde 5m para acciones con pocos datos 1H (ej. IPOs recientes como BRR)
+            try:
+                df_5m = t.history(period="3d", interval="5m")
+                if df_5m is not None and not df_5m.empty and len(df_5m) >= 6:
+                    df_resampled = df_5m.resample("1h").agg({
+                        "Open": "first",
+                        "High": "max",
+                        "Low": "min",
+                        "Close": "last",
+                        "Volume": "sum"
+                    }).dropna()
+                    if len(df_resampled) >= 2:
+                        df_1h = df_resampled
+            except Exception as e_resample:
+                log_debug(MODULE, f"No se pudo resamplear 5m a 1h para {clean_ticker}: {e_resample}")
+
+        if df_1h is None or df_1h.empty or len(df_1h) < 2:
             _1H_CACHE[clean_ticker] = {"timestamp": now_ts, "data": fallback_data}
             return fallback_data
 
@@ -89,10 +109,11 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         ema3_prev = float(ema3_series.iloc[-2]) if len(ema3_series) > 1 else ema3_live
         ema9_curr = float(ema9_series.iloc[-1])
 
-        # Pendiente de EMA3 en 1H
+        # Pendiente de EMA3 en 1H y relación EMA3 > EMA9
         ema3_slope = ema3_live - ema3_prev
         is_ascending = (ema3_slope > 0.0001)
         is_descending = not is_ascending
+        is_ema3_above_ema9 = bool(ema3_live > ema9_curr)
 
         # Métricas de la vela de 1H en formación (SIPV)
         last_row = df_1h.iloc[-1]
@@ -115,7 +136,9 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         sipv_lower_absorption = (lower_wick_ratio >= 0.40) and not is_red
 
         reason = "Ascendente normal"
-        if is_descending:
+        if not is_ema3_above_ema9:
+            reason = f"EMA3 1H ({ema3_live:.2f}) <= EMA9 1H ({ema9_curr:.2f}) - Falta cruce alcista"
+        elif is_descending:
             reason = f"EMA3 1H cayendo ({ema3_slope:.4f}). Vela 1H en retroceso."
         elif sipv_upper_rejection:
             reason = f"Rechazo SIPV en techo (Mecha sup: {upper_wick_ratio*100:.1f}%)."
@@ -126,6 +149,7 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "ticker": clean_ticker,
             "is_ema3_1h_ascending": is_ascending,
             "is_ema3_1h_descending": is_descending,
+            "is_ema3_above_ema9": is_ema3_above_ema9,
             "ema3_1h_live": round(ema3_live, 4),
             "ema3_1h_prev": round(ema3_prev, 4),
             "ema3_slope_1h": round(ema3_slope, 4),

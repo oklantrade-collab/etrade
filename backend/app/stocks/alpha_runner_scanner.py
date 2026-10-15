@@ -51,14 +51,16 @@ def calculate_semaphore_and_buying_force(
     news_bonus: int = 0,
     is_ema3_1h_ascending: bool = True,
     ema3_slope_1h: float = 0.0,
+    is_ema3_above_ema9: bool = True,
     sipv_upper_rejection: bool = False,
     delta_p_5m: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Calcula la Fuerza Compradora (0-100), Semáforo Visual y Rank Score:
     - 🔴 DESCENDING: EMA3 de 1H plana o en caída (penalización severa -45 pts, prohibido comprar).
+    - ⚪ BELOW_EMA9: EMA3 <= EMA9 en 1H (penalización -10 pts, sin confirmación alcista horaria).
     - 🟡 CLIMAX: Sobreextendida en el High o con rechazo SIPV superior.
-    - 🟢 PULLBACK: Acción en tendencia fuerte con EMA3 1H ascendente y descanso controlado (1.5% a 7.5%).
+    - 🟢 PULLBACK: Acción en tendencia fuerte con EMA3 1H ascendente y sobre EMA9 con descanso controlado (1.5% a 7.5%).
     - ⚪ MONITORING: En rango normal.
     """
     if price <= 0:
@@ -101,6 +103,9 @@ def calculate_semaphore_and_buying_force(
     # Castigo severo si la EMA3 de 1H está plana o descendente:
     if not is_ema3_1h_ascending:
         raw_buying_force = min(raw_buying_force * 0.5, 30.0)
+    elif not is_ema3_above_ema9:
+        # Tope de fuerza si aún no ha roto por encima de EMA9 en 1H
+        raw_buying_force = min(raw_buying_force, 45.0)
 
     buying_force = int(round(min(100.0, max(5.0, raw_buying_force))))
 
@@ -112,6 +117,13 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#EF4444"
         sem_tip = f"EMA3 de 1H cayendo ({ema3_slope_1h:+.4f}). Fase de distribución. PROHIBIDO COMPRAR."
         setup_bonus = -45.0
+    # CASO A.2: EMA3 1H <= EMA9 1H (SIN CONFIRMACIÓN ALCISTA EN 1H)
+    elif not is_ema3_above_ema9:
+        semaphore = "BELOW_EMA9"
+        sem_label = "⚪ BAJO EMA9 1H (SIN CRUCE)"
+        sem_color = "#94A3B8"
+        sem_tip = "EMA3 <= EMA9 en 1H. Falta cruce alcista y confirmación de tendencia en 1 hora. Entrada no permitida."
+        setup_bonus = -10.0
     # CASO B: RECHAZO SIPV EN TECHO (Mecha superior prominente en 1H)
     elif sipv_upper_rejection:
         semaphore = "CLIMAX"
@@ -126,12 +138,12 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#F59E0B"
         sem_tip = f"En techo absoluto (${day_high:.2f}). Riesgo de comprar clímax de distribución. Esperar pullback."
         setup_bonus = -10.0
-    # CASO D: PULLBACK SALUDABLE CON EMA3 1H ASCENDENTE
+    # CASO D: PULLBACK SALUDABLE CON EMA3 1H ASCENDENTE Y EMA3 > EMA9
     elif change_pct >= 8.0 and (1.5 <= dist_from_high_pct <= 7.5):
         semaphore = "PULLBACK"
         sem_label = "🟢 PULLBACK COMPRABLE"
         sem_color = "#10B981"
-        sem_tip = f"Descanso saludable (-{dist_from_high_pct:.1f}% del pico) con EMA3 1H ascendente. Oportunidad en soporte."
+        sem_tip = f"Descanso saludable (-{dist_from_high_pct:.1f}% del pico) con EMA3 1H ascendente y sobre EMA9. Oportunidad en soporte."
         setup_bonus = 25.0
     else:
         semaphore = "MONITORING"
@@ -230,6 +242,7 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 news_bonus=news_bonus,
                 is_ema3_1h_ascending=live_1h.get("is_ema3_1h_ascending", True),
                 ema3_slope_1h=live_1h.get("ema3_slope_1h", 0.0),
+                is_ema3_above_ema9=live_1h.get("is_ema3_above_ema9", False),
                 sipv_upper_rejection=live_1h.get("sipv_upper_rejection", False),
             )
 
@@ -255,8 +268,10 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 # Vela 1H en Formación & SIPV
                 "is_ema3_1h_ascending": live_1h.get("is_ema3_1h_ascending", True),
                 "is_ema3_1h_descending": live_1h.get("is_ema3_1h_descending", False),
+                "is_ema3_above_ema9": live_1h.get("is_ema3_above_ema9", False),
                 "ema3_slope_1h": live_1h.get("ema3_slope_1h", 0.0),
                 "ema3_1h_live": live_1h.get("ema3_1h_live", 0.0),
+                "ema9_1h": live_1h.get("ema9_1h", 0.0),
                 "sipv_upper_rejection": live_1h.get("sipv_upper_rejection", False),
                 "sipv_lower_absorption": live_1h.get("sipv_lower_absorption", False),
                 "sipv_status_reason": live_1h.get("status_reason", ""),

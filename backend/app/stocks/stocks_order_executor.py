@@ -161,7 +161,7 @@ def execute_market_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
-        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO ──
+        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO / EMA3<=EMA9 ──
         try:
             from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
             live_1h = get_live_1h_candle_and_sipv(ticker, price)
@@ -171,6 +171,14 @@ def execute_market_order(
                 return {
                     "success": False,
                     "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
+                }
+            if not live_1h.get("is_ema3_above_ema9", True):
+                ema3_val = live_1h.get("ema3_1h_live", 0.0)
+                ema9_val = live_1h.get("ema9_1h", 0.0)
+                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). Falta cruce alcista en 1 hora.")
+                return {
+                    "success": False,
+                    "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
                 }
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
@@ -358,7 +366,7 @@ def place_limit_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
-        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO ──
+        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO / EMA3<=EMA9 ──
         try:
             from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
             live_1h = get_live_1h_candle_and_sipv(ticker, limit_price)
@@ -368,6 +376,14 @@ def place_limit_order(
                 return {
                     "success": False,
                     "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
+                }
+            if not live_1h.get("is_ema3_above_ema9", True):
+                ema3_val = live_1h.get("ema3_1h_live", 0.0)
+                ema9_val = live_1h.get("ema9_1h", 0.0)
+                log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). Falta cruce alcista en 1 hora.")
+                return {
+                    "success": False,
+                    "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
                 }
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")

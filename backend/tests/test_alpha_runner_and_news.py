@@ -222,3 +222,58 @@ def test_max_active_stocks_reading():
         ]
         cfg = _get_config()
         assert cfg["max_positions"] == 5
+
+
+def test_semaphore_below_ema9_no_pullback():
+    # Caso BRR: +8.24% intradía, distancia al high dentro del rango de pullback (-2.8%),
+    # EMA3 1H ascendente (+0.03), pero EMA3 1H (3.78) <= EMA9 1H (3.89)
+    res = calculate_semaphore_and_buying_force(
+        price=3.78,
+        change_pct=8.24,
+        day_high=3.89,
+        day_low=3.40,
+        open_price=3.50,
+        volume=2500000,
+        avg_volume=1000000,
+        news_bonus=0,
+        is_ema3_1h_ascending=True,
+        ema3_slope_1h=0.03,
+        is_ema3_above_ema9=False,
+    )
+    assert res["semaphore"] == "BELOW_EMA9"
+    assert "BAJO EMA9 1H" in res["semaphore_label"]
+    assert res["semaphore_color"] == "#94A3B8"
+    # No recibe el bonus de pullback (+25 pts); setup_bonus es -10 pts
+    assert res["rank_score"] <= 30.0
+
+
+def test_rule_engine_blocks_buy_when_ema3_below_ema9():
+    from app.stocks.stocks_rule_engine import StocksRuleEngine
+    re_instance = StocksRuleEngine.get_instance()
+    
+    rule = {
+        "rule_code": "PRO_DIP_BUY",
+        "direction": "buy",
+        "order_type": "market"
+    }
+    # Contexto con EMA3 <= EMA9 en 1H
+    context = {
+        "ticker": "BRR",
+        "close": 3.78,
+        "is_ema3_1h_ascending": True,
+        "ema3_slope_1h": 0.03,
+        "is_ema3_above_ema9": False,
+        "ema3_1h_live": 3.78,
+        "ema9_1h": 3.89,
+        "ema_20_1d": 3.5,
+        "ema_50_1d": 3.0,
+        "ema_3_1d": 3.7,
+        "ema_9_1d": 3.6,
+        "ema_3": 3.78,
+        "ema_9": 3.75,
+        "ema_20": 3.70
+    }
+    eval_res = re_instance.evaluate_rule(rule, context)
+    assert eval_res["triggered"] is False
+    assert any("EMA3 <= EMA9 en 1H" in f for f in eval_res["failures"])
+
