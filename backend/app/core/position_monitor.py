@@ -1492,15 +1492,17 @@ async def check_open_positions_5m(
                             decision = eval_res.get('decision')
                             if decision == CentinelaDecision.CIERRE_TOTAL.value:
                                 reason = f"HALCON_CENTINELA_CIERRE_TOTAL (Score: {eval_res.get('score_final', 0)})"
-                                await _execute_paper_close(pos, price, reason, supabase)
-                                events.append({'symbol': norm_symbol, 'event': 'centinela_close'})
-                                log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Closed {norm_symbol} via proactive exit: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
-                                continue
+                                closed = await _execute_paper_close(pos, price, reason, supabase)
+                                if closed:
+                                    events.append({'symbol': norm_symbol, 'event': 'centinela_close'})
+                                    log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Closed {norm_symbol} via proactive exit: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
+                                    continue
                             elif decision == CentinelaDecision.CIERRE_PARCIAL.value:
-                                await _execute_paper_partial_close(pos, price, supabase)
-                                events.append({'symbol': norm_symbol, 'event': 'centinela_partial_close'})
-                                log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Partial Close for {norm_symbol}: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
-                                continue
+                                closed_part = await _execute_paper_partial_close(pos, price, supabase)
+                                if closed_part:
+                                    events.append({'symbol': norm_symbol, 'event': 'centinela_partial_close'})
+                                    log_info(MODULE, f"🦅 [CENTINELA CRYPTO] Partial Close for {norm_symbol}: score={eval_res.get('score_final')}, pnl=${upnl:.2f}")
+                                    continue
                 except Exception as cent_err:
                     log_warning(MODULE, f"Error evaluating Centinela for crypto {norm_symbol}: {cent_err}")
 

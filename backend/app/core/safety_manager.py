@@ -11,7 +11,7 @@ Detecta y neutraliza:
 
 import asyncio
 from datetime import datetime, timezone, timedelta
-from app.core.logger import log_info, log_error
+from app.core.logger import log_info, log_warning, log_error
 
 def safe_float(val, default=0.0) -> float:
     if val is None:
