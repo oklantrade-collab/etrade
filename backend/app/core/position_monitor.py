@@ -668,11 +668,12 @@ async def check_protections(
     Retorna True si la posición fue cerrada por el SL dinámico.
     """
     pos_id = str(position.get('id', symbol))
+    side = str(position.get('side') or position.get('direction') or 'long').lower()
 
     # Inicializar estado si no existe
     if pos_id not in _protection_cache:
         # Resolver side
-        side_raw = str(position.get('side') or 'long').lower()
+        side_raw = side
         highest_band_reached = position.get('highest_band_reached') or ''
         bb_touched_val = 'bb_touched' in str(highest_band_reached)
         
@@ -1656,18 +1657,19 @@ async def check_open_positions_5m(
                             arb_res = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_climax)
                             if arb_res.get('approved'):
                                 log_info(MODULE, f"🎯 [ADUANA / REBOTE EXIT] {climax_reason}")
-                                await _execute_paper_close(pos, price, 'rebote_climax'[:20], supabase, snap=current_snap_obj)
-                                events.append({'symbol': symbol, 'event': 'climax_rebote_exit'})
-                                
-                                from app.workers.alerts_service import send_telegram_message
-                                await send_telegram_message(
-                                    f"🎯 REBOTE + ADUANA EXIT [{norm_symbol}]\n"
-                                    f"Dirección: {side.upper()}\n"
-                                    f"Precio Cierre: ${price:.4f}\n"
-                                    f"PnL: +{climax_meta.get('pnl_pct', 0.0):.2f}%\n"
-                                    f"Motivo: {climax_reason}"
-                                )
-                                continue
+                                closed = await _execute_paper_close(pos, price, 'rebote_climax'[:20], supabase, snap=current_snap_obj)
+                                if closed:
+                                    events.append({'symbol': symbol, 'event': 'climax_rebote_exit'})
+                                    
+                                    from app.workers.alerts_service import send_telegram_message
+                                    await send_telegram_message(
+                                        f"🎯 REBOTE + ADUANA EXIT [{norm_symbol}]\n"
+                                        f"Dirección: {side.upper()}\n"
+                                        f"Precio Cierre: ${price:.4f}\n"
+                                        f"PnL: +{climax_meta.get('pnl_pct', 0.0):.2f}%\n"
+                                        f"Motivo: {climax_reason}"
+                                    )
+                                    continue
                 except Exception as reb_climax_err:
                     log_warning(MODULE, f"Error en evaluación REBOTE/ADUANA Clímax para {symbol}: {reb_climax_err}")
 
@@ -1703,18 +1705,19 @@ async def check_open_positions_5m(
                             arb_full = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_full)
                             if arb_full.get('approved'):
                                 log_info(MODULE, f"🎯 [ADUANA TREND FULL EXIT] {aduana_exit_res['reason']}")
-                                await _execute_paper_close(pos, price, 'aduana_trend_full'[:20], supabase, snap=current_snap_obj)
-                                events.append({'symbol': symbol, 'event': 'aduana_trend_full'})
-                                
-                                from app.workers.alerts_service import send_telegram_message
-                                await send_telegram_message(
-                                    f"🎯 ADUANA TREND FULL EXIT [{norm_symbol}]\n"
-                                    f"Dirección: {side.upper()}\n"
-                                    f"Precio: ${price:.4f}\n"
-                                    f"PnL: {aduana_exit_res.get('details', {}).get('pnl_pct', 0.0):+.2f}%\n"
-                                    f"Motivo: {aduana_exit_res['reason']}"
-                                )
-                                continue
+                                closed = await _execute_paper_close(pos, price, 'aduana_trend_full'[:20], supabase, snap=current_snap_obj)
+                                if closed:
+                                    events.append({'symbol': symbol, 'event': 'aduana_trend_full'})
+                                    
+                                    from app.workers.alerts_service import send_telegram_message
+                                    await send_telegram_message(
+                                        f"🎯 ADUANA TREND FULL EXIT [{norm_symbol}]\n"
+                                        f"Dirección: {side.upper()}\n"
+                                        f"Precio: ${price:.4f}\n"
+                                        f"PnL: {aduana_exit_res.get('details', {}).get('pnl_pct', 0.0):+.2f}%\n"
+                                        f"Motivo: {aduana_exit_res['reason']}"
+                                    )
+                                    continue
                                 
                         elif act == 'PARTIAL_CLOSE_50' and not pos.get('partial_closed'):
                             req_part = ExitOrderRequest(
@@ -1731,19 +1734,20 @@ async def check_open_positions_5m(
                             arb_part = GLOBAL_ADUANA_EXIT_GATE.arbitrate_and_register_order(req_part)
                             if arb_part.get('approved'):
                                 log_info(MODULE, f"🎯 [ADUANA TREND PARTIAL 50%] {aduana_exit_res['reason']}")
-                                await _execute_paper_partial_close(pos, price, supabase)
-                                pos['partial_closed'] = True
-                                events.append({'symbol': symbol, 'event': 'aduana_trend_tp50'})
-                                
-                                from app.workers.alerts_service import send_telegram_message
-                                await send_telegram_message(
-                                    f"🎯 ADUANA TREND PARTIAL 50% [{norm_symbol}]\n"
-                                    f"Dirección: {side.upper()}\n"
-                                    f"Precio: ${price:.4f}\n"
-                                    f"PnL: {aduana_exit_res.get('details', {}).get('pnl_pct', 0.0):+.2f}%\n"
-                                    f"Motivo: {aduana_exit_res['reason']}"
-                                )
-                                continue
+                                closed_part = await _execute_paper_partial_close(pos, price, supabase)
+                                if closed_part:
+                                    pos['partial_closed'] = True
+                                    events.append({'symbol': symbol, 'event': 'aduana_trend_tp50'})
+                                    
+                                    from app.workers.alerts_service import send_telegram_message
+                                    await send_telegram_message(
+                                        f"🎯 ADUANA TREND PARTIAL 50% [{norm_symbol}]\n"
+                                        f"Dirección: {side.upper()}\n"
+                                        f"Precio: ${price:.4f}\n"
+                                        f"PnL: {aduana_exit_res.get('details', {}).get('pnl_pct', 0.0):+.2f}%\n"
+                                        f"Motivo: {aduana_exit_res['reason']}"
+                                    )
+                                    continue
                 except Exception as aduana_trend_err:
                     log_warning(MODULE, f"Error en evaluación ADUANA Trend Exit para {symbol}: {aduana_trend_err}")
 
@@ -2642,6 +2646,7 @@ async def _execute_paper_partial_close(pos, price, supabase):
         register_realized_pnl(market, partial_pnl_usd)
     except Exception as cap_e:
         log_warning(MODULE, f"Error actualizando capital acumulado en partial close: {cap_e}")
+    return True
 
 async def _execute_paper_close(pos, price, reason, supabase, snap=None):
     """Cierra la posición completamente en Paper Trading."""
@@ -2731,7 +2736,8 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         return False
 
     # ── CANDLE MOMENTUM GUARD (Protección Central de Ganancias en Tendencia) ──
-    if total_pnl > 0 and reason not in ('emergency_sl', 'sl_hit', 'sl_hit_fx', 'sl_hit_fx_hard', 'liquidation', 'weekend_close', 'KILL_SWITCH', 'MANUAL', 'MANUAL_CLOSE'):
+    is_macro_or_safety_exit = any(x in str(reason).lower() for x in ('aduana', 'rebote_climax', 'climax_rebote'))
+    if total_pnl > 0 and not is_macro_or_safety_exit and reason not in ('emergency_sl', 'sl_hit', 'sl_hit_fx', 'sl_hit_fx_hard', 'liquidation', 'weekend_close', 'KILL_SWITCH', 'MANUAL', 'MANUAL_CLOSE'):
         try:
             from app.core.memory_store import MEMORY_STORE
             from app.strategy.candle_momentum_guard import should_allow_exit
@@ -2920,6 +2926,7 @@ async def _execute_paper_close(pos, price, reason, supabase, snap=None):
         register_sl_event(symbol, side)
 
     log_info(MODULE, f"🏁 FULL CLOSE [{symbol}] ({reason}) at ${price:,.2f} | Total PnL: ${total_pnl:.2f}")
+    return True
 
 
 async def _handle_unexpected_close(

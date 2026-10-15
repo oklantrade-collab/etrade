@@ -238,6 +238,10 @@ def should_allow_exit(
     if exit_rule_id in ('weekend_close', 'WEEKEND_CLOSE', '2.5'):
         return True, "Weekend Close de Forex tiene prioridad absoluta de seguridad ante cierre interbancario."
 
+    # ── REGLA ESPECIAL: ADUANA TREND EXIT TIENE PRIORIDAD MACRO (1H Trend Breakdown) ──
+    if any(x in str(exit_rule_id).lower() for x in ('aduana', 'rebote_climax', 'climax_rebote')):
+        return True, "ADUANA / Clímax Exit tiene prioridad estructural (Agotamiento/Ruptura de Tendencia 1H)."
+
     entry_p = float(position.get('avg_entry_price') or position.get('entry_price') or 0.0)
     if entry_p <= 0 or current_price <= 0:
         return True, "Precios inválidos; permitir salida por defecto."
