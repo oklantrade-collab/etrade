@@ -157,6 +157,7 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
     """
     Verifica si una acción está sobrecomprada.
     Si sí → BLOQUEAR la compra.
+    Para Alpha Runners y Super-Runners de expansión, las zonas Fib altas y Upper_3 son normales en breakout y no deben bloquear.
     """
     rsi      = float(snap.get('rsi_14') or 50)
     fib_zone = int(snap.get('fibonacci_zone', snap.get('fib_zone_15m', 0)) or 0)
@@ -166,16 +167,25 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
     max_rsi  = float(cfg.get('apex_max_overbought_rsi') or 75)
     max_fib  = int(cfg.get('apex_max_fib_zone') or 3)
 
+    is_alpha = bool(
+        snap.get('is_intraday_alpha') or 
+        snap.get('is_expansion_runner') or 
+        snap.get('source') == 'live_top_gainers' or
+        (float(snap.get('rvol') or 1.0) >= 2.0 and float(snap.get('change_pct') or 0.0) >= 5.0)
+    )
+
     reasons  = []
 
     if rsi >= max_rsi:
         reasons.append(f'RSI sobrecomprado ({rsi:.0f} ≥ {max_rsi})')
 
-    if fib_zone >= max_fib:
-        reasons.append(f'Zona Fib alta ({fib_zone} ≥ {max_fib})')
+    # Para Alpha Runners y Super-Runners de expansión, las zonas Fib altas y Upper_3 son normales en breakout y no deben bloquear
+    if not is_alpha:
+        if fib_zone >= max_fib:
+            reasons.append(f'Zona Fib alta ({fib_zone} ≥ {max_fib})')
 
-    if upper_3 > 0 and price > upper_3:
-        reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
+        if upper_3 > 0 and price > upper_3:
+            reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
 
     # Trap Shield: Bloqueo innegociable de trampas de apertura
     if bool(snap.get('is_trap', False)):
@@ -765,6 +775,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 except Exception as e:
                     pass
 
+            # Verificar sobrecompra (con exención para Alpha Runners / Breakouts)
+            overbought = is_overbought(snap, cfg)
+
             # Sección B: Gatillos de Compra/Recompra (3a, 4a, 4b, 4c, 4d)
             pullback_triggered = bool(snap.get('pullback_triggered', False)) and (not is_trap)
             pullback_type = str(snap.get('pullback_type') or '')
@@ -773,10 +786,17 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 log_info(MODULE, f"⛔ {ticker}: Regla 3a bloqueada porque el activo ya ejecutó salida de Clímax 1H hoy.")
                 pullback_triggered = False
 
+            # Detección de Super-Runner en Expansión (Open Gap Up con espacio libre en 1D a Bollinger Superior)
+            enters_by_expansion = bool(snap.get('is_expansion_runner', False)) or (
+                float(snap.get('gap_pct') or snap.get('change_pct') or 0.0) >= 5.0 and
+                float(snap.get('room_to_bb_upper_1d') or 0.0) >= 20.0 and
+                float(snap.get('rvol') or 1.0) >= 1.5
+            )
+
             enters_by_pullback = pullback_triggered and (not overbought['blocked'] or 'LOWER' in pullback_type.upper() or '3A' in pullback_type.upper() or '4C' in pullback_type.upper())
-            is_high_growth = bool(snap.get('is_high_growth_opp', False)) or (bf_score >= 70 and not overbought['blocked'])
-            enters_by_growth = is_high_growth and bool(snap.get('entry_route_1h'))
-            enters_by_alpha = is_intraday_alpha and (not overbought['blocked'])
+            is_high_growth = bool(snap.get('is_high_growth_opp', False)) or enters_by_expansion or (bf_score >= 70 and not overbought['blocked'])
+            enters_by_growth = is_high_growth and bool(snap.get('entry_route_1h') or enters_by_expansion)
+            enters_by_alpha = (is_intraday_alpha or enters_by_expansion) and (not overbought['blocked'])
 
             enters_by_apex = (apex_4h >= min_score) and macro_bonus_trigger_ok
             enters_by_rule = rule_signal['has_signal']
@@ -799,7 +819,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 is_ema3_1h_ascending=is_ema3_asc,
             )
 
-            if enters_by_pullback:
+            if enters_by_expansion:
+                log_info(MODULE, f'🟢 {ticker}: SUPER-RUNNER EXPANSION (Espacio 1D: +{snap.get("room_to_bb_upper_1d", 0):.1f}%, Gap: +{snap.get("gap_pct", 0):.1f}%, RVOL: {snap.get("rvol", 1):.1f}x) | COMPRA HABILITADA')
+            elif enters_by_pullback:
                 log_info(MODULE, f'🎯 {ticker}: Gatillo Sección B [{pullback_type}] — {snap.get("pullback_reason", "")}')
             elif enters_by_alpha:
                 log_info(MODULE, f'🚀 {ticker}: Intraday Alpha Sweet-Spot (Potencial +{snap.get("growth_potential_pct", 5.0)}%, Gap +{snap.get("gap_pct", 0.0)}%)')
@@ -809,10 +831,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 log_info(MODULE, f'🔥 {ticker}: High Growth Swing 1H ({snap.get("entry_route_1h")} en {snap.get("entry_support_1h")}) | BF Score={bf_score}')
 
             # Definir estado inicial
-            status = 'pending' if (enters_by_pullback or enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
+            status = 'pending' if (enters_by_expansion or enters_by_pullback or enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
 
-            # Recalcular rank con boost si es pullback Sección B, intraday alpha o alto crecimiento
-            if enters_by_pullback:
+            # Recalcular rank con boost si es super-runner expansión, pullback Sección B, intraday alpha o alto crecimiento
+            if enters_by_expansion:
+                rank = max(rank, 99.5)
+            elif enters_by_pullback:
                 rank = max(rank, 98.8)
             elif enters_by_alpha:
                 rank = max(rank, 98.5)
@@ -822,8 +846,10 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 rank = max(rank, 95.0)
 
             entry_reason = 'apex_auto'
-            if enters_by_pullback:
-                entry_reason = f'{pullback_type}: {snap.get("pullback_reason", "")}'[:100]
+            if enters_by_expansion:
+                entry_reason = f'expansion_runner_bb1d_{snap.get("room_to_bb_upper_1d", 0):.0f}%'
+            elif enters_by_pullback:
+                entry_reason = f'{pullback_type}: {snap.get("pullback_reason", "")}'[:50]
             elif enters_by_alpha:
                 entry_reason = f'intraday_alpha_pot_{snap.get("growth_potential_pct", 5.0)}%'
             elif enters_by_growth:
@@ -845,11 +871,12 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 'return_expected':   ret_exp,
                 'confidence':        conf,
                 'composite_rank':    rank,
-                'is_overbought':     False if enters_by_pullback else overbought['blocked'],
+                'is_overbought':     False if (enters_by_pullback or enters_by_expansion) else overbought['blocked'],
+                'is_expansion_runner': enters_by_expansion,
                 'overbought_reason': overbought.get('reason', ''),
                 'rsi':               overbought['rsi'],
                 'fib_zone':          overbought['fib_zone'],
-                'has_rule_signal':   enters_by_pullback or enters_by_rule or enters_by_breakout or enters_by_growth,
+                'has_rule_signal':   enters_by_expansion or enters_by_pullback or enters_by_rule or enters_by_breakout or enters_by_growth,
                 'is_pullback_b':     enters_by_pullback,
                 'pullback_rule_code': pullback_type if enters_by_pullback else '',
                 'is_breakout_5m':    enters_by_breakout,
@@ -897,7 +924,7 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 # MÓDULO 8 — EJECUTAR COMPRAS EN ORDEN
 # ════════════════════════════════════════════
 
-async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase) -> list:
+async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase, is_macro_bearish: bool = False) -> list:
     """Ejecuta las compras en orden de prioridad."""
     from app.stocks.stocks_order_executor import (
         execute_market_order, place_limit_order,
@@ -925,9 +952,22 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase)
         is_ob  = candidate['is_overbought']
 
         if is_ob:
-            log_info(MODULE, f'{ticker}: BLOQUEADA por sobrecompra')
+            log_info(MODULE, f'{ticker}: BLOQUEADA por sobrecompra ({candidate.get("overbought_reason", "")})')
             await _upsert_queue(supabase, candidate, status='blocked')
             continue
+
+        # En mercado BEARISH, SOLO se permite comprar si es un ALPHA_RUNNER / SUPER_RUNNER / EXPANSION_RUNNER
+        if is_macro_bearish:
+            is_exempt_runner = bool(
+                candidate.get('is_expansion_runner') or
+                candidate.get('is_intraday_alpha') or
+                'ALPHA_RUNNER' in str(candidate.get('group_name', '')) or
+                candidate.get('composite_rank', 0) >= 98.0 or
+                float(candidate.get('buying_force_score') or 0.0) >= 70.0
+            )
+            if not is_exempt_runner:
+                log_info(MODULE, f"⏸️ {ticker}: Omitida por Filtro Macro Bearish (no es Alpha Runner ni Super-Runner).")
+                continue
 
         sizing = calculate_position_size(
             ticker         = ticker,
@@ -1051,11 +1091,14 @@ async def _upsert_queue(
 ):
     """Actualiza el estado en la cola."""
     try:
+        group_name_val = str(candidate.get('group_name', '') or '')[:50]
+        entry_reason_val = str(candidate.get('entry_reason', 'apex_auto') or 'apex_auto')[:50]
+        triggered_rule_val = str(candidate.get('rule_signal', {}).get('rule_code') or '')[:50]
         supabase \
             .table('stocks_priority_queue') \
             .upsert({
                 'ticker':          candidate['ticker'],
-                'group_name':      candidate.get('group_name', ''),
+                'group_name':      group_name_val,
                 'price_at_rank':   candidate.get('price'),
                 'apex_score_4h':   candidate.get('apex_4h'),
                 'apex_score_1d':   candidate.get('apex_1d'),
@@ -1063,8 +1106,8 @@ async def _upsert_queue(
                 'confidence':      candidate['confidence'],
                 'composite_rank':  candidate['composite_rank'],
                 'status':          status,
-                'entry_reason':    candidate.get('entry_reason', 'apex_auto'),
-                'triggered_rule':  candidate.get('rule_signal', {}).get('rule_code'),
+                'entry_reason':    entry_reason_val,
+                'triggered_rule':  triggered_rule_val,
                 'is_overbought':   candidate['is_overbought'],
                 'rsi_at_entry':    candidate.get('rsi', 0),
                 'fib_zone':        candidate.get('fib_zone', 0),
@@ -1124,10 +1167,10 @@ async def run_orchestrator_cycle(supabase=None):
     from app.stocks.stocks_adaptive_tp import fetch_macro_data
     macro = await fetch_macro_data(supabase)
 
-    # ── REGLA 2: Bloqueo de Compras en Mercado Bearish ──
-    if macro.get('sentiment') == 'bearish':
-        log_warning(MODULE, f"🛑 BLOQUEO MACRO: El sentimiento de mercado es BEARISH ({macro.get('score')}). No se permiten nuevas compras.")
-        return
+    # ── REGLA 2: Bloqueo de Compras en Mercado Bearish (Con Exención para Alpha Runners) ──
+    is_macro_bearish = (macro.get('sentiment') == 'bearish')
+    if is_macro_bearish:
+        log_warning(MODULE, f"⚠️ MERCADO BEARISH ({macro.get('score')}): Compras de acciones ordinarias suspendidas por seguridad. Se evaluarán y ejecutarán EXCLUSIVAMENTE Alpha Runners y Super-Runners con volumen institucional.")
 
     # 4. Construir cola de prioridad
     queue = await build_priority_queue(cfg, supabase, macro)
@@ -1150,7 +1193,7 @@ async def run_orchestrator_cycle(supabase=None):
     )
 
     # 6. Ejecutar compras
-    executed = await execute_priority_buys(queue, capital, cfg, supabase)
+    executed = await execute_priority_buys(queue, capital, cfg, supabase, is_macro_bearish=is_macro_bearish)
 
     return {
         'queue_size': len(queue),

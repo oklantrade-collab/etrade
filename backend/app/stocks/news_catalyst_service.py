@@ -112,11 +112,14 @@ def translate_headline_es(title: str) -> str:
     return res.strip()
 
 
+_AI_API_DISABLED_UNTIL = 0.0
+
 def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Evalúa semánticamente el catalizador con IA (OpenAI / Gemini) o heurística avanzada.
     Genera una síntesis ejecutiva en español y un puntaje cuantitativo (0 a 30).
     """
+    global _AI_API_DISABLED_UNTIL
     from app.core.config import settings
 
     # Heurística inicial por defecto
@@ -124,11 +127,12 @@ def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dic
     best_label = articles[0].get("label", "Noticia Corporativa") if articles else "Sin Catalizador"
     default_summary = f"{ticker}: Impulso respaldado por {best_label}. Actividad de noticias en las últimas 48 horas con interés comprador."
 
-    # Intentar análisis con LLM si API key de OpenAI o Gemini está configurada
-    if settings.openai_api_key and articles:
+    # Intentar análisis con LLM si API key de OpenAI está configurada y no está en cooldown
+    now_ts = time.time()
+    if settings.openai_api_key and articles and (now_ts > _AI_API_DISABLED_UNTIL):
         try:
             from openai import OpenAI
-            client = OpenAI(api_key=settings.openai_api_key)
+            client = OpenAI(api_key=settings.openai_api_key, max_retries=0)
             titles_text = "\n".join([f"- {a.get('title')}" for a in articles[:4]])
 
             prompt = (
@@ -143,7 +147,7 @@ def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dic
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                timeout=4.0,
+                timeout=3.0,
                 temperature=0.2,
                 max_tokens=150
             )
@@ -160,7 +164,12 @@ def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dic
                 "type": data.get("catalyst_type") or best_label,
             }
         except Exception as ai_e:
-            log_warning(MODULE, f"Fallback de IA para {ticker}: {ai_e}")
+            err_str = str(ai_e).lower()
+            if "429" in err_str or "quota" in err_str or "billing" in err_str:
+                _AI_API_DISABLED_UNTIL = now_ts + 3600.0  # 1 hora de cooldown para evitar lentitud
+                log_warning(MODULE, f"OpenAI quota agotada. Activando motor heurístico por 1h: {ai_e}")
+            else:
+                log_warning(MODULE, f"Fallback de IA para {ticker}: {ai_e}")
 
     # Fallback heurístico inteligente
     first_title = articles[0].get("title", "") if articles else ""
