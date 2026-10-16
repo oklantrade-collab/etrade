@@ -171,6 +171,7 @@ class StocksRuleEngine:
             "entry_route_1h": entry_route_1h or snap.get("entry_route_1h"),
             "entry_support_1h": entry_support_1h or snap.get("entry_support_1h"),
             "is_high_growth_opp": is_high_growth_opp or bool(snap.get("is_high_growth_opp", False)),
+            "open_1d": float(snap.get("open_1d", 0.0)),
         }
 
     def evaluate_rule(self, rule: dict, context: dict) -> dict:
@@ -695,6 +696,14 @@ class StocksRuleEngine:
                     f"Volumen de vela anémico ({int(candle_vol)} < 5,000 acciones en 15m): Falta de liquidez institucional."
                 )
 
+            # 6. Anti-Distribución Diaria: Prohibido comprar si la vela diaria es ROJA (Precio < Open Diario)
+            open_1d = float(context.get("open_1d") or 0.0)
+            if open_1d > 0 and current_price < open_1d * 0.995:
+                failures.append(
+                    f"Filtro Anti-Distribución: Vela Diaria Roja (Precio ${current_price:.2f} < Open Diario ${open_1d:.2f}). "
+                    f"El activo abrió con gap y está siendo vendido en masa (distribución intradía)."
+                )
+
         # ── CHECK 7: Regla Específica HOT_CANDLE (MOMENTUM V5.3) ──
         # Normalizar rule_code para capturar variaciones con sufijos (_BUY, _SELL)
         normalized_code = rule_code.replace("_BUY", "").replace("_SELL", "")
@@ -775,8 +784,8 @@ class StocksRuleEngine:
                     f"Entry too late."
                 )
 
-        # ── CHECK 8: Regla Específica BOLLINGER_EXPLOSION (V5.3) ──
-        if normalized_code == "BOLLINGER_EXPLOSION":
+        # ── CHECK 8: Regla Específica BOLLINGER_EXPLOSION / HOT_BB_BREAKOUT_5M (V5.3) ──
+        if normalized_code in ("BOLLINGER_EXPLOSION", "HOT_BB_BREAKOUT_5M", "BB_BREAKOUT_5M"):
             bb_exp = context.get("bb_expanding", False)
             ema_exh = context.get("ema_exhaustion", False)
             rvol = float(context.get("rvol") or 1.0)
@@ -785,6 +794,8 @@ class StocksRuleEngine:
             rsi = float(context.get("rsi_14") or 50.0)
             high_price = float(context.get("high") or 0)
             bb_upper = float(context.get("bb_upper") or 99999)
+            open_1d = float(context.get("open_1d") or 0.0)
+            bf_val = int(context.get("buying_force_score", 0))
 
             # ── Indicadores de 5 minutos ──
             ema3_5m  = float(context.get("ema_3_5m") or 0)
@@ -796,43 +807,51 @@ class StocksRuleEngine:
             
             # Requisito 1: Expansión de bandas activa (15m O 5m)
             if not bb_exp and not bb_exp_5m:
-                failures.append("BB Not Expanding: Bands are not opening on any timeframe")
+                failures.append("BB Not Expanding: Bands are not opening on any timeframe (5m o 15m)")
             
-            # Requisito 2: Volumen masivo (RVOL > 1.0)
-            if rvol < 1.0:
-                failures.append(f"Low RVOL: {rvol:.2f} < 1.0x (Needed for explosion confirmation)")
+            # Requisito 2: Volumen masivo (RVOL > 1.3)
+            if rvol < 1.3:
+                failures.append(f"Low RVOL: {rvol:.2f} < 1.3x (Needed for breakout confirmation)")
             
-            # Requisito 3: Alineación mínima EMA3 > EMA9 (15m)
-            if ema3 and ema9 and ema3 < ema9:
+            # Requisito 3: Vela diaria verde (Precio >= Open Diario)
+            if open_1d > 0 and current_price < open_1d:
+                failures.append(f"Vela diaria roja (${current_price:.2f} < Open ${open_1d:.2f}): Falsa ruptura en distribución.")
+
+            # Requisito 4: Fuerza compradora mínima
+            if bf_val > 0 and bf_val < 60 and rvol < 2.0:
+                failures.append(f"Fuerza compradora insuficiente: Score {bf_val}/100 < 60 sin RVOL extraordinario.")
+
+            # Requisito 5: Alineación mínima EMA3 > EMA9 (15m o 5m)
+            if ema3 and ema9 and ema3 < ema9 and not (ema3_5m > ema9_5m):
                 failures.append(f"EMA Bearish: EMA3 {ema3:.2f} < EMA9 {ema9:.2f}")
 
-            # Requisito 4: No agotamiento
-            if ema_exh:
+            # Requisito 6: No agotamiento
+            if ema_exh and not bb_exp_5m:
                 failures.append("EMA Exhaustion: EMA3 and EMA9 are too close (Possible reversal)")
 
-            # Requisito 5: RSI Máximo (15m)
-            if rsi > 65:
-                failures.append(f"RSI Exhausted (Explosion): {rsi:.1f} > 65 (Overbought)")
+            # Requisito 7: RSI Máximo (15m)
+            if rsi > 68:
+                failures.append(f"RSI Exhausted (Explosion): {rsi:.1f} > 68 (Overbought)")
 
-            # Requisito 6: Evitar perforación de banda superior
-            if high_price >= bb_upper:
-                failures.append(f"Price outside band: High {high_price} >= BB_Upper {bb_upper}")
+            # Requisito 8: Evitar compra en rechazo severo de techo
+            if bb_upper < 99999 and high_price >= bb_upper and current_price < bb_upper * 0.985:
+                failures.append(f"Rechazo de techo: High tocó BB Upper (${high_price:.2f} >= ${bb_upper:.2f}) y fue rechazado hacia abajo.")
 
             # ── V5.3: Precisión 5 minutos ──
 
-            # Requisito 7: Alineación EMA perfecta en 5 minutos
+            # Requisito 9: Alineación EMA en 5 minutos
             if ema3_5m > 0 and ema9_5m > 0 and ema20_5m > 0:
-                if not (ema3_5m > ema9_5m > ema20_5m):
+                if not (ema3_5m >= ema9_5m >= ema20_5m):
                     failures.append(
                         f"5m EMA Misaligned: EMA3={ema3_5m:.2f} EMA9={ema9_5m:.2f} EMA20={ema20_5m:.2f} "
-                        f"(Need perfect 5m alignment for explosion entry)"
+                        f"(Need EMA3 >= EMA9 >= EMA20 on 5m)"
                     )
 
-            # Requisito 8: RSI 5m no sobrecomprado
-            if rsi_5m > 70:
-                failures.append(f"5m RSI Overbought: {rsi_5m:.1f} > 70 (Explosion already mature)")
+            # Requisito 10: RSI 5m no sobrecomprado
+            if rsi_5m > 72:
+                failures.append(f"5m RSI Overbought: {rsi_5m:.1f} > 72 (Breakout mature)")
 
-            # Requisito 9: Bloqueo Gap Up Exhaustion
+            # Requisito 11: Bloqueo Gap Up Exhaustion
             if gap_exhaustion:
                 gap_pct = float(context.get("gap_pct") or 0)
                 failures.append(

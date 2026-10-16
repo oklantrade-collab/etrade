@@ -637,6 +637,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         elif df_5m is not None and len(df_5m) >= 1:
             open_price_today = float(df_5m['open'].iloc[0]) if 'open' in df_5m.columns else current_price
 
+        ind_15m["open_1d"] = open_price_today
+
         trap_shield_res = evaluate_trap_shield(
             current_price=current_price,
             prev_close=prev_close_1d,
@@ -1173,6 +1175,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         rule_ctx['ema_50_1d'] = float(ind_1d.get("ema_50") or 0.0)
         rule_ctx['ema_200_1d'] = float(ind_1d.get("ema_200") or 999999.0)
         
+        rule_ctx['open_1d'] = open_price_today
         rule_ctx['ema_3_4h'] = float(ind_4h.get("ema_3") or 0.0)
         rule_ctx['ema_9_4h'] = float(ind_4h.get("ema_9") or 0.0)
         rule_ctx['ema_20_4h'] = float(ind_4h.get("ema_20") or 0.0)
@@ -1216,7 +1219,21 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         # 9. EVALUATE BUY RULES (Only if market is open or After-Hours is enabled)
         allow_after_hours = str(config.get("allow_after_hours", "false")).lower() == "true"
         if market_open or allow_after_hours:
-            buying_results = re.evaluate_all(rule_ctx, direction="buy")
+            # En mercado Bearish, las compras directas se restringen estrictamente a Alpha/Super-Runners
+            macro_sentiment = str(macro_data.get('sentiment', '')).lower() if 'macro_data' in locals() and macro_data else ''
+            if macro_sentiment == 'bearish':
+                is_runner = bool(
+                    ind_15m.get('is_expansion_runner') or
+                    ind_15m.get('is_intraday_alpha') or
+                    'ALPHA_RUNNER' in str(ind_15m.get('group_name', '')) or
+                    float(ind_15m.get('buying_force_score') or 0.0) >= 70.0
+                )
+                if not is_runner:
+                    buying_results = []
+                else:
+                    buying_results = re.evaluate_all(rule_ctx, direction="buy")
+            else:
+                buying_results = re.evaluate_all(rule_ctx, direction="buy")
             for res in buying_results:
                 if res["triggered"]:
                     # Cutoff 15:15 ET (últimas 3 velas de 15m)
