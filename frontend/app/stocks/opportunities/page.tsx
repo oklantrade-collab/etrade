@@ -139,13 +139,15 @@ function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital
                         <span style={{ fontSize: '7px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 3px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
                       )}
                     </div>
-                    <div style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>RANK {rank.toFixed(1)}</div>
+                    <div style={{ fontSize: '10px', color: '#555', fontWeight: 800 }}>
+                      RANK {rank.toFixed(1)}{item.rvol ? ` · ${item.rvol}x` : ''}
+                    </div>
                   </div>
 
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
                       <span style={{ color: '#38BDF8', fontSize: '11px', fontWeight: 900 }}>
-                        {item.buying_force_score ? `⚡ BF: ${item.buying_force_score}/100` : `${apex4h.toFixed(0)}% APEX`}
+                        {item.buying_force_score ? `⚡ BF: ${item.buying_force_score}/100` : (rank > 0 ? `⚡ SCORE: ${rank.toFixed(0)}` : `${apex4h.toFixed(0)}% APEX`)}
                       </span>
                       <span style={{ color: retExp > 0 ? '#22C55E' : '#EF4444', fontSize: '11px', fontWeight: 800 }}>
                         {retExp > 0 ? '+' : ''}{retExp.toFixed(2)}%
@@ -998,7 +1000,7 @@ export default function OpportunitiesIntelligence() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [selectedStock, setSelectedStock] = useState<any | null>(null)
-  const [activeTab, setActiveTab] = useState<'QUEUE' | 'HOT' | 'ALPHA' | 'VALUE'>('QUEUE')
+  const [activeTab, setActiveTab] = useState<'ALPHA' | 'HOT' | 'QUEUE' | 'VALUE'>('ALPHA')
   const [newsStock, setNewsStock] = useState<any | null>(null)
   const [marketStatus, setMarketStatus] = useState({ is_open: false, status: 'CARGANDO...' })
   const [priorityQueue, setPriorityQueue] = useState<any[]>([])
@@ -1162,7 +1164,7 @@ export default function OpportunitiesIntelligence() {
     .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0));
 
   const valueList = opportunitiesWithQueue.filter(o => o.is_pro_member);
-  const displayList = activeTab === 'QUEUE' ? queueList : (activeTab === 'HOT' ? hotList : (activeTab === 'ALPHA' ? alphaList : valueList));
+  const displayList = activeTab === 'ALPHA' ? alphaList : (activeTab === 'HOT' ? hotList : (activeTab === 'QUEUE' ? queueList : valueList));
 
   return (
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
@@ -1185,9 +1187,9 @@ export default function OpportunitiesIntelligence() {
         <div style={{ display: 'flex', gap: '12px' }}>
             <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>⚙️ FILTROS</button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', alignItems: 'center' }}>
-                <TabButton label="🎯 En Cola APEX" active={activeTab === 'QUEUE'} onClick={() => setActiveTab('QUEUE')} count={queueList.length}/>
+                <TabButton label="🚀 Alpha Runners (Orden de Compra BOT)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
                 <TabButton label="🔥 Hot by Volume (Top 20)" active={activeTab === 'HOT'} onClick={() => setActiveTab('HOT')} count={hotList.length}/>
-                <TabButton label="🚀 Alpha Runners (Top Gainers)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
+                <TabButton label="🎯 En Cola APEX" active={activeTab === 'QUEUE'} onClick={() => setActiveTab('QUEUE')} count={queueList.length}/>
                 <TabButton label="💎 Inversión Pro" active={activeTab === 'VALUE'} onClick={() => setActiveTab('VALUE')} count={valueList.length}/>
                 <button onClick={() => setShowAddModal(true)} style={{ background: '#22C55E', color: '#000', border: 'none', width: '28px', height: '28px', borderRadius: '8px', marginLeft: '8px', cursor: 'pointer', fontWeight: 900, fontSize: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
             </div>

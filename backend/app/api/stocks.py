@@ -737,68 +737,82 @@ async def get_priority_queue():
             queue.append(q)
             existing_tickers.add(ticker)
 
-        # 3. If queue is too small, generate dynamic candidates from market_snapshot
-        if len(queue) < 10:
+        # 3. Dynamic candidates from Alpha Runners (Live Top Gainers & Buying Force)
+        if len(queue) < 15:
             try:
-                # Get top APEX-scoring tickers from market_snapshot
-                limit_time_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-                
-                snap_res = sb.table("market_snapshot")\
-                    .select("symbol, price, apex_4h, apex_1d, apex_signal, apex_conf")\
-                    .gt("updated_at", limit_time_iso)\
-                    .order("apex_1d", desc=True)\
-                    .limit(40)\
-                    .execute()
-                
-                for snap in (snap_res.data or []):
-                    if len(queue) >= 15:
-                        break
-                    ticker = snap.get("symbol")
+                from app.stocks.alpha_runner_scanner import scan_top_gainers_live
+                from app.stocks.stocks_orchestrator import load_orchestrator_config, calculate_composite_rank
+                cfg = await load_orchestrator_config(sb)
+                live_gainers = scan_top_gainers_live(limit=25)
+
+                for g in (live_gainers or []):
+                    ticker = g.get("ticker")
                     if not ticker or ticker in existing_tickers:
                         continue
-                        
-                    # Filtrar símbolos de Forex y Crypto que hayan caído en market_snapshot general
-                    if len(ticker) >= 6 and (ticker.endswith("USD") or ticker.endswith("JPY") or ticker.endswith("EUR") or ticker.endswith("GBP") or "USDT" in ticker):
-                        continue
                     
-                    apex_4h = float(snap.get("apex_4h") or 0)
-                    apex_1d = float(snap.get("apex_1d") or 0)
-                    rvol = 1.0  # fallback since rvol isn't in market_snapshot
-                    
-                    # Instead of hard filtering by APEX > 60, we allow them through if APEX is missing
-                    # but rank them properly.
-                    
-                    # Build a dynamic queue entry with consistent ranking logic
-                    # Rank = 30% 4H + 25% 1D + 25% RVOL + 5% Conf + 15% Gain(0 fallback)
-                    conf_score = {'high': 90, 'medium': 60, 'low': 30}.get(snap.get("apex_conf", "medium"), 60)
-                    rank = (apex_4h * 0.30) + (apex_1d * 0.25) + (min(100, rvol * 20) * 0.25) + (conf_score * 0.05)
-                    
+                    bf = float(g.get("buying_force_5m") or 50.0)
+                    rvol_val = float(g.get("rvol") or 1.0)
+                    chg = float(g.get("change_pct") or 0.0)
+                    has_n = bool(g.get("has_news", False))
+                    is_ema3_asc = bool(g.get("is_ema3_1h_ascending", True))
+                    apex_4h = float(g.get("apex_4h") or bf)
+                    apex_1d = float(g.get("apex_1d") or bf)
+                    rank_score = float(g.get("rank_score") or bf)
+
+                    # Calcular composite rank con la fórmula unificada de Fuerza Compradora (45%), RVOL (25%), Gainers (20%)
+                    comp_rank = calculate_composite_rank(
+                        apex_4h=apex_4h,
+                        apex_1d=apex_1d,
+                        return_pct=chg,
+                        confidence="high" if bf >= 70 else "medium",
+                        rvol=rvol_val,
+                        cfg=cfg or {},
+                        buying_force_score=bf,
+                        is_intraday_alpha=True,
+                        change_pct=chg,
+                        has_news=has_n,
+                        is_ema3_1h_ascending=is_ema3_asc
+                    )
+                    # Tomar el mayor entre rank_score de Alpha Runners y comp_rank
+                    final_rank = max(rank_score, comp_rank)
+
+                    is_climax = (g.get("semaphore") == "CLIMAX")
+
                     dynamic_entry = {
                         "ticker": ticker,
-                        "group_name": "",
+                        "group_name": "ALPHA_RUNNER",
                         "apex_score_4h": apex_4h,
                         "apex_score_1d": apex_1d,
-                        "return_expected": 0,
-                        "confidence": snap.get("apex_conf") or "medium",
-                        "composite_rank": round(rank, 2),
+                        "buying_force_score": round(bf, 0),
+                        "rvol": round(rvol_val, 2),
+                        "return_expected": round(chg, 2),
+                        "confidence": "high" if bf >= 70 else "medium",
+                        "composite_rank": round(final_rank, 1),
                         "status": "watching",
-                        "entry_reason": "dynamic_scan",
-                        "triggered_rule": None,
-                        "is_overbought": False,
+                        "entry_reason": g.get("semaphore_label") or "Alpha Runner (Rally)",
+                        "triggered_rule": "ALPHA_RUNNER",
+                        "is_overbought": is_climax,
                         "rsi_at_entry": 0,
                         "fib_zone": 0,
                         "capital_assigned": 0,
                         "shares_target": 0,
-                        "price_at_rank": float(snap.get("price") or 0),
+                        "price_at_rank": float(g.get("price") or 0),
                         "last_updated": datetime.now(timezone.utc).isoformat(),
                     }
                     queue.append(dynamic_entry)
                     existing_tickers.add(ticker)
-                
-                # Re-sort by composite_rank
-                queue.sort(key=lambda q: float(q.get("composite_rank") or 0), reverse=True)
+
+                # Re-ordenar la cola completa: 1. No clímax/sobrecompra, 2. BF >= 70, 3. Composite rank descendente
+                queue.sort(
+                    key=lambda q: (
+                        not bool(q.get("is_overbought")),
+                        float(q.get("buying_force_score") or 0.0) >= 70.0,
+                        float(q.get("composite_rank") or 0.0)
+                    ),
+                    reverse=True
+                )
             except Exception as dyn_e:
-                log_warning("stocks_api", f"Dynamic queue generation error: {dyn_e}")
+                log_warning("stocks_api", f"Dynamic queue generation from Alpha Runners error: {dyn_e}")
 
         # 4. Capital summary
         try:
