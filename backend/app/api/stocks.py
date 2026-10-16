@@ -732,7 +732,13 @@ async def get_priority_queue():
             
             # Use apex_score_4h from queue or fallback to 0
             apex_4h = float(q.get("apex_score_4h") or 0)
-            # Remove strict filter: if apex_4h < 60: continue
+            comp_rank = float(q.get("composite_rank") or 0)
+            
+            # Filtro estricto: Descartar activos con APEX bajo (< 60) o rendimiento negativo del día
+            # Esto evita que acciones en caída (como SOFI) aparezcan en la cola de compras
+            ret_exp = float(q.get("return_expected") or q.get("change_pct") or 0.0)
+            if apex_4h < 60.0 or ret_exp < -0.5:
+                continue
             
             queue.append(q)
             existing_tickers.add(ticker)

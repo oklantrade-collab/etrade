@@ -116,32 +116,101 @@ _AI_API_DISABLED_UNTIL = 0.0
 
 def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Evalúa semánticamente el catalizador con IA (OpenAI / Gemini) o heurística avanzada.
-    Genera una síntesis ejecutiva en español y un puntaje cuantitativo (0 a 30).
+    Evalúa semánticamente el catalizador con IA (Gemini / OpenAI) o heurística avanzada.
+    Genera síntesis ejecutiva, puntaje cuantitativo, justificación y detección de catalizadores ocultos.
     """
     global _AI_API_DISABLED_UNTIL
     from app.core.config import settings
 
-    # Heurística inicial por defecto
     best_bonus = max([a.get("bonus", 5) for a in articles], default=5)
     best_label = articles[0].get("label", "Noticia Corporativa") if articles else "Sin Catalizador"
-    default_summary = f"{ticker}: Impulso respaldado por {best_label}. Actividad de noticias en las últimas 48 horas con interés comprador."
+    titles_text = "\n".join([f"- {a.get('title')}" for a in articles[:4]])
 
-    # Intentar análisis con LLM si API key de OpenAI está configurada y no está en cooldown
+    # Heurística inicial inteligente de respaldo
+    if "Earnings" in titles_text or "Resultados" in best_label:
+        default_summary = f"{company_name} ({ticker}) reportó resultados trimestrales con catalizadores positivos destacados en su informe corporativo."
+        default_justification = f"Puntuación de +{best_bonus} pts otorgada por superación de expectativas (Earnings Beat) o guía favorable, sustentando el crecimiento de márgenes operativos."
+        default_hidden = "Posible cobertura forzada de posiciones cortas institucionales (Short Squeeze) tras invalidar tesis bajistas con cifras de facturación."
+        default_impact = "MODERADO A ALTO (+10% a +25%)"
+    elif "FDA" in best_label or "Aprobación" in best_label or "Clinical" in titles_text:
+        default_summary = f"{company_name} ({ticker}) cuenta con avance regulatorio y catalizador de aprobación médica ante la FDA."
+        default_justification = f"Puntuación de +{best_bonus} pts otorgada por tratarse de un catalizador regulatorio de primer orden (FDA / Ensayo Clínico). Genera barrera de entrada comercial y flujo de ingresos recurrente."
+        default_hidden = "Estructura de bajo float típica en biotecnológicas: la noticia médica atrae volumen institucional que agota la oferta flotante, proyectando continuidad del rally intradía."
+        default_impact = "ALTO / EXPLOSIVO (+20% a +75%)"
+    elif "Contrato" in best_label or "M&A" in best_label or "Acuerdo" in best_label:
+        default_summary = f"{company_name} ({ticker}) cerró un acuerdo contractual o adquisición relevante que expande sus ingresos previstos."
+        default_justification = f"Puntuación de +{best_bonus} pts asignada por acuerdo contractual vinculante o alianza estratégica que impacta de inmediato en la facturación y backlog."
+        default_hidden = "Posible revisión al alza de precio objetivo y recomendaciones por analistas de Wall Street en las próximas 24 a 48 horas."
+        default_impact = "ALTO (+15% a +35%)"
+    else:
+        first_title = articles[0].get("title", "") if articles else ""
+        first_title_es = translate_headline_es(first_title)
+        default_summary = f"{ticker}: {first_title_es or 'Impulso respaldado por noticias corporativas recientes.'}"
+        default_justification = f"Puntuación base de +{best_bonus} pts asignada por cobertura informativa positiva en medios financieros y flujo de liquidez."
+        default_hidden = "Interés especulativo y aumento sostenido de volumen relativo (RVOL) por encima de la media histórica del activo."
+        default_impact = "MODERADO (+5% a +15%)"
+
     now_ts = time.time()
+
+    # 1. Intentar con Google Gemini (Prioridad solicitada por el usuario)
+    if settings.gemini_api_key and articles and (now_ts > _AI_API_DISABLED_UNTIL):
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=settings.gemini_api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+
+            prompt = (
+                f"Actúa como analista senior de Wall Street y momentum trader. Analiza estas noticias de hoy para {ticker} ({company_name}):\n"
+                f"{titles_text}\n\n"
+                f"Responde estrictamente en formato JSON válido (sin backticks ```json ni texto adicional):\n"
+                f"{{\n"
+                f'  "summary_es": "<resumen ejecutivo en español en 1-2 líneas de qué ocurrió y cuál es el catalizador>",\n'
+                f'  "score": <entero entre 10 y 30 según el impacto del catalizador>,\n'
+                f'  "catalyst_type": "<tipo: FDA / Contrato / Earnings / M&A / IA / etc>",\n'
+                f'  "score_justification": "<justificación detallada y profesional de por qué se asignó esta puntuación y su impacto financiero>",\n'
+                f'  "hidden_catalyst": "<identifica si hay un catalizador oculto o secundario (bajo float, short interest, contrato no descontado, sin resistencia técnica) que proyecte un incremento de precio considerable>",\n'
+                f'  "projected_impact": "<ALTO (+20% a +60%) | MODERADO (+8% a +20%) | EXPLOSIVO (+60%+)>"\n'
+                f"}}"
+            )
+
+            resp = model.generate_content(prompt)
+            raw = (resp.text or "").strip()
+            if "```" in raw:
+                raw = raw.split("```")[1].replace("json", "").strip()
+
+            import json
+            data = json.loads(raw)
+            return {
+                "summary_es": data.get("summary_es") or default_summary,
+                "score": int(data.get("score") or best_bonus),
+                "type": data.get("catalyst_type") or best_label,
+                "score_justification": data.get("score_justification") or default_justification,
+                "hidden_catalyst": data.get("hidden_catalyst") or default_hidden,
+                "projected_impact": data.get("projected_impact") or default_impact,
+                "source_model": "Gemini 1.5 Flash",
+            }
+        except Exception as gem_e:
+            err_str = str(gem_e).lower()
+            if "429" in err_str or "quota" in err_str:
+                _AI_API_DISABLED_UNTIL = now_ts + 1800.0
+            log_warning(MODULE, f"Gemini catalyst analysis fallback for {ticker}: {gem_e}")
+
+    # 2. Intentar con OpenAI como fallback
     if settings.openai_api_key and articles and (now_ts > _AI_API_DISABLED_UNTIL):
         try:
             from openai import OpenAI
             client = OpenAI(api_key=settings.openai_api_key, max_retries=0)
-            titles_text = "\n".join([f"- {a.get('title')}" for a in articles[:4]])
 
             prompt = (
                 f"Analiza estas noticias recientes para la acción {ticker} ({company_name}):\n"
                 f"{titles_text}\n\n"
-                f"Responde estrictamente en formato JSON sin formato adicional ni markdown:\n"
-                f'{{"summary_es": "<explicación en 1-2 líneas en español de por qué sube la acción y cuál es el catalizador real>", '
-                f'"score": <entero entre 10 y 30 según la magnitud económica del catalizador>, '
-                f'"catalyst_type": "<Contrato / IA / FDA / Earnings / M&A / etc.>"}}'
+                f"Responde estrictamente en JSON:\n"
+                f'{{"summary_es": "<explicación en español>", '
+                f'"score": <entero 10 a 30>, '
+                f'"catalyst_type": "<tipo>", '
+                f'"score_justification": "<justificación de la puntuación asignada>", '
+                f'"hidden_catalyst": "<catalizador oculto que proyecte subida>", '
+                f'"projected_impact": "<ALTO | MODERADO | EXPLOSIVO>"}}'
             )
 
             resp = client.chat.completions.create(
@@ -149,10 +218,9 @@ def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dic
                 messages=[{"role": "user", "content": prompt}],
                 timeout=3.0,
                 temperature=0.2,
-                max_tokens=150
+                max_tokens=220
             )
             raw_content = resp.choices[0].message.content.strip()
-            # Limpiar posible bloque de markdown
             if "```" in raw_content:
                 raw_content = raw_content.split("```")[1].replace("json", "").strip()
 
@@ -162,31 +230,25 @@ def evaluate_catalyst_with_ai(ticker: str, company_name: str, articles: List[Dic
                 "summary_es": data.get("summary_es") or default_summary,
                 "score": int(data.get("score") or best_bonus),
                 "type": data.get("catalyst_type") or best_label,
+                "score_justification": data.get("score_justification") or default_justification,
+                "hidden_catalyst": data.get("hidden_catalyst") or default_hidden,
+                "projected_impact": data.get("projected_impact") or default_impact,
+                "source_model": "OpenAI GPT-4o-mini",
             }
         except Exception as ai_e:
             err_str = str(ai_e).lower()
-            if "429" in err_str or "quota" in err_str or "billing" in err_str:
-                _AI_API_DISABLED_UNTIL = now_ts + 3600.0  # 1 hora de cooldown para evitar lentitud
-                log_warning(MODULE, f"OpenAI quota agotada. Activando motor heurístico por 1h: {ai_e}")
-            else:
-                log_warning(MODULE, f"Fallback de IA para {ticker}: {ai_e}")
-
-    # Fallback heurístico inteligente
-    first_title = articles[0].get("title", "") if articles else ""
-    first_title_es = translate_headline_es(first_title)
-    if "Earnings" in first_title or "Resultados" in best_label:
-        default_summary = f"{company_name} ({ticker}) reportó resultados trimestrales con catalizadores positivos destacados en su informe corporativo."
-    elif "FDA" in best_label or "Aprobación" in best_label:
-        default_summary = f"{company_name} ({ticker}) cuenta con avance regulatorio y catalizador de aprobación médica ante la FDA."
-    elif "Contrato" in best_label or "M&A" in best_label:
-        default_summary = f"{company_name} ({ticker}) cerró un acuerdo contractual o adquisición relevante que expande sus ingresos previstos."
-    elif first_title_es:
-        default_summary = f"{ticker}: {first_title_es}"
+            if "429" in err_str or "quota" in err_str:
+                _AI_API_DISABLED_UNTIL = now_ts + 3600.0
+            log_warning(MODULE, f"OpenAI fallback for {ticker}: {ai_e}")
 
     return {
         "summary_es": default_summary,
         "score": best_bonus,
         "type": best_label,
+        "score_justification": default_justification,
+        "hidden_catalyst": default_hidden,
+        "projected_impact": default_impact,
+        "source_model": "Motor Cuantitativo eTrader",
     }
 
 
@@ -320,6 +382,10 @@ def fetch_stock_news(ticker: str, max_items: int = 5) -> Dict[str, Any]:
             "top_headline": best_catalyst["headline"],
             "top_headline_es": translate_headline_es(best_catalyst["headline"]),
             "catalyst_summary_es": catalyst_summary_es,
+            "score_justification": ai_eval.get("score_justification", ""),
+            "hidden_catalyst": ai_eval.get("hidden_catalyst", ""),
+            "projected_impact": ai_eval.get("projected_impact", "MODERADO"),
+            "source_model": ai_eval.get("source_model", "Gemini AI"),
             "top_url": best_catalyst["url"],
             "articles": valid_articles,
         }

@@ -836,33 +836,40 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             except Exception as e_ft_sched:
                 log_warning(MODULE, f"Error en Fast-Track Scheduler para {ticker}: {e_ft_sched}")
 
-        # 2. Si GATILLO DE ENTRADA RÁPIDA (FAST ENTRY) está activo: Máxima Prioridad Rank 99.0
-        elif fast_entry_res['fast_entry_triggered']:
+        # 2. Si GATILLO DE ENTRADA RÁPIDA (FAST ENTRY) está activo:
+        # Veto estricto: Prohibido si la vela diaria es roja o tendencia 1D es bajista (Evitar casos tipo SOFI)
+        elif fast_entry_res['fast_entry_triggered'] and not ((open_price_today > 0 and current_price < open_price_today * 0.995) or (movement_1d.get("movement_type") == "descending")):
             try:
-                rank_boost = 99.0
-                sb.table("stocks_priority_queue").upsert({
-                    'ticker': ticker,
-                    'group_name': ind_15m.get('pool_type', 'HOT'),
-                    'price_at_rank': current_price,
-                    'apex_score_4h': float(ind_15m.get('apex_4h') or 95.0),
-                    'apex_score_1d': float(ind_15m.get('apex_1d') or 95.0),
-                    'return_expected': trap_shield_res['growth_potential_pct'],
-                    'confidence': 'high',
-                    'composite_rank': rank_boost,
-                    'status': 'pending',
-                    'entry_reason': str(fast_entry_res['entry_reason'])[:50],
-                    'triggered_rule': f"FAST_{fast_entry_res['entry_type']}"[:50],
-                    'is_overbought': False,
-                    'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
-                    'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
-                    'last_updated': datetime.now(timezone.utc).isoformat()
-                }, on_conflict='ticker').execute()
-                log_info(MODULE, f"⚡ GATILLO FAST ENTRY 99.0: {ticker} | {fast_entry_res['entry_type']} | {fast_entry_res['entry_reason']}")
+                real_apex_4h = float(ind_15m.get('apex_4h') or 0.0)
+                real_apex_1d = float(ind_15m.get('apex_1d') or 0.0)
+                bf_val = float(ind_15m.get('buying_force_score') or 50.0)
+
+                # Solo califica a la cola si tiene momentum y APEX real >= 60 o fuerza compradora >= 70
+                if (real_apex_4h >= 60.0 or bf_val >= 70.0):
+                    rank_boost = round(min(98.5, max(75.0, (real_apex_4h * 0.4 + real_apex_1d * 0.3 + bf_val * 0.3))), 1)
+                    sb.table("stocks_priority_queue").upsert({
+                        'ticker': ticker,
+                        'group_name': ind_15m.get('pool_type', 'HOT'),
+                        'price_at_rank': current_price,
+                        'apex_score_4h': real_apex_4h,
+                        'apex_score_1d': real_apex_1d,
+                        'return_expected': trap_shield_res['growth_potential_pct'],
+                        'confidence': 'high' if rank_boost >= 85 else 'medium',
+                        'composite_rank': rank_boost,
+                        'status': 'pending',
+                        'entry_reason': str(fast_entry_res['entry_reason'])[:50],
+                        'triggered_rule': f"FAST_{fast_entry_res['entry_type']}"[:50],
+                        'is_overbought': False,
+                        'rsi_at_entry': float(ind_15m.get('rsi_14', 50.0)),
+                        'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
+                        'last_updated': datetime.now(timezone.utc).isoformat()
+                    }, on_conflict='ticker').execute()
+                    log_info(MODULE, f"⚡ GATILLO FAST ENTRY {rank_boost}: {ticker} | {fast_entry_res['entry_type']} | {fast_entry_res['entry_reason']}")
             except Exception as q_err:
                 log_warning(MODULE, f"Error asignando fast entry en cola para {ticker}: {q_err}")
 
         # 3. Si GATILLO DE COMPRA EN RETROCESO (PULLBACK) está activo: Rank 98.8 (LOWER) o 98.6 (EMA LIMIT)
-        elif pullback_res['pullback_triggered'] and not trap_shield_res['is_trap']:
+        elif pullback_res['pullback_triggered'] and not trap_shield_res['is_trap'] and not (open_price_today > 0 and current_price < open_price_today * 0.985):
             try:
                 rank_boost = 98.8 if pullback_res['trigger_type'] == 'PULLBACK_LOWER_ABSORPTION' else 98.6
                 sb.table("stocks_priority_queue").upsert({

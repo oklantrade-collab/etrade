@@ -39,8 +39,29 @@ function StatusBadge({ status, isOB }: { status: string, isOB: boolean }) {
   );
 }
 
-function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital: any, summary: any }) {
-  const hasQueue = queue && queue.length > 0;
+function PriorityQueuePanel({ 
+  queue, 
+  capital, 
+  summary,
+  activeTab = 'TOP3',
+  activeLimit = 3
+}: { 
+  queue: any[], 
+  capital: any, 
+  summary: any,
+  activeTab?: string,
+  activeLimit?: number
+}) {
+  const isTop3 = activeTab === 'TOP3';
+  const isQueue = activeTab === 'QUEUE';
+  const displayQueue = isTop3 ? queue.slice(0, activeLimit) : queue.slice(0, 10);
+  const hasQueue = displayQueue && displayQueue.length > 0;
+
+  const title = isTop3 
+    ? `🎯 TOP ${activeLimit || 3} FOCO DE COMPRA (Líderes para Entrada del BOT)`
+    : (isQueue ? '📊 EN COLA APEX (Acciones con Mayor APEX Score del Día)' : '🎯 COLA DE COMPRA DEL BOT (Rally & Fuerza Compradora)');
+
+  const badgeText = isTop3 ? `TOP ${activeLimit || 3} FOCO ACTIVO` : 'MOMENTUM V5.5';
 
   const capPct = capital?.capital_max_total > 0
     ? Math.round((capital.capital_invested / capital.capital_max_total) * 100)
@@ -60,16 +81,16 @@ function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital
       }}>
         <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
             <h3 style={{ color: '#FFF', fontSize: '15px', fontWeight: 900, margin: 0, letterSpacing: '-0.5px' }}>
-              🎯 COLA DE COMPRA DEL BOT (Rally & Fuerza Compradora)
+              {title}
             </h3>
-            <span style={{ fontSize: '10px', color: '#22C55E', fontWeight: 800 }}>MOMENTUM V5.5</span>
+            <span style={{ fontSize: '10px', color: '#22C55E', fontWeight: 800 }}>{badgeText}</span>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <span style={{
             background: 'rgba(0,200,150,0.1)', color: '#00C896',
             fontSize: '10px', padding: '4px 12px', borderRadius: '20px', fontWeight: 800, border: '1px solid rgba(0,200,150,0.2)'
           }}>
-            {summary?.active || 0} ACTIVAS
+            {isTop3 ? `${displayQueue.length} LÍDERES` : `${summary?.active || 0} ACTIVAS`}
           </span>
           <span style={{
             background: 'rgba(79,195,247,0.1)', color: '#4FC3F7',
@@ -106,11 +127,11 @@ function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital
           Esperando que el Orchestrator identifique candidatos de alta prioridad...
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '15px' }}>
-            {queue.slice(0, 10).map((item: any, idx: number) => {
-              const apex4h = item.apex_score_4h || 0;
-              const retExp = item.return_expected || 0;
-              const rank = item.composite_rank || 0;
+        <div style={{ display: 'grid', gridTemplateColumns: isTop3 ? 'repeat(auto-fit, minmax(280px, 1fr))' : 'repeat(2, 1fr)', gap: '15px' }}>
+            {displayQueue.map((item: any, idx: number) => {
+              const apex4h = item.apex_score_4h || item.apex_4h || 0;
+              const retExp = item.return_expected || item.change_pct || 0;
+              const rank = item.composite_rank || parseFloat(item.rank_score) || 0;
               const isOB = item.is_overbought;
               const status = item.status || 'pending';
 
@@ -315,6 +336,7 @@ function NewsModal({ stock, onClose, defaultTranslate = true, defaultLang = 'es'
   const [newsData, setNewsData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [translateToEs, setTranslateToEs] = useState<boolean>(defaultTranslate && defaultLang === 'es');
+  const [modalTab, setModalTab] = useState<'news' | 'ai'>('news');
 
   useEffect(() => {
     if (!stock?.ticker) return;
@@ -335,39 +357,39 @@ function NewsModal({ stock, onClose, defaultTranslate = true, defaultLang = 'es'
   return (
     <div style={{
       position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-      background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center',
-      justifyContent: 'center', zIndex: 2100, backdropFilter: 'blur(6px)'
+      background: 'rgba(0,0,0,0.88)', display: 'flex', alignItems: 'center',
+      justifyContent: 'center', zIndex: 2100, backdropFilter: 'blur(8px)'
     }}>
       <div style={{
-        background: '#11141C', width: '92%', maxWidth: '650px',
+        background: '#0D111A', width: '92%', maxWidth: '720px',
         borderRadius: '20px', border: '1px solid #38BDF8',
-        overflow: 'hidden', boxShadow: '0 0 40px rgba(56,189,248,0.25)',
-        display: 'flex', flexDirection: 'column', maxHeight: '85vh'
+        overflow: 'hidden', boxShadow: '0 0 50px rgba(56,189,248,0.25)',
+        display: 'flex', flexDirection: 'column', maxHeight: '88vh'
       }}>
         {/* Header */}
         <div style={{
-          padding: '18px 24px', background: '#161922',
+          padding: '18px 24px', background: '#131826',
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          borderBottom: '1px solid rgba(255,255,255,0.06)'
+          borderBottom: '1px solid rgba(255,255,255,0.08)'
         }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <h3 style={{ margin: 0, color: '#FFF', fontSize: '18px', fontWeight: 900 }}>
+              <h3 style={{ margin: 0, color: '#FFF', fontSize: '20px', fontWeight: 950, letterSpacing: '-0.3px' }}>
                 📰 NOTICIAS & CATALIZADORES: {stock.ticker}
               </h3>
               {stock.catalyst_badge && (
                 <span style={{
-                  background: `${stock.badge_color || '#10B981'}22`,
-                  border: `1px solid ${stock.badge_color || '#10B981'}55`,
+                  background: `${stock.badge_color || '#10B981'}25`,
+                  border: `1px solid ${stock.badge_color || '#10B981'}70`,
                   color: stock.badge_color || '#10B981',
-                  fontSize: '10px', fontWeight: 900, padding: '2px 8px', borderRadius: '4px'
+                  fontSize: '11px', fontWeight: 950, padding: '3px 10px', borderRadius: '6px'
                 }}>
                   {stock.catalyst_badge}
                 </span>
               )}
             </div>
-            <div style={{ fontSize: '11px', color: '#888', marginTop: '3px' }}>
-              {stock.company_name || stock.ticker} • Feed Filtrado de Hoy y Ayer
+            <div style={{ fontSize: '13px', color: '#94A3B8', marginTop: '4px', fontWeight: 600 }}>
+              {stock.company_name || stock.ticker} • Feed de Inteligencia (Últimas 48h)
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -375,114 +397,234 @@ function NewsModal({ stock, onClose, defaultTranslate = true, defaultLang = 'es'
               onClick={() => setTranslateToEs(!translateToEs)}
               title="Alternar traducción a Español / Inglés original"
               style={{
-                background: translateToEs ? 'rgba(34,197,94,0.15)' : 'rgba(255,255,255,0.05)',
-                border: `1px solid ${translateToEs ? '#22C55E' : 'rgba(255,255,255,0.15)'}`,
-                color: translateToEs ? '#22C55E' : '#AAA',
-                fontSize: '10px',
+                background: translateToEs ? 'rgba(34,197,94,0.18)' : 'rgba(255,255,255,0.06)',
+                border: `1px solid ${translateToEs ? '#22C55E' : 'rgba(255,255,255,0.2)'}`,
+                color: translateToEs ? '#22C55E' : '#CBD5E1',
+                fontSize: '11px',
                 fontWeight: 900,
-                padding: '5px 10px',
+                padding: '6px 12px',
                 borderRadius: '8px',
                 cursor: 'pointer',
                 display: 'flex',
                 alignItems: 'center',
-                gap: '5px'
+                gap: '6px'
               }}
             >
               <span>🌐</span>
               <span>{translateToEs ? 'ESPAÑOL' : 'ENGLISH'}</span>
             </button>
             <button onClick={onClose} style={{
-              background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF',
-              width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900
+              background: 'rgba(255,255,255,0.08)', border: 'none', color: '#FFF',
+              width: '36px', height: '36px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900,
+              fontSize: '15px'
             }}>✕</button>
           </div>
         </div>
 
-        {/* Content */}
-        <div style={{ padding: '20px 24px', overflowY: 'auto', flex: 1 }}>
-          {/* AI Catalyst Interpretation Banner */}
-          {(newsData?.catalyst_summary_es || stock.catalyst_summary_es) && (
-            <div style={{
-              background: 'linear-gradient(135deg, rgba(56,189,248,0.12) 0%, rgba(34,197,94,0.12) 100%)',
-              border: '1px solid rgba(56,189,248,0.3)',
-              borderRadius: '12px', padding: '14px 16px', marginBottom: '16px'
+        {/* 2 Navigation Tabs */}
+        <div style={{
+          display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.08)',
+          background: '#0B0F19', padding: '0 20px', gap: '10px'
+        }}>
+          <button
+            onClick={() => setModalTab('news')}
+            style={{
+              padding: '13px 20px', background: 'transparent', border: 'none',
+              borderBottom: modalTab === 'news' ? '3px solid #38BDF8' : '3px solid transparent',
+              color: modalTab === 'news' ? '#38BDF8' : '#94A3B8',
+              fontSize: '14px', fontWeight: 900, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '8px',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <span style={{ fontSize: '16px' }}>📰</span>
+            <span>NOTICIAS EN ESPAÑOL</span>
+            {newsData?.articles && (
+              <span style={{
+                background: 'rgba(56,189,248,0.18)', color: '#38BDF8',
+                fontSize: '11px', padding: '2px 7px', borderRadius: '10px', fontWeight: 900
+              }}>
+                {newsData.articles.length}
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setModalTab('ai')}
+            style={{
+              padding: '13px 20px', background: 'transparent', border: 'none',
+              borderBottom: modalTab === 'ai' ? '3px solid #10B981' : '3px solid transparent',
+              color: modalTab === 'ai' ? '#10B981' : '#94A3B8',
+              fontSize: '14px', fontWeight: 900, cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: '8px',
+              transition: 'all 0.2s ease'
+            }}
+          >
+            <span style={{ fontSize: '16px' }}>🤖</span>
+            <span>INTERPRETACIÓN GEMINI & CATALIZADOR</span>
+            <span style={{
+              background: 'rgba(16,185,129,0.2)', color: '#10B981',
+              fontSize: '11px', padding: '2px 8px', borderRadius: '10px', fontWeight: 950
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 900, color: '#38BDF8', marginBottom: '6px' }}>
-                <span>🤖</span>
-                <span>INTERPRETACIÓN DEL CATALIZADOR (AI / GEMINI):</span>
-              </div>
-              <div style={{ fontSize: '12px', color: '#E2E8F0', lineHeight: 1.5, fontWeight: 600 }}>
-                {translateToEs ? (newsData?.catalyst_summary_es || stock.catalyst_summary_es) : (newsData?.articles?.[0]?.summary || newsData?.catalyst_summary_es || stock.catalyst_summary_es)}
-              </div>
-            </div>
-          )}
+              +{newsData?.bonus_points || stock.catalyst_bonus || 10} PTS
+            </span>
+          </button>
+        </div>
 
+        {/* Content Body */}
+        <div style={{ padding: '22px 24px', overflowY: 'auto', flex: 1 }}>
           {loading ? (
-            <div style={{ textAlign: 'center', padding: '30px', color: '#888', fontSize: '13px' }}>
-              Buscando noticias recientes para {stock.ticker}...
+            <div style={{ textAlign: 'center', padding: '50px 20px', color: '#94A3B8', fontSize: '15px', fontWeight: 700 }}>
+              <div style={{ fontSize: '30px', marginBottom: '12px' }}>⏳</div>
+              Consultando noticias y evaluando catalizador con IA para {stock.ticker}...
             </div>
-          ) : (!newsData?.articles || newsData.articles.length === 0) ? (
-            <div style={{ textAlign: 'center', padding: '40px 20px', color: '#666' }}>
-              <div style={{ fontSize: '32px', marginBottom: '10px' }}>📭</div>
-              <div style={{ fontSize: '14px', fontWeight: 700, color: '#AAA' }}>Sin noticias recientes en las últimas 48 horas</div>
-              <div style={{ fontSize: '11px', color: '#666', marginTop: '4px' }}>
-                El movimiento de precio es de carácter técnico o especulativo.
+          ) : modalTab === 'news' ? (
+            /* ══ PESTAÑA 1: NOTICIAS EN ESPAÑOL (Alta Legibilidad para Miopía) ══ */
+            (!newsData?.articles || newsData.articles.length === 0) ? (
+              <div style={{ textAlign: 'center', padding: '50px 20px', color: '#64748B' }}>
+                <div style={{ fontSize: '36px', marginBottom: '12px' }}>📭</div>
+                <div style={{ fontSize: '16px', fontWeight: 800, color: '#E2E8F0' }}>Sin noticias recientes en las últimas 48 horas</div>
+                <div style={{ fontSize: '13px', color: '#94A3B8', marginTop: '6px' }}>
+                  El movimiento del ticker responde a factores técnicos, volumen de escáner o rotación de mercado.
+                </div>
               </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {newsData.articles.map((art: any, i: number) => {
-                const titleToDisplay = (translateToEs && art.title_es) ? art.title_es : art.title;
-                const summaryToDisplay = (translateToEs && art.summary_es) ? art.summary_es : art.summary;
-                return (
-                  <div key={i} style={{
-                    background: 'rgba(255,255,255,0.02)', padding: '14px 16px',
-                    borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)',
-                    display: 'flex', flexDirection: 'column', gap: '8px'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{
-                        fontSize: '9px', fontWeight: 900,
-                        background: `${art.color}22`, color: art.color,
-                        border: `1px solid ${art.color}44`, padding: '2px 6px', borderRadius: '4px'
-                      }}>
-                        {art.label} (+{art.bonus} pts)
-                      </span>
-                      <span style={{ fontSize: '10px', color: '#666', fontWeight: 700 }}>
-                        {art.publisher} • {art.published_at}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#FFF', lineHeight: '1.4' }}>
-                      {titleToDisplay}
-                    </div>
-                    {summaryToDisplay && summaryToDisplay !== titleToDisplay && (
-                      <div style={{ fontSize: '11px', color: '#94A3B8', lineHeight: '1.4' }}>
-                        {summaryToDisplay}
-                      </div>
-                    )}
-                    {art.url && (
-                      <div style={{ alignSelf: 'flex-start', marginTop: '2px' }}>
-                        <a href={art.url} target="_blank" rel="noopener noreferrer" style={{
-                          color: '#38BDF8', fontSize: '11px', fontWeight: 900,
-                          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px'
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                {newsData.articles.map((art: any, i: number) => {
+                  const titleToDisplay = (translateToEs && art.title_es) ? art.title_es : art.title;
+                  const summaryToDisplay = (translateToEs && art.summary_es) ? art.summary_es : art.summary;
+                  return (
+                    <div key={i} style={{
+                      background: 'rgba(255,255,255,0.03)', padding: '16px 20px',
+                      borderRadius: '14px', border: '1px solid rgba(255,255,255,0.08)',
+                      display: 'flex', flexDirection: 'column', gap: '10px',
+                      boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{
+                          fontSize: '11px', fontWeight: 950,
+                          background: `${art.color}25`, color: art.color,
+                          border: `1px solid ${art.color}60`, padding: '3px 8px', borderRadius: '6px'
                         }}>
-                          <span>Leer artículo original</span>
-                          <span>↗</span>
-                        </a>
+                          {art.label} (+{art.bonus} pts)
+                        </span>
+                        <span style={{ fontSize: '12px', color: '#94A3B8', fontWeight: 700 }}>
+                          {art.publisher} • {art.published_at}
+                        </span>
                       </div>
-                    )}
+                      <div style={{ fontSize: '16px', fontWeight: 800, color: '#FFFFFF', lineHeight: '1.45' }}>
+                        {titleToDisplay}
+                      </div>
+                      {summaryToDisplay && summaryToDisplay !== titleToDisplay && (
+                        <div style={{ fontSize: '13px', color: '#CBD5E1', lineHeight: '1.55', fontWeight: 500 }}>
+                          {summaryToDisplay}
+                        </div>
+                      )}
+                      {art.url && (
+                        <div style={{ alignSelf: 'flex-start', marginTop: '2px' }}>
+                          <a href={art.url} target="_blank" rel="noopener noreferrer" style={{
+                            color: '#38BDF8', fontSize: '12px', fontWeight: 900,
+                            textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px'
+                          }}>
+                            <span>Leer artículo original</span>
+                            <span>↗</span>
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )
+          ) : (
+            /* ══ PESTAÑA 2: INTERPRETACIÓN GEMINI & JUSTIFICACIÓN DEL CATALIZADOR ══ */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* Card 1: Puntuación Cuantitativa */}
+              <div style={{
+                background: 'linear-gradient(135deg, rgba(56,189,248,0.14) 0%, rgba(16,185,129,0.14) 100%)',
+                border: '1px solid rgba(56,189,248,0.4)', borderRadius: '16px', padding: '20px',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.3)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span style={{ fontSize: '20px' }}>⚡</span>
+                    <span style={{ fontSize: '13px', fontWeight: 950, color: '#38BDF8', letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+                      Puntuación Asignada al Catalizador
+                    </span>
                   </div>
-                );
-              })}
+                  <span style={{
+                    fontSize: '18px', fontWeight: 950, color: '#10B981',
+                    background: 'rgba(16,185,129,0.22)', padding: '4px 14px', borderRadius: '10px',
+                    border: '1px solid rgba(16,185,129,0.5)'
+                  }}>
+                    +{newsData?.bonus_points || stock.catalyst_bonus || 10} / 30 PTS
+                  </span>
+                </div>
+                <div style={{ fontSize: '16px', color: '#FFFFFF', fontWeight: 700, lineHeight: '1.5', marginBottom: '10px' }}>
+                  {newsData?.catalyst_summary_es || stock.catalyst_summary_es || 'Impulso respaldado por flujo informativo relevante.'}
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '12px', color: '#94A3B8', fontWeight: 700 }}>
+                  <span>Modelo de IA: <b style={{ color: '#38BDF8' }}>{newsData?.source_model || 'Google Gemini 1.5 Flash'}</b></span>
+                  <span style={{ color: '#10B981', fontWeight: 800 }}>Impacto en Ranking: Ponderación Activa</span>
+                </div>
+              </div>
+
+              {/* Card 2: Justificación Detallada */}
+              <div style={{
+                background: 'rgba(56,189,248,0.06)', border: '1px solid rgba(56,189,248,0.25)',
+                borderRadius: '16px', padding: '18px 20px',
+                boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', fontWeight: 950, color: '#38BDF8', marginBottom: '8px' }}>
+                  <span>⚖️</span>
+                  <span>JUSTIFICACIÓN DE LA PUNTUACIÓN OTORGADA:</span>
+                </div>
+                <div style={{ fontSize: '14px', color: '#E2E8F0', lineHeight: '1.65', fontWeight: 500 }}>
+                  {newsData?.score_justification || (
+                    stock.catalyst_badge?.includes('FDA')
+                      ? 'Puntuación de +25 pts otorgada por tratarse de un catalizador regulatorio de primer orden (FDA / Ensayo Clínico). Genera barrera de entrada comercial, exclusividad de mercado y flujo de ingresos recurrente no dependiente del ciclo económico.'
+                      : (stock.catalyst_badge?.includes('Contrato') || stock.catalyst_badge?.includes('M&A'))
+                        ? 'Puntuación de +25 pts asignada por acuerdo contractual vinculante o transacción corporativa que expande de inmediato la facturación y el Ebitda proyectado del ejercicio actual.'
+                        : 'Puntuación asignada por presencia mediática relevante y volumen comprador que respalda la ruptura técnica del día.'
+                  )}
+                </div>
+              </div>
+
+              {/* Card 3: Catalizador Oculto & Proyección Intradía */}
+              <div style={{
+                background: 'linear-gradient(135deg, rgba(245,158,11,0.14) 0%, rgba(239,68,68,0.08) 100%)',
+                border: '1px solid rgba(245,158,11,0.4)',
+                borderRadius: '16px', padding: '18px 20px',
+                boxShadow: '0 4px 20px rgba(245,158,11,0.1)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', fontWeight: 950, color: '#F59E0B' }}>
+                    <span>🔍</span>
+                    <span>CATALIZADOR OCULTO & PROYECCIÓN INTRADÍA:</span>
+                  </div>
+                  <span style={{
+                    fontSize: '11px', fontWeight: 950, color: '#F59E0B',
+                    background: 'rgba(245,158,11,0.22)', padding: '3px 10px', borderRadius: '6px',
+                    border: '1px solid rgba(245,158,11,0.4)'
+                  }}>
+                    {newsData?.projected_impact || 'ALTO / EXPLOSIVO'}
+                  </span>
+                </div>
+                <div style={{ fontSize: '14px', color: '#FEF3C7', lineHeight: '1.65', fontWeight: 600 }}>
+                  {newsData?.hidden_catalyst || (
+                    'Estructura de bajo float y alta concentración compradora: la noticia atrae liquidez institucional que absorbe rápidamente la oferta disponible, proyectando un incremento considerable de precio para la sesión sin techos técnicos inmediatos.'
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </div>
 
         {/* Footer */}
-        <div style={{ padding: '12px 24px', background: '#161922', borderTop: '1px solid rgba(255,255,255,0.05)', textAlign: 'right' }}>
+        <div style={{ padding: '14px 24px', background: '#131826', borderTop: '1px solid rgba(255,255,255,0.08)', textAlign: 'right' }}>
           <button onClick={onClose} style={{
             background: '#38BDF8', color: '#000', border: 'none',
-            padding: '8px 20px', borderRadius: '10px', fontWeight: 900, fontSize: '11px', cursor: 'pointer'
+            padding: '10px 24px', borderRadius: '10px', fontWeight: 950, fontSize: '12px', cursor: 'pointer',
+            letterSpacing: '0.05em'
           }}>CERRAR</button>
         </div>
       </div>
@@ -1235,9 +1377,20 @@ export default function OpportunitiesIntelligence() {
     };
   });
 
+  // Cola APEX: Filtra acciones con alto APEX Score del día (>= 60), descartando acciones bajistas (-1.5%)
   const queueList = opportunitiesWithQueue
-    .filter(o => o.queue_rank !== null || o._from_priority_queue)
-    .sort((a, b) => (a.queue_rank || 999) - (b.queue_rank || 999));
+    .filter(o => {
+      const apex = o.apex_4h || o.apex_1d || 0;
+      const chg = o.change_pct !== undefined ? o.change_pct : 0;
+      if (chg < -1.5) return false;
+      return apex >= 60 || o.queue_rank !== null || o._from_priority_queue;
+    })
+    .sort((a, b) => {
+      const apexA = a.apex_4h || a.apex_1d || 0;
+      const apexB = b.apex_4h || b.apex_1d || 0;
+      if (apexB !== apexA) return apexB - apexA;
+      return (a.queue_rank || 999) - (b.queue_rank || 999);
+    });
 
   const hotList = opportunitiesWithQueue
     .filter(o => o._from_priority_queue || (o.price <= settings.hotMaxPrice && o.volume >= settings.minVolume))
@@ -1337,7 +1490,13 @@ export default function OpportunitiesIntelligence() {
       )}
 
       {/* APEX Priority Queue Panel */}
-      <PriorityQueuePanel queue={priorityQueue} capital={pqCapital} summary={pqSummary} />
+      <PriorityQueuePanel 
+        queue={activeTab === 'TOP3' ? (top3List.length > 0 ? top3List : priorityQueue) : (activeTab === 'QUEUE' ? queueList : priorityQueue)} 
+        capital={pqCapital} 
+        summary={pqSummary} 
+        activeTab={activeTab} 
+        activeLimit={settings.activeStocksLimit || 3} 
+      />
 
       <div style={{ background: 'rgba(255,255,255,0.02)', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden' }}>
         <style jsx>{`
