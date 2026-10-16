@@ -311,9 +311,10 @@ function RankingHeaderTooltip() {
   );
 }
 
-function NewsModal({ stock, onClose }: { stock: any, onClose: () => void }) {
+function NewsModal({ stock, onClose, defaultTranslate = true, defaultLang = 'es' }: { stock: any, onClose: () => void, defaultTranslate?: boolean, defaultLang?: string }) {
   const [newsData, setNewsData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [translateToEs, setTranslateToEs] = useState<boolean>(defaultTranslate && defaultLang === 'es');
 
   useEffect(() => {
     if (!stock?.ticker) return;
@@ -369,14 +370,53 @@ function NewsModal({ stock, onClose }: { stock: any, onClose: () => void }) {
               {stock.company_name || stock.ticker} • Feed Filtrado de Hoy y Ayer
             </div>
           </div>
-          <button onClick={onClose} style={{
-            background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF',
-            width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900
-          }}>✕</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <button
+              onClick={() => setTranslateToEs(!translateToEs)}
+              title="Alternar traducción a Español / Inglés original"
+              style={{
+                background: translateToEs ? 'rgba(34,197,94,0.15)' : 'rgba(255,255,255,0.05)',
+                border: `1px solid ${translateToEs ? '#22C55E' : 'rgba(255,255,255,0.15)'}`,
+                color: translateToEs ? '#22C55E' : '#AAA',
+                fontSize: '10px',
+                fontWeight: 900,
+                padding: '5px 10px',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '5px'
+              }}
+            >
+              <span>🌐</span>
+              <span>{translateToEs ? 'ESPAÑOL' : 'ENGLISH'}</span>
+            </button>
+            <button onClick={onClose} style={{
+              background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF',
+              width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900
+            }}>✕</button>
+          </div>
         </div>
 
         {/* Content */}
         <div style={{ padding: '20px 24px', overflowY: 'auto', flex: 1 }}>
+          {/* AI Catalyst Interpretation Banner */}
+          {(newsData?.catalyst_summary_es || stock.catalyst_summary_es) && (
+            <div style={{
+              background: 'linear-gradient(135deg, rgba(56,189,248,0.12) 0%, rgba(34,197,94,0.12) 100%)',
+              border: '1px solid rgba(56,189,248,0.3)',
+              borderRadius: '12px', padding: '14px 16px', marginBottom: '16px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', fontWeight: 900, color: '#38BDF8', marginBottom: '6px' }}>
+                <span>🤖</span>
+                <span>INTERPRETACIÓN DEL CATALIZADOR (AI / GEMINI):</span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#E2E8F0', lineHeight: 1.5, fontWeight: 600 }}>
+                {translateToEs ? (newsData?.catalyst_summary_es || stock.catalyst_summary_es) : (newsData?.articles?.[0]?.summary || newsData?.catalyst_summary_es || stock.catalyst_summary_es)}
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <div style={{ textAlign: 'center', padding: '30px', color: '#888', fontSize: '13px' }}>
               Buscando noticias recientes para {stock.ticker}...
@@ -391,40 +431,49 @@ function NewsModal({ stock, onClose }: { stock: any, onClose: () => void }) {
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {newsData.articles.map((art: any, i: number) => (
-                <div key={i} style={{
-                  background: 'rgba(255,255,255,0.02)', padding: '14px 16px',
-                  borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)',
-                  display: 'flex', flexDirection: 'column', gap: '8px'
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{
-                      fontSize: '9px', fontWeight: 900,
-                      background: `${art.color}22`, color: art.color,
-                      border: `1px solid ${art.color}44`, padding: '2px 6px', borderRadius: '4px'
-                    }}>
-                      {art.label} (+{art.bonus} pts)
-                    </span>
-                    <span style={{ fontSize: '10px', color: '#666', fontWeight: 700 }}>
-                      {art.publisher} • {art.published_at}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '13px', fontWeight: 800, color: '#FFF', lineHeight: '1.4' }}>
-                    {art.title}
-                  </div>
-                  {art.url && (
-                    <div style={{ alignSelf: 'flex-start', marginTop: '2px' }}>
-                      <a href={art.url} target="_blank" rel="noopener noreferrer" style={{
-                        color: '#38BDF8', fontSize: '11px', fontWeight: 900,
-                        textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px'
+              {newsData.articles.map((art: any, i: number) => {
+                const titleToDisplay = (translateToEs && art.title_es) ? art.title_es : art.title;
+                const summaryToDisplay = (translateToEs && art.summary_es) ? art.summary_es : art.summary;
+                return (
+                  <div key={i} style={{
+                    background: 'rgba(255,255,255,0.02)', padding: '14px 16px',
+                    borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)',
+                    display: 'flex', flexDirection: 'column', gap: '8px'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{
+                        fontSize: '9px', fontWeight: 900,
+                        background: `${art.color}22`, color: art.color,
+                        border: `1px solid ${art.color}44`, padding: '2px 6px', borderRadius: '4px'
                       }}>
-                        <span>Leer artículo original</span>
-                        <span>↗</span>
-                      </a>
+                        {art.label} (+{art.bonus} pts)
+                      </span>
+                      <span style={{ fontSize: '10px', color: '#666', fontWeight: 700 }}>
+                        {art.publisher} • {art.published_at}
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
+                    <div style={{ fontSize: '13px', fontWeight: 800, color: '#FFF', lineHeight: '1.4' }}>
+                      {titleToDisplay}
+                    </div>
+                    {summaryToDisplay && summaryToDisplay !== titleToDisplay && (
+                      <div style={{ fontSize: '11px', color: '#94A3B8', lineHeight: '1.4' }}>
+                        {summaryToDisplay}
+                      </div>
+                    )}
+                    {art.url && (
+                      <div style={{ alignSelf: 'flex-start', marginTop: '2px' }}>
+                        <a href={art.url} target="_blank" rel="noopener noreferrer" style={{
+                          color: '#38BDF8', fontSize: '11px', fontWeight: 900,
+                          textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px'
+                        }}>
+                          <span>Leer artículo original</span>
+                          <span>↗</span>
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -884,6 +933,19 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
           {opp.is_intraday_alpha && (
             <span style={{ fontSize: '7px', background: 'linear-gradient(90deg, #10B981, #06B6D4)', color: '#000', padding: '1px 3px', borderRadius: '3px', fontWeight: 950 }}>🚀</span>
           )}
+          {opp.room_to_bb_upper_1d !== undefined && opp.room_to_bb_upper_1d !== null && (
+            <span style={{
+              fontSize: '7.5px',
+              background: opp.room_to_bb_upper_1d >= 20 ? 'rgba(34,197,94,0.18)' : 'rgba(56,189,248,0.18)',
+              border: `1px solid ${opp.room_to_bb_upper_1d >= 20 ? '#22C55E' : '#38BDF8'}`,
+              color: opp.room_to_bb_upper_1d >= 20 ? '#22C55E' : '#38BDF8',
+              padding: '1px 4px',
+              borderRadius: '3px',
+              fontWeight: 950
+            }} title={`Espacio a Bollinger Superior 1D: +${opp.room_to_bb_upper_1d.toFixed(1)}% (SMA20 1D: $${opp.sma20_1d || '?'}, BB Sup 1D: $${opp.bb_upper_1d || '?'})`}>
+              🚀 BB 1D: +{opp.room_to_bb_upper_1d.toFixed(0)}%
+            </span>
+          )}
         </div>
         <span style={{ fontSize: '9px', color: '#666', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '95px' }}>
           {opp.company_name || opp.ticker}
@@ -1000,7 +1062,7 @@ export default function OpportunitiesIntelligence() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [selectedStock, setSelectedStock] = useState<any | null>(null)
-  const [activeTab, setActiveTab] = useState<'ALPHA' | 'HOT' | 'QUEUE' | 'VALUE'>('ALPHA')
+  const [activeTab, setActiveTab] = useState<'TOP3' | 'ALPHA' | 'HOT' | 'QUEUE' | 'VALUE'>('TOP3')
   const [newsStock, setNewsStock] = useState<any | null>(null)
   const [marketStatus, setMarketStatus] = useState({ is_open: false, status: 'CARGANDO...' })
   const [priorityQueue, setPriorityQueue] = useState<any[]>([])
@@ -1013,7 +1075,10 @@ export default function OpportunitiesIntelligence() {
     minVolume: 0,
     minMarketCap: 0,
     minValueGap: 15,
-    maxHotResults: 50
+    maxHotResults: 50,
+    language: 'es',
+    translateNews: true,
+    activeStocksLimit: 3
   })
   const [showSettings, setShowSettings] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -1021,6 +1086,26 @@ export default function OpportunitiesIntelligence() {
   const [searchResult, setSearchResult] = useState<any>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('etrade_scanner_settings');
+      if (saved) {
+        setSettings(prev => ({ ...prev, ...JSON.parse(saved) }));
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  const updateSettings = (newSettings: any) => {
+    setSettings(newSettings);
+    try {
+      localStorage.setItem('etrade_scanner_settings', JSON.stringify(newSettings));
+    } catch (e) {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     fetchData()
@@ -1163,8 +1248,9 @@ export default function OpportunitiesIntelligence() {
     .filter(o => o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0))
     .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0));
 
+  const top3List = alphaList.slice(0, settings.activeStocksLimit || 3);
   const valueList = opportunitiesWithQueue.filter(o => o.is_pro_member);
-  const displayList = activeTab === 'ALPHA' ? alphaList : (activeTab === 'HOT' ? hotList : (activeTab === 'QUEUE' ? queueList : valueList));
+  const displayList = activeTab === 'TOP3' ? top3List : (activeTab === 'ALPHA' ? alphaList : (activeTab === 'HOT' ? hotList : (activeTab === 'QUEUE' ? queueList : valueList)));
 
   return (
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
@@ -1187,7 +1273,8 @@ export default function OpportunitiesIntelligence() {
         <div style={{ display: 'flex', gap: '12px' }}>
             <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>⚙️ FILTROS</button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', alignItems: 'center' }}>
-                <TabButton label="🚀 Alpha Runners (Orden de Compra BOT)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
+                <TabButton label={`🎯 Top ${settings.activeStocksLimit || 3} Foco de Compra`} active={activeTab === 'TOP3'} onClick={() => setActiveTab('TOP3')} count={top3List.length}/>
+                <TabButton label="🚀 Alpha Runners (Orden BOT Completo)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
                 <TabButton label="🔥 Hot by Volume (Top 20)" active={activeTab === 'HOT'} onClick={() => setActiveTab('HOT')} count={hotList.length}/>
                 <TabButton label="🎯 En Cola APEX" active={activeTab === 'QUEUE'} onClick={() => setActiveTab('QUEUE')} count={queueList.length}/>
                 <TabButton label="💎 Inversión Pro" active={activeTab === 'VALUE'} onClick={() => setActiveTab('VALUE')} count={valueList.length}/>
@@ -1197,11 +1284,55 @@ export default function OpportunitiesIntelligence() {
       </div>
 
       {showSettings && (
-        <div style={{ background: '#161922', padding: '20px', borderRadius: '16px', marginBottom: '20px', border: '1px solid #22C55E', display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '15px' }}>
-            <SettingInput label="Hot Price Max" value={settings.hotMaxPrice} onChange={(v:any) => setSettings({...settings, hotMaxPrice: Number(v)})} />
-            <SettingInput label="Min RVOL" value={settings.minRvol} onChange={(v:any) => setSettings({...settings, minRvol: Number(v)})} step={0.1} />
-            <SettingInput label="Min Volume" value={settings.minVolume} onChange={(v:any) => setSettings({...settings, minVolume: Number(v)})} step={100000} />
-            <SettingInput label="Min Market Cap" value={settings.minMarketCap} onChange={(v:any) => setSettings({...settings, minMarketCap: Number(v)})} step={100000000} />
+        <div style={{ background: '#161922', padding: '20px', borderRadius: '16px', marginBottom: '20px', border: '1px solid #22C55E' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '15px', marginBottom: '15px' }}>
+            <SettingInput label="Hot Price Max ($)" value={settings.hotMaxPrice} onChange={(v:any) => updateSettings({...settings, hotMaxPrice: Number(v)})} />
+            <SettingInput label="Min RVOL" value={settings.minRvol} onChange={(v:any) => updateSettings({...settings, minRvol: Number(v)})} step={0.1} />
+            <SettingInput label="Min Volume" value={settings.minVolume} onChange={(v:any) => updateSettings({...settings, minVolume: Number(v)})} step={100000} />
+            <SettingInput label="Min Market Cap" value={settings.minMarketCap} onChange={(v:any) => updateSettings({...settings, minMarketCap: Number(v)})} step={100000000} />
+          </div>
+
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: '15px', display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '15px', alignItems: 'center' }}>
+            <SettingInput
+              label="Cant. Acciones Activas (Top Foco Compra)"
+              value={settings.activeStocksLimit || 3}
+              onChange={(v:any) => updateSettings({...settings, activeStocksLimit: Math.max(1, Number(v) || 3)})}
+              step={1}
+            />
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <label style={{ fontSize: '9px', fontWeight: 900, color: '#666', textTransform: 'uppercase' }}>Idioma Noticias & Análisis</label>
+              <select
+                value={settings.language || 'es'}
+                onChange={(e) => updateSettings({...settings, language: e.target.value})}
+                style={{ background: '#000', border: '1px solid #333', borderRadius: '8px', padding: '8px', color: '#22C55E', fontWeight: 900, fontSize: '12px' }}
+              >
+                <option value="es">🇪🇸 Español (Predeterminado)</option>
+                <option value="en">🇺🇸 English (Original)</option>
+              </select>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <label style={{ fontSize: '9px', fontWeight: 900, color: '#666', textTransform: 'uppercase' }}>Traducción Automática (IA)</label>
+              <button
+                type="button"
+                onClick={() => updateSettings({...settings, translateNews: !settings.translateNews})}
+                style={{
+                  background: settings.translateNews ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)',
+                  border: `1px solid ${settings.translateNews ? '#22C55E' : '#EF4444'}`,
+                  borderRadius: '8px',
+                  padding: '8px 12px',
+                  color: settings.translateNews ? '#22C55E' : '#EF4444',
+                  fontWeight: 900,
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  textAlign: 'center'
+                }}
+              >
+                {settings.translateNews ? '✅ TRADUCCIÓN ACTIVA (ES)' : '❌ TRADUCCIÓN DESACTIVADA'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -1273,7 +1404,7 @@ export default function OpportunitiesIntelligence() {
         </div>
       )}
       {selectedStock && <AnalysisModal stock={selectedStock} onClose={() => setSelectedStock(null)} />}
-      {newsStock && <NewsModal stock={newsStock} onClose={() => setNewsStock(null)} />}
+      {newsStock && <NewsModal stock={newsStock} onClose={() => setNewsStock(null)} defaultTranslate={settings.translateNews} defaultLang={settings.language} />}
       <Link href="/stocks/universe" style={{ display: 'inline-block', marginTop: '20px', color: '#22C55E', textDecoration: 'none', fontWeight: 800, fontSize: '11px' }}>← VOLVER AL UNIVERSE BUILDER</Link>
     </div>
   )

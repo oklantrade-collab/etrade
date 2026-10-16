@@ -40,6 +40,36 @@ def _is_ib_connected() -> bool:
         return False
 
 
+_DAILY_BB_CACHE: Dict[str, tuple] = {}  # { ticker: (timestamp, sma20, bb_upper, bb_lower) }
+
+def get_daily_bollinger_metrics(ticker: str, current_price: float) -> tuple:
+    """Calcula SMA20, BB Upper y room_to_bb_upper en gráfico diario (1D) con cache de 1 hora."""
+    clean_ticker = ticker.replace("/", "").replace(".", "").upper().strip()
+    now_ts = time.time()
+    cached = _DAILY_BB_CACHE.get(clean_ticker)
+    if cached and (now_ts - cached[0] < 3600):
+        sma20, bb_upper, bb_lower = cached[1], cached[2], cached[3]
+    else:
+        try:
+            import yfinance as yf
+            t = yf.Ticker(clean_ticker)
+            df_daily = t.history(period="60d", interval="1d")
+            if df_daily is not None and len(df_daily) >= 20:
+                c = df_daily["Close"]
+                sma20 = float(c.rolling(20).mean().iloc[-1])
+                std20 = float(c.rolling(20).std().iloc[-1])
+                bb_upper = float(sma20 + (2.0 * std20))
+                bb_lower = float(sma20 - (2.0 * std20))
+                _DAILY_BB_CACHE[clean_ticker] = (now_ts, sma20, bb_upper, bb_lower)
+            else:
+                sma20, bb_upper, bb_lower = current_price, current_price * 1.3, current_price * 0.7
+        except Exception:
+            sma20, bb_upper, bb_lower = current_price, current_price * 1.3, current_price * 0.7
+
+    room_to_bb = ((bb_upper - current_price) / current_price * 100.0) if current_price > 0 else 0.0
+    return round(sma20, 2), round(bb_upper, 2), round(room_to_bb, 1)
+
+
 def calculate_semaphore_and_buying_force(
     price: float,
     change_pct: float,
@@ -59,7 +89,9 @@ def calculate_semaphore_and_buying_force(
     adx_5m: float = 25.0,
     plus_di_5m: float = 25.0,
     minus_di_5m: float = 15.0,
-    open_ge_close: bool = True
+    open_ge_close: bool = True,
+    room_to_bb_upper_1d: Optional[float] = None,
+    sma20_1d: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Calcula la Fuerza Compradora (0-100), Semáforo Visual y Rank Score:
@@ -114,8 +146,17 @@ def calculate_semaphore_and_buying_force(
     elif not is_ema3_above_ema9:
         # Tope de fuerza si aún no ha roto por encima de EMA9 en 1H
         raw_buying_force = min(raw_buying_force, 45.0)
+    has_room_to_bb = (room_to_bb_upper_1d is not None and room_to_bb_upper_1d >= 20.0)
+    is_super_runner_expansion = (
+        gap_pct is not None and gap_pct >= 5.0 and has_room_to_bb and rvol >= 1.5 and plus_di_5m >= minus_di_5m
+    )
+
+    # Castigo o bonificación de fuerza compradora para Gaps:
+    if is_super_runner_expansion:
+        # SUPER-RUNNER EXPANSION: No se castiga la fuerza compradora; tiene autopista en 1D y volumen institucional
+        raw_buying_force += min(25.0, room_to_bb_upper_1d * 0.25)
     elif gap_pct is not None and gap_pct > 25.0:
-        # Castigo de fuerza compradora para Gaps excesivos por sobreextensión en apertura
+        # Castigo de fuerza compradora para Gaps excesivos por sobreextensión en apertura (sin espacio 1D)
         raw_buying_force = min(raw_buying_force, 45.0)
 
     buying_force = int(round(min(100.0, max(5.0, raw_buying_force))))
@@ -135,6 +176,13 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#94A3B8"
         sem_tip = "EMA3 <= EMA9 en 1H. Falta cruce alcista y confirmación de tendencia en 1 hora. Entrada no permitida."
         setup_bonus = -10.0
+    # CASO A.2.5: SUPER-RUNNER EXPANSION (OPEN GAP UP CON ESPACIO LIBRE A BOLLINGER SUPERIOR 1D)
+    elif is_super_runner_expansion and candle_1_green:
+        semaphore = "EXPANSION_RUNNER"
+        sem_label = f"🟢 SUPER-RUNNER EXPANSION (+{room_to_bb_upper_1d:.0f}% A BB 1D)"
+        sem_color = "#10B981"
+        sem_tip = f"Open Gap Up (+{gap_pct:.1f}%) con autopista libre hasta la Banda Superior de Bollinger 1D (+{room_to_bb_upper_1d:.1f}%). Reversión desde el fondo confirmada con RVOL {rvol:.1f}x. COMPRA HABILITADA."
+        setup_bonus = 35.0
     # CASO A.3: CANDADO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA)
     elif gap_pct is not None and gap_pct > 25.0:
         semaphore = "EXHAUSTION_GAP"
@@ -259,6 +307,9 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             prev_close = float(item.get('regularMarketPreviousClose') or (price / (1.0 + (chg_pct / 100.0)) if chg_pct != -100 else price))
             gap_pct = round(((open_p - prev_close) / prev_close * 100.0), 2) if prev_close > 0 else 0.0
 
+            # Métricas 1D (Bandas de Bollinger en gráfico Diario para medir espacio de expansión)
+            sma20_1d, bb_upper_1d, room_to_bb = get_daily_bollinger_metrics(sym, price)
+
             # Fuerza compradora y semáforo
             metrics = calculate_semaphore_and_buying_force(
                 price=price,
@@ -279,6 +330,8 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 plus_di_5m=live_1h.get("plus_di_5m", 25.0),
                 minus_di_5m=live_1h.get("minus_di_5m", 15.0),
                 open_ge_close=live_1h.get("open_ge_close_prev", True),
+                room_to_bb_upper_1d=room_to_bb,
+                sma20_1d=sma20_1d,
             )
 
             candidates.append({
@@ -301,6 +354,10 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "semaphore_color": metrics["semaphore_color"],
                 "semaphore_tip": metrics["semaphore_tip"],
                 "gap_pct": gap_pct,
+                "room_to_bb_upper_1d": room_to_bb,
+                "bb_upper_1d": bb_upper_1d,
+                "sma20_1d": sma20_1d,
+                "is_expansion_runner": (metrics["semaphore"] == "EXPANSION_RUNNER"),
                 # Vela 1H en Formación & SIPV + 5m
                 "is_ema3_1h_ascending": live_1h.get("is_ema3_1h_ascending", True),
                 "is_ema3_1h_descending": live_1h.get("is_ema3_1h_descending", False),
@@ -322,6 +379,8 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "badge_color": news_info.get("badge_color"),
                 "news_bonus": news_bonus,
                 "top_headline": news_info.get("top_headline", ""),
+                "top_headline_es": news_info.get("top_headline_es", news_info.get("top_headline", "")),
+                "catalyst_summary_es": news_info.get("catalyst_summary_es", ""),
                 "top_url": news_info.get("top_url", ""),
                 "articles_count": len(news_info.get("articles", [])),
                 "pool_type": "ALPHA_RUNNER",
