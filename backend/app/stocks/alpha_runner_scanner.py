@@ -292,6 +292,12 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             vol = int(item.get('regularMarketVolume') or item.get('dayvolume') or 0)
             avg_vol = int(item.get('averageDailyVolume3Month') or max(1, vol // 2))
             mcap = float(item.get('marketCap') or item.get('intradaymarketcap') or 0.0)
+
+            # Filtro estricto anti-microcap / anti-zombi (Caso JAGX / CCEL / POAS):
+            # Excluye cascarones < $15M o acciones con volumen histórico muerto sin respaldo corporativo
+            if mcap < 15_000_000 or (mcap < 50_000_000 and avg_vol < 300_000 and vol < 1_500_000):
+                continue
+
             high = float(item.get('regularMarketDayHigh') or price)
             low = float(item.get('regularMarketDayLow') or price)
             open_p = float(item.get('regularMarketOpen') or price)

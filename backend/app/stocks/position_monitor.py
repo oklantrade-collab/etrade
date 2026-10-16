@@ -470,6 +470,24 @@ class PositionMonitor:
                     await self._close_position(trade, current_price, "hot_pullback_exit")
                     return
 
+            # ── SALIDA INMEDIATA POR AGOTAMIENTO DE FUERZA COMPRADORA (ALPHA RUNNERS) ──
+            # Requerimiento: "cuando agote su fuerza compradora es salir inmediatamente"
+            if "ALPHA" in group or "RUNNER" in group or "FAST" in str(trade.get("rule_code", "")).upper():
+                try:
+                    from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+                    live_1h_data = get_live_1h_candle_and_sipv(ticker, current_price)
+                    
+                    ema3_drop = bool(live_1h_data.get("is_ema3_1h_descending", False))
+                    ema3_live = float(live_1h_data.get("ema3_1h_live") or 0.0)
+                    
+                    # Si la EMA3 de 1H gira a la baja y el precio perfora por debajo de la EMA3 en vivo:
+                    if ema3_drop and current_price < ema3_live and (pnl_pct >= 1.0 or (pnl_pct >= 0.0 and age_mins >= 8.0)):
+                        log_warning(MODULE, f"⚡ AGOTAMIENTO DE FUERZA COMPRADORA: {ticker} EMA3 1H descendente (${ema3_live:.2f}) con precio ${current_price:.2f}. Salida Inmediata asegurando +{pnl_pct:.2f}%.")
+                        await self._close_position(trade, current_price, "buying_force_exhaustion_exit")
+                        return
+                except Exception as e_bf_exit:
+                    log_debug(MODULE, f"Error evaluando agotamiento de fuerza compradora para {ticker}: {e_bf_exit}")
+
             # ── NUEVO: BLUE PROACTIVE EXIT (Salidas Rápidas 5m para APEX AZUL) ──
             rule_code_pos = str(trade.get("rule_code", "") or trade.get("strategy", "") or "")
             if rule_code_pos.startswith("BLUE_") and (age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5):

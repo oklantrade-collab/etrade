@@ -1454,7 +1454,31 @@ async def run_stocks_cycle(force=False):
             log_warning(MODULE, f"Scanner refresh skipped: {e}")
 
         # Get watchlist (populated by IB Scanner, limited to top 20)
-        tickers = await get_watchlist(config)
+        base_tickers = await get_watchlist(config)
+
+        # ── CAPA ALPHA RUNNERS EN VIVO: Inyectar líderes intradía calificados ──
+        # Permite capturar joyas intradía (como $IAM con aprobación FDA) generadas durante la sesión
+        # Excluye estrictamente micro-caps sin volumen o trampas de un día (como $JAGX, $CCEL)
+        live_runner_tickers = []
+        try:
+            from app.stocks.alpha_runner_scanner import scan_top_gainers_live
+            live_gainers = scan_top_gainers_live(limit=15)
+            for g in (live_gainers or []):
+                sym = g.get("ticker")
+                bf = float(g.get("buying_force_5m") or 0.0)
+                vol = int(g.get("volume") or 0)
+                mcap = float(g.get("market_cap") or 0.0)
+                # Filtro estricto: Volumen >= 1M, Market Cap >= $15M y Fuerza Compradora activa >= 65
+                if sym and vol >= 1_000_000 and mcap >= 15_000_000 and bf >= 65.0:
+                    live_runner_tickers.append(sym)
+
+            if live_runner_tickers:
+                log_info(MODULE, f"⚡ Inyectando {len(live_runner_tickers)} Alpha Runners calificados al ciclo de compras: {live_runner_tickers}")
+        except Exception as e_ar_inject:
+            log_warning(MODULE, f"Error inyectando Alpha Runners en vivo al ciclo: {e_ar_inject}")
+
+        # Priorizar Alpha Runners al inicio de la lista de evaluación
+        tickers = list(dict.fromkeys(live_runner_tickers + (base_tickers or [])))
         if not tickers:
             log_warning(MODULE, "Empty watchlist — nothing to process")
             return
