@@ -261,6 +261,55 @@ class StocksRuleEngine:
             if is_ema3_above_ema9 is False:
                 failures.append(f"COMPRA BLOQUEADA (EMA3 <= EMA9 en 1H): EMA3={float(ema3_1h_live or 0):.2f} <= EMA9={float(ema9_1h or 0):.2f}. Requiere cruce y confirmación alcista de 1H.")
 
+        # ── CHECK 0.15: ADUANA LONG IMPULSE GUARD (ADX >= 18 & +DI > -DI & Anti-Falling Knife) ──
+        if direction == "buy":
+            adx_val = context.get("adx_5m")
+            plus_di_val = context.get("plus_di_5m")
+            minus_di_val = context.get("minus_di_5m")
+            is_red_1h_val = context.get("is_red_candle_1h")
+            is_last_green_val = context.get("is_last_candle_green")
+            lower_wick_val = context.get("lower_wick_ratio")
+
+            if adx_val is None or plus_di_val is None or minus_di_val is None:
+                ticker = context.get("ticker")
+                if ticker:
+                    try:
+                        from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+                        l1h = get_live_1h_candle_and_sipv(ticker, current_price)
+                        adx_val = float(l1h.get("adx_5m", 25.0))
+                        plus_di_val = float(l1h.get("plus_di_5m", 25.0))
+                        minus_di_val = float(l1h.get("minus_di_5m", 15.0))
+                        if is_red_1h_val is None:
+                            is_red_1h_val = l1h.get("is_red_candle_1h", False)
+                        if is_last_green_val is None:
+                            is_last_green_val = l1h.get("is_last_candle_green", True)
+                        if lower_wick_val is None:
+                            lower_wick_val = l1h.get("lower_wick_ratio", 0.0)
+                    except Exception:
+                        adx_val, plus_di_val, minus_di_val = 25.0, 25.0, 15.0
+
+            # 1. Bloqueo si vendedores dominan (-DI > +DI)
+            if minus_di_val is not None and plus_di_val is not None:
+                if float(minus_di_val) > float(plus_di_val):
+                    failures.append(
+                        f"COMPRA BLOQUEADA (Aduana -DI > +DI): Fuerza vendedora dominante "
+                        f"(-DI={float(minus_di_val):.1f} > +DI={float(plus_di_val):.1f}). Sin impulso positivo."
+                    )
+
+            # 2. Bloqueo si ADX es menor a 18 (mercado sin fuerza/aletargado)
+            if adx_val is not None and float(adx_val) < 18.0:
+                failures.append(
+                    f"COMPRA BLOQUEADA (Aduana ADX Débil): ADX={float(adx_val):.1f} < 18.0. "
+                    f"Falta momentum institucional y potencial de crecimiento."
+                )
+
+            # 3. Bloqueo de Cuchillo Cayendo (1H Roja + 5m Roja sin absorción en soporte)
+            if is_red_1h_val is True and is_last_green_val is False and float(lower_wick_val or 0.0) < 0.30:
+                failures.append(
+                    f"COMPRA BLOQUEADA (Aduana Falling Knife): Vela 1H y vela 5m en caída roja simultánea sin absorción "
+                    f"(Mecha inf {float(lower_wick_val or 0)*100:.0f}% < 30%). Prohibido comprar sin rebote confirmado."
+                )
+
         # ── CHECK 0.2: Gap Exhaustion Shield (Anti-LQDA / Climax Gap Lock > 25%) ──
         if direction == "buy":
             gap_pct = float(context.get("gap_pct") or 0.0)
@@ -911,7 +960,7 @@ class StocksRuleEngine:
                 smart_limit_price = round(ema20_15m, 2)
 
         # ── CHECK 12: HOT_DIP_BUY / PRO_DIP_BUY (Macro Trend / Daily Dip) ──
-        if normalized_code == "HOT_DIP_BUY" or normalized_code == "PRO_DIP_BUY":
+        if normalized_code in ("HOT_DIP", "PRO_DIP") or rule_code in ("HOT_DIP_BUY", "PRO_DIP_BUY"):
             ema3_1d   = float(context.get("ema_3_1d") or 0)
             ema9_1d   = float(context.get("ema_9_1d") or 0)
             ema20_1d  = float(context.get("ema_20_1d") or 0)
@@ -960,9 +1009,23 @@ class StocksRuleEngine:
                     failures.append(
                         f"DIP Diario no cumplido: Tendencia 1D Alcista + Precio Min ({low_15m:.2f}) tocando EMA20_1D ({ema20_1d:.2f})."
                     )
+                else:
+                    # 4. Confirmación de rebote en EMA20: La acción no debe estar cayendo a plomo en vela roja sin mecha
+                    open_15m = float(context.get("open") or close_price)
+                    is_green_15m = (close_price >= open_15m)
+                    rng_15m = max(1e-4, high_price - low_15m)
+                    wick_inf_15m = (close_price - low_15m) / rng_15m
+
+                    # Exigir vela verde O absorción inferior >= 30% en soporte
+                    has_rebound_support = is_green_15m or (wick_inf_15m >= 0.30)
+                    if not has_rebound_support:
+                        failures.append(
+                            f"DIP_BUY Rechazado: Rebote no confirmado en EMA20 1D "
+                            f"(Vela 15m roja en mínimos, mecha inf={wick_inf_15m*100:.0f}% < 30%). Esperar giro alcista."
+                        )
 
         # ── CHECK 13: BLOQUEO PRO_CANDLE_SELL EN PÉRDIDA ──
-        if normalized_code == "PRO_CANDLE_SELL":
+        if rule_code == "PRO_CANDLE_SELL" or (normalized_code == "PRO_CANDLE" and direction == "sell"):
             pnl_pct = context.get("unrealized_pnl_pct")
             if pnl_pct is not None and float(pnl_pct) <= 0:
                 failures.append(f"PRO_CANDLE_SELL Bloqueado: Posición en pérdida ({float(pnl_pct):.2f}% <= 0)")

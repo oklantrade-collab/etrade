@@ -180,29 +180,67 @@ def execute_market_order(
                     "success": False,
                     "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
                 }
+
+            # ── VALIDACIÓN 0.15: GUARDIA ADUANA DE IMPULSO COMPRADOR (ADX >= 18 & +DI > -DI & Anti-Falling Knife) ──
+            minus_di = float(live_1h.get("minus_di_5m") or 15.0)
+            plus_di = float(live_1h.get("plus_di_5m") or 25.0)
+            adx_val = float(live_1h.get("adx_5m") or 25.0)
+            is_red_1h = bool(live_1h.get("is_red_candle_1h", False))
+            is_last_green = bool(live_1h.get("is_last_candle_green", True))
+            lower_wick = float(live_1h.get("lower_wick_ratio") or 0.0)
+
+            # 1. Bloqueo si vendedores dominan (-DI > +DI)
+            if minus_di > plus_di:
+                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Fuerza vendedora dominante (-DI {minus_di:.1f} > +DI {plus_di:.1f}). Sin impulso comprador.")
+                return {
+                    "success": False,
+                    "reason": f"Aduana Entrada Rechazada: Fuerza vendedora dominante (-DI {minus_di:.1f} > +DI {plus_di:.1f}). No hay impulso positivo para LONG."
+                }
+
+            # 2. Bloqueo si ADX es menor a 18 (mercado sin fuerza/aletargado)
+            if adx_val < 18.0:
+                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: ADX {adx_val:.1f} < 18.0. Mercado sin fuerza de tendencia.")
+                return {
+                    "success": False,
+                    "reason": f"Aduana Entrada Rechazada: ADX ({adx_val:.1f} < 18.0) insuficiente. Se exigen acciones con fuerza y potencial de crecimiento."
+                }
+
+            # 3. Bloqueo de Cuchillo Cayendo (1H Roja + 5m Roja sin absorción en soporte)
+            if is_red_1h and not is_last_green and lower_wick < 0.30:
+                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Vela 1H y 5m rojas simultáneas sin absorción (Mecha inf {lower_wick*100:.0f}% < 30%).")
+                return {
+                    "success": False,
+                    "reason": f"Aduana Entrada Rechazada: Caída roja continua en 1H y 5m sin absorción ni rebote positivo."
+                }
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
 
-        # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15 MINUTOS) ANTI-CHURNING ──
-        # Evita re-abrir la misma posición si cerró hace menos de 15 minutos
+        # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15M NORMAL / 60M SI HUBO PÉRDIDA PREVIA) ──
+        # Evita re-abrir la misma posición si cerró recientemente (y 60 min si fue pérdida para erradicar whipsaws)
         try:
             now_u = datetime.now(timezone.utc)
             last_tj = sb.table('trades_journal') \
-                .select('exit_date, pnl_pct, exit_reason') \
+                .select('exit_date, pnl_pct, pnl_usd, result') \
                 .eq('ticker', ticker) \
                 .order('exit_date', desc=True) \
                 .limit(1) \
                 .execute()
             if last_tj.data:
                 ex_dt_str = last_tj.data[0].get('exit_date')
+                last_pnl_pct = float(last_tj.data[0].get('pnl_pct') or 0.0)
+                last_result = str(last_tj.data[0].get('result') or '').lower()
+                is_prev_loss = (last_pnl_pct < 0 or last_result == 'loss')
+                required_cooldown = 60.0 if is_prev_loss else 15.0
+
                 if ex_dt_str:
                     ex_dt = datetime.fromisoformat(str(ex_dt_str).replace('Z', '+00:00'))
                     mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
-                    if mins_since_exit < 15.0 and not context.get('force_buy', False):
-                        log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< 15 min). Re-apertura bloqueada.")
+                    if mins_since_exit < required_cooldown and not context.get('force_buy', False):
+                        loss_tag = f" tras PÉRDIDA previa ({last_pnl_pct:+.2f}%)" if is_prev_loss else ""
+                        log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< {required_cooldown:.0f} min){loss_tag}. Re-apertura bloqueada.")
                         return {
                             "success": False,
-                            "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: 15 minutos."
+                            "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: {required_cooldown:.0f} minutos{loss_tag}."
                         }
         except Exception as e_cd:
             log_debug(MODULE, f"Error validando cooldown de salida para {ticker}: {e_cd}")
@@ -434,8 +472,69 @@ def place_limit_order(
                     "success": False,
                     "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
                 }
+
+            # ── VALIDACIÓN 0.15: GUARDIA ADUANA DE IMPULSO COMPRADOR (ADX >= 18 & +DI > -DI & Anti-Falling Knife) ──
+            minus_di = float(live_1h.get("minus_di_5m") or 15.0)
+            plus_di = float(live_1h.get("plus_di_5m") or 25.0)
+            adx_val = float(live_1h.get("adx_5m") or 25.0)
+            is_red_1h = bool(live_1h.get("is_red_candle_1h", False))
+            is_last_green = bool(live_1h.get("is_last_candle_green", True))
+            lower_wick = float(live_1h.get("lower_wick_ratio") or 0.0)
+
+            # 1. Bloqueo si vendedores dominan (-DI > +DI)
+            if minus_di > plus_di:
+                log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Fuerza vendedora dominante (-DI {minus_di:.1f} > +DI {plus_di:.1f}). Sin impulso comprador.")
+                return {
+                    "success": False,
+                    "reason": f"Aduana Entrada Rechazada: Fuerza vendedora dominante (-DI {minus_di:.1f} > +DI {plus_di:.1f}). No hay impulso positivo para LONG."
+                }
+
+            # 2. Bloqueo si ADX es menor a 18 (mercado sin fuerza/aletargado)
+            if adx_val < 18.0:
+                log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: ADX {adx_val:.1f} < 18.0. Mercado sin fuerza de tendencia.")
+                return {
+                    "success": False,
+                    "reason": f"Aduana Entrada Rechazada: ADX ({adx_val:.1f} < 18.0) insuficiente. Se exigen acciones con fuerza y potencial de crecimiento."
+                }
+
+            # 3. Bloqueo de Cuchillo Cayendo (1H Roja + 5m Roja sin absorción en soporte)
+            if is_red_1h and not is_last_green and lower_wick < 0.30:
+                log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Vela 1H y 5m rojas simultáneas sin absorción (Mecha inf {lower_wick*100:.0f}% < 30%).")
+                return {
+                    "success": False,
+                    "reason": f"Aduana Entrada Rechazada: Caída roja continua en 1H y 5m sin absorción ni rebote positivo."
+                }
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
+
+        # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15M NORMAL / 60M SI HUBO PÉRDIDA PREVIA) ──
+        try:
+            now_u = datetime.now(timezone.utc)
+            last_tj = sb.table('trades_journal') \
+                .select('exit_date, pnl_pct, pnl_usd, result') \
+                .eq('ticker', ticker) \
+                .order('exit_date', desc=True) \
+                .limit(1) \
+                .execute()
+            if last_tj.data:
+                ex_dt_str = last_tj.data[0].get('exit_date')
+                last_pnl_pct = float(last_tj.data[0].get('pnl_pct') or 0.0)
+                last_result = str(last_tj.data[0].get('result') or '').lower()
+                is_prev_loss = (last_pnl_pct < 0 or last_result == 'loss')
+                required_cooldown = 60.0 if is_prev_loss else 15.0
+
+                if ex_dt_str:
+                    ex_dt = datetime.fromisoformat(str(ex_dt_str).replace('Z', '+00:00'))
+                    mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
+                    if mins_since_exit < required_cooldown and not context.get('force_buy', False):
+                        loss_tag = f" tras PÉRDIDA previa ({last_pnl_pct:+.2f}%)" if is_prev_loss else ""
+                        log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< {required_cooldown:.0f} min){loss_tag}. Re-apertura bloqueada.")
+                        return {
+                            "success": False,
+                            "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: {required_cooldown:.0f} minutos{loss_tag}."
+                        }
+        except Exception as e_cd:
+            log_debug(MODULE, f"Error validando cooldown de salida para {ticker}: {e_cd}")
 
         # ── VALIDACIÓN 0.3: BLOQUEO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA) ──
         gap_pct = float(context.get("gap_pct") or 0.0)

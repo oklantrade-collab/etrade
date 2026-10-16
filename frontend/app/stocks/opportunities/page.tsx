@@ -60,9 +60,9 @@ function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital
       }}>
         <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
             <h3 style={{ color: '#FFF', fontSize: '15px', fontWeight: 900, margin: 0, letterSpacing: '-0.5px' }}>
-              🎯 COLA DE ALTA PRIORIDAD APEX
+              🎯 COLA DE COMPRA DEL BOT (Rally & Fuerza Compradora)
             </h3>
-            <span style={{ fontSize: '10px', color: '#444', fontWeight: 800 }}>V5.0 ORCHESTRATOR</span>
+            <span style={{ fontSize: '10px', color: '#22C55E', fontWeight: 800 }}>MOMENTUM V5.5</span>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <span style={{
@@ -144,15 +144,17 @@ function PriorityQueuePanel({ queue, capital, summary }: { queue: any[], capital
 
                   <div style={{ flex: 1 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <span style={{ color: '#4FC3F7', fontSize: '11px', fontWeight: 900 }}>{apex4h.toFixed(0)}% APEX</span>
+                      <span style={{ color: '#38BDF8', fontSize: '11px', fontWeight: 900 }}>
+                        {item.buying_force_score ? `⚡ BF: ${item.buying_force_score}/100` : `${apex4h.toFixed(0)}% APEX`}
+                      </span>
                       <span style={{ color: retExp > 0 ? '#22C55E' : '#EF4444', fontSize: '11px', fontWeight: 800 }}>
                         {retExp > 0 ? '+' : ''}{retExp.toFixed(2)}%
                       </span>
                     </div>
                     <div style={{ height: '4px', background: 'rgba(255,255,255,0.05)', borderRadius: '2px' }}>
                       <div style={{
-                        width: `${Math.min(100, apex4h)}%`, height: '100%',
-                        background: apex4h >= 75 ? '#22C55E' : apex4h >= 60 ? '#38BDF8' : '#F59E0B',
+                        width: `${Math.min(100, item.buying_force_score || apex4h)}%`, height: '100%',
+                        background: (item.buying_force_score || apex4h) >= 75 ? '#22C55E' : (item.buying_force_score || apex4h) >= 50 ? '#38BDF8' : '#F59E0B',
                         borderRadius: '2px', transition: 'width 1s ease',
                       }} />
                     </div>
@@ -869,8 +871,11 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
 
       {/* 2. Ticker & Badges */}
       <div style={{ display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display:'flex', alignItems:'center', gap: '4px' }}>
+        <div style={{ display:'flex', alignItems:'center', gap: '4px', flexWrap: 'wrap' }}>
           <span style={{ fontWeight: 950, color: '#FFF', fontSize: '14px', letterSpacing: '-0.5px' }}>{opp.ticker}</span>
+          {opp.queue_rank && (
+            <span style={{ fontSize: '8px', background: 'rgba(56,189,248,0.2)', border: '1px solid #38BDF8', color: '#38BDF8', padding: '1px 5px', borderRadius: '4px', fontWeight: 950 }}>🎯 COLA #{opp.queue_rank}</span>
+          )}
           {opp.is_high_growth_opp && (
             <span style={{ fontSize: '7px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 3px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
           )}
@@ -993,7 +998,7 @@ export default function OpportunitiesIntelligence() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [selectedStock, setSelectedStock] = useState<any | null>(null)
-  const [activeTab, setActiveTab] = useState<'HOT' | 'ALPHA' | 'VALUE'>('ALPHA')
+  const [activeTab, setActiveTab] = useState<'QUEUE' | 'HOT' | 'ALPHA' | 'VALUE'>('QUEUE')
   const [newsStock, setNewsStock] = useState<any | null>(null)
   const [marketStatus, setMarketStatus] = useState({ is_open: false, status: 'CARGANDO...' })
   const [priorityQueue, setPriorityQueue] = useState<any[]>([])
@@ -1134,17 +1139,30 @@ export default function OpportunitiesIntelligence() {
     return merged;
   })();
 
-  const hotList = mergedOpportunities
+  // Añadir información de posición en la cola de compras a cada oportunidad
+  const opportunitiesWithQueue = mergedOpportunities.map(opp => {
+    const queueIdx = priorityQueue.findIndex((pq: any) => pq.ticker === opp.ticker);
+    return {
+      ...opp,
+      queue_rank: queueIdx !== -1 ? queueIdx + 1 : null
+    };
+  });
+
+  const queueList = opportunitiesWithQueue
+    .filter(o => o.queue_rank !== null || o._from_priority_queue)
+    .sort((a, b) => (a.queue_rank || 999) - (b.queue_rank || 999));
+
+  const hotList = opportunitiesWithQueue
     .filter(o => o._from_priority_queue || (o.price <= settings.hotMaxPrice && o.volume >= settings.minVolume))
     .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0))
     .slice(0, 20);
 
-  const alphaList = mergedOpportunities
+  const alphaList = opportunitiesWithQueue
     .filter(o => o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0))
     .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0));
 
-  const valueList = mergedOpportunities.filter(o => o.is_pro_member);
-  const displayList = activeTab === 'HOT' ? hotList : (activeTab === 'ALPHA' ? alphaList : valueList);
+  const valueList = opportunitiesWithQueue.filter(o => o.is_pro_member);
+  const displayList = activeTab === 'QUEUE' ? queueList : (activeTab === 'HOT' ? hotList : (activeTab === 'ALPHA' ? alphaList : valueList));
 
   return (
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
@@ -1167,6 +1185,7 @@ export default function OpportunitiesIntelligence() {
         <div style={{ display: 'flex', gap: '12px' }}>
             <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>⚙️ FILTROS</button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', alignItems: 'center' }}>
+                <TabButton label="🎯 En Cola APEX" active={activeTab === 'QUEUE'} onClick={() => setActiveTab('QUEUE')} count={queueList.length}/>
                 <TabButton label="🔥 Hot by Volume (Top 20)" active={activeTab === 'HOT'} onClick={() => setActiveTab('HOT')} count={hotList.length}/>
                 <TabButton label="🚀 Alpha Runners (Top Gainers)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
                 <TabButton label="💎 Inversión Pro" active={activeTab === 'VALUE'} onClick={() => setActiveTab('VALUE')} count={valueList.length}/>

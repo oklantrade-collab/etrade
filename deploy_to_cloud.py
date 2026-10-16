@@ -193,6 +193,8 @@ files_to_sync = [
     "tests/test_aduana_stocks_exit.py",
     "tests/test_adr_volatility_gate.py",
     "tests/test_maturation_and_multi_tf_exit.py",
+    "tests/test_aduana_long_impulse_guard.py",
+    "tests/test_stocks_pullback_climax_aduana.py",
     "scripts/update_hot_rules_volatility.py",
     "app/tests/test_qshr_booster.py",
     "app/tests/test_qshr_v5.py",

@@ -98,49 +98,52 @@ def calculate_composite_rank(
     buying_force_score: float = None,
     is_high_priority_growth: bool = False,
     is_intraday_alpha: bool = False,
+    change_pct: float = None,
+    has_news: bool = False,
+    is_ema3_1h_ascending: bool = True,
 ) -> float:
     """
-    Calcula el Composite Rank — métrica única
-    para ordenar la cola de Alta Prioridad.
-    Si Trade Score y ETV están disponibles (APEX v2.0), usa:
-       Rank = Trade_Score × 0.70 + ETV_normalized × 0.30
-    Si califica con alto crecimiento / Buying Force / Intraday Alpha, recibe boost de alta prioridad.
+    Calcula el Composite Rank — métrica única para ordenar la cola de Alta Prioridad.
+    Prioriza la POTENCIALIDAD DE GANANCIA y RALLY DEL DÍA:
+      1. Fuerza Compradora 5m (Buying Force): 45%
+      2. Volumen Relativo (RVOL Institucional): 25%
+      3. Potencial de Expansión / Catalizador / Top Gainer: 20%
+      4. Alineación de Tendencia Horaria (EMA3 > EMA9 en 1H): 10%
+    APEX Score actúa como filtro de salud técnica (penaliza si < 25%).
     """
-    if trade_score is not None and etv is not None:
-        # Normalizar ETV a 0-100 (ETV típico: -5% a +15%)
-        etv_norm = min(100, max(0, (etv + 5) / 20 * 100))
-        rank = trade_score * 0.70 + etv_norm * 0.30
-    else:
-        w_4h   = 0.30  # Ajustado de 0.40 para dar espacio a RVOL
-        w_1d   = 0.25  # Ajustado de 0.30
-        w_gain = 0.15  # Ajustado de 0.20
-        w_conf = 0.05  # Ajustado de 0.10
-        w_rvol = 0.25  # Nuevo peso RVOL (25%)
+    bf_val = float(buying_force_score if buying_force_score is not None else 50.0)
 
-        gain_norm = min(100, max(0, return_pct * 10))
-        rvol_norm = min(100, max(0, rvol * 20)) # 5x = 100 pts
+    # 1. Fuerza Compradora 5m (0 a 100) -> 45%
+    score_bf = max(0.0, min(100.0, bf_val)) * 0.45
 
-        conf_score = {
-            'high':   90,
-            'medium': 60,
-            'low':    30,
-        }.get(confidence, 50)
+    # 2. RVOL Institucional (Normalizado: 4.0x = 100 pts) -> 25%
+    rvol_float = float(rvol or 1.0)
+    score_rvol = min(100.0, max(0.0, rvol_float * 25.0)) * 0.25
 
-        rank = (
-            apex_4h    * w_4h  +
-            apex_1d    * w_1d  +
-            gain_norm  * w_gain +
-            conf_score * w_conf +
-            rvol_norm  * w_rvol
-        )
+    # 3. Potencial de Ganancia y Catalizadores del Día -> 20%
+    chg = float(change_pct if change_pct is not None else (return_pct or 0.0))
+    # Una subida de +20% en el día equivale a 80 pts base
+    gain_score = min(80.0, max(0.0, chg * 4.0))
+    if has_news or is_intraday_alpha:
+        gain_score += 20.0
+    score_potential = min(100.0, gain_score) * 0.20
 
-    # ── BOOST DE ALTA PRIORIDAD PARA ALTO CRECIMIENTO & BUYING FORCE & INTRADAY ALPHA ──
+    # 4. Tendencia Horaria Favorable -> 10%
+    score_trend = (100.0 if is_ema3_1h_ascending else 20.0) * 0.10
+
+    rank = score_bf + score_rvol + score_potential + score_trend
+
+    # Filtro de seguridad: penalizar si el gráfico macro está roto o en caída libre (< 25 APEX)
+    if apex_4h < 25.0:
+        rank = max(0.0, rank - 20.0)
+
+    # ── BOOSTS DE MÁXIMA PRIORIDAD PARA RALLIES ACTIVOS ──
     if is_intraday_alpha:
         rank = max(rank, 98.5)
-    elif is_high_priority_growth or (buying_force_score is not None and buying_force_score >= 85):
-        rank = max(rank, 92.0) + 6.0
-    elif (buying_force_score is not None and buying_force_score >= 70):
-        rank = max(rank, 85.0) + 5.0
+    elif is_high_priority_growth or bf_val >= 85.0:
+        rank = max(rank, 95.0)
+    elif bf_val >= 70.0:
+        rank = max(rank, 88.0)
 
     return round(min(99.0, max(0.0, rank)), 2)
 
@@ -533,6 +536,18 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
     else:
         log_info(MODULE, f"Watchlist para cola obtenida de hoy: {len(tickers_set)} tickers")
 
+    # 3. Inyectar Top Gainers y Alpha Runners en tiempo real (Rallies del día)
+    try:
+        from app.stocks.alpha_runner_scanner import scan_top_gainers_live
+        live_gainers = scan_top_gainers_live(limit=25)
+        for g in (live_gainers or []):
+            tg = g.get('ticker')
+            if tg and tg not in tickers_set:
+                tickers_set.add(tg)
+                log_info(MODULE, f"🚀 Inyectando Top Gainer en vivo a la cola: {tg} ({g.get('change_pct',0):+.1f}%, BF={g.get('buying_force_5m',0)})")
+    except Exception as e_live:
+        log_warning(MODULE, f"Bypass inyección live gainers a cola: {e_live}")
+
     tickers = list(tickers_set)
 
     # Obtener posiciones ya abiertas
@@ -717,14 +732,15 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             # Verificar señales de reglas
             rule_signal = check_active_rules(ticker, snap, supabase)
 
-            # Calcular Composite Rank
-            rank = calculate_composite_rank(
-                apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
-                trade_score=trade_s, etv=etv_val
-            )
+            # Criterios e indicadores de fuerza compradora y momentum del día
+            bf_score = float(snap.get('buying_force_score') or snap.get('buying_force_5m') or 0.0)
+            is_trap = bool(snap.get('is_trap', False))
+            is_intraday_alpha = bool(snap.get('is_intraday_alpha', False)) and (not is_trap)
+            change_p_val = float(snap.get('change_pct') or snap.get('gap_pct') or 0.0)
+            has_news_val = bool(snap.get('has_news', False))
+            is_ema3_asc = bool(snap.get('is_ema3_1h_ascending', True))
 
             # ── REGLA 4: Confirmación de Volumen (15m Spike) ──
-            # Se ha relajado la regla de volumen estricto por petición del usuario
             vol_spike_ok = True
 
             # ── GATILLO MACRO BONUS (15m) ──
@@ -749,11 +765,6 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 except Exception as e:
                     pass
 
-            # Criterios de entrada a la cola de alta prioridad
-            bf_score = float(snap.get('buying_force_score') or 0)
-            is_trap = bool(snap.get('is_trap', False))
-            is_intraday_alpha = bool(snap.get('is_intraday_alpha', False)) and (not is_trap)
-
             # Sección B: Gatillos de Compra/Recompra (3a, 4a, 4b, 4c, 4d)
             pullback_triggered = bool(snap.get('pullback_triggered', False)) and (not is_trap)
             pullback_type = str(snap.get('pullback_type') or '')
@@ -763,7 +774,6 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 pullback_triggered = False
 
             enters_by_pullback = pullback_triggered and (not overbought['blocked'] or 'LOWER' in pullback_type.upper() or '3A' in pullback_type.upper() or '4C' in pullback_type.upper())
-
             is_high_growth = bool(snap.get('is_high_growth_opp', False)) or (bf_score >= 70 and not overbought['blocked'])
             enters_by_growth = is_high_growth and bool(snap.get('entry_route_1h'))
             enters_by_alpha = is_intraday_alpha and (not overbought['blocked'])
@@ -776,6 +786,18 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 ticker=ticker, df_5m=df_5m, df_1d=df_daily, snap=snap
             )
             enters_by_breakout = breakout_5m.get('triggered', False)
+
+            # Calcular Composite Rank centrado en Fuerza Compradora y Potencial de Ganancia
+            rank = calculate_composite_rank(
+                apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
+                trade_score=trade_s, etv=etv_val,
+                buying_force_score=bf_score,
+                is_high_priority_growth=enters_by_growth,
+                is_intraday_alpha=enters_by_alpha,
+                change_pct=change_p_val,
+                has_news=has_news_val,
+                is_ema3_1h_ascending=is_ema3_asc,
+            )
 
             if enters_by_pullback:
                 log_info(MODULE, f'🎯 {ticker}: Gatillo Sección B [{pullback_type}] — {snap.get("pullback_reason", "")}')
@@ -791,16 +813,13 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 
             # Recalcular rank con boost si es pullback Sección B, intraday alpha o alto crecimiento
             if enters_by_pullback:
-                rank = 98.8
+                rank = max(rank, 98.8)
             elif enters_by_alpha:
-                rank = 98.5
+                rank = max(rank, 98.5)
+            elif enters_by_breakout:
+                rank = max(rank, 98.0)
             elif enters_by_growth:
-                rank = calculate_composite_rank(
-                    apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
-                    trade_score=trade_s, etv=etv_val,
-                    buying_force_score=bf_score,
-                    is_high_priority_growth=True
-                )
+                rank = max(rank, 95.0)
 
             entry_reason = 'apex_auto'
             if enters_by_pullback:
@@ -853,15 +872,13 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             log_warning(MODULE, f'{ticker}: {e}')
             continue
 
-    # Ordenar la cola (Pullback Sección B, Alto Crecimiento 1H y Breakout tienen máxima prioridad)
+    # Ordenar la cola (Prioriza: 1. No sobrecompradas, 2. Señal activa, 3. Alta Fuerza Compradora BF >= 70, 4. Composite Rank descendente)
     def sort_key(c):
-        is_pb          = c.get('is_pullback_b', False)
-        is_growth      = c.get('is_high_growth_opp', False)
-        is_breakout    = c.get('is_breakout_5m', False)
-        has_rule       = c['has_rule_signal']
-        not_overbought = not c['is_overbought']
-        rank           = c['composite_rank']
-        return (is_pb and not_overbought, is_growth and not_overbought, is_breakout, has_rule and not_overbought, not_overbought, rank)
+        has_signal     = bool(c.get('has_rule_signal') or c.get('is_pullback_b') or c.get('is_breakout_5m'))
+        not_overbought = not bool(c.get('is_overbought'))
+        bf             = float(c.get('buying_force_score') or 0.0)
+        rank           = float(c.get('composite_rank') or 0.0)
+        return (not_overbought, has_signal, bf >= 70.0, rank)
 
     queue_candidates.sort(key=sort_key, reverse=True)
 
