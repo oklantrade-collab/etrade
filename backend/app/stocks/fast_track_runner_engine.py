@@ -142,24 +142,37 @@ def evaluate_fast_track_entry(
             res['reason'] = f"Gap {gap_pct:.1f}% insuficiente para Super-Runner (mínimo +10.0%)"
             return res
 
-        # Si el gap es extremo (> +50%), exigir ORB-5m (2da vela rompe High de 1ra vela)
-        if gap_pct > 50.0:
-            if len(df_5m) >= 2:
-                prev_h = float(h5.iloc[-2])
-                if cur_c <= prev_h:
-                    res['reason'] = f"Gap parabólico ({gap_pct:.1f}% > 50%): Esperando confirmación ORB-5m (Close ${cur_c:.2f} <= High previo ${prev_h:.2f})"
-                    return res
-            else:
-                res['reason'] = f"Gap parabólico ({gap_pct:.1f}% > 50%): No comprar a ciegas en 1ra vela; esperar 2da vela"
-                return res
-
         # 2. Filtro de Volumen y Combustible Inicial
         vol_ma = float(v5.rolling(10, min_periods=2).mean().iloc[-1]) if len(v5) >= 2 else cur_v
         rvol_5m = (cur_v / vol_ma) if vol_ma > 0 else 1.0
 
-        has_massive_vol = (cur_v >= 500_000) or (rvol_5m >= 2.5)
+        first_v = float(v5.iloc[0])
+        first_c = float(c5.iloc[0])
+        first_o = float(o5.iloc[0])
+        first_candle_tsunami = (first_v >= 1_000_000) or (first_v >= 500_000 and first_c >= first_o)
+
+        # Si el gap es extremo (> +50%):
+        # A. Si la 1ra vela acumuló un Tsunami Institucional (>= 1M sh) o la 2da vela abre con gap sobre la 1ra (Open >= Close_1),
+        #    se autoriza la compra inmediata en el OPEN de la 2da vela (08:35 AM) sin esperar su cierre.
+        # B. En caso contrario, exigir confirmación ORB clásica (2da vela rompe High previo).
+        if gap_pct > 50.0:
+            if len(df_5m) >= 2:
+                prev_h = float(h5.iloc[-2])
+                second_candle_open_gap = (cur_o >= float(c5.iloc[-2]) * 0.998)
+                if first_candle_tsunami and (cur_c >= float(c5.iloc[-2]) * 0.98 or second_candle_open_gap):
+                    # Tsunami de volumen confirmado al Open: Compra autorizada inmediatamente
+                    pass
+                elif cur_c <= prev_h:
+                    res['reason'] = f"Gap parabólico ({gap_pct:.1f}% > 50%): Esperando confirmación ORB-5m (Close ${cur_c:.2f} <= High previo ${prev_h:.2f})"
+                    return res
+            else:
+                if not (first_candle_tsunami and cur_c >= cur_o):
+                    res['reason'] = f"Gap parabólico ({gap_pct:.1f}% > 50%): Esperar 2da vela o volumen tsunami >= 1M"
+                    return res
+
+        has_massive_vol = (cur_v >= 250_000) or (rvol_5m >= 2.0) or first_candle_tsunami or (cur_v * cur_c >= 1_000_000)
         if not has_massive_vol:
-            res['reason'] = f"Volumen 5m insuficiente ({cur_v:,.0f} sh, RVOL={rvol_5m:.1f}x < 2.5x)"
+            res['reason'] = f"Volumen 5m insuficiente ({cur_v:,.0f} sh, RVOL={rvol_5m:.1f}x < 2.0x)"
             return res
 
         # 3. Tendencia 1H / 15m (ADX y EMAs)
@@ -300,48 +313,99 @@ def evaluate_fast_track_exits(
                 return res
 
             # -----------------------------------------------------------------
-            # 2. VELA DE CLÍMAX EN 15m: MECHA SUPERIOR >= 10% FUERA DE BOLLINGER
+            # SALIDA 3 (EXTREMO PARABÓLICO): RSI_15m >= 85 -> CIERRE TOTAL 100%
             # -----------------------------------------------------------------
-            if not partial_1_done and current_shares >= 2:
-                # Bollinger Bands 15m
-                sma20_15 = float(c15.rolling(20, min_periods=5).mean().iloc[-1])
-                std20_15 = float(c15.rolling(20, min_periods=5).std().fillna(0).iloc[-1])
-                bb_up_15 = sma20_15 + 2.0 * std20_15
+            # Si el RSI supera los 85, es un agotamiento comprador extremo (Blow-Off Top).
+            # Se cierra el 100% incondicionalmente para amarrar la ganancia en la cima.
+            from ta.momentum import RSIIndicator
+            rsi_15m = float(RSIIndicator(c15, window=14).rsi().iloc[-1]) if len(c15) >= 14 else 50.0
 
-                cur_h15 = max(float(h15.iloc[-1]), current_price)
-                cur_l15 = min(float(l15.iloc[-1]), current_price)
-                cur_o15 = float(o15.iloc[-1])
-                cur_c15 = current_price
-                cur_range15 = max(1e-6, cur_h15 - cur_l15)
+            if rsi_15m >= 85.0 and gain_pct >= 6.0:
+                res.update({
+                    'should_exit': True,
+                    'action': 'FULL_EXIT',
+                    'shares_to_sell': current_shares,
+                    'pct_to_sell': 100,
+                    'rule_code': 'FT_CLIMAX_EXTREME_RSI85',
+                    'reason': (
+                        f"🚀 SALIDA 3 - CLÍMAX EXTREMO: RSI 15m ({rsi_15m:.1f} >= 85.0). "
+                        f"Agotamiento comprador máximo (Blow-off Top). Cierre TOTAL 100% ({current_shares} sh @ ${current_price:.2f}, +{gain_pct:.1f}%)."
+                    )
+                })
+                return res
 
-                # Comparar tamaño con las 9 velas anteriores de 15m
-                prev_9_ranges = (h15.iloc[-10:-1] - l15.iloc[-10:-1]).values if len(h15) >= 10 else []
-                is_largest_range_9 = (len(prev_9_ranges) > 0 and cur_range15 > np.max(prev_9_ranges))
+            # Bollinger Bands 15m
+            sma20_15 = float(c15.rolling(20, min_periods=5).mean().iloc[-1])
+            std20_15 = float(c15.rolling(20, min_periods=5).std().fillna(0).iloc[-1])
+            bb_up_15 = sma20_15 + 2.0 * std20_15
 
-                # Expansión del cuerpo: (Close - Open) > 1.20 * (Close_prev - Open_prev)
-                prev_body = abs(float(c15.iloc[-2]) - float(o15.iloc[-2])) if len(c15) >= 2 else 0.0
-                cur_body = cur_c15 - cur_o15
-                body_expanded = (cur_body > 1.20 * prev_body) or (cur_body > 0 and prev_body <= 0)
+            cur_h15 = max(float(h15.iloc[-1]), current_price)
+            cur_l15 = min(float(l15.iloc[-1]), current_price)
+            cur_o15 = float(o15.iloc[-1])
+            cur_c15 = current_price
+            cur_range15 = max(1e-6, cur_h15 - cur_l15)
 
-                # Mecha Superior de Rechazo: (High - Close) >= 10% del rango total de la vela
-                upper_wick = cur_h15 - max(cur_o15, cur_c15)
-                upper_wick_pct = upper_wick / cur_range15
+            fib_15m = calculate_fibonacci_bands(df_15m, current_price)
+            upper_6_15m = float(fib_15m.get('upper_6') or 0.0)
 
-                # Fuera de Bollinger o rozando la banda
-                outside_bb15 = (cur_c15 >= bb_up_15 * 0.995) or (cur_h15 >= bb_up_15)
+            outside_bb15 = (cur_c15 >= bb_up_15 * 0.995) or (cur_h15 >= bb_up_15)
+            touched_upper6 = (upper_6_15m > 0 and current_price >= upper_6_15m * 0.995)
 
-                if is_largest_range_9 and body_expanded and outside_bb15 and upper_wick_pct >= 0.10:
-                    shares_sell = max(1, int(current_shares * 0.40))
+            # Comparar tamaño con las 9 velas anteriores de 15m
+            prev_9_ranges = (h15.iloc[-10:-1] - l15.iloc[-10:-1]).values if len(h15) >= 10 else []
+            avg_9_rng = float(np.mean(prev_9_ranges)) if len(prev_9_ranges) > 0 else 0.0
+            is_2x_expansion = (avg_9_rng > 0 and cur_range15 >= 2.0 * avg_9_rng)
+
+            upper_wick = cur_h15 - max(cur_o15, cur_c15)
+            upper_wick_pct = upper_wick / cur_range15
+
+            # -----------------------------------------------------------------
+            # SALIDA 1: CLÍMAX INICIAL (RSI >= 80, UPPER_6 o BB_UPPER) -> VENTA PARCIAL 50%
+            # -----------------------------------------------------------------
+            is_climax_15m = (rsi_15m >= 80.0) or (is_2x_expansion and upper_wick_pct >= 0.10 and outside_bb15) or touched_upper6
+            if not partial_1_done and is_climax_15m and gain_pct >= 6.0 and current_shares >= 2:
+                shares_sell = max(1, int(current_shares * 0.50))
+                # Elevar Trailing Ratchet de inmediato al Low de la vela de clímax o EMA3
+                ema3_15_val = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                climax_ratchet_sl = max(cur_sl, round(min(cur_l15, ema3_15_val), 2))
+                res.update({
+                    'should_exit': True,
+                    'action': 'PARTIAL_SELL_50',
+                    'shares_to_sell': shares_sell,
+                    'pct_to_sell': 50,
+                    'rule_code': 'FT_PARTIAL_SELL_CLIMAX',
+                    'should_update_sl': True,
+                    'new_stop_loss': climax_ratchet_sl,
+                    'sl_reason': f"Trailing Ratchet Clímax elevado a ${climax_ratchet_sl:.2f} (Low Clímax / EMA3)",
+                    'reason': (
+                        f"🎯 SALIDA 1 - CLÍMAX INICIAL: RSI 15m={rsi_15m:.1f} (>=80), BB_Upper=${bb_up_15:.2f}. "
+                        f"Venta Parcial 50% ({shares_sell} sh @ ${current_price:.2f}, +{gain_pct:.1f}%). Stop del remanente ceñido a ${climax_ratchet_sl:.2f}."
+                    )
+                })
+                return res
+
+            # -----------------------------------------------------------------
+            # SALIDA 2: RANGE DECAY / CONTRACCIÓN DE RANGO POST-CLÍMAX -> CIERRE TOTAL REMANENTE
+            # -----------------------------------------------------------------
+            # Si ya se ejecutó la Venta Parcial 50%, vigilar la siguiente vela de 15m:
+            # Si el rango de la vela se contrae (< 75% de la vela de clímax) y muestra rechazo o rompe su Open/Low/EMA3
+            if partial_1_done and len(h15) >= 2:
+                prev_rng15 = max(1e-6, float(h15.iloc[-2]) - float(l15.iloc[-2]))
+                range_ratio = cur_range15 / prev_rng15
+                is_range_decay = (range_ratio < 0.75) and (cur_c15 <= cur_o15 * 0.998 or cur_l15 < float(l15.iloc[-2]) or upper_wick_pct >= 0.20)
+                ema3_15_now = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                lost_ema3 = (cur_c15 < ema3_15_now * 0.995)
+
+                if is_range_decay or lost_ema3:
                     res.update({
                         'should_exit': True,
-                        'action': 'PARTIAL_SELL_40',
-                        'shares_to_sell': shares_sell,
-                        'pct_to_sell': 40,
-                        'rule_code': 'FT_PARTIAL_SELL',
+                        'action': 'FULL_EXIT',
+                        'shares_to_sell': current_shares,
+                        'pct_to_sell': 100,
+                        'rule_code': 'FT_RANGE_DECAY_EXIT',
                         'reason': (
-                            f"Vela Clímax 15m detectada: Rango ${cur_range15:.2f} > 9 velas previas, "
-                            f"Mecha superior {upper_wick_pct*100:.1f}% >= 10%, Close ${cur_c15:.2f} > BB Upper ${bb_up_15:.2f}. "
-                            f"Cierre Parcial del 40% ({shares_sell} sh @ ${current_price:.2f}, +{gain_pct:.1f}%)."
+                            f"🛑 SALIDA 2 - CONTRACCIÓN DE RANGO (Range Decay): Rango 15m (${cur_range15:.2f}) < 75% del previo (${prev_rng15:.2f}) "
+                            f"con rechazo/pérdida de EMA3 (${ema3_15_now:.2f}). Cierre TOTAL remanente ({current_shares} sh @ ${current_price:.2f}, +{gain_pct:.1f}%)."
                         )
                     })
                     return res

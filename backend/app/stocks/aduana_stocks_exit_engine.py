@@ -863,25 +863,58 @@ def evaluate_alpha_runner_sharp_exit(
                 if cand_2c > entry_p and cand_2c < current_price:
                     res['suggested_tsl_2c'] = max(res['suggested_tsl_2c'], cand_2c)
 
-            # 2b-CLIMAX: Clímax Multivariable Refinado (Venta Parcial 50% al Clímax Parabólico):
-            # Condición A: RSI_15m >= 80.0 con ganancia >= 4.0% O
-            # Condición B: Vela 15m >= 2.0x promedio 9 velas, perfora BB_Upper, MECHA SUPERIOR >= 15% y ganancia >= 6.0%
+            # 2b-CLIMAX: Clímax Multivariable Refinado y Salidas Escalonadas (Salida 1, 2 y 3):
             try:
                 from ta.momentum import RSIIndicator
                 rsi_15m_val = float(RSIIndicator(c15, window=14).rsi().iloc[-1]) if len(c15) >= 14 else 50.0
                 prev_9_rngs = (h15.iloc[-10:-1] - l15.iloc[-10:-1]).values if len(h15) >= 10 else []
                 avg_9_rng = float(np.mean(prev_9_rngs)) if len(prev_9_rngs) > 0 else 0.0
 
+                # -------------------------------------------------------------
+                # SALIDA 3: CLÍMAX EXTREMO PARABÓLICO (RSI_15m >= 85.0) -> CIERRE TOTAL 100%
+                # -------------------------------------------------------------
+                if rsi_15m_val >= 85.0 and gain_pct >= 6.0:
+                    return {
+                        **res,
+                        'should_close': True,
+                        'action': 'CLOSE_TOTAL',
+                        'pct_to_close': 100,
+                        'shares_to_close': shares,
+                        'rule_code': 'ALPHA_EXIT_CLIMAX_EXTREME_RSI85',
+                        'reason': (
+                            f"🚀 SALIDA 3 - CLÍMAX EXTREMO: RSI 15m ({rsi_15m_val:.1f} >= 85.0). "
+                            f"Agotamiento comprador máximo (Blow-off Top). Cierre TOTAL 100% ({shares} sh @ ${current_price:.2f}, +{gain_pct:.1f}%)."
+                        )
+                    }
+
+                # Fibonacci bands 15m
+                from app.stocks.fast_track_runner_engine import calculate_fibonacci_bands
+                fib_15 = calculate_fibonacci_bands(df_15m, current_price)
+                upper_6_15 = float(fib_15.get('upper_6') or 0.0)
+                touched_upper6 = (upper_6_15 > 0 and current_price >= upper_6_15 * 0.995 and gain_pct >= 6.0)
+
                 is_2x_rejection_climax = (
                     avg_9_rng > 0 and rng_15m_cur >= 2.0 * avg_9_rng and
-                    wick_15m_pct >= 0.15 and gain_pct >= 6.0 and
-                    bb_up_15m_cur > 0 and high_15m_cur > bb_up_15m_cur
+                    wick_15m_pct >= 0.10 and gain_pct >= 6.0 and
+                    bb_up_15m_cur > 0 and high_15m_cur >= bb_up_15m_cur * 0.995
                 )
                 is_rsi_80_climax = (rsi_15m_val >= 80.0 and gain_pct >= 4.0)
 
-                if (is_2x_rejection_climax or is_rsi_80_climax) and not partial_done and shares >= 2:
+                # -------------------------------------------------------------
+                # SALIDA 1: CLÍMAX INICIAL (RSI >= 80, BB Upper o UPPER_6) -> VENTA PARCIAL 50%
+                # -------------------------------------------------------------
+                if (is_2x_rejection_climax or is_rsi_80_climax or touched_upper6) and not partial_done and shares >= 2:
                     shares_sell = max(1, int(shares * 0.50))
-                    climax_type = f"Vela 15m 2x (${rng_15m_cur:.2f} >= 2x ${avg_9_rng:.2f}) c/Mecha {wick_15m_pct*100:.1f}% >= 15%" if is_2x_rejection_climax else f"RSI_15m ({rsi_15m_val:.1f} >= 80)"
+                    climax_type = (
+                        f"RSI 15m ({rsi_15m_val:.1f} >= 80)" if is_rsi_80_climax else
+                        (f"Vela 15m 2x (${rng_15m_cur:.2f} >= 2x ${avg_9_rng:.2f}) c/Mecha {wick_15m_pct*100:.1f}%" if is_2x_rejection_climax else f"Fibonacci UPPER_6 (${upper_6_15:.2f})")
+                    )
+                    # Ceñir Trailing Ratchet de inmediato al Low de la vela de clímax o EMA3_15m
+                    ema3_15_val = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                    climax_ratchet_sl = max(res.get('suggested_tsl_2c', 0.0), round(min(low_15m_cur, ema3_15_val), 2))
+                    if climax_ratchet_sl > entry_p:
+                        res['suggested_tsl_2c'] = climax_ratchet_sl
+
                     return {
                         **res,
                         'should_close': True,
@@ -890,10 +923,35 @@ def evaluate_alpha_runner_sharp_exit(
                         'shares_to_close': shares_sell,
                         'rule_code': 'ALPHA_EXIT_CLIMAX_MULTIVARIABLE_TP50',
                         'reason': (
-                            f"Clímax Parabólico ({climax_type}): Ganancia actual +{gain_pct:.2f}%. "
-                            f"Venta parcial del 50% ({shares_sell} sh @ ${current_price:.2f}), remanente protegido con Trailing Stop."
+                            f"🎯 SALIDA 1 - CLÍMAX INICIAL ({climax_type}): Ganancia actual +{gain_pct:.2f}%. "
+                            f"Venta parcial del 50% ({shares_sell} sh @ ${current_price:.2f}), stop ceñido a ${climax_ratchet_sl:.2f} (Low Clímax/EMA3)."
                         )
                     }
+
+                # -------------------------------------------------------------
+                # SALIDA 2: RANGE DECAY / CONTRACCIÓN DE RANGO POST-CLÍMAX -> CIERRE TOTAL 100%
+                # -------------------------------------------------------------
+                if partial_done and len(h15) >= 2:
+                    prev_rng15 = max(1e-6, float(h15.iloc[-2]) - float(l15.iloc[-2]))
+                    range_ratio = rng_15m_cur / prev_rng15
+                    ema3_15_val = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                    lost_ema3 = (current_price < ema3_15_val * 0.995)
+                    is_range_decay = (range_ratio < 0.75) and (current_price <= open_15m_cur * 0.998 or low_15m_cur < float(l15.iloc[-2]) or wick_15m_pct >= 0.20)
+
+                    if is_range_decay or lost_ema3:
+                        decay_reason = f"Rango 15m (${rng_15m_cur:.2f}) < 75% del previo (${prev_rng15:.2f}) con rechazo" if is_range_decay else f"Pérdida de EMA3 15m (${ema3_15_val:.2f})"
+                        return {
+                            **res,
+                            'should_close': True,
+                            'action': 'CLOSE_TOTAL',
+                            'pct_to_close': 100,
+                            'shares_to_close': shares,
+                            'rule_code': 'ALPHA_EXIT_RANGE_DECAY_POST_CLIMAX',
+                            'reason': (
+                                f"🛑 SALIDA 2 - CONTRACCIÓN DE RANGO (Range Decay): {decay_reason}. "
+                                f"Cierre TOTAL remanente ({shares} sh @ ${current_price:.2f}, +{gain_pct:.1f}%)."
+                            )
+                        }
             except Exception as e_climax:
                 log_debug(MODULE, f"Error evaluando Clímax Multivariable 15m: {e_climax}")
 
