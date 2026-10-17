@@ -863,6 +863,40 @@ def evaluate_alpha_runner_sharp_exit(
                 if cand_2c > entry_p and cand_2c < current_price:
                     res['suggested_tsl_2c'] = max(res['suggested_tsl_2c'], cand_2c)
 
+            # 2b-CLIMAX: Clímax Multivariable Refinado (Venta Parcial 50% al Clímax Parabólico):
+            # Condición A: RSI_15m >= 80.0 con ganancia >= 4.0% O
+            # Condición B: Vela 15m >= 2.0x promedio 9 velas, perfora BB_Upper, MECHA SUPERIOR >= 15% y ganancia >= 6.0%
+            try:
+                from ta.momentum import RSIIndicator
+                rsi_15m_val = float(RSIIndicator(c15, window=14).rsi().iloc[-1]) if len(c15) >= 14 else 50.0
+                prev_9_rngs = (h15.iloc[-10:-1] - l15.iloc[-10:-1]).values if len(h15) >= 10 else []
+                avg_9_rng = float(np.mean(prev_9_rngs)) if len(prev_9_rngs) > 0 else 0.0
+
+                is_2x_rejection_climax = (
+                    avg_9_rng > 0 and rng_15m_cur >= 2.0 * avg_9_rng and
+                    wick_15m_pct >= 0.15 and gain_pct >= 6.0 and
+                    bb_up_15m_cur > 0 and high_15m_cur > bb_up_15m_cur
+                )
+                is_rsi_80_climax = (rsi_15m_val >= 80.0 and gain_pct >= 4.0)
+
+                if (is_2x_rejection_climax or is_rsi_80_climax) and not partial_done and shares >= 2:
+                    shares_sell = max(1, int(shares * 0.50))
+                    climax_type = f"Vela 15m 2x (${rng_15m_cur:.2f} >= 2x ${avg_9_rng:.2f}) c/Mecha {wick_15m_pct*100:.1f}% >= 15%" if is_2x_rejection_climax else f"RSI_15m ({rsi_15m_val:.1f} >= 80)"
+                    return {
+                        **res,
+                        'should_close': True,
+                        'action': 'CLOSE_PARTIAL_50',
+                        'pct_to_close': 50,
+                        'shares_to_close': shares_sell,
+                        'rule_code': 'ALPHA_EXIT_CLIMAX_MULTIVARIABLE_TP50',
+                        'reason': (
+                            f"Clímax Parabólico ({climax_type}): Ganancia actual +{gain_pct:.2f}%. "
+                            f"Venta parcial del 50% ({shares_sell} sh @ ${current_price:.2f}), remanente protegido con Trailing Stop."
+                        )
+                    }
+            except Exception as e_climax:
+                log_debug(MODULE, f"Error evaluando Clímax Multivariable 15m: {e_climax}")
+
             # Condición 2a:
             # Vela de 15m supera BB_Upper_15m (prev_c15 > prev_bb_up15 o high_15m_cur > bb_up_15m_cur),
             # forma mecha superior >= 15% del rango (High - Low),

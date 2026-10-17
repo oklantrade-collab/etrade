@@ -510,6 +510,42 @@ def evaluate_fast_track_reentry(
             return res
 
         # -----------------------------------------------------------------
+        # Validación de Seguridad Macro 1H (SIPV, Ángulo EMA3 y Rango)
+        # -----------------------------------------------------------------
+        if df_1h is not None and len(df_1h) >= 3:
+            c1h = _safe_col(df_1h, 'close')
+            o1h = _safe_col(df_1h, 'open')
+            h1h = _safe_col(df_1h, 'high')
+            l1h = _safe_col(df_1h, 'low')
+
+            # 1. Ángulo de la EMA3 en 1H (Debe ser estrictamente ascendente)
+            ema3_1h = c1h.ewm(span=3, adjust=False).mean()
+            slope_ema3_1h = float(ema3_1h.iloc[-1] - ema3_1h.iloc[-2])
+            if slope_ema3_1h <= 0.0:
+                res['reason'] = f"Ángulo de EMA3 en 1H plano o descendente ({slope_ema3_1h:+.4f}). Agotamiento macro, recompra prohibida."
+                return res
+
+            # 2. Análisis de Mechas SIPV en Vela 1H Viva
+            cur_h1h = max(float(h1h.iloc[-1]), current_price)
+            cur_l1h = min(float(l1h.iloc[-1]), current_price)
+            cur_rng1h = max(1e-6, cur_h1h - cur_l1h)
+            cur_o1h = float(o1h.iloc[-1])
+            top_body1h = max(cur_o1h, current_price)
+            upper_wick_ratio_1h = (cur_h1h - top_body1h) / cur_rng1h
+
+            if upper_wick_ratio_1h >= 0.35:
+                res['reason'] = f"Rechazo SIPV en 1H: Mecha superior {upper_wick_ratio_1h*100:.1f}% >= 35%. Venta institucional en techo, recompra cancelada."
+                return res
+
+            # 3. Regla de Compresión de Rango de Vela en 1H (Desaceleración)
+            prev_rng1h = max(1e-6, float(h1h.iloc[-2]) - float(l1h.iloc[-2]))
+            range_compression_ratio = cur_rng1h / prev_rng1h
+            if range_compression_ratio < 0.60 and current_price < float(h1h.iloc[-2]):
+                res['reason'] = f"Veto por Compresión de Rango 1H: Rango actual (${cur_rng1h:.2f}) < 60% del previo (${prev_rng1h:.2f}). Pérdida de empuje comprador."
+                res['is_range_compressed_exhaustion'] = True
+                return res
+
+        # -----------------------------------------------------------------
         # Condición 1: Estructura de Mínimos Crecientes 15m y 1H + Cruce EMA
         # -----------------------------------------------------------------
         l15 = _safe_col(df_15m, 'low')

@@ -565,6 +565,33 @@ class PositionMonitor:
                 except Exception as blue_e:
                     log_error(MODULE, f"Error en BLUE EXIT {ticker}: {blue_e}")
 
+            # ── EVALUACIÓN MOTOR AGUDO ALPHA RUNNER & CLÍMAX MULTIVARIABLE (SECCIÓN A) ──
+            try:
+                from app.stocks.aduana_stocks_exit_engine import evaluate_alpha_runner_sharp_exit
+                sharp_exit_res = evaluate_alpha_runner_sharp_exit(
+                    position=trade,
+                    current_price=current_price,
+                    df_5m=hist_5m,
+                    df_15m=hist_15m,
+                    df_1h=hist_1h
+                )
+                if sharp_exit_res.get('should_close'):
+                    action = sharp_exit_res.get('action')
+                    reason = sharp_exit_res.get('reason')
+                    pct = sharp_exit_res.get('pct_to_close', 50)
+                    if action == 'CLOSE_TOTAL' or pct >= 100:
+                        log_warning(MODULE, f"⚡ SHARP EXIT TOTAL: {ticker} @ ${current_price:.2f} | Reason: {reason}")
+                        await self._close_position(trade, current_price, sharp_exit_res.get('rule_code', 'ALPHA_SHARP_TOTAL_EXIT'))
+                        return
+                    elif action == 'CLOSE_PARTIAL_50' or pct == 50:
+                        shares_to_close = sharp_exit_res.get('shares_to_close', max(1, int(trade.get('shares', 0) * 0.5)))
+                        log_warning(MODULE, f"🎯 CLÍMAX MULTIVARIABLE PARCIAL 50%: {ticker} {shares_to_close} sh @ ${current_price:.2f} | Reason: {reason}")
+                        await self._execute_partial_close(trade, current_price, shares_to_close, "climax_50", reason)
+                        sb.table("stocks_positions").update({"tp_block1_executed": True}).eq("id", trade["id"]).execute()
+                        trade["tp_block1_executed"] = True
+            except Exception as e_sharp:
+                log_debug(MODULE, f"Error en evaluate_alpha_runner_sharp_exit para {ticker}: {e_sharp}")
+
             # ── NUEVO: Adaptive TP v2 (Stocks) ──
             try:
                 # Si la posición tiene menos de MIN_HOLDING_MINUTES (15 min) y la ganancia no es clímax (>= 2.5%),
@@ -854,7 +881,7 @@ class PositionMonitor:
             try:
                 from app.stocks.stocks_order_executor import is_ib_bridge_alive
                 if is_ib_bridge_alive():
-                    partial_rule = "FT_PARTIAL_SELL" if ("FT" in str(reason).upper() or "FAST" in str(trade.get("rule_code", "")).upper()) else "ADUANA_TP_CLOSE"
+                    partial_rule = "FT_PARTIAL_SELL" if ("FT" in str(reason).upper() or "FAST" in str(trade.get("rule_code", "")).upper() or "CLIMAX" in str(reason).upper()) else "ADUANA_TP_CLOSE"
                     sb.table("stocks_orders").insert({
                         "ticker": ticker,
                         "group_name": trade.get("group_name", "STOCKS"),

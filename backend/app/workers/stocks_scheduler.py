@@ -812,8 +812,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         current_price=current_price
                     )
                     if ft_reentry_res.get('should_reenter'):
-                        cur_shares = int(active_pos.get('shares', 0))
-                        re_shares = max(5, int(cur_shares * 0.35 // 5) * 5)
+                        # Sizing de re-compra: 35% del total asignado por % Inversión por Operación
+                        initial_shares = int(active_pos.get('initial_shares') or active_pos.get('shares', 0))
+                        re_shares = max(5, int((initial_shares * (0.35 / 0.30)) // 5) * 5)
                         sb.table("stocks_orders").insert({
                             "ticker": ticker,
                             "group_name": "FAST_TRACK",
@@ -832,7 +833,17 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             "reentry_count": new_count,
                             "last_reentry_at": datetime.now(timezone.utc).isoformat()
                         }).eq("id", active_pos["id"]).execute()
-                        log_info(MODULE, f"🔥 RECOMPRA PYRAMIDING DISPARADA: {ticker} +{re_shares} sh @ ${current_price:.2f} (SL a ${new_sl:.2f})")
+                        log_info(MODULE, f"🔥 RECOMPRA PYRAMIDING DISPARADA ({new_count}/2): {ticker} +{re_shares} sh @ ${current_price:.2f} (SL a ${new_sl:.2f})")
+                    elif ft_reentry_res.get('is_range_compressed_exhaustion'):
+                        log_warning(MODULE, f"⚠️ DESACELERACIÓN Y COMPRESIÓN DE RANGO 1H para {ticker}: Recompra cancelada. Ajustando Trailing Stop defensivo.")
+                        if df_1h is not None and len(df_1h) >= 2:
+                            l1h_cur = float(_safe_col(df_1h, 'low').iloc[-1])
+                            cur_sl = float(active_pos.get('stop_loss') or 0.0)
+                            if l1h_cur > cur_sl and l1h_cur < current_price:
+                                sb.table("stocks_positions").update({
+                                    "stop_loss": round(l1h_cur, 2),
+                                    "sl_activation_reason": "1H Range Compression Defensivo"
+                                }).eq("id", active_pos["id"]).execute()
             except Exception as e_ft_sched:
                 log_warning(MODULE, f"Error en Fast-Track Scheduler para {ticker}: {e_ft_sched}")
 
@@ -1462,15 +1473,39 @@ async def run_stocks_cycle(force=False):
         live_runner_tickers = []
         try:
             from app.stocks.alpha_runner_scanner import scan_top_gainers_live
+            from app.core.market_hours import get_nyc_now
+            from datetime import time as dt_time
+            nyc_time = get_nyc_now().time()
+            is_post_lunch = (nyc_time >= dt_time(12, 30))
+
             live_gainers = scan_top_gainers_live(limit=15)
             for g in (live_gainers or []):
                 sym = g.get("ticker")
                 bf = float(g.get("buying_force_5m") or 0.0)
                 vol = int(g.get("volume") or 0)
                 mcap = float(g.get("market_cap") or 0.0)
+                rvol_val = float(g.get("rvol") or 1.0)
+                chg = float(g.get("change_pct") or 0.0)
+                has_news = bool(g.get("has_news", False))
+                is_ema3_asc = bool(g.get("is_ema3_1h_ascending", True))
+
                 # Filtro estricto: Volumen >= 1M, Market Cap >= $15M y Fuerza Compradora activa >= 65
-                if sym and vol >= 1_000_000 and mcap >= 15_000_000 and bf >= 65.0:
-                    live_runner_tickers.append(sym)
+                if not (sym and vol >= 1_000_000 and mcap >= 15_000_000 and bf >= 65.0):
+                    continue
+
+                # ── FILTRO HORARIO INTELIGENTE (CICLO DE VIDA DEL MOMENTUM) ──
+                # Pasadas las 12:30 ET, se descartan los rallies matutinos agotados (slow bleed).
+                # PERO se permiten dos excepciones críticas que renuevan el ciclo:
+                # 1. Ignición Intradía Nueva: RVOL >= 3.0x, BF >= 75, Var >= +12% o Noticia relevante de impacto
+                # 2. Ruptura de Consolidación Base 1H (Leg-2 Breakout): EMA3 1H ascendente, BF >= 70 y RVOL >= 2.0x
+                if is_post_lunch:
+                    is_midday_ignition = (rvol_val >= 3.0 and bf >= 75.0 and chg >= 12.0) or (has_news and bf >= 70.0)
+                    is_leg2_breakout = (is_ema3_asc and bf >= 70.0 and rvol_val >= 2.0)
+                    if not (is_midday_ignition or is_leg2_breakout):
+                        log_debug(MODULE, f"⏳ Filtro Horario: {sym} descartado post 12:30 ET (Ciclo matutino agotado sin ruptura fresca).")
+                        continue
+
+                live_runner_tickers.append(sym)
 
             if live_runner_tickers:
                 log_info(MODULE, f"⚡ Inyectando {len(live_runner_tickers)} Alpha Runners calificados al ciclo de compras: {live_runner_tickers}")
