@@ -888,7 +888,6 @@ def evaluate_alpha_runner_sharp_exit(
                     }
 
                 # Fibonacci bands 15m
-                from app.stocks.fast_track_runner_engine import calculate_fibonacci_bands
                 fib_15 = calculate_fibonacci_bands(df_15m, current_price)
                 upper_6_15 = float(fib_15.get('upper_6') or 0.0)
                 touched_upper6 = (upper_6_15 > 0 and current_price >= upper_6_15 * 0.995 and gain_pct >= 6.0)

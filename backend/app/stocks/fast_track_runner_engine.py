@@ -446,7 +446,7 @@ def evaluate_fast_track_exits(
             is_outside_bands_1h = (cur_o1h >= bb_up_1h * 0.99) or (upper_6_1h > 0 and current_price >= upper_6_1h * 0.99) or (upper_6_1h <= 0)
             is_70pct_expansion_1h = (cur_range1h >= 1.70 * prev_range1h) and (current_price > prev_h1h)
 
-            if is_outside_bands_1h and is_70pct_expansion_1h and not partial_2_done:
+            if is_outside_bands_1h and is_70pct_expansion_1h and gain_pct >= 4.0 and not partial_2_done:
                 shares_sell = max(1, int(current_shares * 0.35))
                 res.update({
                     'should_exit': True,
@@ -483,7 +483,7 @@ def evaluate_fast_track_exits(
             from ta.momentum import RSIIndicator
             rsi_1h = float(RSIIndicator(c1h, window=14).rsi().iloc[-1]) if len(c1h) >= 14 else 50.0
             touched_upper6_1h = (upper_6_1h > 0 and current_price >= upper_6_1h * 0.998)
-            if (touched_upper6_1h or rsi_1h >= 80.0) and not partial_1_done:
+            if (touched_upper6_1h or rsi_1h >= 80.0) and gain_pct >= 4.0 and not partial_1_done:
                 shares_sell = max(1, int(current_shares * 0.40))
                 res.update({
                     'should_exit': True,
