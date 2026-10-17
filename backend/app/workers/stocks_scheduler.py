@@ -774,6 +774,11 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 active_pos = pos_res.data[0] if (pos_res.data and len(pos_res.data) > 0) else None
 
                 if active_pos is None:
+                    from app.stocks.fast_track_runner_engine import (
+                        evaluate_fast_track_entry,
+                        evaluate_fast_track_reentry,
+                        evaluate_leg2_reversal_entry
+                    )
                     ft_entry_res = evaluate_fast_track_entry(
                         ticker=ticker,
                         df_5m=df_5m,
@@ -783,6 +788,17 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         gap_pct=float(trap_shield_res.get('gap_pct', 0.0)),
                         config=config
                     )
+                    # Si no califica por Fast-Track Open (o ya pasó la apertura), evaluar Re-Ignición OLA 2 (Leg-2 Reversal)
+                    if not ft_entry_res.get('is_valid'):
+                        ft_entry_res = evaluate_leg2_reversal_entry(
+                            ticker=ticker,
+                            df_5m=df_5m,
+                            df_15m=df_15m,
+                            df_1h=df_1h,
+                            current_price=current_price,
+                            config=config
+                        )
+
                     if ft_entry_res.get('is_valid'):
                         rank_boost = 99.5
                         sb.table("stocks_priority_queue").upsert({
@@ -802,7 +818,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             'fib_zone': int(movement_15m.get('fib_zone_current', 0)),
                             'last_updated': datetime.now(timezone.utc).isoformat()
                         }, on_conflict='ticker').execute()
-                        log_info(MODULE, f"🚀 GATILLO FAST-TRACK RUNNER 99.5: {ticker} | {ft_entry_res['reason']}")
+                        log_info(MODULE, f"🚀 GATILLO FAST-TRACK RUNNER 99.5: {ticker} | {ft_entry_res['rule_code']} | {ft_entry_res['reason']}")
                 else:
                     ft_reentry_res = evaluate_fast_track_reentry(
                         position=active_pos,

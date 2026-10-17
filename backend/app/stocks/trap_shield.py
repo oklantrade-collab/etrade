@@ -107,14 +107,35 @@ def evaluate_opening_range_5m(df_5m: Optional[pd.DataFrame]) -> dict:
         cur_close = float(close_s.iloc[-1])
         price_below_orb_low = (cur_close < orb_low * 0.997)
 
+        # Detección de Recuperación / Giro de Apertura (ORB Bullish Recovery):
+        # Si la 1ra vela fue roja pero dentro de las primeras 3-6 velas (primeros 15-30 min de sesión):
+        # - La vela actual (2da o 3ra) es verde (cur_close > cur_open)
+        # - El precio recupera y supera el Open de la sesión (cur_close >= first_open * 0.998)
+        # - O la 2da/3ra vela rompe el High de la 1ra vela
+        # - Con volumen sustancial (cur_vol >= 200,000 o RVOL >= 1.5)
+        vol_s = _safe_series(df_5m, 'volume')
+        cur_open = float(open_s.iloc[-1])
+        cur_vol = float(vol_s.iloc[-1]) if len(vol_s) > 0 else 0
+        first_vol = float(vol_s.iloc[0]) if len(vol_s) > 0 else 1
+        rvol_5m = cur_vol / max(1.0, first_vol) if len(vol_s) >= 2 else 1.0
+
+        orb_bullish_recovery = False
+        if len(df_5m) >= 2 and len(df_5m) <= 6:
+            recovering_open = (cur_close >= first_open * 0.998) and (cur_close > cur_open)
+            breaking_first_high = (cur_close > float(high_s.iloc[0]))
+            has_vol = (cur_vol >= 200_000) or (rvol_5m >= 1.5) or (cur_vol >= 0.05 * first_vol and cur_vol >= 100_000)
+            if (recovering_open or breaking_first_high) and has_vol:
+                orb_bullish_recovery = True
+
         return {
             'has_orb': True,
             'first_candle_red': first_candle_red,
             'orb_high': round(orb_high, 3),
             'orb_low': round(orb_low, 3),
             'price_below_orb_low': price_below_orb_low,
+            'orb_bullish_recovery': orb_bullish_recovery,
             'cur_close': cur_close,
-            'reason': f"ORB=[{orb_low:.2f} - {orb_high:.2f}], Vela1={'ROJA 🔴' if first_candle_red else 'VERDE 🟢'}"
+            'reason': f"ORB=[{orb_low:.2f} - {orb_high:.2f}], Vela1={'ROJA 🔴' if first_candle_red else 'VERDE 🟢'}{', RECOVERY 🟢' if orb_bullish_recovery else ''}"
         }
     except Exception as e:
         log_warning(MODULE, f"Error evaluando ORB 5m: {e}")
@@ -253,7 +274,11 @@ def evaluate_trap_shield(
     # TRAMPA 2: APERTURA ROJA CON QUIEBRE DE SOPORTE ORB (Gap & Crap clásico)
     # La vela de apertura abrió arriba pero cerró roja y el precio perforó el mínimo de apertura
     if gap_pct > 10.0 and orb_info['has_orb']:
-        if orb_info['first_candle_red'] and orb_info['price_below_orb_low']:
+        # EXCEPCIÓN ORB_BULLISH_RECOVERY: Si la 2da o 3ra vela de 5m (primeros 15-30 min) recupera sobre el Open con volumen,
+        # NO es trampa: es un shakeout matutino con giro comprador inmediato
+        if orb_info.get('orb_bullish_recovery', False):
+            log_info(MODULE, f"🟢 ORB Bullish Recovery detectado: Precio (${current_price:.2f}) recuperó Open con volumen. Veto de trampa anulado.")
+        elif orb_info['first_candle_red'] and orb_info['price_below_orb_low']:
             return {
                 'is_trap': True,
                 'trap_type': 'OPENING_RANGE_BREAK_DOWN',
@@ -268,17 +293,21 @@ def evaluate_trap_shield(
 
     # TRAMPA 3: COTIZA CLARAMENTE POR DEBAJO DEL VWAP CON GAP ALTO
     if gap_pct >= 20.0 and is_below_vwap:
-        return {
-            'is_trap': True,
-            'trap_type': 'BELOW_VWAP',
-            'trap_reason': f"Precio (${current_price:.2f}) bajo VWAP (${vwap:.2f}) con Gap de +{gap_pct:.1f}%. Compradores atrapados.",
-            'gap_pct': round(gap_pct, 1),
-            'is_sweet_spot': False,
-            'is_intraday_alpha': False,
-            'growth_potential_pct': growth_potential_pct,
-            'priority_rank_boost': 0.0,
-            'vwap': round(vwap, 3)
-        }
+        # Si está en recuperación ORB y el precio actual ya superó el Open o está sobre/cerca de VWAP
+        if orb_info.get('orb_bullish_recovery', False) or (current_price >= eff_open * 0.998):
+            log_info(MODULE, f"🟢 Excepción Below VWAP: En recuperación ORB superando Open (${eff_open:.2f}). Veto anulado.")
+        else:
+            return {
+                'is_trap': True,
+                'trap_type': 'BELOW_VWAP',
+                'trap_reason': f"Precio (${current_price:.2f}) bajo VWAP (${vwap:.2f}) con Gap de +{gap_pct:.1f}%. Compradores atrapados.",
+                'gap_pct': round(gap_pct, 1),
+                'is_sweet_spot': False,
+                'is_intraday_alpha': False,
+                'growth_potential_pct': growth_potential_pct,
+                'priority_rank_boost': 0.0,
+                'vwap': round(vwap, 3)
+            }
 
     # ════════════════════════════════════════════════════════════
     # ZONA DE ORO (SWEET SPOT) & ALTA PRIORIDAD INTRADÍA

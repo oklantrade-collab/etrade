@@ -606,3 +606,134 @@ def evaluate_fast_track_reentry(
         log_error(MODULE, f"Error evaluando recompra para {position.get('ticker')}: {e_re}")
         res['reason'] = str(e_re)
         return res
+
+
+# -------------------------------------------------------------------------
+# D. EVALUACIÓN DE RE-IGNICIÓN DE SEGUNDA OLA (LEG-2 REVERSAL BREAKOUT)
+# -------------------------------------------------------------------------
+def evaluate_leg2_reversal_entry(
+    ticker: str,
+    df_5m: Optional[pd.DataFrame],
+    df_15m: Optional[pd.DataFrame],
+    df_1h: Optional[pd.DataFrame],
+    current_price: float,
+    current_time_et: Optional[datetime] = None,
+    config: Optional[dict] = None
+) -> dict:
+    """
+    Evalúa el Volteo de Mercado / Re-Ignición de Segunda Ola (Leg-2 Reversal):
+    Detecta cuando un Super-Runner o Alpha Runner que sufrió una fuerte corrección
+    (donde en 5m/15m EMA3 estuvo < EMA9 en fase bajista) vuelve a voltear al alza.
+
+    Condiciones Estructurales:
+    1. Gráfico 1H: EMA3_1h > EMA9_1h estrictamente (tendencia macro institucional intacta).
+    2. Volteo de Mercado en 15m y 5m:
+       - En 15m: EMA3_15m cruza por encima de EMA9_15m (EMA3_now > EMA9_now) tras haber estado
+         por debajo en velas anteriores (EMA3_prev <= EMA9_prev o en las últimas 3-5 velas).
+       - Pendiente EMA3_15m positiva (> 0).
+       - En 5m: Vela verde actual sobre EMA9_5m y EMA3_5m > EMA9_5m.
+    3. Volumen de Re-Ignición:
+       - Volumen de 5m >= 200,000 acciones o RVOL_5m >= 2.0x o (Volumen_5m * Precio >= $1,000,000 USD).
+    4. Tranche: Asignación estándar de Runner (35% inicial con piramidación disponible).
+    """
+    res = {
+        'is_valid': False,
+        'ticker': ticker,
+        'entry_price': current_price,
+        'initial_stop_loss': 0.0,
+        'position_tranche_pct': 0.35,
+        'rule_code': 'NONE',
+        'reason': ''
+    }
+
+    if df_5m is None or len(df_5m) < 3 or df_15m is None or len(df_15m) < 3:
+        res['reason'] = "Datos insuficientes de 5m o 15m para validar Leg-2 Reversal"
+        return res
+
+    try:
+        # 1. Macro-Tendencia en 1H: EMA3_1h > EMA9_1h
+        if df_1h is not None and len(df_1h) >= 2:
+            c1h = _safe_col(df_1h, 'close')
+            ema3_1h = float(c1h.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_1h = float(c1h.ewm(span=9, adjust=False).mean().iloc[-1])
+            if ema3_1h <= ema9_1h:
+                res['reason'] = f"Macro 1H bajista o neutral (EMA3 ${ema3_1h:.2f} <= EMA9 ${ema9_1h:.2f}). No califica para Leg-2 Reversal."
+                return res
+
+        # 2. Volteo en 15m: EMA3 cruza por encima de EMA9 tras haber estado por debajo
+        c15 = _safe_col(df_15m, 'close')
+        l15 = _safe_col(df_15m, 'low')
+        ema3_15_series = c15.ewm(span=3, adjust=False).mean()
+        ema9_15_series = c15.ewm(span=9, adjust=False).mean()
+
+        ema3_15_now = float(ema3_15_series.iloc[-1])
+        ema9_15_now = float(ema9_15_series.iloc[-1])
+
+        # Verificar si actualmente EMA3 > EMA9 en 15m
+        if ema3_15_now <= ema9_15_now:
+            res['reason'] = f"15m aún no voltea: EMA3 (${ema3_15_now:.2f}) <= EMA9 (${ema9_15_now:.2f})"
+            return res
+
+        # Verificar si en las últimas 1 a 5 velas estuvo por debajo (es un giro fresco / volteo)
+        was_below_recently = False
+        lookback_15 = min(6, len(ema3_15_series))
+        for k in range(2, lookback_15 + 1):
+            if float(ema3_15_series.iloc[-k]) <= float(ema9_15_series.iloc[-k]) * 1.002:
+                was_below_recently = True
+                break
+
+        if not was_below_recently:
+            res['reason'] = "15m no presenta cruce reciente de volteo (no viene de EMA3 < EMA9)"
+            return res
+
+        # 3. Confirmación en 5m
+        c5 = _safe_col(df_5m, 'close')
+        o5 = _safe_col(df_5m, 'open')
+        l5 = _safe_col(df_5m, 'low')
+        v5 = _safe_col(df_5m, 'volume')
+
+        cur_c5 = float(c5.iloc[-1])
+        cur_o5 = float(o5.iloc[-1])
+        cur_l5 = float(l5.iloc[-1])
+        cur_v5 = float(v5.iloc[-1])
+
+        ema3_5m = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
+        ema9_5m = float(c5.ewm(span=9, adjust=False).mean().iloc[-1])
+
+        if ema3_5m <= ema9_5m or cur_c5 < cur_o5 * 0.995:
+            res['reason'] = f"5m no confirma empuje: EMA3 (${ema3_5m:.2f}) vs EMA9 (${ema9_5m:.2f}) o vela roja"
+            return res
+
+        # 4. Volumen de Combustible en la Re-Ignición
+        vol_ma5 = float(v5.rolling(10, min_periods=2).mean().iloc[-1]) if len(v5) >= 2 else cur_v5
+        rvol_5m = (cur_v5 / vol_ma5) if vol_ma5 > 0 else 1.0
+        has_volume = (cur_v5 >= 200_000) or (rvol_5m >= 1.8) or (cur_v5 * cur_c5 >= 1_000_000)
+
+        if not has_volume:
+            res['reason'] = f"Volumen 5m insuficiente en la re-ignición ({cur_v5:,.0f} sh, RVOL={rvol_5m:.1f}x < 1.8x)"
+            return res
+
+        # 5. Stop Loss Ceñido al Low del Giro
+        min_reversal_low = min(float(l15.iloc[-1]), float(l5.iloc[-1]), float(l5.iloc[-2]) if len(l5) >= 2 else cur_l5)
+        init_sl = round(min_reversal_low * 0.985, 2)
+        if init_sl >= current_price or init_sl <= 0:
+            init_sl = round(current_price * 0.95, 2)
+
+        res.update({
+            'is_valid': True,
+            'entry_price': current_price,
+            'initial_stop_loss': init_sl,
+            'position_tranche_pct': 0.35,
+            'rule_code': 'FT_RUNNER_REVERSAL_LEG2',
+            'reason': (
+                f"Volteo Alcista OLA 2 (Leg-2 Reversal): 1H alcista (EMA3 > EMA9), 15m volteó a EMA3 (${ema3_15_now:.2f}) > "
+                f"EMA9 (${ema9_15_now:.2f}) tras caída previa. 5m con {cur_v5:,.0f} sh (RVOL {rvol_5m:.1f}x). Stop=${init_sl:.2f}."
+            )
+        })
+        return res
+
+    except Exception as e_l2:
+        log_error(MODULE, f"Error evaluando Leg-2 Reversal para {ticker}: {e_l2}")
+        res['reason'] = str(e_l2)
+        return res
+
