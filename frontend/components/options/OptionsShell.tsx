@@ -2,7 +2,7 @@
 import Link from 'next/link'
 import { ReactNode, useEffect, useState } from 'react'
 
-export const OPTIONS_UI_ENABLED = process.env.NEXT_PUBLIC_OPTIONS_ENABLED === 'true'
+export const OPTIONS_UI_ENABLED = process.env.NEXT_PUBLIC_OPTIONS_ENABLED !== 'false'
 
 const card: React.CSSProperties = {
   background: 'rgba(17, 24, 39, 0.4)', backdropFilter: 'blur(12px)',
