@@ -1,113 +1,39 @@
-"use client"
-import Link from 'next/link'
+'use client'
+import { useEffect, useState } from 'react'
+import { OptionsShell, optCard, useOptionsStatus } from '@/components/options/OptionsShell'
 
-export default function OptionsPage() {
+function Kpi({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div style={{
-      display:        'flex',
-      flexDirection:  'column',
-      alignItems:     'center',
-      justifyContent: 'center',
-      minHeight:      '70vh',
-      gap:            '32px',
-    }}>
-      <div style={{
-        fontSize: '80px',
-        filter: 'drop-shadow(0 0 30px rgba(171,71,188,0.3))',
-        animation: 'pulse 3s ease-in-out infinite',
-      }}>
-        🎯
-      </div>
-
-      <div style={{ textAlign: 'center' }}>
-        <h2 style={{
-          fontSize:  '36px',
-          fontWeight: 900,
-          color:     '#FFF',
-          margin:    0,
-          fontStyle: 'italic',
-          letterSpacing: '-0.03em',
-        }}>
-          Opciones
-        </h2>
-        <div style={{
-          display: 'inline-block',
-          marginTop: '12px',
-          padding: '6px 20px',
-          borderRadius: '20px',
-          background: 'rgba(171,71,188,0.12)',
-          border: '1px solid rgba(171,71,188,0.3)',
-          color: '#AB47BC',
-          fontSize: '11px',
-          fontWeight: 900,
-          textTransform: 'uppercase',
-          letterSpacing: '0.15em',
-        }}>
-          Sprint 10+ — Coming Soon
-        </div>
-        <p style={{
-          color: '#666',
-          fontSize: '14px',
-          marginTop: '20px',
-          maxWidth: '500px',
-          lineHeight: '1.7',
-        }}>
-          El módulo de Opciones (Derivados) se desarrollará después de
-          completar y validar el módulo de Stocks (Sprints 5-9).
-        </p>
-      </div>
-
-      {/* PREVIEW FEATURES */}
-      <div style={{
-        background: 'rgba(17, 24, 39, 0.4)',
-        backdropFilter: 'blur(12px)',
-        border: '1px solid rgba(255, 255, 255, 0.04)',
-        borderRadius: '16px',
-        padding: '32px',
-        maxWidth: '480px',
-        width: '100%',
-      }}>
-        <div style={{
-          fontSize: '10px', fontWeight: 900, color: '#555',
-          textTransform: 'uppercase', letterSpacing: '0.2em', marginBottom: '20px'
-        }}>
-          Funcionalidades Planeadas
-        </div>
-
-        {[
-          { icon: '📊', title: 'Covered Call', desc: 'Generar ingreso sobre posiciones de acciones' },
-          { icon: '🛡️', title: 'Cash-Secured Put', desc: 'Comprar acciones a descuento' },
-          { icon: '📈', title: 'Long Call/Put', desc: 'Exposición apalancada con riesgo limitado' },
-          { icon: '🧮', title: 'Greeks Calculator', desc: 'Delta, Theta, Vega, Gamma en tiempo real' },
-          { icon: '🔗', title: 'Options Chain', desc: 'Visualización de cadena de opciones' },
-        ].map((item, i) => (
-          <div key={i} style={{
-            display: 'flex', gap: '16px', alignItems: 'center',
-            padding: '12px 0',
-            borderBottom: i < 4 ? '1px solid rgba(255,255,255,0.03)' : 'none',
-            opacity: 0.5,
-          }}>
-            <span style={{ fontSize: '20px' }}>{item.icon}</span>
-            <div>
-              <div style={{ color: '#AAA', fontSize: '13px', fontWeight: 700 }}>{item.title}</div>
-              <div style={{ color: '#555', fontSize: '11px', marginTop: '2px' }}>{item.desc}</div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <Link href="/stocks/dashboard" style={{
-        padding: '12px 32px',
-        borderRadius: '8px',
-        background: 'rgba(255,255,255,0.03)',
-        border: '1px solid rgba(255,255,255,0.06)',
-        color: '#888',
-        fontSize: '13px',
-        fontWeight: 700,
-        textDecoration: 'none',
-      }}>
-        ← Volver a Stocks
-      </Link>
+    <div style={{ ...optCard, padding: 18 }}>
+      <div style={{ fontSize: 10, fontWeight: 900, color: '#555', textTransform: 'uppercase', letterSpacing: '0.15em' }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 900, color: '#FFF', marginTop: 6 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{sub}</div>}
     </div>
+  )
+}
+
+export default function OptionsDashboard() {
+  const { status, error } = useOptionsStatus()
+  const [g1, setG1] = useState<any>(null)
+  useEffect(() => { fetch('/api/v1/options/g1').then(r => r.ok ? r.json() : null).then(setG1).catch(() => {}) }, [])
+  const caps = status?.hard_caps
+  return (
+    <OptionsShell title="Options Dashboard" active="/options">
+      {error && <div style={{ ...optCard, color: '#EF5350', fontSize: 13 }}>No se pudo leer el estado del módulo (API {error}).</div>}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16 }}>
+        <Kpi label="Módulo" value={status ? (status.module_enabled ? 'ACTIVO' : 'DESACTIVADO') : '…'} sub="OPTIONS_ENABLED (backend)" />
+        <Kpi label="Modo" value="PAPER" sub={status?.execution_mode_ok === false ? '⚠ OPTIONS_EXECUTION_MODE inválido' : 'Sin órdenes reales por diseño'} />
+        <Kpi label="Techo riesgo/operación" value={caps ? `$${caps.max_risk_per_trade_usd}` : '…'} sub="Editable en Settings hasta este techo" />
+        <Kpi label="Techo riesgo abierto" value={caps ? `$${caps.max_open_risk_usd}` : '…'} />
+        <Kpi label="Gate G1" value={g1?.verdict ?? '…'} sub={g1 ? `${g1.sessions_measured}/${g1.required_sessions} sesiones medidas · ${g1.pct_passed}% cumplen (req. ${g1.required_pct}%)` : undefined} />
+      </div>
+      <div style={optCard}>
+        <div style={{ fontSize: 10, fontWeight: 900, color: '#555', textTransform: 'uppercase', letterSpacing: '0.2em', marginBottom: 10 }}>Estado de construcción</div>
+        <div style={{ color: '#888', fontSize: 13, lineHeight: 1.8 }}>
+          Fase actual: <b style={{ color: '#26A69A' }}>Sprints 1–7 Completados</b>. Módulo de Paper Trading 100% operativo con valoración Black-Scholes, ADUANA, Options Score, Selector de Cartera, Paper Trading y Gates G1–G3.
+          Configuración y techos de riesgo en{' '}<a href="/settings" style={{ color: '#AB47BC' }}>Settings → Opciones</a>.
+        </div>
+      </div>
+    </OptionsShell>
   )
 }

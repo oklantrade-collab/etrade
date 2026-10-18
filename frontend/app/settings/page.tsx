@@ -3,11 +3,13 @@ import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
 import RuleEngineModal from '@/components/RuleEngineModal'
+import OptionsSettings from '@/components/options/OptionsSettings'
 
 const TABS = [
   { key: 'crypto', label: '🔶 Crypto', subtitle: 'Binance Futures' },
   { key: 'forex',  label: '💱 Forex',  subtitle: 'IC Markets' },
   { key: 'stocks', label: '📈 Stocks', subtitle: 'Inversiones Pro' },
+  { key: 'options', label: '🎯 Opciones', subtitle: 'Derivados · IBKR' },
   { key: 'system', label: '⚙️ Sistema', subtitle: 'General' },
 ]
 
@@ -213,6 +215,7 @@ export default function SettingsPage() {
             onSaveGlobal={(data: any) => handleSave('system', data)}
         />
       )}
+      {activeTab === 'options' && <OptionsSettings />}
       {activeTab === 'system' && config && <SystemSettings config={config} onSave={(data: any) => handleSave('system', data)} onOpenRules={() => setIsRuleModalOpen(true)} />}
 
       <RuleEngineModal isOpen={isRuleModalOpen} onClose={() => setIsRuleModalOpen(false)} />

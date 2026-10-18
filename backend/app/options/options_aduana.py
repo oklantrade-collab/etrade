@@ -1,0 +1,198 @@
+"""ADUANA de Opciones (reglas O-1..O-11, doc §6.4). PROPIA del modulo: no modifica AduanaValidator.
+
+Toda entrada y salida simulada debe pasar por aqui. Cada decision se devuelve con el detalle de cada regla
+(para persistir en opt_aduana_decisions y System Logs).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from app.options import market_calendar as mc
+from app.options import settings_defaults as sd
+
+PASSIVE_EXITS = {"stop", "stop_loss", "forced_close_time", "bad_data_close"}
+ACTIVE_EXITS = {"take_profit", "signal_invalidation", "manual_simulated"}
+
+
+def classify_exit(reason: str) -> str:
+    """PASIVA / ACTIVA, alineado con el criterio ya usado en la plataforma."""
+    if reason in PASSIVE_EXITS:
+        return "PASIVA"
+    if reason in ACTIVE_EXITS:
+        return "ACTIVA"
+    raise ValueError(f"motivo de salida desconocido: {reason}")
+
+
+@dataclass
+class OpenPosition:
+    underlying_id: int
+    max_loss_total: float
+    direction: str
+    candidate_id: int | None = None
+
+
+@dataclass
+class AduanaContext:
+    now: datetime
+    positions: list[OpenPosition] = field(default_factory=list)
+    realized_pnl_today: float = 0.0
+    unrealized_pnl_today: float = 0.0       # marcada a liquidacion (bid/ask conservador)
+    opened_candidate_ids: set[int] = field(default_factory=set)
+    quote_ages_sec: dict[int, float] = field(default_factory=dict)   # conid -> antiguedad
+    event_flags: list[str] | None = None    # None = no verificado
+    underlying_id: int | None = None
+    execution_mode: str = sd.EXECUTION_MODE
+    check_quote_age: bool = True            # False al valorar candidatas (la antiguedad se exige al abrir)
+    check_window: bool = True
+
+
+@dataclass
+class RuleResult:
+    rule: str
+    ok: bool
+    detail: str
+
+
+@dataclass
+class AduanaResult:
+    approved: bool
+    rules: list[RuleResult]
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def reasons(self) -> list[str]:
+        return [f"{r.rule}: {r.detail}" for r in self.rules if not r.ok]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"approved": self.approved, "rules": [r.__dict__ for r in self.rules], "warnings": self.warnings}
+
+
+def open_risk(positions: list[OpenPosition]) -> float:
+    return sum(p.max_loss_total for p in positions)
+
+
+def remaining_open_risk(positions: list[OpenPosition], eff: dict[str, Any]) -> float:
+    return max(float(eff["max_open_risk_usd"]) - open_risk(positions), 0.0)
+
+
+def daily_stop_active(ctx: AduanaContext, eff: dict[str, Any]) -> bool:
+    """Se activa por perdida realizada + marcada, NO por el riesgo teorico de posiciones abiertas (doc §12.2)."""
+    return (ctx.realized_pnl_today + ctx.unrealized_pnl_today) <= -float(eff["daily_stop_usd"])
+
+
+def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]) -> AduanaResult:
+    """Valida una candidata (fila de opt_candidates) contra O-1..O-11. Datos ausentes = regla no superada."""
+    rules: list[RuleResult] = []
+    warns: list[str] = []
+    add = lambda rule, ok, detail: rules.append(RuleResult(rule, bool(ok), detail))  # noqa: E731
+    legs = cand.get("legs") or []
+    qty = cand.get("qty")
+    max_loss_c = cand.get("max_loss_contract")
+
+    # O-1 modo paper
+    add("O-1", ctx.execution_mode == "paper" and sd.execution_mode_ok(), f"modo={ctx.execution_mode}")
+
+    # O-2 riesgo definido: cada pierna vendida cubierta por una comprada (mismo tipo/vencimiento) y max_loss calculable
+    sells = [l for l in legs if l.get("side") == "sell"]
+    buys = [l for l in legs if l.get("side") == "buy"]
+    covered = True
+    for s in sells:
+        covered &= any(b["right"] == s["right"] and b["expiry"] == s["expiry"] and
+                       ((s["right"] == "C" and b["strike"] < s["strike"]) or (s["right"] == "P" and b["strike"] > s["strike"]))
+                       for b in buys)
+    add("O-2", bool(legs) and covered and max_loss_c is not None and max_loss_c > 0,
+        "riesgo definido" if covered and max_loss_c else "pierna vendida sin cobertura o max_loss no calculable")
+
+    # O-3 max_loss <= riesgo por operacion (techo duro incluido)
+    cap = min(float(eff["max_risk_per_trade_usd"]), sd.hard_caps()["max_risk_per_trade_usd"])
+    tot = cand.get("max_loss_total")
+    add("O-3", tot is not None and qty and tot <= cap + 1e-9, f"max_loss_total={tot} cap={cap}")
+
+    # O-4 riesgo abierto agregado
+    rem = remaining_open_risk(ctx.positions, eff)
+    rem = min(rem, max(sd.hard_caps()["max_open_risk_usd"] - open_risk(ctx.positions), 0.0))
+    add("O-4", tot is not None and tot <= rem + 1e-9, f"max_loss_total={tot} riesgo_restante={rem:.2f}")
+
+    # O-5 stop diario
+    add("O-5", not daily_stop_active(ctx, eff),
+        f"P&L del dia (realizado+marcado)={ctx.realized_pnl_today + ctx.unrealized_pnl_today:.2f} stop=-{eff['daily_stop_usd']}")
+
+    # O-6 spread relativo por pierna y sobrecoste neto
+    bad = []
+    for l in legs:
+        b, a = l.get("bid"), l.get("ask")
+        if b is None or a is None or a <= 0:
+            bad.append(f"{l.get('right')}{l.get('strike')}: sin bid/ask")
+        elif (a - b) / a * 100 > eff["max_leg_spread_pct"] + 1e-9:
+            bad.append(f"{l['right']}{l['strike']}: spread {(a - b) / a * 100:.1f}%")
+    oc = cand.get("exec_overcost_pct")
+    if len(legs) > 1 and (oc is None or oc > eff["max_exec_overcost_pct"] + 1e-9):
+        bad.append(f"sobrecoste de ejecucion {oc}%")
+    add("O-6", not bad, "; ".join(bad) or "spreads dentro de limites")
+
+    # O-7 datos validos y recientes
+    states = {l.get("market_data_type") for l in legs}
+    ok_states = {"LIVE", "DELAYED"} if eff.get("allow_delayed_data") else {"LIVE"}
+    data_ok = bool(states) and states <= ok_states
+    if "DELAYED" in states:
+        warns.append("datos retrasados (MODO PRUEBA)")
+    stale = []
+    if ctx.check_quote_age:
+        for l in legs:
+            age = ctx.quote_ages_sec.get(l.get("conid"))
+            if age is None or age > float(eff["max_quote_age_sec"]):
+                stale.append(f"conid {l.get('conid')}: antiguedad {age}")
+    add("O-7", data_ok and not stale, f"estados={sorted(s for s in states if s)} {'; '.join(stale)}".strip())
+
+    # O-8 ventana de entrada (con festivos y cierres tempranos)
+    if ctx.check_window:
+        okw, why = mc.entry_window(ctx.now, int(eff["entry_start_min_after_open"]), int(eff["entry_end_min_before_close"]))
+        add("O-8", okw, why)
+        if mc.FALLBACK_CALENDAR:
+            warns.append("calendario de mercado de respaldo (sin festivos)")
+    else:
+        add("O-8", True, "no evaluada (valoracion de candidata)")
+
+    # O-9 eventos binarios
+    if ctx.event_flags is None:
+        add("O-9", True, "no verificado (aviso)")
+        warns.append("earnings/catalizador no verificado")
+    else:
+        blocked = bool(ctx.event_flags) and bool(eff["block_events_in_dte"])
+        add("O-9", not blocked, f"eventos={ctx.event_flags}")
+
+    # O-10 idempotencia
+    cid = cand.get("id")
+    add("O-10", cid is None or cid not in ctx.opened_candidate_ids, "candidata ya abierta" if cid in ctx.opened_candidate_ids else "ok")
+
+    # O-11 una posicion por subyacente (+ limites de posiciones abiertas y misma direccion)
+    uid = ctx.underlying_id or cand.get("underlying_id")
+    dup = any(p.underlying_id == uid for p in ctx.positions)
+    n_open = len(ctx.positions)
+    same_dir = sum(1 for p in ctx.positions if p.direction == cand.get("direction"))
+    problems = []
+    if dup:
+        problems.append("ya hay posicion en el subyacente")
+    if n_open >= int(eff["max_open_positions"]):
+        problems.append(f"posiciones abiertas {n_open} >= {eff['max_open_positions']}")
+    if same_dir >= int(eff["max_same_direction"]):
+        problems.append(f"posiciones en la misma direccion {same_dir} >= {eff['max_same_direction']}")
+    add("O-11", not problems, "; ".join(problems) or "ok")
+
+    return AduanaResult(approved=all(r.ok for r in rules), rules=rules, warnings=warns)
+
+
+def validate_exit(reason: str, ctx: AduanaContext) -> AduanaResult:
+    """Salidas simuladas: valida modo paper y clasifica PASIVA/ACTIVA."""
+    kind = classify_exit(reason)
+    ok = ctx.execution_mode == "paper" and sd.execution_mode_ok()
+    return AduanaResult(ok, [RuleResult("O-1", ok, f"modo={ctx.execution_mode}"),
+                             RuleResult("EXIT", True, f"{kind}: {reason}")])
+
+
+def static_context(underlying_id: int | None = None, event_flags: list[str] | None = None) -> AduanaContext:
+    """Contexto para valorar candidatas: sin posiciones, sin exigir ventana ni antiguedad (se exigen al abrir, Sprint 6)."""
+    return AduanaContext(now=datetime.now(timezone.utc), underlying_id=underlying_id, event_flags=event_flags,
+                         check_quote_age=False, check_window=False)

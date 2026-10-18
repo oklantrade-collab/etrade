@@ -64,9 +64,13 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       ],
     },
     {
-      title: 'OPCIONES (Sprint 10+)',
+      title: 'OPCIONES (PAPER)',
       items: [
         { href: '/options', icon: '🎯', label: 'Options Dashboard' },
+        { href: '/options/opportunities', icon: '💡', label: 'Opportunities' },
+        { href: '/options/positions', icon: '📋', label: 'Positions' },
+        { href: '/options/performance', icon: '📈', label: 'Performance' },
+        { href: '/options/status', icon: '🛰️', label: 'Data & Status' },
       ],
     },
     {
@@ -93,7 +97,7 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       </div>
       
       <nav className="sidebar-nav pt-4 pb-10">
-        {sections.map((section, sidx) => (
+        {sections.map((section: any, sidx) => (
           <div key={sidx} className="mb-6">
             <h3 className="px-5 mb-2 text-[0.6rem] font-black text-[var(--text-muted)] uppercase tracking-[0.2em]">
               {section.title}
