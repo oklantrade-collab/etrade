@@ -146,14 +146,22 @@ def measure_symbol(ib: IBSession, sym: str, eff: dict[str, Any]) -> dict[str, An
 
 def load_apex_symbols(limit: int) -> list[str]:
     from app.core.supabase_client import get_supabase
-    rows = get_supabase().table("apex_scores").select("ticker,calculated_at").order("calculated_at", desc=True).limit(500).execute().data or []
     seen: list[str] = []
-    for r in rows:
-        if r["ticker"] not in seen:
-            seen.append(r["ticker"])
-        if len(seen) >= limit:
-            break
-    return seen
+    try:
+        rows = get_supabase().table("apex_scores").select("ticker,calculated_at").order("calculated_at", desc=True).limit(500).execute().data or []
+        for r in rows:
+            if r["ticker"] not in seen:
+                seen.append(r["ticker"])
+            if len(seen) >= limit:
+                break
+    except Exception:
+        pass
+    if not seen:
+        # Fallback a lista suplementaria de tickers de alta liquidez si apex_scores no tiene registros
+        eff = sd.effective_settings(None)
+        raw = str(eff.get("supplementary_tickers") or "SPY,QQQ,IWM,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA")
+        seen = [t.strip().upper() for t in raw.replace(",", " ").split() if t.strip()]
+    return seen[:limit]
 
 
 def run_session(symbols: list[str], save: bool) -> int:
@@ -187,7 +195,7 @@ def run_session(symbols: list[str], save: bool) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check-subscription", action="store_true")
-    ap.add_argument("--symbols", default="")
+    ap.add_argument("--symbols", nargs="*", default=[], help="Simbolos separados por espacio o coma")
     ap.add_argument("--from-apex", action="store_true")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--save", action="store_true")
@@ -195,7 +203,11 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.check_subscription:
         raise SystemExit(check_subscription(price_fallback=a.price))
-    syms = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
+    syms = []
+    for item in a.symbols:
+        for s in str(item).replace(",", " ").split():
+            if s.strip():
+                syms.append(s.strip().upper())
     if a.from_apex:
         syms = load_apex_symbols(a.limit)
     if not syms:
