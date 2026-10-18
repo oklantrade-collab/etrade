@@ -164,15 +164,15 @@ class IBSession:
     def __init__(self, allow_delayed: bool = True, host: str | None = None, port: int | None = None,
                  client_id: int | None = None, rate_per_sec: float = 20.0):
         self.allow_delayed = allow_delayed
-        self.host = host or os.getenv("IB_HOST", "127.0.0.1")
-        self.port = port or int(os.getenv("IB_PORT", "7497"))
-        self.client_id = client_id or int(os.getenv("OPT_IB_CLIENT_ID", "31"))
+        self.host = host or os.getenv("OPTIONS_IB_HOST") or os.getenv("IB_HOST", "127.0.0.1")
+        self.port = port or int(os.getenv("OPTIONS_IB_PORT") or os.getenv("IB_PORT", "7497"))
+        self.client_id = client_id or int(os.getenv("OPTIONS_IB_CLIENT_ID") or os.getenv("OPT_IB_CLIENT_ID", "31"))
         self.limiter = RateLimiter(rate_per_sec)
         self.app: _App | None = None
         self.ad: OptionsReadOnlyAdapter | None = None
 
     # ---- conexion -------------------------------------------------------
-    def connect(self, timeout: float = 8.0) -> bool:
+    def connect(self, timeout: float = 6.0) -> bool:
         self.app = _App()
         self.app.connect(self.host, self.port, self.client_id)
         threading.Thread(target=self.app.run, daemon=True).start()
@@ -192,15 +192,24 @@ class IBSession:
     def ensure_connected(self, retries: int = 4) -> bool:
         if self.is_connected():
             return True
-        for i in range(retries):
-            try:
-                if self.app:
-                    self.app.disconnect()
-            except Exception:
-                pass
-            if self.connect():
-                return True
-            time.sleep(min(2 ** i, 30))
+        base_client_id = self.client_id
+        hosts = [self.host]
+        if self.host not in ("127.0.0.1", "localhost"):
+            hosts.append("127.0.0.1")
+        for h in hosts:
+            self.host = h
+            for i in range(retries):
+                try:
+                    if self.app:
+                        self.app.disconnect()
+                except Exception:
+                    pass
+                # Rotar client_id si el anterior quedo ocupado o en TIME_WAIT
+                self.client_id = base_client_id + i
+                if self.connect(timeout=5.0):
+                    return True
+                time.sleep(0.5)
+        self.client_id = base_client_id
         return False
 
     def close(self) -> None:
