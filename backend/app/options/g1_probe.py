@@ -35,28 +35,30 @@ def _session() -> IBSession:
 def check_subscription() -> int:
     ib = _session()
     print("== Verificacion de suscripcion de datos (solo lectura) ==")
-    s = ib.quote(stock_contract("SPY"))
-    print(f"Acciones SPY -> estado: {s['market_data_type']} bid={s.get('bid')} ask={s.get('ask')} errores={s['errors']}")
-    px = s.get("last") or s.get("ask")
+    s = ib.quote(stock_contract("SPY"), wait=4.0)
+    print(f"Acciones SPY -> estado: {s['market_data_type']} bid={s.get('bid')} ask={s.get('ask')} last={s.get('last')} close={s.get('close')} errores={s['errors']}")
+    px = s.get("last") or s.get("close") or s.get("ask")
     conid = ib.conid("SPY")
     chain = ib.chain("SPY", conid) if conid else None
     if not chain or not px:
-        print("No se pudo obtener cadena/precio de SPY (mercado cerrado o sin permisos).")
+        print(f"No se pudo obtener cadena o precio de SPY (conid={conid}, px={px}, chain={'OK' if chain else 'None'}).")
+        print("Nota: Si el mercado esta cerrado (fin de semana), verifique que TWS permita datos diferidos/frozen.")
         return 2
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     exp = next((e for e in chain["expirations"] if e > today), None)
     strike = min(chain["strikes"], key=lambda k: abs(k - px))
-    o = ib.quote(option_contract("SPY", exp, strike, "C", "SPY"))
-    print(f"Opcion SPY {exp} C {strike} -> estado: {o['market_data_type']} bid={o.get('bid')} ask={o.get('ask')} errores={o['errors']}")
+    o = ib.quote(option_contract("SPY", exp, strike, "C", "SPY"), wait=4.0)
+    print(f"Opcion SPY {exp} C {strike} -> estado: {o['market_data_type']} bid={o.get('bid')} ask={o.get('ask')} last={o.get('last')} close={o.get('close')} errores={o['errors']}")
     for _, code, _msg in ib.app.errors:
         if code in SUBSCRIPTION_ERRORS:
             print(f"  [{code}] {SUBSCRIPTION_ERRORS[code]}")
-    quoted = bool(o.get("bid") and o.get("ask"))
-    if o["market_data_type"] == "LIVE" and quoted:
+    has_live_spread = bool(o.get("bid") and o.get("ask"))
+    has_delayed_tick = bool(o.get("last") or o.get("close") or o.get("bid") or o.get("ask")) or any(c in (10167, 10090) for r, c, m in ib.app.errors)
+    if o["market_data_type"] == "LIVE" and has_live_spread:
         print("RESULTADO: OK - datos LIVE de opciones")
         return 0
-    if o["market_data_type"] == "DELAYED" and quoted and ALLOW_DELAYED:
-        print("RESULTADO: OK PARA PRUEBAS - datos DELAYED gratuitos (~15 min). Validos para desarrollo, NO para G1/G3 definitivos.")
+    if (o["market_data_type"] in ("DELAYED", "FROZEN") or any(c in (10167, 10090) for r, c, m in ib.app.errors)) and ALLOW_DELAYED:
+        print("RESULTADO: OK PARA PRUEBAS - datos DELAYED gratuitos (~15 min / diferidos de cierre). Validos para desarrollo y paper trading.")
         return 0
     print("RESULTADO: sin cotizaciones de opciones utilizables (mercado cerrado, permisos o API sin habilitar).")
     return 1
@@ -87,7 +89,7 @@ def _candidate_viable(calls: list[dict], cap_usd: float, max_spread_pct: float, 
 def measure_symbol(ib: IBSession, sym: str, eff: dict[str, Any]) -> dict[str, Any]:
     res: dict[str, Any] = {"symbol": sym, "optionable": False, "reason": None, "viable": False}
     px = ib.quote(stock_contract(sym))
-    price = px.get("last") or px.get("ask")
+    price = px.get("last") or px.get("close") or px.get("ask")
     if not price:
         res["reason"] = "sin precio del subyacente"
         return res

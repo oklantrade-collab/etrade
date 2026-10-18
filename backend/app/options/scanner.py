@@ -47,7 +47,7 @@ def evaluate_underlying(ib: IBSession, sym: str, eff: dict[str, Any], today: dat
     """Devuelve (fila para opt_underlyings, cadena, quote del subyacente)."""
     row: dict[str, Any] = {"symbol": sym}
     px = ib.quote(stock_contract(sym))
-    price = px.get("last") or px.get("ask")
+    price = px.get("last") or px.get("close") or px.get("ask")
     inp = OptionabilityInput(symbol=sym, price=price, data_states=[px["market_data_type"]])
     row.update(price=price, data_state=px["market_data_type"])
     conid = ib.conid(sym)

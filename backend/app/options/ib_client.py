@@ -94,9 +94,17 @@ class _App(EWrapper, EClient):
         self.mdt[reqId] = marketDataType
 
     def tickPrice(self, reqId, tickType, price, attrib):  # noqa: N802
-        key = {1: "bid", 2: "ask", 4: "last", 66: "bid", 67: "ask", 68: "last"}.get(tickType)
+        key = {
+            1: "bid", 2: "ask", 4: "last", 9: "close",
+            66: "bid", 67: "ask", 68: "last", 75: "close",
+        }.get(tickType)
         if key and price and price > 0:
-            self.ticks.setdefault(reqId, {})[key] = price
+            d = self.ticks.setdefault(reqId, {})
+            d[key] = price
+            if key == "close" and "last" not in d:
+                d["last"] = price
+            if key == "last" and "close" not in d:
+                d["close"] = price
 
     def tickSize(self, reqId, tickType, size):  # noqa: N802
         key = {8: "volume", 74: "volume", 27: "oi_call", 28: "oi_put"}.get(tickType)
@@ -120,9 +128,12 @@ class _App(EWrapper, EClient):
 
     def securityDefinitionOptionParameter(self, reqId, exchange, underlyingConId, tradingClass, multiplier,  # noqa: N802
                                           expirations, strikes):
-        if exchange == "SMART":
-            self.chain[tradingClass] = {"expirations": sorted(expirations), "strikes": sorted(strikes),
-                                        "multiplier": multiplier}
+        # Si llega SMART se prefiere, de lo contrario se acepta el primer exchange disponible (ej. CBOE, AMEX)
+        if exchange == "SMART" or tradingClass not in self.chain:
+            self.chain[tradingClass] = {
+                "expirations": sorted(expirations), "strikes": sorted(strikes),
+                "multiplier": multiplier, "exchange": exchange
+            }
 
     def securityDefinitionOptionParameterEnd(self, reqId):  # noqa: N802
         self.chain_done.set()
@@ -168,7 +179,13 @@ class IBSession:
         if not self.app.conn_ok.wait(timeout):
             return False
         self.ad = OptionsReadOnlyAdapter(self.app)
-        self.ad.call("reqMarketDataType", 3 if self.allow_delayed else 1)
+        if self.allow_delayed:
+            # 3 = Delayed Streaming (mercado abierto), 4 = Delayed Frozen (mercado cerrado / fin de semana)
+            self.ad.call("reqMarketDataType", 3)
+            self.ad.call("reqMarketDataType", 4)
+        else:
+            self.ad.call("reqMarketDataType", 1)
+            self.ad.call("reqMarketDataType", 2)
         return True
 
     def is_connected(self) -> bool:
@@ -231,7 +248,7 @@ class IBSession:
         app.chain.clear()
         app.chain_done.clear()
         self.call("reqSecDefOptParams", app.rid(), sym, "", "STK", conid)
-        app.chain_done.wait(6)
+        app.chain_done.wait(8)
         return app.chain.get(sym) or next(iter(app.chain.values()), None)
 
     def quote(self, contract: Contract, wait: float = 3.0) -> dict[str, Any]:
@@ -244,11 +261,20 @@ class IBSession:
             if "bid" in d and "ask" in d:
                 time.sleep(0.3)  # margen para griegas
                 break
+            # Fuera de hora de mercado / fin de semana: salir si ya llego el ultimo precio o cierre
+            if ("last" in d or "close" in d) and (time.time() - t0 >= 1.5):
+                break
             time.sleep(0.1)
         self.call("cancelMktData", rid)
         out = dict(app.ticks.pop(rid, {}))
         mdt = app.mdt.pop(rid, None)
-        out["market_data_type"] = market_data_type_to_state(mdt)
+        state = market_data_type_to_state(mdt)
+        errs = [(c, m) for r, c, m in app.errors if r == rid]
+        err_codes = {c for c, _ in errs}
+        # Si IBKR devolvio 10167/10090/10168 sabemos que el dato es DELAYED
+        if state == "UNKNOWN" and err_codes.intersection({10167, 10090, 10168}):
+            state = "DELAYED"
+        out["market_data_type"] = state
         out["received_at"] = datetime.now(timezone.utc).isoformat()
-        out["errors"] = [(c, m) for r, c, m in app.errors if r == rid]
+        out["errors"] = errs
         return out
