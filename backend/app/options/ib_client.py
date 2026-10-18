@@ -95,13 +95,13 @@ class _App(EWrapper, EClient):
 
     def tickPrice(self, reqId, tickType, price, attrib):  # noqa: N802
         key = {
-            1: "bid", 2: "ask", 4: "last", 9: "close",
+            1: "bid", 2: "ask", 4: "last", 9: "close", 37: "mark",
             66: "bid", 67: "ask", 68: "last", 75: "close",
         }.get(tickType)
         if key and price and price > 0:
             d = self.ticks.setdefault(reqId, {})
             d[key] = price
-            if key == "close" and "last" not in d:
+            if key in ("close", "mark") and "last" not in d:
                 d["last"] = price
             if key == "last" and "close" not in d:
                 d["close"] = price
@@ -180,12 +180,10 @@ class IBSession:
             return False
         self.ad = OptionsReadOnlyAdapter(self.app)
         if self.allow_delayed:
-            # 3 = Delayed Streaming (mercado abierto), 4 = Delayed Frozen (mercado cerrado / fin de semana)
-            self.ad.call("reqMarketDataType", 3)
+            # 4 = Delayed-Frozen (soporta mercado abierto y cerrado/fin de semana con cotizaciones diferidas)
             self.ad.call("reqMarketDataType", 4)
         else:
             self.ad.call("reqMarketDataType", 1)
-            self.ad.call("reqMarketDataType", 2)
         return True
 
     def is_connected(self) -> bool:
@@ -254,7 +252,8 @@ class IBSession:
     def quote(self, contract: Contract, wait: float = 3.0) -> dict[str, Any]:
         app = self.app
         rid = app.rid()
-        self.call("reqMktData", rid, contract, "", True, False, [])
+        # snapshot=False para streaming: indispensable para datos DELAYED y mercado cerrado
+        self.call("reqMktData", rid, contract, "", False, False, [])
         t0 = time.time()
         while time.time() - t0 < wait:
             d = app.ticks.get(rid, {})

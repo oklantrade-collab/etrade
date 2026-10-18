@@ -32,18 +32,21 @@ def _session() -> IBSession:
     return ib
 
 
-def check_subscription() -> int:
+def check_subscription(price_fallback: float | None = None) -> int:
     ib = _session()
     print("== Verificacion de suscripcion de datos (solo lectura) ==")
     s = ib.quote(stock_contract("SPY"), wait=4.0)
     print(f"Acciones SPY -> estado: {s['market_data_type']} bid={s.get('bid')} ask={s.get('ask')} last={s.get('last')} close={s.get('close')} errores={s['errors']}")
-    px = s.get("last") or s.get("close") or s.get("ask")
+    px = s.get("last") or s.get("close") or s.get("ask") or price_fallback
     conid = ib.conid("SPY")
     chain = ib.chain("SPY", conid) if conid else None
-    if not chain or not px:
-        print(f"No se pudo obtener cadena o precio de SPY (conid={conid}, px={px}, chain={'OK' if chain else 'None'}).")
-        print("Nota: Si el mercado esta cerrado (fin de semana), verifique que TWS permita datos diferidos/frozen.")
+    if not chain:
+        print(f"No se pudo obtener la cadena de opciones de SPY (conid={conid}). Verifique conexion con TWS.")
         return 2
+    if not px:
+        # En fin de semana / fuera de mercado TWS no emite ticks: usar precio de referencia para sondear opciones
+        px = 580.0
+        print(f"Mercado cerrado (fin de semana): usando precio de referencia SPY=${px:.2f} para sondear contratos.")
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     exp = next((e for e in chain["expirations"] if e > today), None)
     strike = min(chain["strikes"], key=lambda k: abs(k - px))
@@ -53,12 +56,14 @@ def check_subscription() -> int:
         if code in SUBSCRIPTION_ERRORS:
             print(f"  [{code}] {SUBSCRIPTION_ERRORS[code]}")
     has_live_spread = bool(o.get("bid") and o.get("ask"))
-    has_delayed_tick = bool(o.get("last") or o.get("close") or o.get("bid") or o.get("ask")) or any(c in (10167, 10090) for r, c, m in ib.app.errors)
+    has_delayed = (o["market_data_type"] in ("DELAYED", "FROZEN") or
+                   any(c in (10167, 10090) for r, c, m in ib.app.errors) or
+                   bool(o.get("last") or o.get("close")))
     if o["market_data_type"] == "LIVE" and has_live_spread:
         print("RESULTADO: OK - datos LIVE de opciones")
         return 0
-    if (o["market_data_type"] in ("DELAYED", "FROZEN") or any(c in (10167, 10090) for r, c, m in ib.app.errors)) and ALLOW_DELAYED:
-        print("RESULTADO: OK PARA PRUEBAS - datos DELAYED gratuitos (~15 min / diferidos de cierre). Validos para desarrollo y paper trading.")
+    if has_delayed and ALLOW_DELAYED:
+        print("RESULTADO: OK PARA PRUEBAS - datos DELAYED gratuitos (~15 min / fin de semana). Validos para desarrollo y paper trading.")
         return 0
     print("RESULTADO: sin cotizaciones de opciones utilizables (mercado cerrado, permisos o API sin habilitar).")
     return 1
@@ -178,9 +183,10 @@ if __name__ == "__main__":
     ap.add_argument("--from-apex", action="store_true")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--save", action="store_true")
+    ap.add_argument("--price", type=float, default=None, help="Precio de referencia para pruebas fuera de mercado")
     a = ap.parse_args()
     if a.check_subscription:
-        raise SystemExit(check_subscription())
+        raise SystemExit(check_subscription(price_fallback=a.price))
     syms = [s.strip().upper() for s in a.symbols.split(",") if s.strip()]
     if a.from_apex:
         syms = load_apex_symbols(a.limit)
