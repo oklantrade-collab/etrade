@@ -154,7 +154,69 @@ def universe():
     except Exception as e:
         return {"items": [], "optionable": 0, "rejected": 0, "error": str(e)[:200]}
     opt = sum(1 for r in rows if r.get("optionable"))
-    return {"items": rows, "optionable": opt, "rejected": len(rows) - opt}
+    calls = [r for r in rows if (r.get("direction") or "").upper() in ("CALL", "BULLISH")]
+    puts = [r for r in rows if (r.get("direction") or "").upper() in ("PUT", "BEARISH")]
+    return {
+        "items": rows,
+        "optionable": opt,
+        "rejected": len(rows) - opt,
+        "calls_count": len(calls),
+        "puts_count": len(puts),
+    }
+
+
+@router.post("/catalysts/scan")
+def trigger_catalyst_scan(payload: dict | None = None, user: dict = ceo_only):
+    """Ejecuta el escaneo y arbitraje de los 4 catalizadores (CALL/PUT) para el universo."""
+    from app.options.catalysts.service import run_catalyst_scan
+    sb = get_supabase()
+    stored, _, _ = _load_stored()
+    eff = sd.effective_settings(stored)
+    custom_tickers = (payload or {}).get("symbols")
+    res = run_catalyst_scan(sb, eff=eff, custom_tickers=custom_tickers)
+    return res
+
+
+@router.get("/catalysts/state")
+def get_catalyst_state():
+    """Devuelve el estado de catalizadores activo por simbolo."""
+    from app.options.catalysts.service import get_latest_catalyst_cache
+    cached = get_latest_catalyst_cache()
+    try:
+        rows = get_supabase().table("universe_catalyst_state").select("*").order("catalyst_score", desc=True).limit(100).execute().data or []
+    except Exception:
+        rows = list(cached.values()) if cached else []
+
+    if not rows and cached:
+        rows = list(cached.values())
+
+    calls = [r for r in rows if (r.get("direction") or "").upper() in ("CALL", "BULLISH")]
+    puts = [r for r in rows if (r.get("direction") or "").upper() in ("PUT", "BEARISH")]
+    return {"items": rows, "calls": calls, "puts": puts, "total": len(rows)}
+
+
+@router.get("/universe/pool")
+def get_universe_pool(direction: str | None = None, limit: int = 100):
+    """Devuelve los simbolos de universe_pool (Opciones y Stocks)."""
+    sb = get_supabase()
+    try:
+        q = sb.table("universe_pool").select("*")
+        if direction:
+            q = q.eq("pool_type", direction)
+        rows = q.order("updated_at", desc=True).limit(min(limit, 200)).execute().data or []
+        if rows:
+            return {"items": rows, "count": len(rows)}
+    except Exception:
+        pass
+
+    try:
+        q = sb.table("opt_underlyings").select("id,symbol,price,direction,apex_score,optionable,updated_at")
+        if direction:
+            q = q.eq("direction", direction)
+        rows = q.order("optionable", desc=True).limit(min(limit, 200)).execute().data or []
+        return {"items": rows, "count": len(rows)}
+    except Exception as e:
+        return {"items": [], "error": str(e)[:200]}
 
 
 @router.post("/jobs/scan")
@@ -217,7 +279,7 @@ CANDIDATE_SUMMARY_COLS = (
     "id,underlying_id,strategy_type,direction,direction_source,expiry,legs,qty,"
     "entry_debit,max_loss_total,max_profit_contract,breakeven,ev_view_net,ev_neutral_net,"
     "pop_view,pop_neutral,score,eligibility_status,rank_global,rank_strategy,created_at,"
-    "opt_underlyings(symbol,price,apex_score,data_state)"
+    "opt_underlyings(symbol,price,apex_score,data_state,direction)"
 )
 
 
@@ -287,6 +349,11 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     eligible = [i for i in items if i.get("eligibility_status") == "eligible"]
     rejected = [i for i in items if i.get("eligibility_status") == "rejected"]
 
+    calls = [i for i in items if (i.get("direction") or "").lower() in ("bullish", "call")]
+    puts = [i for i in items if (i.get("direction") or "").lower() in ("bearish", "put")]
+    top_calls = sorted(calls, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:3]
+    top_puts = sorted(puts, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:3]
+
     allocated_risk = sum(float(s.get("max_loss_total") or 0.0) for s in selected)
     max_open_risk = float(eff.get("max_open_risk_usd") or 100.0)
     remaining_budget = max(0.0, max_open_risk - allocated_risk)
@@ -295,6 +362,10 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
         "items": items,
         "summary": {
             "total_candidates": total,
+            "total_calls": len(calls),
+            "total_puts": len(puts),
+            "top_calls": top_calls,
+            "top_puts": top_puts,
             "selected_count": len(selected),
             "eligible_count": len(eligible),
             "rejected_count": len(rejected),
@@ -302,6 +373,7 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
             "max_open_risk_usd": max_open_risk,
             "remaining_budget_usd": round(remaining_budget, 2),
             "min_score_setting": eff.get("min_score", 60),
+            "max_candidates_per_direction": eff.get("max_candidates_per_direction", 25),
         },
     }
 

@@ -18,6 +18,7 @@ const GROUPS: Group[] = [
   ]},
   { id: 'B', title: 'B. Universo y opcionabilidad', fields: [
     { key: 'max_underlyings', label: 'Máx. subyacentes analizados' },
+    { key: 'max_candidates_per_direction', label: 'Máx. candidatas por dirección (CALLs y PUTs)' },
     { key: 'min_underlying_price', label: 'Precio mínimo del subyacente', unit: 'USD' },
     { key: 'max_strike_gap_pct', label: 'Separación máx. entre strikes', unit: '%' },
     { key: 'min_atm_open_interest', label: 'Open interest mínimo ATM' },
@@ -91,6 +92,16 @@ const GROUPS: Group[] = [
     { key: 'g3_min_weeks', label: 'G3: semanas mínimas en shadow' },
     { key: 'g3_min_trades', label: 'G3: operaciones simuladas mínimas' },
     { key: 'g3_calibration_tol_pts', label: 'G3: tolerancia de calibración', unit: 'pts' },
+  ]},
+  { id: 'I', title: 'I. Catalizadores y Gate O-12 (CALL/PUT)', fields: [
+    { key: 'catalyst_adx_override', label: 'ADX Override (anula arbitraje SIPV si >=)' },
+    { key: 'catalyst_min_score', label: 'Confluencia mínima de catalizadores' },
+    { key: 'catalyst_ttl_min', label: 'Vigencia de catalizadores', unit: 'min' },
+    { key: 'gate_enabled', label: 'Activar Gate de Entrada O-12 (Gap&Go y Clímax)', kind: 'bool' },
+    { key: 'gate_gap_min_atr', label: 'O-12: Gap mínimo relativo', unit: 'ATR' },
+    { key: 'gate_gap_max_atr', label: 'O-12: Gap máximo relativo (techo agotamiento)', unit: 'ATR' },
+    { key: 'gate_adx_min', label: 'O-12: ADX mínimo para confirmación' },
+    { key: 'gate_flow_min', label: 'O-12: Fuerza de flujo mínima' },
   ]},
 ]
 

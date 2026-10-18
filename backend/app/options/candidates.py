@@ -33,8 +33,9 @@ def _to_quote(c: dict[str, Any]) -> st.Q:
 
 
 def candidate_row(c: st.Candidate, underlying_id: int, direction_source: str, settings_version: int,
-                  data_quality: dict[str, Any], snapshot_at: str) -> dict[str, Any]:
-    return {
+                  data_quality: dict[str, Any], snapshot_at: str,
+                  catalyst_state: dict[str, Any] | None = None) -> dict[str, Any]:
+    row = {
         "underlying_id": underlying_id, "strategy_type": c.strategy, "direction": c.direction,
         "direction_source": direction_source, "expiry": c.expiry.isoformat(), "legs": c.legs, "qty": c.qty,
         "entry_debit": c.entry_debit, "mid_debit": c.mid_debit, "max_loss_contract": c.max_loss_contract,
@@ -44,6 +45,9 @@ def candidate_row(c: st.Candidate, underlying_id: int, direction_source: str, se
         "warnings": c.warnings, "data_quality": data_quality, "model_version": MODEL_VERSION,
         "settings_version": settings_version, "snapshot_at": snapshot_at,
     }
+    if catalyst_state is not None:
+        row["catalyst_state"] = catalyst_state
+    return row
 
 
 def generate_for_underlying(sb, und: dict[str, Any], eff: dict[str, Any], settings_version: int = 0) -> dict[str, Any]:
@@ -59,15 +63,16 @@ def generate_for_underlying(sb, und: dict[str, Any], eff: dict[str, Any], settin
         return {"symbol": und["symbol"], "candidates": 0, "rejected": 0, "skipped": "no optionable / sin precio / sin contratos"}
 
     quotes = [_to_quote(c) for c in contracts]
-    direction = und.get("direction")
-    directions = (direction,) if direction in ("bullish", "bearish") else ("bullish", "bearish")
-    dir_source = "apex" if direction in ("bullish", "bearish") else "unverified"
+    raw_dir = und.get("direction")
+    norm_dir = "bullish" if raw_dir in ("CALL", "bullish") else ("bearish" if raw_dir in ("PUT", "bearish") else None)
+    directions = (norm_dir,) if norm_dir else ("bullish", "bearish")
+    dir_source = und.get("direction_source") or ("apex" if norm_dir else "unverified")
     valid, rejected = st.generate(quotes, price, datetime.now(timezone.utc).date(), eff, directions)
 
     states = Counter(q.market_data_type or "UNKNOWN" for q in quotes)
     dq = {"quote_states": dict(states), "usable_quotes": sum(1 for q in quotes if q.usable), "total_quotes": len(quotes)}
     now = datetime.now(timezone.utc).isoformat()
-    rows = [candidate_row(c, uid, dir_source, settings_version, dq, now) for c in valid]
+    rows = [candidate_row(c, uid, dir_source, settings_version, dq, now, catalyst_state=und.get("catalyst_state")) for c in valid]
 
     reasons_count: Counter = Counter()
     for r in rejected:
@@ -131,8 +136,8 @@ def value_underlying_candidates(sb, und: dict[str, Any], eff: dict[str, Any], se
     today = datetime.now(timezone.utc).date()
     n_ok = n_bad = 0
     for row in rows:
-        val = val_.value_candidate(row, price, eff, today, direction_verified=(row.get("direction_source") == "apex"))
-        ad = aduana.validate_entry(row, aduana.static_context(uid, _event_flags(und)), eff)
+        val = val_.value_candidate(row, price, eff, today, direction_verified=(row.get("direction_source") in ("apex", "catalyst")))
+        ad = aduana.validate_entry(row, aduana.static_context(uid, _event_flags(und), underlying=und), eff)
         ev_ok, ev_reasons = val_.eligibility_from_valuation(val, eff)
         approved = ad.approved and ev_ok
         reasons = ad.reasons + ev_reasons

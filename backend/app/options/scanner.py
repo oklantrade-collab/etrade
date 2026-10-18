@@ -20,20 +20,65 @@ QUOTE_FIELDS = ("bid", "ask", "last", "volume", "iv", "delta", "gamma", "theta",
 
 
 def load_universe(sb, eff: dict[str, Any]) -> list[dict[str, Any]]:
-    """Ultimos APEX scores por ticker (sin recalcular), ordenados por apex_score_1d. + lista complementaria D-1."""
-    rows = (sb.table("apex_scores").select("ticker,apex_score_1d,apex_score_4h,calculated_at")
-            .order("calculated_at", desc=True).limit(1000).execute().data or [])
-    seen: dict[str, dict] = {}
-    for r in rows:
-        seen.setdefault(r["ticker"], r)
-    ranked = sorted(seen.values(), key=lambda r: (r.get("apex_score_1d") or r.get("apex_score_4h") or 0), reverse=True)
-    out = [{"symbol": r["ticker"], "apex_score": r.get("apex_score_1d") or r.get("apex_score_4h")}
-           for r in ranked[: int(eff["max_underlyings"])]]
+    """Carga universo combinando catalizadores activos (CALL/PUT hasta max_candidates_per_direction)
+    y fallback de APEX scores."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    max_per_dir = int(eff.get("max_candidates_per_direction") or 25)
+
+    # 1. Cargar desde universe_catalyst_state si hay candidatos disponibles
+    try:
+        cat_rows = (sb.table("universe_catalyst_state").select("*")
+                    .in_("decision", ["ENTER_CALL", "ENTER_PUT"])
+                    .order("catalyst_score", desc=True).limit(100).execute().data or [])
+        calls = [r for r in cat_rows if r.get("direction") in ("CALL", "bullish")][:max_per_dir]
+        puts = [r for r in cat_rows if r.get("direction") in ("PUT", "bearish")][:max_per_dir]
+        for r in calls + puts:
+            sym = r["symbol"].upper()
+            if sym not in seen:
+                seen.add(sym)
+                out.append({
+                    "symbol": sym,
+                    "direction": r.get("direction"),
+                    "direction_source": "catalyst",
+                    "catalyst_score": r.get("catalyst_score"),
+                    "catalyst_state": {
+                        "c1_gap": r.get("c1_gap"),
+                        "c2_basis_1h": r.get("c2_basis_1h"),
+                        "c3_adx": r.get("c3_adx"),
+                        "c4_rebote": r.get("c4_rebote"),
+                        "sipv_state": r.get("sipv_state"),
+                    },
+                })
+    except Exception as e:
+        log_warning(MODULE, f"No se pudo cargar de universe_catalyst_state: {e}")
+
+    # 2. Complementar o fallback con APEX scores
+    try:
+        rows = (sb.table("apex_scores").select("ticker,apex_score_1d,apex_score_4h,calculated_at")
+                .order("calculated_at", desc=True).limit(500).execute().data or [])
+        seen_apex: dict[str, dict] = {}
+        for r in rows:
+            seen_apex.setdefault(r["ticker"], r)
+        ranked = sorted(seen_apex.values(), key=lambda r: (r.get("apex_score_1d") or r.get("apex_score_4h") or 0), reverse=True)
+        max_und = int(eff.get("max_underlyings") or 50)
+        for r in ranked:
+            if len(out) >= max_und:
+                break
+            t = r["ticker"].upper()
+            if t not in seen:
+                seen.add(t)
+                out.append({"symbol": t, "apex_score": r.get("apex_score_1d") or r.get("apex_score_4h")})
+    except Exception as e:
+        log_warning(MODULE, f"Error cargando apex_scores: {e}")
+
+    # 3. Lista complementaria D-1
     if eff.get("supplementary_list_enabled") and eff.get("supplementary_tickers"):
-        have = {u["symbol"] for u in out}
         for t in str(eff["supplementary_tickers"]).replace(" ", "").upper().split(","):
-            if t and t not in have:
+            if t and t not in seen:
+                seen.add(t)
                 out.append({"symbol": t, "apex_score": None, "supplementary": True})
+
     return out
 
 
@@ -127,6 +172,12 @@ def run_scan(ib: IBSession, sb, eff: dict[str, Any], symbols: list[str] | None =
             row, chain, px = evaluate_underlying(ib, sym, eff, today)
             exps = row.pop("_exps")
             row["apex_score"] = u.get("apex_score")
+            if u.get("direction"):
+                row["direction"] = u.get("direction")
+                row["direction_source"] = u.get("direction_source") or "catalyst"
+                row["catalyst_score"] = u.get("catalyst_score")
+                row["catalysts_active"] = u.get("catalysts_active")
+                row["catalyst_state"] = u.get("catalyst_state")
             saved = sb.table("opt_underlyings").upsert(row, on_conflict="symbol").execute().data[0]
             summary["evaluated"] += 1
             if row["optionable"]:

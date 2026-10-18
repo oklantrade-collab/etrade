@@ -287,6 +287,156 @@ async def scan_top_gainers(
     return results
 
 
+async def scan_top_losers(
+    max_results: int = 25,
+    min_price: float = 5.0,
+    max_price: float = 600.0,
+    min_volume: int = 500_000,
+    timeout_s: float = 15.0,
+    filter_options: bool = True,
+) -> list[dict]:
+    """Execute IB Scanner: TOP_PERC_LOSE for US stocks.
+    Captures heavy intraday sell-offs / breakdown candidates for PUTs and Bear Spreads.
+    """
+    if not IB_AVAILABLE or not IB_SCANNER_AVAILABLE:
+        log_warning(MODULE, "IB API not available — cannot run top losers scanner")
+        return []
+
+    ib = get_ib_connection()
+    if ib is None:
+        log_warning(MODULE, "IB connection not available for top losers")
+        return []
+
+    if not ib.connected:
+        log_info(MODULE, "Connecting to IB TWS for top losers scanner...")
+        connected = ib.connect_tws()
+        if not connected:
+            log_warning(MODULE, "IB TWS not available — skipping top losers")
+            return []
+
+    if not hasattr(ib, '_scanner_patched'):
+        _patch_scanner_callbacks(ib)
+        ib._scanner_patched = True
+
+    _TOP_LOSERS_REQ_ID = 9003
+
+    scan_sub = ScannerSubscription()
+    scan_sub.instrument = "STK"
+    scan_sub.locationCode = "STK.US.MAJOR"
+    scan_sub.scanCode = "TOP_PERC_LOSE"
+    scan_sub.numberOfRows = max_results
+    if filter_options:
+        scan_sub.averageOptionVolumeAbove = 500
+
+    filters = []
+    if min_price > 0:
+        filters.append(TagValue("priceAbove", str(min_price)))
+    if max_price < 999999:
+        filters.append(TagValue("priceBelow", str(max_price)))
+    if min_volume > 0:
+        filters.append(TagValue("volumeAbove", str(min_volume)))
+
+    with _scanner_lock:
+        _scanner_results[_TOP_LOSERS_REQ_ID] = []
+        _scanner_complete[_TOP_LOSERS_REQ_ID] = False
+
+    log_info(MODULE, f"Requesting TOP_PERC_LOSE scanner (max={max_results}, price=${min_price}-${max_price})...")
+
+    try:
+        ib.reqScannerSubscription(_TOP_LOSERS_REQ_ID, scan_sub, [], filters)
+    except Exception as e:
+        log_warning(MODULE, f"Top losers scanner request failed: {e}")
+        return []
+
+    start = time.time()
+    while not _scanner_complete.get(_TOP_LOSERS_REQ_ID, False):
+        if time.time() - start > timeout_s:
+            log_warning(MODULE, f"Top losers scanner timeout after {timeout_s}s")
+            break
+        await asyncio.sleep(0.2)
+
+    try:
+        ib.cancelScannerSubscription(_TOP_LOSERS_REQ_ID)
+    except:
+        pass
+
+    with _scanner_lock:
+        results = list(_scanner_results.get(_TOP_LOSERS_REQ_ID, []))
+
+    if results:
+        tickers_str = ", ".join(r["ticker"] for r in results[:10])
+        log_info(MODULE, f"TOP_PERC_LOSE: {len(results)} tickers found. Top 10: {tickers_str}...")
+    return results
+
+
+async def scan_open_gaps(
+    direction: str = "up",
+    max_results: int = 25,
+    min_price: float = 5.0,
+    max_price: float = 600.0,
+    min_volume: int = 300_000,
+    timeout_s: float = 15.0,
+    filter_options: bool = True,
+) -> list[dict]:
+    """Execute IB Scanner: HIGH_OPEN_GAP or LOW_OPEN_GAP."""
+    if not IB_AVAILABLE or not IB_SCANNER_AVAILABLE:
+        return []
+
+    ib = get_ib_connection()
+    if ib is None or not ib.connected:
+        return []
+
+    if not hasattr(ib, '_scanner_patched'):
+        _patch_scanner_callbacks(ib)
+        ib._scanner_patched = True
+
+    is_up = direction.lower() in ("up", "bullish", "call")
+    req_id = 9004 if is_up else 9005
+    code = "HIGH_OPEN_GAP" if is_up else "LOW_OPEN_GAP"
+
+    scan_sub = ScannerSubscription()
+    scan_sub.instrument = "STK"
+    scan_sub.locationCode = "STK.US.MAJOR"
+    scan_sub.scanCode = code
+    scan_sub.numberOfRows = max_results
+    if filter_options:
+        scan_sub.averageOptionVolumeAbove = 500
+
+    filters = []
+    if min_price > 0:
+        filters.append(TagValue("priceAbove", str(min_price)))
+    if max_price < 999999:
+        filters.append(TagValue("priceBelow", str(max_price)))
+    if min_volume > 0:
+        filters.append(TagValue("volumeAbove", str(min_volume)))
+
+    with _scanner_lock:
+        _scanner_results[req_id] = []
+        _scanner_complete[req_id] = False
+
+    log_info(MODULE, f"Requesting {code} scanner (max={max_results})...")
+    try:
+        ib.reqScannerSubscription(req_id, scan_sub, [], filters)
+    except Exception as e:
+        log_warning(MODULE, f"{code} scanner request failed: {e}")
+        return []
+
+    start = time.time()
+    while not _scanner_complete.get(req_id, False):
+        if time.time() - start > timeout_s:
+            break
+        await asyncio.sleep(0.2)
+
+    try:
+        ib.cancelScannerSubscription(req_id)
+    except:
+        pass
+
+    with _scanner_lock:
+        results = list(_scanner_results.get(req_id, []))
+    return results
+
+
 async def save_scanner_to_watchlist(results: list[dict]) -> list[str]:
     """
     Save scanner results to watchlist_daily table.

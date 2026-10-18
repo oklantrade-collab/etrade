@@ -46,6 +46,7 @@ class AduanaContext:
     execution_mode: str = sd.EXECUTION_MODE
     check_quote_age: bool = True            # False al valorar candidatas (la antiguedad se exige al abrir)
     check_window: bool = True
+    underlying: dict[str, Any] | None = None
 
 
 @dataclass
@@ -181,6 +182,60 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
         problems.append(f"posiciones en la misma direccion {same_dir} >= {eff['max_same_direction']}")
     add("O-11", not problems, "; ".join(problems) or "ok")
 
+    # O-12 Gate subyacente: validacion de catalizadores (Gap&Go, SIPV mechas, EMA3 1h, anti-climax)
+    gate_enabled = eff.get("gate_enabled", True)
+    if not gate_enabled:
+        add("O-12", True, "gate O-12 deshabilitado")
+    else:
+        cat_state = cand.get("catalyst_state")
+        if not cat_state and ctx.underlying:
+            cat_state = ctx.underlying.get("catalyst_state")
+        
+        if not cat_state:
+            # Si la candidata no proviene de catalizador ni tiene estado de catalizador, pasa por compatibilidad
+            add("O-12", True, "sin catalizador activo (aprobado por defecto)")
+        else:
+            bad_gate = []
+            cand_dir = (cand.get("direction") or "").lower()
+            is_bull = cand_dir in ("bullish", "call", "long")
+            is_bear = cand_dir in ("bearish", "put", "short")
+
+            # 1. Validacion de Gap si participo en la nominacion
+            gap_info = cat_state.get("c1_gap") or {}
+            gap_active = cat_state.get("c1_active", False) or gap_info.get("triggered", False)
+            if gap_active:
+                candles_checked = int(gap_info.get("candles_checked") or 2)
+                if candles_checked < 2:
+                    bad_gate.append("primer gap del dia: esperando apertura de la 2da vela de 5m para confirmar")
+                
+                gap_atr = abs(float(gap_info.get("gap_atr") or 0.0))
+                min_gap = float(eff.get("gate_gap_min_atr") or 0.5)
+                max_gap = float(eff.get("gate_gap_max_atr") or 3.0)
+                if gap_atr < min_gap:
+                    bad_gate.append(f"gap insuficiente ({gap_atr:.2f} ATR < {min_gap} ATR)")
+                elif gap_atr > max_gap:
+                    bad_gate.append(f"gap excesivo ({gap_atr:.2f} ATR > {max_gap} ATR: riesgo de agotamiento)")
+
+            # 2. Pendiente EMA3 1H
+            if is_bull and cat_state.get("is_ema3_1h_descending"):
+                bad_gate.append("pendiente EMA3 1h contraria (descendente en CALL)")
+            elif is_bear and cat_state.get("is_ema3_1h_ascending"):
+                bad_gate.append("pendiente EMA3 1h contraria (ascendente en PUT)")
+
+            # 3. Rechazo o absorcion SIPV contraria (mecha >= 40%)
+            if is_bull and cat_state.get("sipv_upper_rejection"):
+                bad_gate.append("anulado por mecha de rechazo SIPV superior (>= 40%)")
+            elif is_bear and cat_state.get("sipv_lower_absorption"):
+                bad_gate.append("anulado por mecha de absorcion SIPV inferior (>= 40%)")
+
+            # 4. Anti-climax (no aplica en vela 1 de gap por definicion)
+            if cat_state.get("is_anticlimax_blocked"):
+                is_first_gap_candle = gap_active and int(gap_info.get("candles_checked") or 0) <= 1
+                if not is_first_gap_candle:
+                    bad_gate.append("bloqueo por condicion anti-climax detectada")
+
+            add("O-12", not bad_gate, "; ".join(bad_gate) or "gate subyacente superado")
+
     return AduanaResult(approved=all(r.ok for r in rules), rules=rules, warnings=warns)
 
 
@@ -192,7 +247,8 @@ def validate_exit(reason: str, ctx: AduanaContext) -> AduanaResult:
                              RuleResult("EXIT", True, f"{kind}: {reason}")])
 
 
-def static_context(underlying_id: int | None = None, event_flags: list[str] | None = None) -> AduanaContext:
+def static_context(underlying_id: int | None = None, event_flags: list[str] | None = None,
+                   underlying: dict[str, Any] | None = None) -> AduanaContext:
     """Contexto para valorar candidatas: sin posiciones, sin exigir ventana ni antiguedad (se exigen al abrir, Sprint 6)."""
     return AduanaContext(now=datetime.now(timezone.utc), underlying_id=underlying_id, event_flags=event_flags,
-                         check_quote_age=False, check_window=False)
+                         check_quote_age=False, check_window=False, underlying=underlying)

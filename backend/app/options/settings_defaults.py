@@ -48,6 +48,7 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "extra_fees_per_contract": (0.05, 0, 1),
     # B. Universo y opcionabilidad
     "max_underlyings": (20, 5, 40),
+    "max_candidates_per_direction": (25, 5, 50),
     "min_underlying_price": (5, 1, 100),
     "max_strike_gap_pct": (5, 1, 10),
     "min_atm_open_interest": (300, 50, 5000),
@@ -119,6 +120,16 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "g3_min_weeks": (4, 1, 52),
     "g3_min_trades": (60, 10, 500),
     "g3_calibration_tol_pts": (10, 1, 30),
+    # I. Catalizadores y Gate O-12
+    "catalyst_adx_override": (35.0, 20.0, 60.0),
+    "catalyst_min_score": (45.0, 10.0, 100.0),
+    "catalyst_ttl_min": (45, 10, 180),
+    "gate_enabled": (True, None, None),
+    "gate_gap_min_atr": (0.5, 0.1, 3.0),
+    "gate_gap_max_atr": (3.0, 1.0, 10.0),
+    "gate_adx_min": (18.0, 10.0, 40.0),
+    "gate_flow_min": (60.0, 0.0, 100.0),
+    "gate_max_age_sec": (330, 60, 900),
 }
 
 SCORE_WEIGHT_KEYS = ("w_expectancy", "w_apex_signal", "w_liquidity", "w_risk", "w_iv_greeks", "w_context")

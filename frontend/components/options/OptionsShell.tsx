@@ -31,6 +31,7 @@ export function ComingSoon() {
 
 const NAV = [
   { href: '/options', label: 'Dashboard' },
+  { href: '/options/universe', label: 'Universe' },
   { href: '/options/opportunities', label: 'Opportunities' },
   { href: '/options/positions', label: 'Positions' },
   { href: '/options/performance', label: 'Performance' },

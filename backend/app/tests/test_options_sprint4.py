@@ -207,7 +207,7 @@ def test_aduana_approves_clean_candidate():
     row, eff = cand()
     res = ad.validate_entry(row, ctx(), eff)
     assert res.approved, res.reasons
-    assert [r.rule for r in res.rules] == [f"O-{i}" for i in range(1, 12)]
+    assert [r.rule for r in res.rules] == [f"O-{i}" for i in range(1, 13)]
 
 
 def test_o1_mode_must_be_paper():
@@ -311,6 +311,52 @@ def test_static_context_skips_window_and_age():
     row, eff = cand()
     res = ad.validate_entry(row, ad.static_context(1, []), eff)
     assert res.approved
+
+
+def test_o12_catalyst_gate():
+    row, eff = cand()
+    
+    # 1. Gate deshabilitado
+    res = ad.validate_entry(row, ctx(), dict(eff, gate_enabled=False))
+    assert rule(res, "O-12").ok
+
+    # 2. Sin catalizador activo (aprobado por compatibilidad)
+    res = ad.validate_entry(row, ctx(), eff)
+    assert rule(res, "O-12").ok
+
+    # 3. Gap excesivo (> 3.0 ATR)
+    cand_gap_excessive = dict(row, catalyst_state={
+        "c1_active": True,
+        "c1_gap": {"gap_atr": 4.5, "candles_checked": 2, "triggered": True},
+    })
+    res = ad.validate_entry(cand_gap_excessive, ctx(), eff)
+    assert not rule(res, "O-12").ok
+    assert "gap excesivo" in rule(res, "O-12").detail
+
+    # 4. Primer gap del dia esperando 2da vela
+    cand_c1_wait = dict(row, catalyst_state={
+        "c1_active": True,
+        "c1_gap": {"gap_atr": 1.2, "candles_checked": 1, "triggered": True},
+    })
+    res = ad.validate_entry(cand_c1_wait, ctx(), eff)
+    assert not rule(res, "O-12").ok
+    assert "esperando apertura de la 2da vela" in rule(res, "O-12").detail
+
+    # 5. SIPV mecha de rechazo superior en CALL
+    cand_sipv_reject = dict(row, direction="bullish", catalyst_state={
+        "sipv_upper_rejection": True,
+    })
+    res = ad.validate_entry(cand_sipv_reject, ctx(), eff)
+    assert not rule(res, "O-12").ok
+    assert "rechazo SIPV superior" in rule(res, "O-12").detail
+
+    # 6. Anti-climax bloquea en vela 2+
+    cand_anticlimax = dict(row, catalyst_state={
+        "is_anticlimax_blocked": True,
+        "c1_gap": {"candles_checked": 3},
+    })
+    res = ad.validate_entry(cand_anticlimax, ctx(), eff)
+    assert not rule(res, "O-12").ok
 
 
 def test_exit_classification():

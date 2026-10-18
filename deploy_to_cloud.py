@@ -243,10 +243,37 @@ files_to_sync = [
     "app/execution/providers/ctrader_provider.py",
     "app/analysis/fibonacci_bb.py",
     "app/strategy/emergency_guards.py",
-    "app/api/strategies.py",
     "config_btc_pilot.json",
     "requirements.txt",
-    ".env"
+    ".env",
+
+    # OPTIONS & CATALYSTS
+    "app/options/__init__.py",
+    "app/options/settings_defaults.py",
+    "app/options/market_calendar.py",
+    "app/options/readonly_adapter.py",
+    "app/options/optionability.py",
+    "app/options/ib_client.py",
+    "app/options/scanner.py",
+    "app/options/bs.py",
+    "app/options/strategies.py",
+    "app/options/candidates.py",
+    "app/options/valuation.py",
+    "app/options/options_aduana.py",
+    "app/options/score.py",
+    "app/options/paper_engine.py",
+    "app/options/exit_engine.py",
+    "app/options/calibration.py",
+    "app/options/worker.py",
+    "app/options/catalysts/__init__.py",
+    "app/options/catalysts/indicators.py",
+    "app/options/catalysts/arbitration.py",
+    "app/options/catalysts/engine.py",
+    "app/options/catalysts/service.py",
+    "app/api/options.py",
+    "app/data/ib_scanner.py",
+    "sql/opt_009_catalyst_universe.sql",
+    "apply_migration_opt_009.py",
 ]
 
 # Archivos frontend para sincronizar (relativos a root)
@@ -264,7 +291,11 @@ frontend_files = [
     ("frontend/app/settings/page.tsx", "frontend/app/settings/page.tsx"),
     ("frontend/app/stocks/opportunities/page.tsx", "frontend/app/stocks/opportunities/page.tsx"),
     ("frontend/app/stocks/universe/page.tsx", "frontend/app/stocks/universe/page.tsx"),
-    ("frontend/app/stocks/positions/page.tsx", "frontend/app/stocks/positions/page.tsx")
+    ("frontend/app/stocks/positions/page.tsx", "frontend/app/stocks/positions/page.tsx"),
+    ("frontend/app/options/opportunities/page.tsx", "frontend/app/options/opportunities/page.tsx"),
+    ("frontend/app/options/universe/page.tsx", "frontend/app/options/universe/page.tsx"),
+    ("frontend/components/options/OptionsShell.tsx", "frontend/components/options/OptionsShell.tsx"),
+    ("frontend/components/options/OptionsSettings.tsx", "frontend/components/options/OptionsSettings.tsx"),
 ]
 
 def check_syntax():
@@ -305,6 +336,8 @@ def ensure_remote_directories():
         f"{REMOTE_PATH}/app/halcon_centinela/scoring",
         f"{REMOTE_PATH}/app/halcon_centinela/oraculo",
         f"{REMOTE_PATH}/app/stocks",
+        f"{REMOTE_PATH}/app/options/catalysts",
+        f"{REMOTE_PATH}/sql",
         f"{REMOTE_PATH}/app/tests",
         f"{REMOTE_PATH}/app/strategy",
         f"{REMOTE_PATH}/app/workers",
@@ -313,6 +346,9 @@ def ensure_remote_directories():
         f"{REMOTE_PATH}/data",
         f"{REMOTE_PATH}/tests",
         f"{ROOT_REMOTE_PATH}/frontend/app/halcon",
+        f"{ROOT_REMOTE_PATH}/frontend/app/options/opportunities",
+        f"{ROOT_REMOTE_PATH}/frontend/app/options/universe",
+        f"{ROOT_REMOTE_PATH}/frontend/components/options",
         f"{ROOT_REMOTE_PATH}/frontend/components/widgets"
     ]
     mkdir_cmd = f"mkdir -p {' '.join(dirs)}"

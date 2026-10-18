@@ -309,6 +309,29 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
         </div>
       </SettingsSection>
 
+      <SettingsSection title="⚡ Catalizadores & Arbitraje ADX (Acciones)">
+        <div style={{ padding: '0 20px 10px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Configuración del motor de catalizadores rápidos (Gap&Go, SIPV 1h, ADX, REBOTE).
+        </div>
+        <SettingToggle 
+           label="Activar Alimentador de Catalizadores para Stocks" 
+           value={generalForm.stocks_catalyst_source_enabled === true || generalForm.stocks_catalyst_source_enabled === 'true'} 
+           onChange={(v: any) => setGeneralForm({ ...generalForm, stocks_catalyst_source_enabled: v })} 
+        />
+        <SettingRow 
+           label="ADX Override (Fuerza de Tendencia)" 
+           value={generalForm.stocks_adx_override ?? 35} 
+           type="number" 
+           onChange={(v: any) => setGeneralForm({ ...generalForm, stocks_adx_override: Number(v) })} 
+        />
+        <SettingRow 
+           label="Máx. Candidatos por Dirección" 
+           value={generalForm.stocks_max_candidates_per_direction ?? 25} 
+           type="number" 
+           onChange={(v: any) => setGeneralForm({ ...generalForm, stocks_max_candidates_per_direction: Number(v) })} 
+        />
+      </SettingsSection>
+
       {/* UNIVERSE BUILDER COMO BOTÓN DESPLEGABLE */}
       <div style={{ 
           background: 'rgba(79,195,247,0.05)', 

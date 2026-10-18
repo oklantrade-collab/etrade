@@ -76,25 +76,66 @@ export default function StocksUniverse() {
           </p>
         </div>
 
-        <button
-          onClick={handleManualRefresh}
-          disabled={refreshing}
-          style={{
-            padding: '10px 18px',
-            borderRadius: '8px',
-            background: refreshing ? 'rgba(255,255,255,0.05)' : 'rgba(34,197,94,0.15)',
-            border: `1px solid ${refreshing ? 'rgba(255,255,255,0.1)' : 'rgba(34,197,94,0.3)'}`,
-            color: refreshing ? '#555' : '#22C55E',
-            fontSize: '12px',
-            fontWeight: 800,
-            cursor: refreshing ? 'not-allowed' : 'pointer',
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          {/* Switcher de Vista Universe: Stocks vs Opciones */}
+          <div style={{
             display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-          }}
-        >
-          {refreshing ? 'Refreshing...' : '🔄 Refresh Fundamentals'}
-        </button>
+            background: 'rgba(255,255,255,0.04)',
+            padding: '3px',
+            borderRadius: '10px',
+            border: '1px solid rgba(255,255,255,0.08)'
+          }}>
+            <span style={{
+              padding: '7px 14px',
+              borderRadius: '7px',
+              background: '#22C55E',
+              color: '#000',
+              fontWeight: 800,
+              fontSize: '11px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}>
+              📈 Acciones (Stocks)
+            </span>
+            <Link
+              href="/options/universe"
+              style={{
+                padding: '7px 14px',
+                borderRadius: '7px',
+                color: '#888',
+                fontWeight: 700,
+                fontSize: '11px',
+                textDecoration: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}
+            >
+              ⚡ Opciones (CALL/PUT)
+            </Link>
+          </div>
+
+          <button
+            onClick={handleManualRefresh}
+            disabled={refreshing}
+            style={{
+              padding: '10px 18px',
+              borderRadius: '8px',
+              background: refreshing ? 'rgba(255,255,255,0.05)' : 'rgba(34,197,94,0.15)',
+              border: `1px solid ${refreshing ? 'rgba(255,255,255,0.1)' : 'rgba(34,197,94,0.3)'}`,
+              color: refreshing ? '#555' : '#22C55E',
+              fontSize: '12px',
+              fontWeight: 800,
+              cursor: refreshing ? 'not-allowed' : 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            {refreshing ? 'Refreshing...' : '🔄 Refresh Fundamentals'}
+          </button>
+        </div>
       </div>
 
       {/* CONTROLS */}

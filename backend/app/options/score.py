@@ -41,24 +41,37 @@ def compute_expectancy_score(cand: dict[str, Any], eff: dict[str, Any]) -> tuple
 
 
 def compute_apex_signal_score(cand: dict[str, Any], underlying: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-    """Componente 2: Calidad de senal APEX del subyacente.
-    APEX score en escala 0-100. Coherencia direccional obligatoria.
+    """Componente 2: Calidad de senal APEX o Catalizador del subyacente.
+    Score en escala 0-100. Coherencia direccional obligatoria.
     """
     apex_score = underlying.get("apex_score")
     if apex_score is None:
-        # Si el subyacente no tiene APEX score explicitado, se asume neutro conservador (50)
         apex_score = 50.0
     else:
         apex_score = float(apex_score)
 
-    cand_dir = cand.get("direction")
-    und_dir = underlying.get("direction")
-    dir_source = cand.get("direction_source") or "unverified"
+    cand_dir = (cand.get("direction") or "").lower()
+    raw_und_dir = underlying.get("direction") or ""
+    # Normalizar CALL/PUT o bullish/bearish
+    und_dir = "bullish" if raw_und_dir in ("CALL", "bullish") else ("bearish" if raw_und_dir in ("PUT", "bearish") else raw_und_dir.lower())
+    cand_norm_dir = "bullish" if cand_dir in ("call", "bullish") else ("bearish" if cand_dir in ("put", "bearish") else cand_dir)
+
+    dir_source = cand.get("direction_source") or underlying.get("direction_source") or "unverified"
+
+    if dir_source == "catalyst":
+        cat_score = float(underlying.get("catalyst_score") or cand.get("catalyst_score") or 60.0)
+        if und_dir and cand_norm_dir and cand_norm_dir != und_dir:
+            score = 0.0
+            note = f"direccion opuesta al catalizador ({cand_norm_dir} vs {und_dir})"
+        else:
+            score = cat_score
+            note = f"coherente con catalizador ({raw_und_dir})"
+        return _clip(score), {"catalyst_score": cat_score, "direction_source": "catalyst", "note": note}
 
     if dir_source == "apex":
-        if und_dir and cand_dir != und_dir:
+        if und_dir and cand_norm_dir != und_dir:
             score = 0.0
-            note = f"direccion opuesta a la senal APEX ({cand_dir} vs {und_dir})"
+            note = f"direccion opuesta a la senal APEX ({cand_norm_dir} vs {und_dir})"
         else:
             score = apex_score
             note = f"coherente con senal APEX ({und_dir})"
