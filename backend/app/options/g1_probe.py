@@ -96,7 +96,15 @@ def measure_symbol(ib: IBSession, sym: str, eff: dict[str, Any]) -> dict[str, An
     px = ib.quote(stock_contract(sym))
     price = px.get("last") or px.get("close") or px.get("ask")
     if not price:
-        res["reason"] = "sin precio del subyacente"
+        try:
+            from app.core.supabase_client import get_supabase
+            row = get_supabase().table("opt_underlyings").select("price").eq("symbol", sym).limit(1).execute().data
+            if row and row[0].get("price"):
+                price = float(row[0]["price"])
+        except Exception:
+            pass
+    if not price:
+        res["reason"] = "sin precio del subyacente (mercado cerrado)"
         return res
     if price < eff["min_underlying_price"]:
         res["reason"] = f"precio {price} < minimo"
