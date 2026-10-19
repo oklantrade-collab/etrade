@@ -552,9 +552,20 @@ async def refresh_stocks_fundamentals():
         log_error("stocks_api", f"Error refreshing fundamentals: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+import uuid
+
+def _is_valid_uuid(val: str) -> bool:
+    try:
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
 @router.delete("/positions/{position_id}")
 async def delete_stock_position(position_id: str):
     """Hard delete a stock position record."""
+    if not _is_valid_uuid(position_id):
+        raise HTTPException(status_code=400, detail=f"ID de posicion invalido: '{position_id}'. Debe ser un UUID valido.")
     try:
         sb = get_supabase()
         res = sb.table("stocks_positions").delete().eq("id", position_id).execute()
@@ -564,8 +575,6 @@ async def delete_stock_position(position_id: str):
             log_info("stocks_api", f"Position {position_id} deleted successfully")
             return {"success": True, "message": "Record deleted"}
         else:
-            # Podría ser exitoso pero sin devolver data, o simplemente no encontrarlo
-            # Verificamos si hubo un error en la ejecución
             return {"success": True, "message": "Delete command executed"}
             
     except Exception as e:
@@ -575,6 +584,8 @@ async def delete_stock_position(position_id: str):
 @router.post("/positions/{position_id}/close")
 async def manual_close_stock_position(position_id: str):
     """Manually close a stock position (updates status to 'closed')."""
+    if not _is_valid_uuid(position_id):
+        raise HTTPException(status_code=400, detail=f"ID de posicion invalido: '{position_id}'. Debe ser un UUID valido.")
     try:
         sb = get_supabase()
         from datetime import datetime, timezone
@@ -629,6 +640,8 @@ async def manual_close_stock_position(position_id: str):
         
         return {"success": True, "pnl_usd": pnl_usd}
         
+    except HTTPException:
+        raise
     except Exception as e:
         log_error("stocks_api", f"Error closing position {position_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -636,6 +649,8 @@ async def manual_close_stock_position(position_id: str):
 @router.post("/positions/{position_id}/diagnostics/refresh")
 async def refresh_stock_position_diagnostics(position_id: str):
     """Force an on-demand calculation and refresh of technical diagnostics for a position."""
+    if not _is_valid_uuid(position_id):
+        raise HTTPException(status_code=400, detail=f"ID de posicion invalido: '{position_id}'. Debe ser un UUID valido.")
     try:
         sb = get_supabase()
         res = sb.table("stocks_positions").select("*").eq("id", position_id).execute()
@@ -653,6 +668,8 @@ async def refresh_stock_position_diagnostics(position_id: str):
         diag = build_position_diagnostics(pos, snap_db=snap_data)
 
         return {"success": True, "ticker": ticker, "diagnostics": diag}
+    except HTTPException:
+        raise
     except Exception as e:
         log_error("stocks_api", f"Error refreshing diagnostics for position {position_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
