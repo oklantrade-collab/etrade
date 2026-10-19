@@ -63,7 +63,11 @@ export default function StocksPositions() {
 
       const openData = await openRes.json()
       const rawOpen = Array.isArray(openData.positions) ? openData.positions : []
-      const filteredOpen = rawOpen.filter((p: any) => p.group_name !== 'OPTIONS' && !String(p.ticker || '').includes(':OPT'))
+      const filteredOpen = rawOpen.filter((p: any) => 
+        p.group_name !== 'OPTIONS' && 
+        !String(p.ticker || '').includes(':OPT') &&
+        !String(p.strategy || '').toUpperCase().startsWith('OPT')
+      )
       setPositions(filteredOpen)
       setClosedPositions(Array.isArray(closedData) ? closedData : [])
     } catch (err) {

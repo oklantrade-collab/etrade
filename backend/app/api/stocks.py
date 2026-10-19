@@ -361,6 +361,9 @@ async def get_stocks_positions():
                 # Adjuntar diagnóstico técnico y de riesgo completo
                 pos["diagnostics"] = build_position_diagnostics(pos, snap_db=snap_map.get(ticker))
 
+            # Excluir cualquier posición cuya estrategia sea de opciones
+            positions = [p for p in positions if not str(p.get("strategy", "")).upper().startswith("OPT")]
+
             return {"positions": positions}
 
         except Exception as e:
