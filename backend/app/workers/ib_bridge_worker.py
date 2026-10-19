@@ -103,12 +103,13 @@ def on_ib_order_status(order_id: int, status_info: dict):
                     sl_p = round(exec_price - (atr_fb * 2.0), 2)
                     tp_p = round(exec_price + (atr_fb * 5.0), 2)
 
+                    multiplier = 100 if ":OPT:" in ticker else 1
                     sb.table("stocks_positions").insert({
                         "ticker": ticker,
                         "direction": "long",
                         "shares": shares,
                         "avg_price": exec_price,
-                        "total_cost": round(shares * exec_price, 2),
+                        "total_cost": round(shares * exec_price * multiplier, 2),
                         "current_price": exec_price,
                         "stop_loss": sl_p,
                         "trailing_sl_price": sl_p,
@@ -119,7 +120,37 @@ def on_ib_order_status(order_id: int, status_info: dict):
                         "status": "open",
                         "updated_at": now_iso
                     }).execute()
-                    log_info(MODULE, f"✅ Nueva posición creada en Supabase para {ticker}: {shares} acc @ ${exec_price:.2f} (SL: ${sl_p:.2f}, TP: ${tp_p:.2f})")
+                    log_info(MODULE, f"✅ Nueva posición creada en Supabase para {ticker}: {shares} {'contratos' if multiplier == 100 else 'acc'} @ ${exec_price:.2f} (SL: ${sl_p:.2f}, TP: ${tp_p:.2f})")
+
+                    # Si es opción, también registrar en opt_paper_trades
+                    if ":OPT:" in ticker:
+                        try:
+                            parts = ticker.split(":")
+                            und_sym = parts[0] if parts[0] != "OPT" else parts[1]
+                            exp_d = parts[2]
+                            formatted_exp = f"{exp_d[:4]}-{exp_d[4:6]}-{exp_d[6:8]}" if len(exp_d) == 8 else exp_d
+                            strike_num = float(parts[3])
+                            is_call = parts[-1].upper() == "C"
+                            sb.table("opt_paper_trades").insert({
+                                "symbol": und_sym,
+                                "strategy_type": "long_call" if is_call else "long_put",
+                                "direction": "bullish" if is_call else "bearish",
+                                "status": "open",
+                                "qty": shares,
+                                "expiry": formatted_exp,
+                                "entry_time": now_iso,
+                                "entry_debit": exec_price,
+                                "entry_total_invested": round(shares * exec_price * 100, 2),
+                                "max_loss_total": round(shares * exec_price * 100, 2),
+                                "max_profit_total": 9999.0,
+                                "breakeven": round(strike_num + exec_price, 2) if is_call else round(strike_num - exec_price, 2),
+                                "model_version": "ib_live_paper",
+                                "created_at": now_iso,
+                                "updated_at": now_iso
+                            }).execute()
+                            log_info(MODULE, f"✅ Trade de opción registrado en opt_paper_trades para {und_sym}")
+                        except Exception as opt_err:
+                            log_warning(MODULE, f"No se pudo guardar en opt_paper_trades: {opt_err}")
 
             except Exception as pos_e:
                 log_error(MODULE, f"Error creando/actualizando posición para {ticker}: {pos_e}")
@@ -293,7 +324,35 @@ class IBBridgeWorker:
 
                 try:
                     from ibapi.order import Order
-                    contract = self.ib.us_stock_contract(ticker)
+
+                    # Reconocer si es un contrato de opción (CALL/PUT) o acción
+                    contract = None
+                    is_option = False
+                    if ":OPT:" in ticker.upper() or ticker.upper().startswith("OPT:"):
+                        parts = ticker.upper().split(":")
+                        # Formato: "SPY:OPT:20261120:580:C" -> [SPY, OPT, 20261120, 580, C]
+                        # o "OPT:SPY:20261120:580:C" -> [OPT, SPY, 20261120, 580, C]
+                        if len(parts) >= 5:
+                            sym_p = parts[0] if parts[0] != "OPT" else parts[1]
+                            exp_p = parts[2]
+                            strike_p = float(parts[3])
+                            right_p = parts[4]
+                            contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
+                            is_option = True
+                            log_info(MODULE, f"🎯 Contrato de OPCIÓN identificado: {sym_p} {exp_p} Strike ${strike_p} Right={right_p}")
+                    elif order.get("target_band") and ":OPT:" in str(order.get("target_band")).upper():
+                        parts = str(order.get("target_band")).upper().split(":")
+                        sym_p = ticker.upper()
+                        exp_p = parts[1]
+                        strike_p = float(parts[2])
+                        right_p = parts[3]
+                        contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
+                        is_option = True
+                        log_info(MODULE, f"🎯 Contrato de OPCIÓN identificado vía target_band: {sym_p} {exp_p} Strike ${strike_p} Right={right_p}")
+
+                    if not contract:
+                        contract = self.ib.us_stock_contract(ticker)
+
                     ib_ord = Order()
                     ib_ord.eTradeOnly = False
                     ib_ord.firmQuoteOnly = False
@@ -378,7 +437,7 @@ class IBBridgeWorker:
                         update_payload = {
                             "shares": qty,
                             "avg_price": round(avg_cost, 4),
-                            "total_cost": round(qty * avg_cost, 2),
+                            "total_cost": round(qty * avg_cost * (100 if ":OPT:" in sym else 1), 2),
                             "current_price": cur_p,
                             "unrealized_pnl": pnl_usd,
                             "unrealized_pnl_pct": pnl_pct,
@@ -399,7 +458,7 @@ class IBBridgeWorker:
                         "direction": "long",
                         "shares": qty,
                         "avg_price": round(avg_cost, 4),
-                        "total_cost": round(qty * avg_cost, 2),
+                        "total_cost": round(qty * avg_cost * (100 if ":OPT:" in sym else 1), 2),
                         "current_price": cur_p,
                         "unrealized_pnl": pnl_usd,
                         "unrealized_pnl_pct": pnl_pct,
@@ -407,7 +466,7 @@ class IBBridgeWorker:
                         "trailing_sl_price": sl_calc,
                         "highest_price_reached": max(avg_cost, cur_p),
                         "take_profit": tp_calc,
-                        "group_name": "IB_PAPER",
+                        "group_name": "OPTIONS" if ":OPT:" in sym else "IB_PAPER",
                         "first_buy_at": now_iso,
                         "status": "open",
                         "updated_at": now_iso

@@ -328,6 +328,15 @@ class StocksRuleEngine:
             if gap_pct > 25.0 and is_opening_window:
                 failures.append(f"COMPRA BLOQUEADA (Gap Exhaustion Shield): Gap de apertura excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de dilución/clímax pre-market (Filtro Anti-LQDA). Prohibido comprar en primeros 45m.")
 
+            # Bloqueo universal por agotamiento post-gap (> 2 horas lateral o estancado)
+            gap_up_exhaustion = bool(context.get("gap_up_exhaustion", False))
+            bb_exp = bool(context.get("bb_expanding", False) or context.get("bb_expanding_5m", False))
+            if gap_up_exhaustion and not bb_exp:
+                failures.append(
+                    f"COMPRA BLOQUEADA (Gap Up Exhaustion): Gap de apertura ({gap_pct:+.1f}%) estancado "
+                    f"por más de 2 horas sin nueva expansión de volumen/bandas (Riesgo de distribución lateral post-apertura)."
+                )
+
         # ── CHECK 0.5: Global Intraday Exhaustion Filter ──
         if direction == "buy":
             rsi_15m_val = float(context.get("rsi_14") or 50.0)
@@ -856,6 +865,49 @@ class StocksRuleEngine:
                 gap_pct = float(context.get("gap_pct") or 0)
                 failures.append(
                     f"Gap Up Exhaustion: Stock gapped {gap_pct:.1f}% and explosion is stale."
+                )
+
+        # ── CHECK 8.5: Regla Específica HOT_BB_PULLBACK_5M (Pullback a EMA9 en 5m) ──
+        if normalized_code in ("HOT_BB_PULLBACK_5M", "BB_PULLBACK_5M", "HOT_BB_PULLBACK"):
+            ema3_5m  = float(context.get("ema_3_5m") or 0)
+            ema9_5m  = float(context.get("ema_9_5m") or 0)
+            ema20_5m = float(context.get("ema_20_5m") or 0)
+            low_5m   = float(context.get("low_5m") or context.get("low") or 0)
+            close_5m = float(context.get("close_5m") or current_price)
+            rsi_5m   = float(context.get("rsi_5m") or 50.0)
+            bb_exp_5m = bool(context.get("bb_expanding_5m", False))
+            bb_exp   = bool(context.get("bb_expanding", False))
+            gap_exhaustion = bool(context.get("gap_up_exhaustion", False))
+
+            # Requisito 1: Bloqueo absoluto por agotamiento de gap
+            if gap_exhaustion and not bb_exp and not bb_exp_5m:
+                gap_pct = float(context.get("gap_pct") or 0)
+                failures.append(
+                    f"Gap Up Exhaustion: Activo gapped {gap_pct:.1f}% y lleva >2 horas lateral. Pullback tardío bloqueado."
+                )
+
+            # Requisito 2: El Low de 5m debe haber testeado la EMA9 (Pullback real)
+            if ema9_5m > 0 and low_5m > ema9_5m * 1.003:
+                failures.append(
+                    f"No Pullback to EMA9 (5m): Low ${low_5m:.2f} no alcanzó EMA9 ${ema9_5m:.2f}."
+                )
+
+            # Requisito 3: Rebote activo (El Close debe mantenerse sobre o cerca de EMA9, no en colapso)
+            if ema9_5m > 0 and close_5m < ema9_5m * 0.995:
+                failures.append(
+                    f"Pullback Failed (5m): Precio cayó por debajo de EMA9 (${close_5m:.2f} < ${ema9_5m:.2f})."
+                )
+
+            # Requisito 4: Alineación de tendencia en 5m (EMA9 > EMA20)
+            if ema9_5m > 0 and ema20_5m > 0 and ema9_5m < ema20_5m:
+                failures.append(
+                    f"5m Trend Bearish: EMA9 ${ema9_5m:.2f} < EMA20 ${ema20_5m:.2f} (Tendencia rota)."
+                )
+
+            # Requisito 5: RSI 5m no sobrecomprado (Pullback saludable)
+            if rsi_5m > 65:
+                failures.append(
+                    f"5m RSI Elevated: {rsi_5m:.1f} > 65 (No es un pullback de descanso)."
                 )
 
         # ── CHECK 9: BLUE_DEEP_PULLBACK (APEX AZUL - Retroceso a EMA20) ──

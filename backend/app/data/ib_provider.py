@@ -209,10 +209,21 @@ class IBConnection(EWrapper, EClient):
         symbol = getattr(contract, "symbol", "").upper()
         if not symbol:
             return
-        log_info(MODULE, f"[IB Position] Account={account} Symbol={symbol} Qty={position} AvgCost=${avgCost:.4f}")
-        self._positions[symbol] = {
+        sec_type = getattr(contract, "secType", "STK")
+        if sec_type == "OPT":
+            right = getattr(contract, "right", "")
+            strike = getattr(contract, "strike", 0.0)
+            expiry = getattr(contract, "lastTradeDateOrContractMonth", "")
+            pos_key = f"{symbol}:OPT:{expiry}:{strike}:{right}"
+        else:
+            pos_key = symbol
+
+        log_info(MODULE, f"[IB Position] Account={account} Key={pos_key} (Type={sec_type}) Qty={position} AvgCost=${avgCost:.4f}")
+        self._positions[pos_key] = {
             "account": account,
-            "symbol": symbol,
+            "symbol": pos_key,
+            "sec_type": sec_type,
+            "underlying": symbol,
             "shares": float(position),
             "avg_cost": float(avgCost),
             "updated_at": datetime.now(timezone.utc).isoformat()
@@ -247,6 +258,29 @@ class IBConnection(EWrapper, EClient):
         contract.secType = "STK"
         contract.exchange = "SMART"
         contract.currency = "USD"
+        return contract
+
+    @staticmethod
+    def us_option_contract(
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str = "C",
+        multiplier: str = "100",
+        exchange: str = "SMART"
+    ) -> "Contract":
+        """Create a Contract object for a US stock/ETF option."""
+        if not IB_AVAILABLE:
+            raise RuntimeError("ibapi not installed")
+        contract = Contract()
+        contract.symbol = symbol.upper()
+        contract.secType = "OPT"
+        contract.exchange = exchange
+        contract.currency = "USD"
+        contract.lastTradeDateOrContractMonth = str(expiry).replace("-", "")
+        contract.strike = float(strike)
+        contract.right = right.upper()
+        contract.multiplier = str(multiplier)
         return contract
 
     # ── Order Builder ─────────────────────────────────────
