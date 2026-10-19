@@ -527,6 +527,56 @@ def evaluate_stock_tp_v2(
     except Exception as e_aduana:
         log_error("ADUANA_TP_V2", f"Error en evaluate_aduana_stocks_exit para {ticker}: {e_aduana}")
 
+    # ── 1.5 EVALUACIÓN ADUANA GAP RUNNER (Ángulo EMA3 1H y Compresión Bollinger 1H) ──
+    try:
+        strat = str(position.get("strategy") or "")
+        group_nm = str(position.get("group_name") or "")
+        if "GAP" in strat or "GAP" in group_nm or int(position.get("reentry_count") or 0) > 0:
+            from app.stocks.aduana_gap_runner_engine import evaluate_gap_runner_aduana_exit
+            gap_exit_res = evaluate_gap_runner_aduana_exit(
+                position=position,
+                current_price=current_price,
+                df_5m=df_5m,
+                df_15m=df_15m,
+                df_1h=df_1h,
+                df_1d=None
+            )
+            if gap_exit_res.get('should_exit'):
+                ex_type = gap_exit_res.get('exit_type')
+                shs = gap_exit_res.get('shares_to_exit', 0)
+                if ex_type == 'partial_50':
+                    block = 'block1' if not position.get('tp_block1_executed') else 'block2'
+                    return {
+                        'action': f'close_{block}',
+                        'shares': shs,
+                        'pct': 50,
+                        'trigger': gap_exit_res.get('rule_code', 'ADUANA_GAP_EXIT'),
+                        'reason': gap_exit_res.get('reason', 'ADUANA GAP Parcial 50%'),
+                        'debug_indicators': {}
+                    }
+                elif ex_type == 'full':
+                    return {
+                        'action': 'close_total',
+                        'shares': shs,
+                        'pct': 100,
+                        'trigger': gap_exit_res.get('rule_code', 'ADUANA_GAP_EXIT'),
+                        'reason': gap_exit_res.get('reason', 'ADUANA GAP Cierre Total'),
+                        'debug_indicators': {}
+                    }
+            elif gap_exit_res.get('new_stop_loss'):
+                new_sl = gap_exit_res.get('new_stop_loss')
+                cur_sl = float(position.get('stop_loss') or 0.0)
+                if new_sl > cur_sl and new_sl < current_price:
+                    from app.core.supabase_client import get_supabase
+                    sb_inst = get_supabase()
+                    sb_inst.table("stocks_positions").update({
+                        "stop_loss": new_sl,
+                        "trailing_sl_price": new_sl,
+                        "sl_activation_reason": str(gap_exit_res.get('reason', 'ADUANA Ratchet'))[:50]
+                    }).eq("id", position["id"]).execute()
+    except Exception as e_gap_exit:
+        log_error("ADUANA_TP_V2", f"Error en evaluate_gap_runner_aduana_exit para {ticker}: {e_gap_exit}")
+
     # ── 2. EVALUACIÓN COMPLEMENTARIA DE BLOQUES V2 ──
     res = _evaluate_stock_tp_v2_core(
         ticker, position, current_price, snap, df_15m, df_5m, df_1h, df_4h, rvol, sar_15m

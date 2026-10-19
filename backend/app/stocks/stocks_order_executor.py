@@ -258,7 +258,9 @@ def execute_market_order(
             except Exception:
                 is_opening_window = False
 
-        if gap_pct > 25.0 and is_opening_window:
+        is_gap_tranche = str(rule.get("code") or context.get("rule_code") or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (rule.get("strategy") == "ADUANA_GAP_RUNNER")
+
+        if gap_pct > 25.0 and is_opening_window and not is_gap_tranche:
             log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Gap Up excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de agotamiento en apertura (Filtro Anti-LQDA).")
             return {
                 "success": False,
@@ -320,6 +322,15 @@ def execute_market_order(
         elif tranche_step == 3:
             shares = max(5, int((shares * 0.34) // 5) * 5)
 
+    elif rule_code == "GAP_TRANCHE_1":
+        # Tranche inicial 1/3 (33.3%)
+        shares = max(5, int((shares * 0.33) // 5) * 5)
+    elif rule_code == "GAP_TRANCHE_2":
+        # Tranche segundo 1/3 (33.3%)
+        shares = max(5, int((shares * 0.33) // 5) * 5)
+    elif rule_code == "GAP_TRANCHE_3":
+        # Tranche final 1/3 (33.4%)
+        shares = max(5, int((shares * 0.34) // 5) * 5)
     elif rule_code == "FT_RUNNER_BUY":
         # Tranche inicial ligero (30%) para permitir Scaling-In / Pyramiding
         shares = max(5, int((shares * 0.30) // 5) * 5)
@@ -549,7 +560,9 @@ def place_limit_order(
             except Exception:
                 is_opening_window = False
 
-        if gap_pct > 25.0 and is_opening_window:
+        is_gap_tranche = str(rule.get("code") or context.get("rule_code") or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (rule.get("strategy") == "ADUANA_GAP_RUNNER")
+
+        if gap_pct > 25.0 and is_opening_window and not is_gap_tranche:
             log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Gap Up excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de agotamiento en apertura (Filtro Anti-LQDA).")
             return {
                 "success": False,

@@ -325,7 +325,9 @@ class StocksRuleEngine:
                 except Exception:
                     is_opening_window = False
 
-            if gap_pct > 25.0 and is_opening_window:
+            is_gap_tranche = str(context.get("rule_code") or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (context.get("strategy") == "ADUANA_GAP_RUNNER")
+
+            if gap_pct > 25.0 and is_opening_window and not is_gap_tranche:
                 failures.append(f"COMPRA BLOQUEADA (Gap Exhaustion Shield): Gap de apertura excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de dilución/clímax pre-market (Filtro Anti-LQDA). Prohibido comprar en primeros 45m.")
 
             # Bloqueo universal por agotamiento post-gap (> 2 horas lateral o estancado)

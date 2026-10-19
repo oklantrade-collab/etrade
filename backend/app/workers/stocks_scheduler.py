@@ -766,8 +766,83 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             except Exception as q_err:
                 log_warning(MODULE, f"Error bloqueando trampa para {ticker}: {q_err}")
 
+        # 1.4 ESTRATEGIA ADUANA OPEN GAP RUNNER (Piramidación 3 Tranches: 1/3, 2/3, 3/3)
+        gap_val = float(trap_shield_res.get('gap_pct') or ind_15m.get('gap_pct') or 0.0)
+        gap_runner_handled = False
+        if gap_val >= 5.0 and not trap_shield_res.get('is_trap', False) and not trap_shield_res.get('is_toxic_dilution', False):
+            try:
+                from app.stocks.aduana_gap_runner_engine import evaluate_gap_runner_entry_tranches
+                pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+                active_pos = pos_res.data[0] if (pos_res.data and len(pos_res.data) > 0) else None
+
+                gap_eval = evaluate_gap_runner_entry_tranches(
+                    ticker=ticker,
+                    df_5m=df_5m,
+                    df_15m=df_15m,
+                    df_1h=df_1h,
+                    gap_pct=gap_val,
+                    active_position=active_pos,
+                    config=config
+                )
+
+                if gap_eval.get('should_enter'):
+                    rule_cd = gap_eval.get('rule_code', 'GAP_TRANCHE_1')
+                    t_step = gap_eval.get('tranche_step', 1)
+                    t_ratio = gap_eval.get('tranche_shares_ratio', 0.3333)
+                    init_sl = gap_eval.get('initial_sl', round(current_price * 0.95, 2))
+
+                    if active_pos is None and t_step == 1:
+                        rank_boost = 99.8
+                        sb.table("stocks_priority_queue").upsert({
+                            'ticker': ticker,
+                            'group_name': 'OPEN_GAP_RUNNER',
+                            'price_at_rank': current_price,
+                            'apex_score_4h': 99.0,
+                            'apex_score_1d': 99.0,
+                            'return_expected': 25.0,
+                            'confidence': 'high',
+                            'composite_rank': rank_boost,
+                            'status': 'pending',
+                            'entry_reason': str(gap_eval.get('reason', 'GAP_TRANCHE_1'))[:50],
+                            'triggered_rule': rule_cd,
+                            'is_overbought': False,
+                            'rsi_at_entry': float(gap_eval.get('rsi_1h', 50.0)),
+                            'fib_zone': 0,
+                            'last_updated': datetime.now(timezone.utc).isoformat()
+                        }, on_conflict='ticker').execute()
+                        log_info(MODULE, f"🚀 ADUANA GAP RUNNER 99.8: {ticker} | {rule_cd} | {gap_eval['reason']}")
+                        gap_runner_handled = True
+                    elif active_pos is not None and t_step in [2, 3]:
+                        cap_total = float(config.get("stock_capital_total", 1000.0))
+                        max_pct = float(config.get("stock_max_allocation_pct", 0.25))
+                        trade_cap = cap_total * max_pct
+                        tranche_shares = max(5, int((trade_cap * t_ratio // current_price) // 5) * 5)
+
+                        sb.table("stocks_orders").insert({
+                            "ticker": ticker,
+                            "group_name": "OPEN_GAP_RUNNER",
+                            "rule_code": rule_cd,
+                            "order_type": "market",
+                            "direction": "buy",
+                            "shares": tranche_shares,
+                            "market_price": current_price,
+                            "status": "pending",
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        }).execute()
+
+                        new_count = int(active_pos.get('reentry_count') or 0) + 1
+                        sb.table("stocks_positions").update({
+                            "stop_loss": init_sl,
+                            "reentry_count": new_count,
+                            "last_reentry_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", active_pos["id"]).execute()
+                        log_info(MODULE, f"🔥 ADUANA GAP RUNNER PYRAMID ({new_count}/2): {ticker} +{tranche_shares} sh @ ${current_price:.2f} (SL a ${init_sl:.2f})")
+                        gap_runner_handled = True
+            except Exception as e_gap_sched:
+                log_warning(MODULE, f"Error en Aduana Gap Runner para {ticker}: {e_gap_sched}")
+
         # 1.5 Si es candidato FAST-TRACK IPO SUPER-RUNNER / ALPHA RUNNER: Máxima Prioridad Rank 99.5
-        elif (is_ipo_runner or is_alpha_runner_cat) and not trap_shield_res.get('is_toxic_dilution', False):
+        elif not gap_runner_handled and (is_ipo_runner or is_alpha_runner_cat) and not trap_shield_res.get('is_toxic_dilution', False):
             try:
                 from app.stocks.fast_track_runner_engine import evaluate_fast_track_entry, evaluate_fast_track_reentry
                 pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
