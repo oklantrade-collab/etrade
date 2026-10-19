@@ -798,6 +798,282 @@ def evaluate_strategy_custom(payload: dict):
     }
 
 
+# ---------------------------------------------------------------------------
+# Complementary Architecture Endpoints (Doc v1.0)
+# ---------------------------------------------------------------------------
+@router.get("/health")
+def get_system_health():
+    """Estado integral de salud del sistema de opciones, calidad de datos y Kill Switch (Doc §4)."""
+    from app.options import health
+    sb = get_supabase()
+    stored, _, _ = _load_stored()
+    eff = sd.effective_settings(stored)
+    h = health.evaluate_system_health(sb, eff)
+    return {
+        "status": h.status,
+        "kill_switch_active": h.kill_switch_active,
+        "data_state": h.data_state,
+        "consecutive_divergences": h.consecutive_divergences,
+        "delayed_quotes_ratio": h.delayed_quotes_ratio,
+        "active_positions_count": h.active_positions_count,
+        "can_open_new_position": h.can_open_new_position,
+        "reasons": h.reasons,
+        "checked_at": h.checked_at.isoformat(),
+    }
+
+
+@router.post("/control/kill-switch")
+def toggle_kill_switch(payload: dict, user: dict = ceo_only):
+    """Activa o desactiva el Kill Switch de emergencia de Opciones (Doc §4.2)."""
+    from app.options import health
+    active = bool(payload.get("active", True))
+    reason = str(payload.get("reason") or "Manual toggle via API/UI")
+    operator = user.get("email") if isinstance(user, dict) else "admin"
+    res = health.set_kill_switch(active=active, reason=reason, operator=operator, sb=get_supabase())
+    return {"ok": True, "kill_switch_active": active, "audit": res}
+
+
+@router.get("/control/mode")
+def get_control_mode():
+    """Modo operativo del sistema de opciones y consistencia con datos (Doc §3)."""
+    from app.options import health
+    stored, _, _ = _load_stored()
+    mode = stored.get("options_mode") or "paper"
+    sb = get_supabase()
+    eff = sd.effective_settings(stored)
+    h = health.evaluate_system_health(sb, eff)
+    coherent = True
+    if mode == "paper" and h.data_state not in ("LIVE", "TEST_LIVE"):
+        coherent = False
+    return {
+        "options_mode": mode,
+        "data_state": h.data_state,
+        "coherent": coherent,
+        "allowed_modes": ["observation", "paper", "live_staged"],
+    }
+
+
+@router.put("/control/mode")
+def set_control_mode(payload: dict, user: dict = ceo_only):
+    """Cambia el modo operativo de opciones (Doc §3)."""
+    from app.options import health
+    mode = str(payload.get("mode") or "").lower()
+    if mode not in ("observation", "paper", "live_staged"):
+        raise HTTPException(status_code=400, detail="Modo invalido. Permitidos: observation, paper, live_staged")
+    if mode == "live_staged":
+        raise HTTPException(status_code=403, detail="Modo live_staged bloqueado: no habilitado en v1.0")
+    reason = str(payload.get("reason") or "User mode change")
+    operator = user.get("email") if isinstance(user, dict) else "admin"
+    sb = get_supabase()
+    stored, version, _ = _load_stored()
+    new_version = version + 1
+    try:
+        sb.table("opt_settings").upsert([
+            {"key": "options_mode", "value": mode, "updated_at": datetime.now(timezone.utc).isoformat()},
+            {"key": "_version", "value": str(new_version), "updated_at": datetime.now(timezone.utc).isoformat()},
+        ]).execute()
+        health.record_control_event(sb, "MODE_CHANGE", f"Modo cambiado a {mode}: {reason}", operator)
+    except Exception as e:
+        log_warning("OPTIONS_MODE", f"Error guardando modo en BD: {e}")
+    return {"ok": True, "options_mode": mode, "version": new_version}
+
+
+@router.get("/control/audit")
+def get_control_audit(limit: int = 50):
+    """Historial de eventos de control y seguridad (Kill switch, cambios de modo, admisiones)."""
+    sb = get_supabase()
+    try:
+        events = sb.table("opt_control_events").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute().data or []
+    except Exception:
+        events = []
+    return {"events": events}
+
+
+@router.get("/events/calendar")
+def get_events_calendar(symbols: str | None = None):
+    """Consulta el estado del calendario de eventos corporativos y macro para simbolos dados (Doc §7)."""
+    from app.options import event_calendar
+    sym_list = [s.strip().upper() for s in (symbols or "SPY,QQQ,AAPL,NVDA,MSFT,AMZN,TSLA").split(",") if s.strip()]
+    sb = get_supabase()
+    cal = event_calendar.get_event_calendar(sb)
+    results = {}
+    for s in sym_list:
+        ev = cal.get_event(s, horizon_days=30)
+        results[s] = {
+            "symbol": ev.symbol,
+            "state": ev.state.value,
+            "event_type": ev.event_type,
+            "event_date": ev.event_date.isoformat() if ev.event_date else None,
+            "source": ev.source,
+            "is_blocking": ev.is_blocking(),
+            "details": ev.details,
+            "checked_at": ev.checked_at.isoformat() if ev.checked_at else None,
+        }
+    return {"events": results, "calendar_source": "hybrid (Stocks fundamentals + IBKR Scanner fallback)"}
+
+
+@router.post("/evaluations/{candidate_id}/replay")
+def replay_candidate_evaluation(candidate_id: int):
+    """Reejecuta deterministamente la valoracion y score de una candidata (Doc §13.3)."""
+    from app.options import score
+    sb = get_supabase()
+    stored, _, _ = _load_stored()
+    eff = sd.effective_settings(stored)
+    try:
+        res = sb.table("opt_candidates").select("*").eq("id", candidate_id).execute().data
+        if not res:
+            raise HTTPException(status_code=404, detail=f"Candidata {candidate_id} no encontrada")
+        cand = res[0]
+        uid = cand.get("underlying_id") or 0
+        und_res = sb.table("opt_underlyings").select("*").eq("id", uid).execute().data if uid else []
+        und = und_res[0] if und_res else {}
+        replayed = score.replay_evaluation(cand, und, eff)
+        return {"ok": True, "replay": replayed}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en replay: {str(e)[:200]}")
+
+
+@router.get("/analytics/portfolio-greeks")
+def get_portfolio_greeks():
+    """Griegas netas agregadas de la cartera de opciones abierta (Doc §8.3)."""
+    from datetime import date
+    from app.options import bs
+    sb = get_supabase()
+    try:
+        open_pos = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
+    except Exception:
+        open_pos = []
+
+    total_delta_shares = 0.0
+    total_delta_usd = 0.0
+    total_gamma = 0.0
+    total_vega = 0.0
+    total_theta = 0.0
+
+    position_greeks = []
+    today = date.today()
+    for p in open_pos:
+        legs = p.get("legs") or []
+        s0 = float(p.get("underlying_price") or 100.0)
+        p_delta = 0.0
+        p_gamma = 0.0
+        p_vega = 0.0
+        p_theta = 0.0
+        r = 0.045
+        for lg in legs:
+            side = 1.0 if lg.get("side") == "buy" else -1.0
+            k_strike = float(lg.get("strike") or s0)
+            exp_str = lg.get("expiry") or p.get("expiry")
+            t0 = 30.0 / 365.0
+            if exp_str:
+                try:
+                    exp_date = date.fromisoformat(str(exp_str)[:10])
+                    t0 = max((exp_date - today).days / 365.0, 0.001)
+                except Exception:
+                    pass
+            iv = float(lg.get("iv") or 0.35)
+            right = lg.get("right") or "C"
+            d = bs.bs_delta(s0, k_strike, t0, r, iv, right) or 0.0
+            g = bs.bs_gamma(s0, k_strike, t0, r, iv) or 0.0
+            v = bs.bs_vega(s0, k_strike, t0, r, iv) or 0.0
+            th = bs.bs_theta(s0, k_strike, t0, r, iv, right) or 0.0
+
+            p_delta += side * 100.0 * d
+            p_gamma += side * 100.0 * g
+            p_vega += side * 100.0 * v
+            p_theta += side * 100.0 * th
+
+        p_delta_usd = p_delta * s0
+        total_delta_shares += p_delta
+        total_delta_usd += p_delta_usd
+        total_gamma += p_gamma
+        total_vega += p_vega
+        total_theta += p_theta
+
+        position_greeks.append({
+            "id": p.get("id"),
+            "symbol": p.get("symbol"),
+            "strategy": p.get("strategy_type"),
+            "direction": p.get("direction"),
+            "underlying_price": s0,
+            "delta_shares": round(p_delta, 2),
+            "delta_usd": round(p_delta_usd, 2),
+            "gamma": round(p_gamma, 4),
+            "vega_point": round(p_vega, 2),
+            "theta_day": round(p_theta, 2),
+        })
+
+    # Alertas blandas de concentracion de griegas (§8.3)
+    alerts = []
+    if abs(total_delta_usd) > 500.0:
+        alerts.append(f"Delta neto ({total_delta_usd:+.2f} USD) con sesgo direccional significativo")
+    if total_theta < -10.0:
+        alerts.append(f"Decaimiento theta acelerado ({total_theta:.2f} USD/dia)")
+
+    return {
+        "portfolio_totals": {
+            "open_positions": len(open_pos),
+            "delta_shares": round(total_delta_shares, 2),
+            "delta_usd": round(total_delta_usd, 2),
+            "gamma": round(total_gamma, 4),
+            "vega_point": round(total_vega, 2),
+            "theta_day": round(total_theta, 2),
+        },
+        "alerts": alerts,
+        "positions": position_greeks,
+    }
+
+
+@router.get("/analytics/counterfactual-book")
+def get_counterfactual_book(limit: int = 50):
+    """Libro contrafactual: candidatas rechazadas por ADUANA o selector vs aprobadas (Doc §12)."""
+    sb = get_supabase()
+    try:
+        candidates = sb.table("opt_candidates").select("*").order("created_at", desc=True).limit(min(limit, 100)).execute().data or []
+    except Exception:
+        candidates = []
+
+    opened_ids = set()
+    try:
+        pos_data = sb.table("opt_paper_trades").select("candidate_id").execute().data or []
+        opened_ids = {p["candidate_id"] for p in pos_data if p.get("candidate_id")}
+    except Exception:
+        pass
+
+    counterfactuals = []
+    opened = []
+    for c in candidates:
+        cid = c.get("id")
+        is_opened = cid in opened_ids
+        item = {
+            "id": cid,
+            "symbol": c.get("symbol"),
+            "strategy": c.get("strategy_type"),
+            "direction": c.get("direction"),
+            "ev_view_net": c.get("ev_view_net"),
+            "ev_ratio": c.get("ev_ratio"),
+            "score": c.get("score"),
+            "ev_robust": c.get("ev_robust"),
+            "eligibility_status": c.get("eligibility_status"),
+            "rejection_reasons": c.get("rejection_reasons") or [],
+            "created_at": c.get("created_at"),
+        }
+        if is_opened:
+            opened.append(item)
+        else:
+            counterfactuals.append(item)
+
+    return {
+        "opened_count": len(opened),
+        "counterfactual_count": len(counterfactuals),
+        "opened_sample": opened[:20],
+        "counterfactual_sample": counterfactuals[:30],
+        "tracking_note": "Evaluaciones contrafactuales registradas para medir coste de oportunidad de filtros ADUANA",
+    }
+
+
 
 
 

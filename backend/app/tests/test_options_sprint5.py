@@ -33,7 +33,7 @@ def mock_cand(id_: int, uid: int, strat: str = "bull_call_spread", direction: st
         "strategy_type": strat,
         "direction": direction,
         "direction_source": kw.get("direction_source", "apex"),
-        "expiry": "2026-11-20",
+        "expiry": kw.get("expiry", f"2026-11-{10 + (id_ % 15)}"),
         "qty": qty,
         "entry_debit": 0.40,
         "max_loss_contract": c_loss,

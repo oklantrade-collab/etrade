@@ -11,6 +11,8 @@ from typing import Any
 
 from app.options import market_calendar as mc
 from app.options import settings_defaults as sd
+from app.options import health
+from app.options import event_calendar
 
 PASSIVE_EXITS = {"stop", "stop_loss", "forced_close_time", "bad_data_close"}
 ACTIVE_EXITS = {"take_profit", "signal_invalidation", "manual_simulated"}
@@ -290,6 +292,31 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
 
     add("O-13", not bad_standards, "; ".join(bad_standards) or "estandares multi-pata y costes aprobados")
 
+    # O-14 Cobertura minima del score y datos esenciales (§5.3 / B-14)
+    cov = cand.get("coverage")
+    min_cov = float(eff.get("min_coverage", 0.80))
+    missing_essential = []
+    missing_comps = cand.get("missing_components") or []
+    for es in ("expectancy", "liquidity", "risk"):
+        if es in missing_comps:
+            missing_essential.append(es)
+    
+    cov_ok = (cov is None or cov >= min_cov - 1e-9) and not missing_essential
+    cov_detail = f"cobertura={cov if cov is not None else 1.0:.2f} >= {min_cov}" if not missing_essential else f"faltan componentes esenciales: {missing_essential}"
+    add("O-14", cov_ok, cov_detail)
+
+    # O-15 Salud del sistema y Kill Switch (§4.2 / B-15)
+    allowed, health_reason = health.can_open_new_position(eff)
+    add("O-15", allowed, health_reason)
+
+    # O-16 Revalidacion de precio al abrir y deriva maxima (§10.3 / B-17)
+    drift = cand.get("price_drift_pct")
+    max_drift = float(eff.get("max_price_drift_pct", 5.0))
+    if drift is not None and drift > 0:
+        add("O-16", drift <= max_drift + 1e-9, f"deriva={drift:.1f}% max={max_drift}%")
+    else:
+        add("O-16", True, "sin deriva de precio")
+
     return AduanaResult(approved=all(r.ok for r in rules), rules=rules, warnings=warns)
 
 
@@ -306,3 +333,37 @@ def static_context(underlying_id: int | None = None, event_flags: list[str] | No
     """Contexto para valorar candidatas: sin posiciones, sin exigir ventana ni antiguedad (se exigen al abrir, Sprint 6)."""
     return AduanaContext(now=datetime.now(timezone.utc), underlying_id=underlying_id, event_flags=event_flags,
                          check_quote_age=False, check_window=False, underlying=underlying)
+
+
+def rule_o14_coverage_and_critical_data(cand: dict[str, Any], eff: dict[str, Any]) -> tuple[bool, str, str]:
+    """Regla O-14: Cobertura minima y componentes esenciales (Doc §5.3 / B-14)."""
+    cov = cand.get("coverage")
+    min_cov = float(eff.get("min_coverage", 0.80))
+    missing_comps = cand.get("missing_components") or []
+    missing_essential = [es for es in ("expectancy", "liquidity", "risk") if es in missing_comps]
+    if missing_essential:
+        return False, "MISSING_ESSENTIAL_COMPONENT", f"faltan componentes esenciales: {missing_essential}"
+    if cov is not None and cov < min_cov - 1e-9:
+        return False, "INSUFFICIENT_COVERAGE", f"cobertura={cov:.2f} < {min_cov:.2f}"
+    return True, "PASS", "cobertura y componentes suficientes"
+
+
+def rule_o15_system_health_and_kill_switch(cand: dict[str, Any], eff: dict[str, Any]) -> tuple[bool, str, str]:
+    """Regla O-15: Salud del sistema y Kill Switch (Doc §4.2 / B-15)."""
+    allowed, health_reason = health.can_open_new_position(eff)
+    code = "PASS" if allowed else ("SYSTEM_HALTED" if "Kill switch" in health_reason or "HALTED" in health_reason else "SYSTEM_DEGRADED")
+    return allowed, code, health_reason
+
+
+def rule_o16_price_drift_revalidation(cand: dict[str, Any], current_underlying: float, current_debit: float, eff: dict[str, Any]) -> tuple[bool, str, str]:
+    """Regla O-16: Revalidacion de deriva de precio al momento de abrir (Doc §10.3 / B-17)."""
+    ref_s0 = float(cand.get("underlying_price") or current_underlying)
+    ref_debit = float(cand.get("entry_debit") or current_debit)
+    max_drift = float(eff.get("max_price_drift_pct", 3.0))
+    drift_s = abs(current_underlying - ref_s0) / ref_s0 * 100.0 if ref_s0 > 0 else 0.0
+    drift_d = abs(current_debit - ref_debit) / ref_debit * 100.0 if ref_debit > 0 else 0.0
+    drift = max(drift_s, drift_d)
+    if drift > max_drift:
+        return False, "PRICE_DRIFT_EXCEEDED", f"deriva {drift:.1f}% > {max_drift:.1f}%"
+    return True, "PASS", f"deriva {drift:.1f}% <= {max_drift:.1f}%"
+

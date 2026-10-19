@@ -127,9 +127,76 @@ def value_candidate(row: dict[str, Any], S0: float, eff: dict[str, Any], today: 
     if A is None or A_adv is None:
         return {"error": "no se pudo revalorar alguna pierna (IV/tiempo invalidos)"}
     B = B_adv = None
+    ev_reduced_bias = None
+    ev_iv_minus_10 = None
+    ev_vol_k08 = None
+    ev_vol_k12 = None
     if view_ok:
         B = _expect(legs, entry, costs, S0, sig, mu_view, T_exit, r, 0.0, k, m_norm, 0.0)
         B_adv = _expect(legs, entry, costs, S0, sig, mu_view, T_exit, r, 0.0, k, m_adv, extra_adv)
+        ev_reduced_bias = _expect(legs, entry, costs, S0, sig, 0.5 * mu_view, T_exit, r, 0.0, k, m_norm, 0.0)
+        ev_iv_minus_10 = _expect(legs, entry, costs, S0, sig, mu_view, T_exit, r, -0.10, k, m_norm, 0.0)
+        sig_08 = sigma_h(iv_ref, 0.8, h)
+        sig_12 = sigma_h(iv_ref, 1.2, h)
+        mu_08 = sign * float(eff["alpha"]) * sig_08
+        mu_12 = sign * float(eff["alpha"]) * sig_12
+        ev_vol_k08 = _expect(legs, entry, costs, S0, sig_08, mu_08, T_exit, r, 0.0, 0.8, m_norm, 0.0)
+        ev_vol_k12 = _expect(legs, entry, costs, S0, sig_12, mu_12, T_exit, r, 0.0, 1.2, m_norm, 0.0)
+
+    # Net Greeks per candidate (Doc §8.3)
+    greeks_net = None
+    delta_shares = 0.0
+    gamma_tot = 0.0
+    vega_tot = 0.0
+    theta_tot = 0.0
+    greeks_available = True
+    for lg in legs:
+        side_mult = 1.0 if lg.side == "buy" else -1.0
+        d = bs.bs_delta(S0, lg.strike, T0, r, lg.iv, lg.right)
+        g = bs.bs_gamma(S0, lg.strike, T0, r, lg.iv)
+        v = bs.bs_vega(S0, lg.strike, T0, r, lg.iv)
+        th = bs.bs_theta(S0, lg.strike, T0, r, lg.iv, lg.right)
+        if any(x is None for x in (d, g, v, th)):
+            greeks_available = False
+            break
+        delta_shares += side_mult * 100.0 * d
+        gamma_tot += side_mult * 100.0 * g
+        vega_tot += side_mult * 100.0 * v
+        theta_tot += side_mult * 100.0 * th
+
+    if greeks_available:
+        greeks_net = {
+            "source": "MODEL",
+            "delta_shares": round(delta_shares, 2),
+            "delta_usd": round(delta_shares * S0, 2),
+            "gamma": round(gamma_tot, 4),
+            "vega_point": round(vega_tot, 2),
+            "theta_day": round(theta_tot, 2),
+        }
+
+    # Sensitivities grid (Doc §8.2)
+    sensitivities = {
+        "base": _r2(B["ev"]) if B else _r2(A["ev"]),
+        "reduced_bias": _r2(ev_reduced_bias["ev"]) if ev_reduced_bias else None,
+        "no_bias": _r2(A["ev"]),
+        "adverse_exec": _r2(B_adv["ev"]) if B_adv else _r2(A_adv["ev"]),
+        "iv_shock_minus_10": _r2(ev_iv_minus_10["ev"]) if ev_iv_minus_10 else None,
+        "vol_k_0_8": _r2(ev_vol_k08["ev"]) if ev_vol_k08 else None,
+        "vol_k_1_2": _r2(ev_vol_k12["ev"]) if ev_vol_k12 else None,
+    }
+    valid_sens_evs = [v for v in sensitivities.values() if v is not None]
+    ev_min = min(valid_sens_evs) if valid_sens_evs else None
+    ev_max = max(valid_sens_evs) if valid_sens_evs else None
+    ev_range = round(ev_max - ev_min, 2) if (ev_max is not None and ev_min is not None) else None
+
+    # ev_robust: True if EV remains > 0 in reduced bias, adverse execution, and IV -10% (§8.2)
+    ev_robust = False
+    if B and ev_reduced_bias and B_adv and ev_iv_minus_10:
+        ev_robust = (
+            ev_reduced_bias["ev"] > 0
+            and B_adv["ev"] > 0
+            and ev_iv_minus_10["ev"] > 0
+        )
 
     # Escenarios determinista: movimiento del subyacente (en sigmas) x cambio relativo de IV (normal y adverso)
     scenarios = []
@@ -153,6 +220,11 @@ def value_candidate(row: dict[str, Any], S0: float, eff: dict[str, Any], today: 
         "ev_view_adverse": _r2(B_adv["ev"]) if B_adv else None,
         "ev_ratio": round(B["ev"] / max_loss, 4) if B and max_loss > 0 else None,
         "worst_adverse_scenario_pnl": worst_adverse,
+        "greeks_net": greeks_net,
+        "sensitivities": sensitivities,
+        "ev_robust": ev_robust,
+        "ev_min": ev_min,
+        "ev_range": ev_range,
         "scenarios": scenarios, "warnings": warnings, "view_computed": bool(B),
         "model": {"dist": "lognormal", "quadrature_points": N_POINTS, "pricing": "black-scholes",
                   "american_early_exercise": "ignored (limitacion V1)"},
@@ -175,4 +247,6 @@ def eligibility_from_valuation(val: dict[str, Any], eff: dict[str, Any]) -> tupl
         reasons.append(f"EV neto con sesgo {val['ev_view_net']:.2f} <= 0")
     if val.get("ev_ratio") is None or val["ev_ratio"] < eff["min_ev_ratio"]:
         reasons.append(f"EV/perdida maxima {val.get('ev_ratio')} < {eff['min_ev_ratio']}")
+    if eff.get("require_ev_robust") and not val.get("ev_robust"):
+        reasons.append("EV no es robusto ante escenarios adversos (sesgo reducido / ejecucion adversa / shock IV)")
     return (not reasons), reasons

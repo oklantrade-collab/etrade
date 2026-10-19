@@ -34,36 +34,75 @@ const NAV = [
   { href: '/options/universe', label: 'Universe' },
   { href: '/options/opportunities', label: 'Opportunities' },
   { href: '/options/positions', label: 'Positions' },
+  { href: '/options/analytics', label: 'Analytics & Greeks' },
+  { href: '/options/system', label: 'System & Health' },
   { href: '/options/performance', label: 'Performance' },
   { href: '/options/status', label: 'Data & Status' },
 ]
 
 export function useOptionsStatus() {
   const [status, setStatus] = useState<any>(null)
+  const [health, setHealth] = useState<any>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
-    const load = () => fetch('/api/v1/options/status').then(r => r.ok ? r.json() : Promise.reject(r.status))
-      .then(setStatus).catch(e => setError(String(e)))
+    const load = () => {
+      fetch('/api/v1/options/status').then(r => r.ok ? r.json() : Promise.reject(r.status))
+        .then(setStatus).catch(e => setError(String(e)))
+      fetch('/api/v1/options/health').then(r => r.ok ? r.json() : null)
+        .then(setHealth).catch(() => {})
+    }
     load()
-    const t = setInterval(load, 30000)
+    const t = setInterval(load, 15000)
     return () => clearInterval(t)
   }, [])
-  return { status, error }
+  return { status, health, error }
 }
 
 export function OptionsShell({ title, active, children }: { title: string; active: string; children: ReactNode }) {
-  const { status } = useOptionsStatus()
+  const { status, health } = useOptionsStatus()
   if (!OPTIONS_UI_ENABLED) return <ComingSoon />
   const ds = status?.worker?.data_state ?? 'UNKNOWN'
   const dsColor = ds === 'LIVE' ? '#26A69A' : ds === 'UNKNOWN' ? '#888' : '#FFA726'
+  const hStatus = health?.status ?? 'NORMAL'
+  const hColor = hStatus === 'NORMAL' ? '#26A69A' : hStatus === 'DEGRADED' ? '#FFA726' : '#EF5350'
+  const isKillSwitch = Boolean(health?.kill_switch_active)
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <h2 style={{ fontSize: 28, fontWeight: 900, color: '#FFF', margin: 0, fontStyle: 'italic' }}>{title}</h2>
-        <span style={{ padding: '4px 12px', borderRadius: 12, background: 'rgba(38,166,154,0.12)', border: '1px solid rgba(38,166,154,0.4)', color: '#26A69A', fontSize: 11, fontWeight: 900 }}>PAPER</span>
-        <span style={{ padding: '4px 12px', borderRadius: 12, border: `1px solid ${dsColor}`, color: dsColor, fontSize: 11, fontWeight: 900 }}>DATOS: {ds}</span>
-        <span style={{ padding: '4px 12px', borderRadius: 12, border: '1px solid #444', color: '#999', fontSize: 11, fontWeight: 700 }}>WORKER: {status?.worker?.state ?? '…'}</span>
+      {isKillSwitch && (
+        <div style={{
+          padding: '12px 18px', borderRadius: 10, background: 'rgba(239,83,80,0.15)',
+          border: '1px solid #EF5350', color: '#EF5350', fontSize: 13, fontWeight: 800,
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}>
+          <span>🚨 KILL SWITCH ACTIVADO: Todas las nuevas operaciones simuladas están bloqueadas.</span>
+          <Link href="/options/system" style={{
+            padding: '4px 12px', borderRadius: 6, background: '#EF5350', color: '#FFF',
+            textDecoration: 'none', fontSize: 11, fontWeight: 900,
+          }}>
+            ADMINISTRAR
+          </Link>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <h2 style={{ fontSize: 28, fontWeight: 900, color: '#FFF', margin: 0, fontStyle: 'italic' }}>{title}</h2>
+          <span style={{ padding: '4px 12px', borderRadius: 12, background: 'rgba(38,166,154,0.12)', border: '1px solid rgba(38,166,154,0.4)', color: '#26A69A', fontSize: 11, fontWeight: 900 }}>PAPER</span>
+          <span style={{ padding: '4px 12px', borderRadius: 12, border: `1px solid ${dsColor}`, color: dsColor, fontSize: 11, fontWeight: 900 }}>DATOS: {ds}</span>
+          <span style={{ padding: '4px 12px', borderRadius: 12, border: `1px solid ${hColor}`, color: hColor, fontSize: 11, fontWeight: 900 }}>SALUD: {hStatus}</span>
+          <span style={{ padding: '4px 12px', borderRadius: 12, border: '1px solid #444', color: '#999', fontSize: 11, fontWeight: 700 }}>WORKER: {status?.worker?.state ?? '…'}</span>
+        </div>
+        <Link href="/options/system" style={{
+          padding: '6px 14px', borderRadius: 8,
+          background: isKillSwitch ? 'rgba(239,83,80,0.2)' : 'rgba(255,255,255,0.05)',
+          border: `1px solid ${isKillSwitch ? '#EF5350' : 'rgba(255,255,255,0.1)'}`,
+          color: isKillSwitch ? '#EF5350' : '#FFF', fontSize: 11, fontWeight: 800, textDecoration: 'none',
+        }}>
+          {isKillSwitch ? '🚨 KILL SWITCH ACTIVO' : '🛡️ CONTROL & AUDIT'}
+        </Link>
       </div>
+
       {ds === 'DELAYED' && (
         <div style={{ padding: '10px 16px', borderRadius: 10, background: 'rgba(255,167,38,0.08)', border: '1px solid rgba(255,167,38,0.35)', color: '#FFA726', fontSize: 12 }}>
           MODO PRUEBA: datos retrasados (~15 min). Sirve para validar la plataforma; los resultados no son válidos para decidir los gates G1/G3 ni para evaluar rentabilidad.

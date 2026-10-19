@@ -249,6 +249,8 @@ files_to_sync = [
 
     # OPTIONS & CATALYSTS
     "app/options/__init__.py",
+    "app/options/health.py",
+    "app/options/event_calendar.py",
     "app/options/settings_defaults.py",
     "app/options/market_calendar.py",
     "app/options/readonly_adapter.py",
@@ -276,6 +278,9 @@ files_to_sync = [
     "app/data/ib_scanner.py",
     "sql/opt_009_catalyst_universe.sql",
     "apply_migration_opt_009.py",
+    "sql/opt_010_complementary_architecture.sql",
+    "apply_migration_opt_010.py",
+    "app/tests/test_options_complementary_architecture.py",
 ]
 
 # Archivos frontend para sincronizar (relativos a root)
@@ -296,6 +301,8 @@ frontend_files = [
     ("frontend/app/stocks/positions/page.tsx", "frontend/app/stocks/positions/page.tsx"),
     ("frontend/app/options/opportunities/page.tsx", "frontend/app/options/opportunities/page.tsx"),
     ("frontend/app/options/universe/page.tsx", "frontend/app/options/universe/page.tsx"),
+    ("frontend/app/options/system/page.tsx", "frontend/app/options/system/page.tsx"),
+    ("frontend/app/options/analytics/page.tsx", "frontend/app/options/analytics/page.tsx"),
     ("frontend/components/options/OptionsShell.tsx", "frontend/components/options/OptionsShell.tsx"),
     ("frontend/components/options/OptionsSettings.tsx", "frontend/components/options/OptionsSettings.tsx"),
 ]

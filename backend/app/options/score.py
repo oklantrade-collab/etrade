@@ -306,8 +306,105 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
     min_score = float(eff.get("min_score", 60))
     eligible_by_score = final_score >= min_score
 
+    # Check missing components and calculate coverage (§5, §9.1)
+    missing_components = []
+    # Essential components: expectancy, liquidity, risk
+    if cand.get("ev_view_net") is None:
+        missing_components.append("expectancy")
+    legs = cand.get("legs") or []
+    if not legs or any(l.get("bid") is None or l.get("ask") is None for l in legs):
+        missing_components.append("liquidity")
+    if not (cand.get("max_loss_contract") or cand.get("max_loss_total")):
+        missing_components.append("risk")
+    if not legs or any(l.get("iv") is None for l in legs):
+        missing_components.append("iv_greeks")
+    if not (cand.get("direction_source") or underlying.get("direction")):
+        missing_components.append("apex_signal")
+    if underlying.get("event_flags") is None and not cand.get("event_state"):
+        missing_components.append("context")
+
+    total_components_count = 6
+    present_count = total_components_count - len(missing_components)
+    coverage = round(present_count / total_components_count, 2)
+
+    components_list = [
+        {
+            "name": "expectancy",
+            "weight": round(w_exp / total_w, 2),
+            "score": s_exp,
+            "contribution": round(s_exp * w_exp / total_w, 2),
+            "inputs": d_exp,
+            "sub_scores": {"ev_ratio": d_exp.get("ev_ratio")},
+            "multiplier": 1.0,
+            "notes": [],
+        },
+        {
+            "name": "apex_signal",
+            "weight": round(w_apex / total_w, 2),
+            "score": s_apex,
+            "contribution": round(s_apex * w_apex / total_w, 2),
+            "inputs": {"direction_source": d_apex.get("direction_source")},
+            "sub_scores": {"raw_score": d_apex.get("apex_score") or d_apex.get("catalyst_score")},
+            "multiplier": 1.0,
+            "notes": [d_apex.get("note")] if d_apex.get("note") else [],
+        },
+        {
+            "name": "liquidity",
+            "weight": round(w_liq / total_w, 2),
+            "score": s_liq,
+            "contribution": round(s_liq * w_liq / total_w, 2),
+            "inputs": {
+                "max_rel_spread_pct": d_liq.get("max_rel_spread_pct"),
+                "min_oi": d_liq.get("min_oi"),
+            },
+            "sub_scores": {"raw_liquidity": d_liq.get("raw_liquidity")},
+            "multiplier": d_liq.get("data_multiplier", 1.0),
+            "notes": [d_liq.get("data_note")] if d_liq.get("data_note") else [],
+        },
+        {
+            "name": "risk",
+            "weight": round(w_risk / total_w, 2),
+            "score": s_risk,
+            "contribution": round(s_risk * w_risk / total_w, 2),
+            "inputs": {"exec_overcost_pct": d_risk.get("exec_overcost_pct")},
+            "sub_scores": {
+                "drawdown": d_risk.get("drawdown_score"),
+                "overcost": d_risk.get("overcost_score"),
+                "ev_adverse": d_risk.get("ev_adverse_score"),
+            },
+            "multiplier": 1.0,
+            "notes": [],
+        },
+        {
+            "name": "iv_greeks",
+            "weight": round(w_iv / total_w, 2),
+            "score": s_iv,
+            "contribution": round(s_iv * w_iv / total_w, 2),
+            "inputs": {"avg_iv": d_iv.get("avg_iv")},
+            "sub_scores": {"iv_score": d_iv.get("iv_score"), "delta_score": d_iv.get("delta_score")},
+            "multiplier": 1.0,
+            "notes": [],
+        },
+        {
+            "name": "context",
+            "weight": round(w_ctx / total_w, 2),
+            "score": s_ctx,
+            "contribution": round(s_ctx * w_ctx / total_w, 2),
+            "inputs": {"event_flags": d_ctx.get("event_flags")},
+            "sub_scores": {},
+            "multiplier": 1.0,
+            "notes": [d_ctx.get("note")] if d_ctx.get("note") else [],
+        },
+    ]
+
     breakdown = {
+        "score_version": "sv-001",
+        "code_version": "git:master",
+        "config_version": int(eff.get("config_version") or 1),
+        "score_total": final_score,
         "final_score": final_score,
+        "coverage": coverage,
+        "missing_components": missing_components,
         "min_score_required": min_score,
         "eligible_by_score": eligible_by_score,
         "weights": {
@@ -322,9 +419,33 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
             "iv_greeks": {"score": s_iv, "weighted": round(s_iv * w_iv / total_w, 2), "detail": d_iv},
             "context": {"score": s_ctx, "weighted": round(s_ctx * w_ctx / total_w, 2), "detail": d_ctx},
         },
+        "components_list": components_list,
         "model_version": MODEL_VERSION,
     }
-    return {"score": final_score, "score_breakdown": breakdown}
+    return {"score": final_score, "coverage": coverage, "score_breakdown": breakdown}
+
+
+def replay_evaluation(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[str, Any]) -> dict[str, Any]:
+    """Reejecuta deterministamente la valoracion y score de una candidata (Doc §13.3).
+    Comprueba reproducibilidad bit a bit.
+    """
+    replayed = score_candidate(cand, underlying, eff)
+    orig_score = cand.get("score")
+    diff = None
+    matches = True
+    if orig_score is not None:
+        diff = round(float(replayed["score"]) - float(orig_score), 4)
+        matches = abs(diff) < 0.01
+
+    return {
+        "candidate_id": cand.get("id"),
+        "original_score": orig_score,
+        "replayed_score": replayed["score"],
+        "diff": diff,
+        "matches": matches,
+        "coverage": replayed["coverage"],
+        "breakdown": replayed["score_breakdown"],
+    }
 
 
 def rank_and_score_candidates(candidates: list[dict[str, Any]],

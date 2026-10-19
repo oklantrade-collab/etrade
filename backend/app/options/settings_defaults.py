@@ -151,6 +151,34 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "gate_adx_min": (18.0, 10.0, 40.0),
     "gate_flow_min": (60.0, 0.0, 100.0),
     "gate_max_age_sec": (330, 60, 900),
+    # J. Modo y control (Arquitectura Complementaria §16.I)
+    "options_mode": ("paper", None, None),
+    "kill_switch_active": (False, None, None),
+    "live_trading_enabled": (False, None, None),
+    # K. Calidad de datos y salud (§16.J)
+    "min_coverage": (0.80, 0.50, 1.00),
+    "missing_component_policy": ("reject_essential_zero_optional", None, None),
+    "degraded_disconnect_sec": (30.0, 5.0, 300.0),
+    "degraded_quote_age_p95_sec": (10.0, 2.0, 60.0),
+    "degraded_stale_pct": (30.0, 5.0, 80.0),
+    "halted_consecutive_db_errors": (3, 1, 10),
+    "reconciliation_tolerance_usd": (0.01, 0.001, 0.10),
+    "reconciliation_freq_min": (5, 1, 60),
+    # L. Calendario de Eventos (§16.K)
+    "calendar_max_age_hours": (24.0, 1.0, 72.0),
+    "unknown_event_policy": ("block", None, None),
+    "macro_event_lead_min": (30, 0, 120),
+    "macro_event_lag_min": (5, 0, 60),
+    # M. Concentracion y Fills Realistas (§16.L)
+    "max_positions_per_sector": (2, 1, 5),
+    "max_positions_per_expiry": (2, 1, 5),
+    "max_price_drift_pct": (5.0, 0.0, 20.0),
+    "simulated_fill_latency_ms": (1000, 0, 10000),
+    "require_ev_robust": (False, None, None),
+    # N. Validacion y Champion / Challenger (§16.M)
+    "champion_challenger_min_weeks": (4, 2, 26),
+    "champion_challenger_min_obs": (200, 50, 2000),
+    "eval_top_quantile_pct": (20.0, 5.0, 50.0),
 }
 
 SCORE_WEIGHT_KEYS = ("w_expectancy", "w_apex_signal", "w_liquidity", "w_risk", "w_iv_greeks", "w_context")

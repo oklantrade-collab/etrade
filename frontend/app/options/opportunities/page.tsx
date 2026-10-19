@@ -776,8 +776,23 @@ export default function OpportunitiesPage() {
                                     </>
                                   ) : (
                                     <>
-                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                        <b style={{ color: '#FFF', fontSize: 13 }}>Estructura & Griegas</b>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                          <b style={{ color: '#FFF', fontSize: 13 }}>Estructura & Griegas Netas (Doc §8.3)</b>
+                                          <span style={{
+                                            padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800,
+                                            background: detail.ev_robust ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.06)',
+                                            color: detail.ev_robust ? '#22C55E' : '#888',
+                                            border: `1px solid ${detail.ev_robust ? '#22C55E44' : 'rgba(255,255,255,0.1)'}`,
+                                          }}>
+                                            {detail.ev_robust ? '✓ EV ROBUSTO' : 'EV SENSIBLE'}
+                                          </span>
+                                          {detail.ev_range != null && (
+                                            <span style={{ fontSize: 11, color: '#aaa' }}>
+                                              Rango EV: ${n(detail.ev_range)} (mín: ${n(detail.ev_min)})
+                                            </span>
+                                          )}
+                                        </div>
                                         {detail.budget_adapted && (
                                           <span style={{ fontSize: 11, color: '#FFA726', background: 'rgba(255, 167, 38, 0.15)', padding: '2px 8px', borderRadius: 4 }}>
                                             {detail.adaptation_note || 'Tamaño adaptado para entrar en presupuesto'}
@@ -785,10 +800,51 @@ export default function OpportunitiesPage() {
                                         )}
                                       </div>
 
+                                      {/* Net Greeks Grid */}
+                                      {detail.greeks_net && (
+                                        <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, background: 'rgba(0,0,0,0.3)', padding: 10, borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+                                          <div>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Δ Delta USD</div>
+                                            <div style={{ fontSize: 13, fontWeight: 800, color: (detail.greeks_net.delta_usd || 0) >= 0 ? '#22C55E' : '#EF5350' }}>
+                                              ${n(detail.greeks_net.delta_usd)}
+                                            </div>
+                                          </div>
+                                          <div>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Δ Acciones</div>
+                                            <div style={{ fontSize: 13, fontWeight: 800, color: '#FFF' }}>
+                                              {n(detail.greeks_net.delta_shares)}
+                                            </div>
+                                          </div>
+                                          <div>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Γ Gamma</div>
+                                            <div style={{ fontSize: 13, fontWeight: 800, color: '#42A5F5' }}>
+                                              {n(detail.greeks_net.gamma, 4)}
+                                            </div>
+                                          </div>
+                                          <div>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>V Vega ($/pt)</div>
+                                            <div style={{ fontSize: 13, fontWeight: 800, color: '#AB47BC' }}>
+                                              ${n(detail.greeks_net.vega_point)}
+                                            </div>
+                                          </div>
+                                          <div>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Θ Theta ($/día)</div>
+                                            <div style={{ fontSize: 13, fontWeight: 800, color: (detail.greeks_net.theta_day || 0) >= 0 ? '#22C55E' : '#EF5350' }}>
+                                              ${n(detail.greeks_net.theta_day)}
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )}
+
                                       {detail.score_breakdown && (
                                         <div style={{ marginTop: 10, background: 'rgba(255,255,255,0.03)', padding: 10, borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)' }}>
                                           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                                            <b style={{ color: '#38BDF8', fontSize: 12 }}>Options Score: {detail.score?.toFixed(1)} / 100</b>
+                                            <b style={{ color: '#38BDF8', fontSize: 12 }}>
+                                              Options Score: {detail.score?.toFixed(1)} / 100
+                                              <span style={{ fontSize: 10, color: '#888', marginLeft: 8, fontWeight: 400 }}>
+                                                (Cobertura: {((detail.score_breakdown.coverage || 1) * 100).toFixed(0)}%)
+                                              </span>
+                                            </b>
                                             <span style={{ fontSize: 11, color: '#888' }}>Mínimo req: {detail.score_breakdown.min_score_required}</span>
                                           </div>
                                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, fontSize: 11 }}>

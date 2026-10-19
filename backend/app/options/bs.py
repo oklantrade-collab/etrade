@@ -31,3 +31,35 @@ def bs_delta(S: float, K: float, T: float, r: float, sigma: float, right: str) -
         return None
     d1, _ = _d1_d2(S, K, T, r, sigma)
     return _cdf(d1) if right == "C" else _cdf(d1) - 1.0
+
+
+def _pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float | None:
+    if not valid_inputs(S, K, T, sigma):
+        return None
+    d1, _ = _d1_d2(S, K, T, r, sigma)
+    return _pdf(d1) / (S * sigma * math.sqrt(T))
+
+
+def bs_vega(S: float, K: float, T: float, r: float, sigma: float) -> float | None:
+    """Vega por 1 punto porcentual de volatilidad (0.01)."""
+    if not valid_inputs(S, K, T, sigma):
+        return None
+    d1, _ = _d1_d2(S, K, T, r, sigma)
+    return S * math.sqrt(T) * _pdf(d1) * 0.01
+
+
+def bs_theta(S: float, K: float, T: float, r: float, sigma: float, right: str) -> float | None:
+    """Theta por dia (1/365)."""
+    if not valid_inputs(S, K, T, sigma):
+        return None
+    d1, d2 = _d1_d2(S, K, T, r, sigma)
+    term1 = -(S * _pdf(d1) * sigma) / (2.0 * math.sqrt(T))
+    if right == "C":
+        term2 = -r * K * math.exp(-r * T) * _cdf(d2)
+        return (term1 + term2) / 365.0
+    term2 = r * K * math.exp(-r * T) * _cdf(-d2)
+    return (term1 + term2) / 365.0

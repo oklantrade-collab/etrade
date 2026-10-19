@@ -118,6 +118,39 @@ const GROUPS: Group[] = [
     { key: 'gate_adx_min', label: 'O-12: ADX mínimo para confirmación' },
     { key: 'gate_flow_min', label: 'O-12: Fuerza de flujo mínima' },
   ]},
+  { id: 'J', title: 'J. Modo y control operativo (Doc §3 y §4)', open: true, confirm: true, fields: [
+    { key: 'options_mode', label: 'Modo del sistema (paper | observation)', kind: 'text' },
+    { key: 'kill_switch_active', label: 'Kill Switch de emergencia activo', kind: 'bool' },
+    { key: 'live_trading_enabled', label: 'Trading real activo (Bloqueado permanentemente)', kind: 'bool' },
+  ]},
+  { id: 'K', title: 'K. Calidad de datos y salud del sistema (§4 y §5)', fields: [
+    { key: 'min_coverage', label: 'Cobertura mínima de datos (O-14)', unit: 'ratio' },
+    { key: 'missing_component_policy', label: 'Política componentes ausentes', kind: 'text' },
+    { key: 'degraded_disconnect_sec', label: 'Desconexión IBKR para DEGRADED', unit: 's' },
+    { key: 'degraded_quote_age_p95_sec', label: 'Antigüedad p95 de cotización para DEGRADED', unit: 's' },
+    { key: 'degraded_stale_pct', label: '% de cotizaciones stale para DEGRADED', unit: '%' },
+    { key: 'halted_consecutive_db_errors', label: 'Errores consecutivos para HALTED' },
+    { key: 'reconciliation_tolerance_usd', label: 'Tolerancia de reconciliación', unit: 'USD' },
+    { key: 'reconciliation_freq_min', label: 'Frecuencia de reconciliación', unit: 'min' },
+  ]},
+  { id: 'L', title: 'L. Calendario de eventos (§7)', fields: [
+    { key: 'calendar_max_age_hours', label: 'Antigüedad máx. del calendario (después es STALE)', unit: 'h' },
+    { key: 'unknown_event_policy', label: 'Política ante UNKNOWN o STALE', kind: 'text' },
+    { key: 'macro_event_lead_min', label: 'Bloqueo antes de evento macro de alto impacto', unit: 'min' },
+    { key: 'macro_event_lag_min', label: 'Bloqueo después de evento macro de alto impacto', unit: 'min' },
+  ]},
+  { id: 'M', title: 'M. Concentración y fills realistas (§11 y §16)', fields: [
+    { key: 'max_positions_per_sector', label: 'Máx. posiciones por sector' },
+    { key: 'max_positions_per_expiry', label: 'Máx. posiciones por fecha de vencimiento' },
+    { key: 'max_price_drift_pct', label: 'Deriva máxima de precio al abrir (O-16)', unit: '%' },
+    { key: 'simulated_fill_latency_ms', label: 'Latencia simulada de ejecución', unit: 'ms' },
+    { key: 'require_ev_robust', label: 'Exigir ev_robust para elegibilidad (O-14)', kind: 'bool' },
+  ]},
+  { id: 'N', title: 'N. Validación y Champion / Challenger (§14)', fields: [
+    { key: 'champion_challenger_min_weeks', label: 'Semanas mínimas para comparar versiones', unit: 'semanas' },
+    { key: 'champion_challenger_min_obs', label: 'Muestras mínimas de observación' },
+    { key: 'eval_top_quantile_pct', label: 'Fracción superior del ranking evaluada', unit: '%' },
+  ]},
 ]
 
 export default function OptionsSettings() {

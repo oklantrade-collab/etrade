@@ -80,11 +80,19 @@ def select_portfolio(candidates: list[dict[str, Any]],
     max_daily_sel = int(eff.get("max_daily_selections") or 3)
     max_per_underlying = int(eff.get("max_positions_per_underlying") or 1)
     max_same_dir = int(eff.get("max_same_direction") or 2)
+    max_per_sector = int(eff.get("max_positions_per_sector") or 2)
+    max_per_expiry = int(eff.get("max_positions_per_expiry") or 2)
     min_score = float(eff.get("min_score") or 60.0)
 
     # Contabilidad inicial del portafolio existente
     used_underlyings = set(p.underlying_id for p in open_pos)
     direction_counts = Counter(p.direction for p in open_pos)
+    sector_counts = Counter(
+        p.get("sector") for p in existing_positions if isinstance(p, dict) and p.get("sector")
+    )
+    expiry_counts = Counter(
+        p.get("expiry") for p in existing_positions if isinstance(p, dict) and p.get("expiry")
+    )
 
     # 4. Filtrar y ordenar candidatas elegibles
     # Solo entran candidatas aprobadas por ADUANA/valoracion ('eligible') y con score >= min_score
@@ -107,6 +115,8 @@ def select_portfolio(candidates: list[dict[str, Any]],
         cid = cand.get("id")
         uid = cand.get("underlying_id")
         direction = cand.get("direction")
+        sector = cand.get("sector")
+        expiry = cand.get("expiry")
         score = float(cand.get("score") or 0.0)
         loss_total = float(cand.get("max_loss_total") or 0.0)
         contract_loss = float(cand.get("max_loss_contract") or loss_total)
@@ -189,6 +199,22 @@ def select_portfolio(candidates: list[dict[str, Any]],
                 })
                 continue
 
+        # Regla 6: Maximo en el mismo sector
+        if sector and sector_counts[sector] >= max_per_sector:
+            skipped.append({
+                "candidate_id": cid, "underlying_id": uid, "score": score,
+                "reason": f"Limite de {max_per_sector} posiciones en sector '{sector}' alcanzado",
+            })
+            continue
+
+        # Regla 7: Maximo en el mismo vencimiento
+        if expiry and expiry_counts[expiry] >= max_per_expiry:
+            skipped.append({
+                "candidate_id": cid, "underlying_id": uid, "score": score,
+                "reason": f"Limite de {max_per_expiry} posiciones para vencimiento '{expiry}' alcanzado",
+            })
+            continue
+
         # Cumple todas las restricciones: seleccionada
         sel_cand = dict(cand)
         sel_cand["qty"] = qty
@@ -199,6 +225,10 @@ def select_portfolio(candidates: list[dict[str, Any]],
         used_underlyings.add(uid)
         if direction:
             direction_counts[direction] += 1
+        if sector:
+            sector_counts[sector] += 1
+        if expiry:
+            expiry_counts[expiry] += 1
         remaining_budget -= loss_total
 
     total_allocated = sum(float(c.get("max_loss_total") or 0.0) for c in selected)
