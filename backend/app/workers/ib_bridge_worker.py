@@ -295,6 +295,8 @@ class IBBridgeWorker:
                     from ibapi.order import Order
                     contract = self.ib.us_stock_contract(ticker)
                     ib_ord = Order()
+                    ib_ord.eTradeOnly = False
+                    ib_ord.firmQuoteOnly = False
                     ib_ord.action = direction.upper()
                     ib_ord.totalQuantity = shares
                     

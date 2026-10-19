@@ -288,6 +288,8 @@ class IBConnection(EWrapper, EClient):
 
         # Parent: Limit entry order
         parent = Order()
+        parent.eTradeOnly = False
+        parent.firmQuoteOnly = False
         parent.orderId = parent_id
         parent.action = action
         parent.orderType = "LMT"
@@ -299,6 +301,8 @@ class IBConnection(EWrapper, EClient):
         reverse_action = "SELL" if action == "BUY" else "BUY"
 
         stop_order = Order()
+        stop_order.eTradeOnly = False
+        stop_order.firmQuoteOnly = False
         stop_order.orderId = self.get_next_order_id()
         stop_order.action = reverse_action
         stop_order.orderType = "STP"
@@ -309,6 +313,8 @@ class IBConnection(EWrapper, EClient):
 
         # Child 2: Take Profit
         target_order = Order()
+        target_order.eTradeOnly = False
+        target_order.firmQuoteOnly = False
         target_order.orderId = self.get_next_order_id()
         target_order.action = reverse_action
         target_order.orderType = "LMT"
@@ -433,6 +439,8 @@ class IBProvider:
 
         contract = self.conn.us_stock_contract(ticker)
         order = Order()
+        order.eTradeOnly = False
+        order.firmQuoteOnly = False
         order.action = direction.upper() # BUY/SELL
         order.totalQuantity = int(shares)
         
