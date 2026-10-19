@@ -358,6 +358,8 @@ def ensure_remote_directories():
         "ssh", "-i", SSH_KEY,
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
         f"root@{SERVER_IP}",
         mkdir_cmd
     ]
@@ -396,6 +398,8 @@ def deploy():
         "scp", "-i", SSH_KEY,
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
         bundle_path, f"root@{SERVER_IP}:/tmp/etrade_bundle.tar.gz"
     ]
     subprocess.run(scp_cmd, check=True)
@@ -405,6 +409,8 @@ def deploy():
         "ssh", "-i", SSH_KEY,
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
         f"root@{SERVER_IP}",
         f"tar -xzf /tmp/etrade_bundle.tar.gz -C {ROOT_REMOTE_PATH} && rm -f /tmp/etrade_bundle.tar.gz"
     ]
@@ -415,6 +421,8 @@ def deploy():
         "ssh", "-i", SSH_KEY,
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
         f"root@{SERVER_IP}",
         f"chown -R etrade:etrade {ROOT_REMOTE_PATH}"
     ]
@@ -425,6 +433,8 @@ def deploy():
         "ssh", "-i", SSH_KEY, 
         "-o", "StrictHostKeyChecking=no",
         "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
         f"root@{SERVER_IP}",
         "systemctl restart --no-block etrade-api etrade-forex etrade-forex-scheduler etrade-crypto etrade-stocks"
     ]
