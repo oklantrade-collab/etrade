@@ -303,6 +303,8 @@ frontend_files = [
     ("frontend/app/options/universe/page.tsx", "frontend/app/options/universe/page.tsx"),
     ("frontend/app/options/system/page.tsx", "frontend/app/options/system/page.tsx"),
     ("frontend/app/options/analytics/page.tsx", "frontend/app/options/analytics/page.tsx"),
+    ("frontend/app/options/page.tsx", "frontend/app/options/page.tsx"),
+    ("frontend/components/Sidebar.tsx", "frontend/components/Sidebar.tsx"),
     ("frontend/components/options/OptionsShell.tsx", "frontend/components/options/OptionsShell.tsx"),
     ("frontend/components/options/OptionsSettings.tsx", "frontend/components/options/OptionsSettings.tsx"),
 ]

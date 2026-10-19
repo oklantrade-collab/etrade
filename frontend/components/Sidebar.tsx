@@ -67,8 +67,11 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       title: 'OPCIONES (PAPER)',
       items: [
         { href: '/options', icon: '🎯', label: 'Options Dashboard' },
+        { href: '/options/universe', icon: '🔍', label: 'Universe' },
         { href: '/options/opportunities', icon: '💡', label: 'Opportunities' },
         { href: '/options/positions', icon: '📋', label: 'Positions' },
+        { href: '/options/analytics', icon: '📐', label: 'Analytics & Greeks' },
+        { href: '/options/system', icon: '🛡️', label: 'System & Health' },
         { href: '/options/performance', icon: '📈', label: 'Performance' },
         { href: '/options/status', icon: '🛰️', label: 'Data & Status' },
       ],
