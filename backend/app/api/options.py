@@ -11,6 +11,13 @@ from app.core.auth_handler import check_role
 from app.core.logger import log_info, log_warning
 from app.core.supabase_client import get_supabase
 from app.options import settings_defaults as sd
+from app.options.strategies_catalog import (
+    STRATEGY_CATALOG,
+    calculate_generic_payoff,
+    closed_formula_oracle,
+    get_all_strategies,
+    get_strategy_definition,
+)
 
 router = APIRouter()
 ceo_only = Depends(check_role(["CEO"]))
@@ -738,6 +745,58 @@ def get_options_db_stats(user: dict = ceo_only):
         "snapshot_retention_days": 7,
         "candidate_retention_days": 3,
     }
+
+
+@router.get("/strategies")
+def list_strategies():
+    """Catálogo maestro de las 14 estrategias de opciones con estado, familia y viabilidad económica."""
+    return {
+        "strategies": get_all_strategies(),
+        "families": ["single-leg", "vertical", "multi-leg defined-risk", "calendar/diagonal"],
+        "viable_for_capital_50": [k for k, v in STRATEGY_CATALOG.items() if v.capital_viable],
+    }
+
+
+@router.get("/strategies/{key}")
+def get_strategy(key: str):
+    """Detalle de una estrategia del catálogo."""
+    strat = get_strategy_definition(key)
+    if not strat:
+        raise HTTPException(status_code=404, detail=f"Estrategia '{key}' no encontrada en el catálogo")
+    return strat.__dict__
+
+
+@router.post("/strategies/evaluate")
+def evaluate_strategy_custom(payload: dict):
+    """Evalúa payoff analítico y genérico para una configuración de patas personalizada (Addendum §11.2)."""
+    legs = payload.get("legs") or []
+    if not legs:
+        raise HTTPException(status_code=400, detail="Se requiere al menos una pata ('legs')")
+
+    strategy_key = payload.get("strategy_key") or "custom"
+    underlying_price = float(payload.get("underlying_price") or 100.0)
+    costs = float(payload.get("costs_total") or 0.0)
+    multiplier = int(payload.get("multiplier") or 100)
+
+    # Rango de precios para simular vencimiento (+/- 20%)
+    price_min = float(payload.get("price_min") or max(underlying_price * 0.8, 0.01))
+    price_max = float(payload.get("price_max") or underlying_price * 1.2)
+    steps = int(payload.get("steps") or 41)
+
+    step_size = (price_max - price_min) / max(steps - 1, 1)
+    s_mesh = [round(price_min + i * step_size, 4) for i in range(steps)]
+
+    payoff_curve = calculate_generic_payoff(legs, entry_net_per_share=0.0, costs_total=costs, s_prices=s_mesh)
+    oracle = closed_formula_oracle(strategy_key, legs, costs_total=costs, multiplier=multiplier)
+
+    return {
+        "strategy_key": strategy_key,
+        "underlying_price": underlying_price,
+        "costs_total": costs,
+        "oracle": oracle,
+        "payoff_curve": payoff_curve,
+    }
+
 
 
 

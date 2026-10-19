@@ -236,6 +236,60 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
 
             add("O-12", not bad_gate, "; ".join(bad_gate) or "gate subyacente superado")
 
+    # O-13 Multi-pata, estandares y sincronizacion (Addendum v1.1 §10, §7 & §6.4)
+    bad_standards = []
+    # 1. Multiplicador estandar 100
+    allow_nonstandard = eff.get("allow_nonstandard_multiplier", False)
+    if not allow_nonstandard:
+        for l in legs:
+            m = l.get("multiplier", 100)
+            if m not in (100, None):
+                bad_standards.append(f"multiplicador no estandar {m} != 100")
+                break
+
+    # 2. Ratio costes/riesgo
+    c_costs = cand.get("costs_contract")
+    c_ml = cand.get("max_loss_contract")
+    if c_costs is not None and c_ml is not None and c_ml > 0:
+        c2r = (float(c_costs) / float(c_ml)) * 100.0
+        max_c2r = float(eff.get("max_cost_to_risk_ratio", 20.0))
+        if c2r > max_c2r + 1e-6:
+            bad_standards.append(f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%")
+
+    # 3. Validacion creditos 0 < C < W
+    strat_type = cand.get("strategy_type") or cand.get("strategy")
+    if strat_type in ("bull_put_spread", "bear_call_spread"):
+        debit = cand.get("entry_debit")
+        if debit is not None:
+            credit = -float(debit)
+            if len(legs) >= 2:
+                w = abs(float(legs[0].get("strike", 0.0)) - float(legs[1].get("strike", 0.0)))
+                if credit <= 0:
+                    bad_standards.append("credito neto <= 0")
+                elif w > 0 and credit >= w:
+                    bad_standards.append(f"credito {credit:.2f} >= ancho {w:.2f}")
+
+    # 4. Sincronizacion temporal entre patas (skew)
+    if len(legs) > 1:
+        timestamps = []
+        for l in legs:
+            ts_val = l.get("timestamp") or l.get("updated_at")
+            if ts_val:
+                try:
+                    if isinstance(ts_val, (int, float)):
+                        timestamps.append(float(ts_val))
+                    elif isinstance(ts_val, str):
+                        timestamps.append(datetime.fromisoformat(ts_val.replace("Z", "+00:00")).timestamp())
+                except Exception:
+                    pass
+        if len(timestamps) == len(legs) and len(timestamps) > 1:
+            skew = max(timestamps) - min(timestamps)
+            max_skew = float(eff.get("max_leg_quote_skew_sec", 3.0))
+            if skew > max_skew:
+                bad_standards.append(f"desincronizacion entre patas {skew:.1f}s > {max_skew}s")
+
+    add("O-13", not bad_standards, "; ".join(bad_standards) or "estandares multi-pata y costes aprobados")
+
     return AduanaResult(approved=all(r.ok for r in rules), rules=rules, warnings=warns)
 
 

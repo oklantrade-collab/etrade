@@ -14,14 +14,48 @@ from datetime import date, datetime
 from typing import Any
 
 from app.options import bs
+from app.options.strategies_catalog import STRATEGY_CATALOG
 
-STRATEGIES = ("long_call", "long_put", "bull_call_spread", "bear_put_spread")
+STRATEGIES = (
+    "long_call",
+    "long_put",
+    "bull_call_spread",
+    "bear_put_spread",
+    "bull_put_spread",
+    "bear_call_spread",
+)
 SETTING_FLAG = {
-    "long_call": "strat_long_call", "long_put": "strat_long_put",
-    "bull_call_spread": "strat_bull_call_spread", "bear_put_spread": "strat_bear_put_spread",
+    "long_call": "strat_long_call",
+    "long_put": "strat_long_put",
+    "bull_call_spread": "strat_bull_call_spread",
+    "bear_put_spread": "strat_bear_put_spread",
+    "bull_put_spread": "strat_bull_put_spread",
+    "bear_call_spread": "strat_bear_call_spread",
+    "long_straddle": "strat_long_straddle",
+    "long_strangle": "strat_long_strangle",
+    "iron_condor": "strat_iron_condor",
+    "iron_butterfly": "strat_iron_butterfly",
+    "long_call_butterfly": "strat_long_call_butterfly",
+    "long_put_butterfly": "strat_long_put_butterfly",
+    "calendar_spread": "strat_calendar_spread",
+    "diagonal_spread": "strat_diagonal_spread",
 }
-STRATEGY_DIRECTION = {"long_call": "bullish", "bull_call_spread": "bullish",
-                      "long_put": "bearish", "bear_put_spread": "bearish"}
+STRATEGY_DIRECTION = {
+    "long_call": "bullish",
+    "bull_call_spread": "bullish",
+    "bull_put_spread": "bullish",
+    "long_put": "bearish",
+    "bear_put_spread": "bearish",
+    "bear_call_spread": "bearish",
+    "long_straddle": "volatile",
+    "long_strangle": "volatile",
+    "iron_condor": "neutral",
+    "iron_butterfly": "neutral",
+    "long_call_butterfly": "neutral",
+    "long_put_butterfly": "neutral",
+    "calendar_spread": "neutral",
+    "diagonal_spread": "bullish",
+}
 
 
 @dataclass
@@ -51,7 +85,7 @@ class Candidate:
     expiry: date
     legs: list[dict[str, Any]]
     qty: int
-    entry_debit: float             # por accion, ejecutable (ask - bid)
+    entry_debit: float             # por accion, ejecutable (ask - bid) o negativo si credito
     mid_debit: float               # por accion, a mid (referencia)
     max_loss_contract: float       # USD por contrato, con costes
     max_loss_total: float          # qty * max_loss_contract
@@ -62,6 +96,8 @@ class Candidate:
     exit_plan: dict[str, Any] = field(default_factory=dict)
     delta_source: str | None = None
     warnings: list[str] = field(default_factory=list)
+    family: str = "vertical"
+    credit_or_debit: str = "debit"
 
 
 # ------------------------------------------------------------------ costes y payoff
@@ -78,8 +114,13 @@ def intrinsic(right: str, strike: float, S: float) -> float:
 
 def pnl_at_expiry(c: Candidate, S: float) -> float:
     """P&L neto por contrato al vencimiento (con costes) si el subyacente termina en S, qty=1."""
-    value = sum((1 if leg["side"] == "buy" else -1) * intrinsic(leg["right"], leg["strike"], S) for leg in c.legs)
-    return (value - c.entry_debit) * 100.0 - c.costs_contract
+    pnl = 0.0
+    for leg in c.legs:
+        side = 1.0 if leg["side"] == "buy" else -1.0
+        intr = intrinsic(leg["right"], leg["strike"], S)
+        px = float(leg.get("exec_price") or 0.0)
+        pnl += side * (intr - px) * 100.0
+    return pnl - c.costs_contract
 
 
 # ------------------------------------------------------------------ chequeos de calidad
@@ -113,7 +154,8 @@ def abs_delta(q: Q, S: float, today: date, eff: dict[str, Any]) -> tuple[float |
     return (abs(d), "bs_from_iv") if d is not None else (None, None)
 
 
-def _exit_plan(strategy: str, entry_debit: float, max_profit: float | None, eff: dict[str, Any]) -> dict[str, Any]:
+def _exit_plan(strategy: str, entry_debit: float, max_profit: float | None, eff: dict[str, Any],
+               max_loss: float | None = None) -> dict[str, Any]:
     plan: dict[str, Any] = {
         "force_close_min_before_close": eff["force_close_min_before_close"],
         "exit_on_direction_flip": eff["exit_on_direction_flip"],
@@ -122,6 +164,11 @@ def _exit_plan(strategy: str, entry_debit: float, max_profit: float | None, eff:
     if strategy in ("long_call", "long_put"):
         plan["take_profit_premium"] = round(entry_debit * (1 + eff["long_tp_pct"] / 100), 4)
         plan["stop_premium"] = round(entry_debit * (1 - eff["long_sl_pct"] / 100), 4)
+    elif strategy in ("bull_put_spread", "bear_call_spread"):
+        plan["take_profit_pnl_contract"] = round((max_profit or 0) * eff["spread_tp_pct"] / 100, 2)
+        loss_base = max_loss if max_loss is not None else abs(entry_debit * 100)
+        plan["stop_pnl_contract"] = round(-loss_base * eff["spread_sl_pct"] / 100, 2)
+        plan["short_leg_delta_exit"] = float(eff.get("short_leg_delta_exit", 0.70))
     else:
         plan["take_profit_pnl_contract"] = round((max_profit or 0) * eff["spread_tp_pct"] / 100, 2)
         plan["stop_pnl_contract"] = round(-entry_debit * 100 * eff["spread_sl_pct"] / 100, 2)
@@ -152,13 +199,36 @@ def build_long(strategy: str, q: Q, S: float, today: date, eff: dict[str, Any]) 
     debit = q.ask
     costs = contract_costs(1, eff)
     ml = debit * 100 + costs
+
+    # Filtro ratio costes/riesgo (§6.4)
+    c2r = (costs / ml) * 100.0 if ml > 0 else 100.0
+    max_c2r = float(eff.get("max_cost_to_risk_ratio", 20.0))
+    if c2r > max_c2r:
+        return None, [f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%"]
+
     qty = _qty(ml, eff)
     if qty < 1:
         return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff['max_risk_per_trade_usd']}"]
     be = q.strike + ml / 100 if q.right == "C" else q.strike - ml / 100
-    cand = Candidate(strategy, STRATEGY_DIRECTION[strategy], q.expiry, [_leg(q, "buy")], qty, debit,
-                     round((q.bid + q.ask) / 2, 4), round(ml, 2), round(ml * qty, 2), None, round(be, 4),
-                     round(costs, 2), None, _exit_plan(strategy, debit, None, eff), src)
+    cand = Candidate(
+        strategy=strategy,
+        direction=STRATEGY_DIRECTION[strategy],
+        expiry=q.expiry,
+        legs=[_leg(q, "buy")],
+        qty=qty,
+        entry_debit=debit,
+        mid_debit=round((q.bid + q.ask) / 2, 4),
+        max_loss_contract=round(ml, 2),
+        max_loss_total=round(ml * qty, 2),
+        max_profit_contract=None,
+        breakeven=round(be, 4),
+        costs_contract=round(costs, 2),
+        exec_overcost_pct=None,
+        exit_plan=_exit_plan(strategy, debit, None, eff),
+        delta_source=src,
+        family="single-leg",
+        credit_or_debit="debit",
+    )
     if src == "bs_from_iv":
         cand.warnings.append("delta estimada con Black-Scholes desde IV del broker")
     return cand, []
@@ -202,14 +272,146 @@ def build_spread(strategy: str, long_q: Q, short_q: Q, S: float, today: date,
         return None, ["debito a mid <= 0: sobrecoste de ejecucion no calculable"]
     if overcost > eff["max_exec_overcost_pct"]:
         return None, [f"sobrecoste de ejecucion {overcost:.1f}% > {eff['max_exec_overcost_pct']}%"]
+
+    # Filtro ratio costes/riesgo (§6.4)
+    c2r = (costs / ml) * 100.0 if ml > 0 else 100.0
+    max_c2r = float(eff.get("max_cost_to_risk_ratio", 20.0))
+    if c2r > max_c2r:
+        return None, [f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%"]
+
     qty = _qty(ml, eff)
     if qty < 1:
         return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff['max_risk_per_trade_usd']}"]
     be = long_q.strike + ml / 100 if long_q.right == "C" else long_q.strike - ml / 100
-    cand = Candidate(strategy, STRATEGY_DIRECTION[strategy], long_q.expiry,
-                     [_leg(long_q, "buy"), _leg(short_q, "sell")], qty, round(debit, 4), round(mid_debit, 4),
-                     round(ml, 2), round(ml * qty, 2), round(max_profit, 2), round(be, 4), round(costs, 2),
-                     round(overcost, 2), _exit_plan(strategy, debit, max_profit, eff), src)
+    cand = Candidate(
+        strategy=strategy,
+        direction=STRATEGY_DIRECTION[strategy],
+        expiry=long_q.expiry,
+        legs=[_leg(long_q, "buy"), _leg(short_q, "sell")],
+        qty=qty,
+        entry_debit=round(debit, 4),
+        mid_debit=round(mid_debit, 4),
+        max_loss_contract=round(ml, 2),
+        max_loss_total=round(ml * qty, 2),
+        max_profit_contract=round(max_profit, 2),
+        breakeven=round(be, 4),
+        costs_contract=round(costs, 2),
+        exec_overcost_pct=round(overcost, 2),
+        exit_plan=_exit_plan(strategy, debit, max_profit, eff),
+        delta_source=src,
+        family="vertical",
+        credit_or_debit="debit",
+    )
+    if src == "bs_from_iv":
+        cand.warnings.append("delta estimada con Black-Scholes desde IV del broker")
+    return cand, []
+
+
+def build_vertical_credit(strategy: str, short_q: Q, long_q: Q, S: float, today: date,
+                         eff: dict[str, Any]) -> tuple[Candidate | None, list[str]]:
+    """Construye un spread vertical de credito (Bull Put o Bear Call).
+    - Bull Put Spread: Vende Put K_alto (short_q), compra Put K_bajo (long_q).
+    - Bear Call Spread: Vende Call K_bajo (short_q), compra Call K_alto (long_q).
+    """
+    reasons: list[str] = []
+    if short_q.expiry != long_q.expiry or short_q.right != long_q.right:
+        return None, ["piernas con distinto vencimiento o tipo"]
+
+    width = abs(short_q.strike - long_q.strike)
+    if strategy == "bull_put_spread":
+        if short_q.right != "P":
+            return None, ["bull put spread debe ser con PUTs"]
+        if not (short_q.strike > long_q.strike):
+            return None, ["bull put spread mal construido (K corto debe ser > K largo)"]
+    elif strategy == "bear_call_spread":
+        if short_q.right != "C":
+            return None, ["bear call spread debe ser con CALLs"]
+        if not (short_q.strike < long_q.strike):
+            return None, ["bear call spread mal construido (K corto debe ser < K largo)"]
+    else:
+        return None, [f"estrategia de credito no soportada: {strategy}"]
+
+    if width < eff["spread_width_min"] or width > eff["spread_width_max"]:
+        return None, [f"ancho {width:g} fuera de [{eff['spread_width_min']}, {eff['spread_width_max']}]"]
+
+    reasons += [f"pierna corta: {r}" for r in leg_issues(short_q, eff)]
+    reasons += [f"pierna larga: {r}" for r in leg_issues(long_q, eff)]
+
+    d, src = abs_delta(short_q, S, today, eff)
+    if d is None:
+        reasons.append("dato no disponible: delta pierna corta (ni IV para estimarla)")
+    elif not (eff["delta_min"] <= d <= eff["delta_max"]):
+        reasons.append(f"|delta| pierna corta {d:.2f} fuera de [{eff['delta_min']}, {eff['delta_max']}]")
+
+    if reasons:
+        return None, reasons
+
+    # Credito ejecutable: vende pierna corta al bid, compra pierna larga al ask
+    credit = short_q.bid - long_q.ask
+    mid_credit = (short_q.bid + short_q.ask) / 2.0 - (long_q.bid + long_q.ask) / 2.0
+
+    if credit <= 0:
+        return None, ["credito ejecutable <= 0 (cotizaciones inconsistentes o credito nulo)"]
+    if credit >= width:
+        return None, [f"credito {credit:.2f} >= ancho {width:g}: estructura invalida o arbitraje aparente"]
+
+    costs = contract_costs(2, eff)
+    ml = (width - credit) * 100.0 + costs
+    max_profit = credit * 100.0 - costs
+    if max_profit <= 0:
+        return None, ["sin beneficio posible tras costes"]
+
+    # Sobrecoste de ejecucion en credito: (mid_credit - credit) / mid_credit * 100
+    overcost = ((mid_credit - credit) / mid_credit * 100.0) if mid_credit > 0 else None
+    if overcost is None:
+        return None, ["credito a mid <= 0: sobrecoste de ejecucion no calculable"]
+    max_oc = float(eff.get("max_credit_overcost_pct", 15.0))
+    if overcost > max_oc:
+        return None, [f"sobrecoste de ejecucion en credito {overcost:.1f}% > {max_oc}%"]
+
+    # Ratio costes/riesgo (§6.4)
+    c2r = (costs / ml) * 100.0 if ml > 0 else 100.0
+    max_c2r = float(eff.get("max_cost_to_risk_ratio", 20.0))
+    if c2r > max_c2r:
+        return None, [f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%"]
+
+    qty = _qty(ml, eff)
+    if qty < 1:
+        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff['max_risk_per_trade_usd']}"]
+
+    # Break-even
+    # Bull Put: K_short - credit + costs/100
+    # Bear Call: K_short + credit - costs/100
+    if strategy == "bull_put_spread":
+        be = short_q.strike - credit + (costs / 100.0)
+    else:
+        be = short_q.strike + credit - (costs / 100.0)
+
+    # entry_debit negativo indica entrada en credito
+    entry_debit = -round(credit, 4)
+    mid_debit = -round(mid_credit, 4)
+
+    exit_plan = _exit_plan(strategy, entry_debit, max_profit, eff, max_loss=ml)
+
+    cand = Candidate(
+        strategy=strategy,
+        direction=STRATEGY_DIRECTION[strategy],
+        expiry=short_q.expiry,
+        legs=[_leg(short_q, "sell"), _leg(long_q, "buy")],
+        qty=qty,
+        entry_debit=entry_debit,
+        mid_debit=mid_debit,
+        max_loss_contract=round(ml, 2),
+        max_loss_total=round(ml * qty, 2),
+        max_profit_contract=round(max_profit, 2),
+        breakeven=round(be, 4),
+        costs_contract=round(costs, 2),
+        exec_overcost_pct=round(overcost, 2),
+        exit_plan=exit_plan,
+        delta_source=src,
+        family="vertical",
+        credit_or_debit="credit",
+    )
     if src == "bs_from_iv":
         cand.warnings.append("delta estimada con Black-Scholes desde IV del broker")
     return cand, []
@@ -231,18 +433,25 @@ def generate(quotes: list[Q], price: float, today: date, eff: dict[str, Any],
         by_exp.setdefault(q.expiry, []).append(q)
 
     for strat in STRATEGIES:
-        if not eff.get(SETTING_FLAG[strat]):
+        flag = SETTING_FLAG.get(strat)
+        if not flag or not eff.get(flag):
             continue
         if STRATEGY_DIRECTION[strat] not in directions:
             continue
-        right = "C" if strat in ("long_call", "bull_call_spread") else "P"
-        for exp, qs in by_exp.items():
-            side = sorted([q for q in qs if q.right == right], key=lambda q: q.strike)
-            for lq in side:
-                if strat in ("long_call", "long_put"):
+
+        if strat in ("long_call", "long_put"):
+            right = "C" if strat == "long_call" else "P"
+            for exp, qs in by_exp.items():
+                side = sorted([q for q in qs if q.right == right], key=lambda q: q.strike)
+                for lq in side:
                     c, why = build_long(strat, lq, price, today, eff)
                     (valid.append(c) if c else rej(strat, [lq], why))
-                else:
+
+        elif strat in ("bull_call_spread", "bear_put_spread"):
+            right = "C" if strat == "bull_call_spread" else "P"
+            for exp, qs in by_exp.items():
+                side = sorted([q for q in qs if q.right == right], key=lambda q: q.strike)
+                for lq in side:
                     for sq in side:
                         if sq.strike == lq.strike:
                             continue
@@ -251,4 +460,19 @@ def generate(quotes: list[Q], price: float, today: date, eff: dict[str, Any],
                             valid.append(c)
                         elif not (why and ("mal construido" in why[0])):
                             rej(strat, [lq, sq], why)
+
+        elif strat in ("bull_put_spread", "bear_call_spread"):
+            right = "P" if strat == "bull_put_spread" else "C"
+            for exp, qs in by_exp.items():
+                side = sorted([q for q in qs if q.right == right], key=lambda q: q.strike)
+                for sq in side:
+                    for lq in side:
+                        if sq.strike == lq.strike:
+                            continue
+                        c, why = build_vertical_credit(strat, sq, lq, price, today, eff)
+                        if c:
+                            valid.append(c)
+                        elif not (why and ("mal construido" in why[0])):
+                            rej(strat, [sq, lq], why)
+
     return valid, rejected

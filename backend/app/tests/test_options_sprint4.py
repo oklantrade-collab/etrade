@@ -207,7 +207,7 @@ def test_aduana_approves_clean_candidate():
     row, eff = cand()
     res = ad.validate_entry(row, ctx(), eff)
     assert res.approved, res.reasons
-    assert [r.rule for r in res.rules] == [f"O-{i}" for i in range(1, 13)]
+    assert [r.rule for r in res.rules] == [f"O-{i}" for i in range(1, 14)]
 
 
 def test_o1_mode_must_be_paper():

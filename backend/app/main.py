@@ -68,6 +68,7 @@ app.include_router(backtests_router, prefix="/api/v1/backtests", tags=["Backtest
 app.include_router(forex_router, prefix="/api/v1/forex", tags=["Forex"])
 app.include_router(stocks_router, prefix="/api/v1/stocks", tags=["Stocks"])
 app.include_router(options_router, prefix="/api/v1/options", tags=["Options"])
+app.include_router(options_router, prefix="/api/options/v1", tags=["Options V1 Alias"])
 app.include_router(halcon_router)
 app.include_router(radar_cascada_router)
 

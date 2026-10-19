@@ -6,8 +6,18 @@ import { OptionsShell, optCard } from '@/components/options/OptionsShell'
 const STRAT: Record<string, string> = {
   long_call: 'Long Call',
   long_put: 'Long Put',
-  bull_call_spread: 'Bull Call Spread',
-  bear_put_spread: 'Bear Put Spread',
+  bull_call_spread: 'Bull Call Spread (Débito)',
+  bear_put_spread: 'Bear Put Spread (Débito)',
+  bull_put_spread: 'Bull Put Spread (Crédito)',
+  bear_call_spread: 'Bear Call Spread (Crédito)',
+  long_straddle: 'Long Straddle',
+  long_strangle: 'Long Strangle',
+  iron_condor: 'Iron Condor',
+  iron_butterfly: 'Iron Butterfly',
+  long_call_butterfly: 'Long Call Butterfly',
+  long_put_butterfly: 'Long Put Butterfly',
+  calendar_spread: 'Calendar Spread',
+  diagonal_spread: 'Diagonal Spread',
 }
 
 const n = (v: any, d = 2) => (v === null || v === undefined ? '—' : Number(v).toFixed(d))
@@ -445,7 +455,7 @@ export default function OpportunitiesPage() {
                       <ScoreBadge score={c.score} />
                     </div>
                     <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
-                      Vence: {c.expiry} · Débito: ${n(c.entry_debit)} · Max Pérdida: ${n(c.max_loss_total)}
+                      Vence: {c.expiry} · {Number(c.entry_debit) < 0 ? `Crédito: $${n(Math.abs(c.entry_debit))}` : `Débito: $${n(c.entry_debit)}`} · Max Pérdida: ${n(c.max_loss_total)}
                     </div>
                     <div style={{ marginTop: 6 }}>
                       <CatalystSemaphores meta={c.catalyst_state || c.opt_underlyings?.catalyst_meta} />
@@ -527,7 +537,7 @@ export default function OpportunitiesPage() {
                       <ScoreBadge score={c.score} />
                     </div>
                     <div style={{ fontSize: 11, color: '#888', marginTop: 4 }}>
-                      Vence: {c.expiry} · Débito: ${n(c.entry_debit)} · Max Pérdida: ${n(c.max_loss_total)}
+                      Vence: {c.expiry} · {Number(c.entry_debit) < 0 ? `Crédito: $${n(Math.abs(c.entry_debit))}` : `Débito: $${n(c.entry_debit)}`} · Max Pérdida: ${n(c.max_loss_total)}
                     </div>
                     <div style={{ marginTop: 6 }}>
                       <CatalystSemaphores meta={c.catalyst_state || c.opt_underlyings?.catalyst_meta} />
@@ -606,10 +616,28 @@ export default function OpportunitiesPage() {
 
             <select style={sel_} value={strategy} onChange={e => setStrategy(e.target.value)}>
               <option value="">Todas las estrategias</option>
-              <option value="long_call">Long Call</option>
-              <option value="long_put">Long Put</option>
-              <option value="bull_call_spread">Bull Call Spread</option>
-              <option value="bear_put_spread">Bear Put Spread</option>
+              <optgroup label="Single-Leg (Viables con $50)">
+                <option value="long_call">Long Call</option>
+                <option value="long_put">Long Put</option>
+              </optgroup>
+              <optgroup label="Verticales Débito (Viables con $50)">
+                <option value="bull_call_spread">Bull Call Spread</option>
+                <option value="bear_put_spread">Bear Put Spread</option>
+              </optgroup>
+              <optgroup label="Verticales Crédito (Viables con $50)">
+                <option value="bull_put_spread">Bull Put Spread (Crédito)</option>
+                <option value="bear_call_spread">Bear Call Spread (Crédito)</option>
+              </optgroup>
+              <optgroup label="Multi-Leg & Calendars (Catálogo)">
+                <option value="long_straddle">Long Straddle</option>
+                <option value="long_strangle">Long Strangle</option>
+                <option value="iron_condor">Iron Condor</option>
+                <option value="iron_butterfly">Iron Butterfly</option>
+                <option value="long_call_butterfly">Long Call Butterfly</option>
+                <option value="long_put_butterfly">Long Put Butterfly</option>
+                <option value="calendar_spread">Calendar Spread</option>
+                <option value="diagonal_spread">Diagonal Spread</option>
+              </optgroup>
             </select>
           </div>
 
@@ -711,7 +739,9 @@ export default function OpportunitiesPage() {
                         <td style={td}>
                           {(c.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
                         </td>
-                        <td style={td}>{c.eligibility_status === 'rejected' ? '—' : `$${n(c.entry_debit)}`}</td>
+                        <td style={td}>
+                          {c.eligibility_status === 'rejected' ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
+                        </td>
                         <td style={td}>{c.qty ?? '—'}</td>
                         <td style={td}>{c.max_loss_total != null ? `$${n(c.max_loss_total)}` : '—'}</td>
                         <td style={{ ...td, color: (c.ev_view_net || 0) > 0 ? '#22C55E' : '#AAA' }}>
