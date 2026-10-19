@@ -29,35 +29,20 @@ def _clean_str(val: Any) -> str:
 
 
 def get_default_catalyst_tickers(sb) -> list[str]:
-    """Obtiene una lista representativa de subyacentes liquidos opcionables y movers."""
-    tickers = set()
+    """Obtiene una lista representativa de los 50 subyacentes recomendables del dia segun catalizadores y liquidez."""
     try:
-        rows = sb.table("opt_underlyings").select("symbol").limit(60).execute().data or []
-        for r in rows:
-            sym = _clean_str(r.get("symbol"))
-            if sym:
-                tickers.add(sym)
+        from app.options.scanner import load_universe
+        items = load_universe(sb, {"max_underlyings": 50})
+        if items:
+            return [i["symbol"] for i in items]
     except Exception as e:
-        log_warning(MODULE, f"Error leyendo opt_underlyings: {e}")
+        log_warning(MODULE, f"Error cargando universo con catalizadores: {e}")
 
-    try:
-        stocks = sb.table("stocks_universe").select("symbol").limit(40).execute().data or []
-        for s in stocks:
-            sym = _clean_str(s.get("symbol"))
-            if sym:
-                tickers.add(sym)
-    except Exception:
-        pass
-
-    # Tickers altamente liquidos por defecto para Opciones si la DB esta vacia
-    default_liquid = [
-        "SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "TSLA", "META",
-        "AMD", "NFLX", "PLTR", "COIN", "MARA", "INTC", "BABA", "BA", "DIS", "SOFI"
+    return [
+        "SPY", "QQQ", "IWM", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META",
+        "GOOGL", "NFLX", "PLTR", "COIN", "MARA", "INTC", "BAC", "JPM", "XOM", "DIS",
+        "SOFI", "BABA", "UBER", "PYPL", "CRM", "ORCL", "AVGO", "MU", "SMCI", "QCOM"
     ]
-    for t in default_liquid:
-        tickers.add(t)
-
-    return sorted(list(tickers))
 
 
 def run_catalyst_scan(
@@ -103,6 +88,17 @@ def run_catalyst_scan(
                     px = ib_session.quote(stock_contract(sym))
                     price = float(px.get("last") or px.get("close") or px.get("ask") or 100.0)
                     prev_close = float(px.get("close") or price)
+                except Exception:
+                    pass
+
+            if price == 100.0:
+                try:
+                    import yfinance as yf
+                    fast = yf.Ticker(sym).fast_info
+                    p_val = float(fast.last_price or fast.previous_close or 0.0)
+                    if p_val > 0:
+                        price = round(p_val, 2)
+                        prev_close = round(float(fast.previous_close or price), 2)
                 except Exception:
                     pass
 

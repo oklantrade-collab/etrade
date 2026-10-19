@@ -72,7 +72,9 @@ def generate_for_underlying(sb, und: dict[str, Any], eff: dict[str, Any], settin
     states = Counter(q.market_data_type or "UNKNOWN" for q in quotes)
     dq = {"quote_states": dict(states), "usable_quotes": sum(1 for q in quotes if q.usable), "total_quotes": len(quotes)}
     now = datetime.now(timezone.utc).isoformat()
-    rows = [candidate_row(c, uid, dir_source, settings_version, dq, now, catalyst_state=und.get("catalyst_state")) for c in valid]
+    ALLOWED_DB_STRATEGIES = {"long_call", "long_put", "bull_call_spread", "bear_put_spread"}
+    rows = [candidate_row(c, uid, dir_source, settings_version, dq, now, catalyst_state=und.get("catalyst_state"))
+            for c in valid if c.strategy in ALLOWED_DB_STRATEGIES]
 
     reasons_count: Counter = Counter()
     for r in rejected:
@@ -81,6 +83,8 @@ def generate_for_underlying(sb, und: dict[str, Any], eff: dict[str, Any], settin
     rej_rows = []
     for r in rejected[:MAX_REJECTED_SAMPLE]:
         strat = r["strategy"]
+        if strat not in ALLOWED_DB_STRATEGIES:
+            continue
         rej_rows.append({
             "underlying_id": uid, "strategy_type": strat, "direction": st.STRATEGY_DIRECTION[strat],
             "direction_source": dir_source, "expiry": r["expiry"],

@@ -185,6 +185,12 @@ export default function OpportunitiesPage() {
   const [runningSelect, setRunningSelect] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [simulating, setSimulating] = useState(false)
+  const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped')
+  const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({})
+
+  const toggleSymbol = (sym: string) => {
+    setExpandedSymbols(prev => ({ ...prev, [sym]: !prev[sym] }))
+  }
 
   const loadData = async () => {
     setLoading(true)
@@ -282,8 +288,52 @@ export default function OpportunitiesPage() {
 
   const summary = data?.summary
   const items = data?.items || []
-  const topCalls = summary?.top_calls || []
-  const topPuts = summary?.top_puts || []
+
+  // Deduplicate topCalls and topPuts by symbol (no repeated tickers in Top 3)
+  const distinctTop = (list: any[]) => {
+    const seen = new Set<string>()
+    const out: any[] = []
+    for (const item of (list || [])) {
+      const sym = item.opt_underlyings?.symbol || item.symbol
+      if (sym && !seen.has(sym)) {
+        seen.add(sym)
+        out.push(item)
+      }
+      if (out.length >= 3) break
+    }
+    return out
+  }
+  const topCalls = distinctTop(summary?.top_calls || [])
+  const topPuts = distinctTop(summary?.top_puts || [])
+
+  // Group items by symbol and sort by profitability
+  const groupedBySymbol = (() => {
+    const map = new Map<string, any[]>()
+    for (const item of items) {
+      const sym = item.opt_underlyings?.symbol || 'UNKNOWN'
+      if (!map.has(sym)) map.set(sym, [])
+      map.get(sym)!.push(item)
+    }
+
+    const groups: { symbol: string; top: any; rest: any[] }[] = []
+    for (const [sym, list] of map.entries()) {
+      list.sort((a, b) => {
+        const scA = Number(a.score) || 0
+        const scB = Number(b.score) || 0
+        if (scB !== scA) return scB - scA
+        const evA = Number(a.ev_view_net) || 0
+        const evB = Number(b.ev_view_net) || 0
+        return evB - evA
+      })
+      groups.push({
+        symbol: sym,
+        top: list[0],
+        rest: list.slice(1),
+      })
+    }
+    groups.sort((a, b) => (Number(b.top?.score) || 0) - (Number(a.top?.score) || 0))
+    return groups
+  })()
 
   // Capital calculation
   const allocatedRisk = summary?.allocated_risk_usd ?? 0
@@ -639,6 +689,29 @@ export default function OpportunitiesPage() {
                 <option value="diagonal_spread">Diagonal Spread</option>
               </optgroup>
             </select>
+
+            <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', padding: 3, borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+              <button
+                onClick={() => setViewMode('grouped')}
+                style={{
+                  padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer',
+                  background: viewMode === 'grouped' ? 'rgba(56,189,248,0.2)' : 'transparent',
+                  color: viewMode === 'grouped' ? '#38BDF8' : '#888',
+                }}
+              >
+                📦 Agrupado por Símbolo ({groupedBySymbol.length})
+              </button>
+              <button
+                onClick={() => setViewMode('flat')}
+                style={{
+                  padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer',
+                  background: viewMode === 'flat' ? 'rgba(255,255,255,0.1)' : 'transparent',
+                  color: viewMode === 'flat' ? '#FFF' : '#888',
+                }}
+              >
+                📄 Todos ({items.length})
+              </button>
+            </div>
           </div>
 
           <div style={{ display: 'flex', gap: 10 }}>
@@ -704,59 +777,477 @@ export default function OpportunitiesPage() {
                 </tr>
               </thead>
               <tbody>
-                {items.map(c => {
-                  const isCall = (c.direction || '').toLowerCase() === 'bullish'
-                  return (
-                    <Fragment key={c.id}>
-                      <tr
-                        onClick={() => openDetail(c.id)}
-                        style={{
-                          cursor: 'pointer',
-                          background: sel === c.id ? 'rgba(255,255,255,0.04)' : 'transparent',
-                          transition: 'background 0.2s',
-                        }}
-                      >
-                        <td style={{ ...td, color: '#777' }}>
-                          {c.rank_global ? `#${c.rank_global}` : '—'}
-                        </td>
-                        <td style={{ ...td, color: '#FFF', fontWeight: 800 }}>
-                          {c.opt_underlyings?.symbol}
-                        </td>
-                        <td style={td}>{STRAT[c.strategy_type] || c.strategy_type}</td>
-                        <td style={td}>
-                          <span style={{
-                            padding: '2px 6px',
-                            borderRadius: 4,
-                            background: isCall ? 'rgba(34,197,94,0.15)' : 'rgba(171,71,188,0.15)',
-                            color: isCall ? '#22C55E' : '#AB47BC',
-                            fontWeight: 800,
-                            fontSize: 10,
-                          }}>
-                            {isCall ? '▲ CALL' : '▼ PUT'}
-                          </span>
-                        </td>
-                        <td style={td}>{c.expiry}</td>
-                        <td style={td}>
-                          {(c.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
-                        </td>
-                        <td style={td}>
-                          {c.eligibility_status === 'rejected' ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
-                        </td>
-                        <td style={td}>{c.qty ?? '—'}</td>
-                        <td style={td}>{c.max_loss_total != null ? `$${n(c.max_loss_total)}` : '—'}</td>
-                        <td style={{ ...td, color: (c.ev_view_net || 0) > 0 ? '#22C55E' : '#AAA' }}>
-                          {c.ev_view_net != null ? `$${n(c.ev_view_net)}` : '—'}
-                        </td>
-                        <td style={td}>
-                          <CatalystSemaphores meta={c.catalyst_state || c.opt_underlyings?.catalyst_meta} />
-                        </td>
-                        <td style={td}>
-                          <ScoreBadge score={c.score} />
-                        </td>
-                        <td style={td}>
-                          <StatusBadge status={c.eligibility_status} />
-                        </td>
-                      </tr>
+                {viewMode === 'grouped' ? (
+                  // VISTA AGRUPADA POR SIMBOLO CON DESGLOSE POR VENCIMIENTO
+                  groupedBySymbol.map(group => {
+                    const c = group.top
+                    const isCall = (c.direction || '').toLowerCase() === 'bullish'
+                    const isExpanded = Boolean(expandedSymbols[group.symbol])
+                    return (
+                      <Fragment key={group.symbol}>
+                        <tr
+                          onClick={() => openDetail(c.id)}
+                          style={{
+                            cursor: 'pointer',
+                            background: sel === c.id ? 'rgba(255,255,255,0.04)' : (isExpanded ? 'rgba(56,189,248,0.03)' : 'transparent'),
+                            transition: 'background 0.2s',
+                            borderTop: '1px solid rgba(255,255,255,0.08)',
+                          }}
+                        >
+                          <td style={{ ...td, color: '#777' }}>
+                            {c.rank_global ? `#${c.rank_global}` : '—'}
+                          </td>
+                          <td style={{ ...td, color: '#FFF', fontWeight: 900 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span>{group.symbol}</span>
+                              {group.rest.length > 0 && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    toggleSymbol(group.symbol)
+                                  }}
+                                  style={{
+                                    padding: '2px 8px',
+                                    borderRadius: 4,
+                                    background: isExpanded ? 'rgba(56,189,248,0.25)' : 'rgba(255,255,255,0.08)',
+                                    color: isExpanded ? '#38BDF8' : '#AAA',
+                                    border: '1px solid rgba(255,255,255,0.15)',
+                                    fontSize: 10,
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                  }}
+                                  title="Ver más vencimientos de este símbolo"
+                                >
+                                  {isExpanded ? '▲ Ocultar' : `▼ +${group.rest.length} venc.`}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                          <td style={td}>{STRAT[c.strategy_type] || c.strategy_type}</td>
+                          <td style={td}>
+                            <span style={{
+                              padding: '2px 6px',
+                              borderRadius: 4,
+                              background: isCall ? 'rgba(34,197,94,0.15)' : 'rgba(171,71,188,0.15)',
+                              color: isCall ? '#22C55E' : '#AB47BC',
+                              fontWeight: 800,
+                              fontSize: 10,
+                            }}>
+                              {isCall ? '▲ CALL' : '▼ PUT'}
+                            </span>
+                          </td>
+                          <td style={{ ...td, fontWeight: 700, color: '#FFF' }}>{c.expiry}</td>
+                          <td style={td}>
+                            {(c.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
+                          </td>
+                          <td style={td}>
+                            {c.eligibility_status === 'rejected' ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
+                          </td>
+                          <td style={td}>{c.qty ?? '—'}</td>
+                          <td style={td}>{c.max_loss_total != null ? `$${n(c.max_loss_total)}` : '—'}</td>
+                          <td style={{ ...td, color: (c.ev_view_net || 0) > 0 ? '#22C55E' : '#AAA' }}>
+                            {c.ev_view_net != null ? `$${n(c.ev_view_net)}` : '—'}
+                          </td>
+                          <td style={td}>
+                            <CatalystSemaphores meta={c.catalyst_state || c.opt_underlyings?.catalyst_meta} />
+                          </td>
+                          <td style={td}>
+                            <ScoreBadge score={c.score} />
+                          </td>
+                          <td style={td}>
+                            <StatusBadge status={c.eligibility_status} />
+                          </td>
+                        </tr>
+
+                        {/* DESGLOSE DE OTROS VENCIMIENTOS/STRUKES DEL MISMO SIMBOLO */}
+                        {isExpanded && group.rest.map((alt: any) => {
+                          const isAltCall = (alt.direction || '').toLowerCase() === 'bullish'
+                          return (
+                            <tr
+                              key={alt.id}
+                              onClick={() => openDetail(alt.id)}
+                              style={{
+                                cursor: 'pointer',
+                                background: sel === alt.id ? 'rgba(56,189,248,0.1)' : 'rgba(56,189,248,0.02)',
+                                transition: 'background 0.2s',
+                              }}
+                            >
+                              <td style={{ ...td, color: '#555', paddingLeft: 20 }}>↳</td>
+                              <td style={{ ...td, color: '#888', fontSize: 11 }}>
+                                {alt.opt_underlyings?.symbol}
+                              </td>
+                              <td style={{ ...td, color: '#999', fontSize: 11 }}>
+                                {STRAT[alt.strategy_type] || alt.strategy_type}
+                              </td>
+                              <td style={td}>
+                                <span style={{
+                                  padding: '2px 5px',
+                                  borderRadius: 4,
+                                  background: isAltCall ? 'rgba(34,197,94,0.1)' : 'rgba(171,71,188,0.1)',
+                                  color: isAltCall ? '#22C55E' : '#AB47BC',
+                                  fontSize: 9,
+                                }}>
+                                  {isAltCall ? '▲ CALL' : '▼ PUT'}
+                                </span>
+                              </td>
+                              <td style={{ ...td, color: '#38BDF8', fontWeight: 600 }}>{alt.expiry}</td>
+                              <td style={{ ...td, fontSize: 11 }}>
+                                {(alt.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
+                              </td>
+                              <td style={td}>
+                                {alt.eligibility_status === 'rejected' ? '—' : (Number(alt.entry_debit) < 0 ? `+C $${n(Math.abs(alt.entry_debit))}` : `$${n(alt.entry_debit)}`)}
+                              </td>
+                              <td style={td}>{alt.qty ?? '—'}</td>
+                              <td style={td}>{alt.max_loss_total != null ? `$${n(alt.max_loss_total)}` : '—'}</td>
+                              <td style={{ ...td, color: (alt.ev_view_net || 0) > 0 ? '#22C55E' : '#AAA' }}>
+                                {alt.ev_view_net != null ? `$${n(alt.ev_view_net)}` : '—'}
+                              </td>
+                              <td style={td}>
+                                <CatalystSemaphores meta={alt.catalyst_state || alt.opt_underlyings?.catalyst_meta} />
+                              </td>
+                              <td style={td}>
+                                <ScoreBadge score={alt.score} />
+                              </td>
+                              <td style={td}>
+                                <StatusBadge status={alt.eligibility_status} />
+                              </td>
+                            </tr>
+                          )
+                        })}
+
+                        {/* DETALLE EXPANDIDO */}
+                        {sel === c.id && (
+                          <tr>
+                            <td colSpan={13} style={{ ...td, background: 'rgba(255,255,255,0.02)', padding: 18 }}>
+                              {!detail ? (
+                                <div style={{ color: '#888' }}>Cargando detalle de la candidata…</div>
+                              ) : (
+                                <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                                  <div style={{ minWidth: 360, flex: 1 }}>
+                                    {c.eligibility_status === 'rejected' ? (
+                                      <>
+                                        <b style={{ color: '#EF5350', fontSize: 13 }}>Motivos de Descarte (ADUANA / EV)</b>
+                                        <ul style={{ margin: '8px 0 0', paddingLeft: 18, color: '#CCC', fontSize: 12, lineHeight: 1.6 }}>
+                                          {(detail.rejection_reasons || []).map((r: string, idx: number) => <li key={idx}>{r}</li>)}
+                                        </ul>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                            <b style={{ color: '#FFF', fontSize: 13 }}>Estructura & Griegas Netas (Doc §8.3)</b>
+                                            <span style={{
+                                              padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800,
+                                              background: detail.ev_robust ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.06)',
+                                              color: detail.ev_robust ? '#22C55E' : '#888',
+                                              border: `1px solid ${detail.ev_robust ? '#22C55E44' : 'rgba(255,255,255,0.1)'}`,
+                                            }}>
+                                              {detail.ev_robust ? '✓ EV ROBUSTO' : 'EV SENSIBLE'}
+                                            </span>
+                                            {detail.ev_range != null && (
+                                              <span style={{ fontSize: 11, color: '#aaa' }}>
+                                                Rango EV: ${n(detail.ev_range)} (mín: ${n(detail.ev_min)})
+                                              </span>
+                                            )}
+                                          </div>
+                                          {detail.budget_adapted && (
+                                            <span style={{ fontSize: 11, color: '#FFA726', background: 'rgba(255, 167, 38, 0.15)', padding: '2px 8px', borderRadius: 4 }}>
+                                              {detail.adaptation_note || 'Tamaño adaptado para entrar en presupuesto'}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {/* Net Greeks Grid */}
+                                        {detail.greeks_net && (
+                                          <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, background: 'rgba(0,0,0,0.3)', padding: 10, borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Δ Delta USD</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: (detail.greeks_net.delta_usd || 0) >= 0 ? '#22C55E' : '#EF5350' }}>
+                                                ${n(detail.greeks_net.delta_usd)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Δ Acciones</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: '#FFF' }}>
+                                                {n(detail.greeks_net.delta_shares)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Γ Gamma</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: '#42A5F5' }}>
+                                                {n(detail.greeks_net.gamma, 4)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>V Vega ($/pt)</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: '#AB47BC' }}>
+                                                ${n(detail.greeks_net.vega_point)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Θ Theta ($/día)</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: (detail.greeks_net.theta_day || 0) >= 0 ? '#22C55E' : '#EF5350' }}>
+                                                ${n(detail.greeks_net.theta_day)}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {detail.score_breakdown && (
+                                          <div style={{ marginTop: 10, background: 'rgba(255,255,255,0.03)', padding: 10, borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)' }}>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 4 }}>
+                                              Desglose Score (doc §9.2)
+                                            </div>
+                                            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, color: '#AAA' }}>
+                                              <span>EV: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.expectancy, 1)}</b></span>
+                                              <span>APEX: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.apex_signal, 1)}</b></span>
+                                              <span>Liquidez: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.liquidity, 1)}</b></span>
+                                              <span>Riesgo: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.risk, 1)}</b></span>
+                                              <span>Griegas: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.iv_greeks, 1)}</b></span>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+
+                                  <div style={{ minWidth: 320, flex: 1, borderLeft: '1px solid rgba(255,255,255,0.06)', paddingLeft: 16 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                      <b style={{ color: '#FFF', fontSize: 12 }}>Curva de Payoff al Vencimiento</b>
+                                      {detail.breakeven != null && (
+                                        <span style={{ fontSize: 11, color: '#888' }}>
+                                          Breakeven: <b style={{ color: '#38BDF8' }}>${n(detail.breakeven)}</b>
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div style={{ marginTop: 8 }}>
+                                      <Payoff data={detail.payoff} be={detail.breakeven} />
+                                    </div>
+
+                                    {/* Botón de Entrada Paper */}
+                                    <div style={{ marginTop: 14, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                                      <button
+                                        onClick={() => handleSimulateEntry(c.id)}
+                                        disabled={simulating || c.eligibility_status === 'rejected'}
+                                        style={{
+                                          background: c.eligibility_status === 'rejected' ? 'rgba(255,255,255,0.05)' : 'linear-gradient(135deg, #22C55E 0%, #16A34A 100%)',
+                                          color: c.eligibility_status === 'rejected' ? '#666' : '#FFF',
+                                          border: 'none',
+                                          borderRadius: 8,
+                                          padding: '8px 16px',
+                                          fontSize: 11,
+                                          fontWeight: 800,
+                                          cursor: c.eligibility_status === 'rejected' ? 'not-allowed' : 'pointer',
+                                          boxShadow: c.eligibility_status === 'rejected' ? 'none' : '0 2px 8px rgba(34,197,94,0.3)',
+                                        }}
+                                      >
+                                        {simulating ? 'Procesando entrada…' : '★ Ejecutar Entrada Paper'}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })
+                ) : (
+                  // VISTA PLANA ORIGINAL
+                  items.map(c => {
+                    const isCall = (c.direction || '').toLowerCase() === 'bullish'
+                    return (
+                      <Fragment key={c.id}>
+                        <tr
+                          onClick={() => openDetail(c.id)}
+                          style={{
+                            cursor: 'pointer',
+                            background: sel === c.id ? 'rgba(255,255,255,0.04)' : 'transparent',
+                            transition: 'background 0.2s',
+                          }}
+                        >
+                          <td style={{ ...td, color: '#777' }}>
+                            {c.rank_global ? `#${c.rank_global}` : '—'}
+                          </td>
+                          <td style={{ ...td, color: '#FFF', fontWeight: 800 }}>
+                            {c.opt_underlyings?.symbol}
+                          </td>
+                          <td style={td}>{STRAT[c.strategy_type] || c.strategy_type}</td>
+                          <td style={td}>
+                            <span style={{
+                              padding: '2px 6px',
+                              borderRadius: 4,
+                              background: isCall ? 'rgba(34,197,94,0.15)' : 'rgba(171,71,188,0.15)',
+                              color: isCall ? '#22C55E' : '#AB47BC',
+                              fontWeight: 800,
+                              fontSize: 10,
+                            }}>
+                              {isCall ? '▲ CALL' : '▼ PUT'}
+                            </span>
+                          </td>
+                          <td style={td}>{c.expiry}</td>
+                          <td style={td}>
+                            {(c.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
+                          </td>
+                          <td style={td}>
+                            {c.eligibility_status === 'rejected' ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
+                          </td>
+                          <td style={td}>{c.qty ?? '—'}</td>
+                          <td style={td}>{c.max_loss_total != null ? `$${n(c.max_loss_total)}` : '—'}</td>
+                          <td style={{ ...td, color: (c.ev_view_net || 0) > 0 ? '#22C55E' : '#AAA' }}>
+                            {c.ev_view_net != null ? `$${n(c.ev_view_net)}` : '—'}
+                          </td>
+                          <td style={td}>
+                            <CatalystSemaphores meta={c.catalyst_state || c.opt_underlyings?.catalyst_meta} />
+                          </td>
+                          <td style={td}>
+                            <ScoreBadge score={c.score} />
+                          </td>
+                          <td style={td}>
+                            <StatusBadge status={c.eligibility_status} />
+                          </td>
+                        </tr>
+
+                        {/* DETALLE EXPANDIDO */}
+                        {sel === c.id && (
+                          <tr>
+                            <td colSpan={13} style={{ ...td, background: 'rgba(255,255,255,0.02)', padding: 18 }}>
+                              {!detail ? (
+                                <div style={{ color: '#888' }}>Cargando detalle de la candidata…</div>
+                              ) : (
+                                <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                                  <div style={{ minWidth: 360, flex: 1 }}>
+                                    {c.eligibility_status === 'rejected' ? (
+                                      <>
+                                        <b style={{ color: '#EF5350', fontSize: 13 }}>Motivos de Descarte (ADUANA / EV)</b>
+                                        <ul style={{ margin: '8px 0 0', paddingLeft: 18, color: '#CCC', fontSize: 12, lineHeight: 1.6 }}>
+                                          {(detail.rejection_reasons || []).map((r: string, idx: number) => <li key={idx}>{r}</li>)}
+                                        </ul>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                            <b style={{ color: '#FFF', fontSize: 13 }}>Estructura & Griegas Netas (Doc §8.3)</b>
+                                            <span style={{
+                                              padding: '2px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800,
+                                              background: detail.ev_robust ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.06)',
+                                              color: detail.ev_robust ? '#22C55E' : '#888',
+                                              border: `1px solid ${detail.ev_robust ? '#22C55E44' : 'rgba(255,255,255,0.1)'}`,
+                                            }}>
+                                              {detail.ev_robust ? '✓ EV ROBUSTO' : 'EV SENSIBLE'}
+                                            </span>
+                                            {detail.ev_range != null && (
+                                              <span style={{ fontSize: 11, color: '#aaa' }}>
+                                                Rango EV: ${n(detail.ev_range)} (mín: ${n(detail.ev_min)})
+                                              </span>
+                                            )}
+                                          </div>
+                                          {detail.budget_adapted && (
+                                            <span style={{ fontSize: 11, color: '#FFA726', background: 'rgba(255, 167, 38, 0.15)', padding: '2px 8px', borderRadius: 4 }}>
+                                              {detail.adaptation_note || 'Tamaño adaptado para entrar en presupuesto'}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        {/* Net Greeks Grid */}
+                                        {detail.greeks_net && (
+                                          <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, background: 'rgba(0,0,0,0.3)', padding: 10, borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Δ Delta USD</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: (detail.greeks_net.delta_usd || 0) >= 0 ? '#22C55E' : '#EF5350' }}>
+                                                ${n(detail.greeks_net.delta_usd)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Δ Acciones</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: '#FFF' }}>
+                                                {n(detail.greeks_net.delta_shares)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Γ Gamma</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: '#42A5F5' }}>
+                                                {n(detail.greeks_net.gamma, 4)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>V Vega ($/pt)</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: '#AB47BC' }}>
+                                                ${n(detail.greeks_net.vega_point)}
+                                              </div>
+                                            </div>
+                                            <div>
+                                              <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase' }}>Θ Theta ($/día)</div>
+                                              <div style={{ fontSize: 13, fontWeight: 800, color: (detail.greeks_net.theta_day || 0) >= 0 ? '#22C55E' : '#EF5350' }}>
+                                                ${n(detail.greeks_net.theta_day)}
+                                              </div>
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {detail.score_breakdown && (
+                                          <div style={{ marginTop: 10, background: 'rgba(255,255,255,0.03)', padding: 10, borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)' }}>
+                                            <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 4 }}>
+                                              Desglose Score (doc §9.2)
+                                            </div>
+                                            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, color: '#AAA' }}>
+                                              <span>EV: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.expectancy, 1)}</b></span>
+                                              <span>APEX: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.apex_signal, 1)}</b></span>
+                                              <span>Liquidez: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.liquidity, 1)}</b></span>
+                                              <span>Riesgo: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.risk, 1)}</b></span>
+                                              <span>Griegas: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.iv_greeks, 1)}</b></span>
+                                            </div>
+                                          </div>
+                                        )}
+                                      </>
+                                    )}
+                                  </div>
+
+                                  <div style={{ minWidth: 320, flex: 1, borderLeft: '1px solid rgba(255,255,255,0.06)', paddingLeft: 16 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                      <b style={{ color: '#FFF', fontSize: 12 }}>Curva de Payoff al Vencimiento</b>
+                                      {detail.breakeven != null && (
+                                        <span style={{ fontSize: 11, color: '#888' }}>
+                                          Breakeven: <b style={{ color: '#38BDF8' }}>${n(detail.breakeven)}</b>
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div style={{ marginTop: 8 }}>
+                                      <Payoff data={detail.payoff} be={detail.breakeven} />
+                                    </div>
+
+                                    {/* Botón de Entrada Paper */}
+                                    <div style={{ marginTop: 14, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                                      <button
+                                        onClick={() => handleSimulateEntry(c.id)}
+                                        disabled={simulating || c.eligibility_status === 'rejected'}
+                                        style={{
+                                          background: c.eligibility_status === 'rejected' ? 'rgba(255,255,255,0.05)' : 'linear-gradient(135deg, #22C55E 0%, #16A34A 100%)',
+                                          color: c.eligibility_status === 'rejected' ? '#666' : '#FFF',
+                                          border: 'none',
+                                          borderRadius: 8,
+                                          padding: '8px 16px',
+                                          fontSize: 11,
+                                          fontWeight: 800,
+                                          cursor: c.eligibility_status === 'rejected' ? 'not-allowed' : 'pointer',
+                                          boxShadow: c.eligibility_status === 'rejected' ? 'none' : '0 2px 8px rgba(34,197,94,0.3)',
+                                        }}
+                                      >
+                                        {simulating ? 'Procesando entrada…' : '★ Ejecutar Entrada Paper'}
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })
+                )}
 
                       {/* EXPANDED ROW DETAIL */}
                       {sel === c.id && (

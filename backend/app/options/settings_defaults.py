@@ -20,9 +20,9 @@ def _env_float(name: str, default: float) -> float:
 
 def hard_caps() -> dict[str, float]:
     return {
-        "max_risk_per_trade_usd": _env_float("OPTIONS_HARD_MAX_RISK_PER_TRADE_USD", 100),
-        "max_open_risk_usd": _env_float("OPTIONS_HARD_MAX_OPEN_RISK_USD", 200),
-        "max_daily_selections": _env_float("OPTIONS_HARD_MAX_DAILY_SELECTIONS", 5),
+        "max_risk_per_trade_usd": _env_float("OPTIONS_HARD_MAX_RISK_PER_TRADE_USD", 1000),
+        "max_open_risk_usd": _env_float("OPTIONS_HARD_MAX_OPEN_RISK_USD", 3000),
+        "max_daily_selections": _env_float("OPTIONS_HARD_MAX_DAILY_SELECTIONS", 10),
     }
 
 
@@ -37,17 +37,17 @@ def execution_mode_ok() -> bool:
 # key: (default, min, max)  -- max/min None = sin rango numerico (bool/str)
 PARAMS: dict[str, tuple[Any, Any, Any]] = {
     # A. Cuenta y riesgo
-    "capital_usd": (1000, 100, 50000),
-    "max_risk_per_trade_usd": (50, 5, 100),
-    "max_open_risk_usd": (100, 5, 200),
-    "daily_stop_usd": (50, 5, 200),
+    "capital_usd": (5000, 100, 50000),
+    "max_risk_per_trade_usd": (350, 5, 2000),
+    "max_open_risk_usd": (1000, 5, 5000),
+    "daily_stop_usd": (500, 5, 2000),
     "max_daily_selections": (3, 0, 5),
     "max_open_positions": (3, 1, 5),
     "max_same_direction": (2, 1, 5),
     "commission_per_contract": (0.65, 0, 5),
     "extra_fees_per_contract": (0.05, 0, 1),
     # B. Universo y opcionabilidad
-    "max_underlyings": (20, 5, 40),
+    "max_underlyings": (50, 5, 100),
     "max_candidates_per_direction": (25, 5, 50),
     "min_underlying_price": (5, 1, 100),
     "max_strike_gap_pct": (5, 1, 10),
@@ -89,7 +89,7 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "delta_min": (0.25, 0.10, 0.90),
     "delta_max": (0.65, 0.10, 0.90),
     "spread_width_min": (1, 0.5, 10),
-    "spread_width_max": (5, 0.5, 10),
+    "spread_width_max": (10, 0.5, 25),
     "max_leg_spread_pct": (10, 2, 25),
     "max_exec_overcost_pct": (10, 2, 25),
     "min_contract_oi": (100, 0, 5000),

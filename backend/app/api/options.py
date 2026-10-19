@@ -355,11 +355,28 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     selected = [i for i in items if i.get("eligibility_status") == "selected"]
     eligible = [i for i in items if i.get("eligibility_status") == "eligible"]
     rejected = [i for i in items if i.get("eligibility_status") == "rejected"]
+    calls = [i for i in items if i.get("direction") in ("CALL", "bullish")]
+    puts = [i for i in items if i.get("direction") in ("PUT", "bearish")]
 
-    calls = [i for i in items if (i.get("direction") or "").lower() in ("bullish", "call")]
-    puts = [i for i in items if (i.get("direction") or "").lower() in ("bearish", "put")]
-    top_calls = sorted(calls, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:3]
-    top_puts = sorted(puts, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:3]
+    def _distinct_by_symbol(cands: list[dict], top_n: int = 3) -> list[dict]:
+        out = []
+        seen = set()
+        sorted_cands = sorted(cands, key=lambda x: (
+            float(x.get("score") or 0.0),
+            float(x.get("ev_ratio") or x.get("ev_view_net") or 0.0),
+            float(x.get("max_profit_contract") or 0.0)
+        ), reverse=True)
+        for c in sorted_cands:
+            sym = (c.get("opt_underlyings") or {}).get("symbol") or "UNKNOWN"
+            if sym not in seen:
+                seen.add(sym)
+                out.append(c)
+                if len(out) >= top_n:
+                    break
+        return out
+
+    top_calls = _distinct_by_symbol(calls, 3)
+    top_puts = _distinct_by_symbol(puts, 3)
 
     allocated_risk = sum(float(s.get("max_loss_total") or 0.0) for s in selected)
     max_open_risk = float(eff.get("max_open_risk_usd") or 100.0)

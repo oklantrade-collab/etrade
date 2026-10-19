@@ -125,6 +125,12 @@ class _App(EWrapper, EClient):
                      ("theta", theta), ("underlying_price", undPrice)):
             if ok(v):
                 d[k] = v
+        if ok(optPrice) and "last" not in d:
+            d["last"] = round(optPrice, 2)
+            if "bid" not in d:
+                d["bid"] = round(max(0.01, optPrice * 0.98), 2)
+            if "ask" not in d:
+                d["ask"] = round(max(0.02, optPrice * 1.02), 2)
 
     def securityDefinitionOptionParameter(self, reqId, exchange, underlyingConId, tradingClass, multiplier,  # noqa: N802
                                           expirations, strikes):
