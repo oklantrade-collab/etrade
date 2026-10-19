@@ -407,15 +407,31 @@ class IBBridgeWorker:
             except Exception:
                 pass
 
-            # 1. Obtener posiciones actualmente abiertas en Supabase
-            sb_pos_res = sb.table("stocks_positions").select("*").eq("status", "open").execute()
-            sb_open = {p["ticker"]: p for p in (sb_pos_res.data or [])}
-
-            # 2. Reconciliar cada posición existente en el Broker
+            # ── 1. SEPARAR EN STOCKS Y OPTIONS ──
+            broker_stocks = {}
+            broker_options = {}
             for sym, b_data in broker_positions.items():
-                qty = int(b_data["shares"])
+                qty = int(b_data.get("shares") or 0)
                 if qty <= 0:
                     continue
+                if b_data.get("sec_type") == "OPT" or ":OPT:" in sym:
+                    broker_options[sym] = b_data
+                else:
+                    broker_stocks[sym] = b_data
+
+            # ── 2. RECONCILIAR STOCKS_POSITIONS (SÓLO ACCIONES) ──
+            sb_pos_res = sb.table("stocks_positions").select("*").eq("status", "open").execute()
+            sb_open_stocks = {}
+            for p in (sb_pos_res.data or []):
+                # Si una opción se coló en stocks_positions, cerrarla inmediatamente
+                if p.get("group_name") == "OPTIONS" or ":OPT:" in str(p.get("ticker", "")):
+                    sb.table("stocks_positions").update({"status": "closed", "updated_at": now_iso}).eq("id", p["id"]).execute()
+                    log_info(MODULE, f"🧹 [LIMPIEZA] Opción {p.get('ticker')} removida de stocks_positions.")
+                else:
+                    sb_open_stocks[p["ticker"]] = p
+
+            for sym, b_data in broker_stocks.items():
+                qty = int(b_data["shares"])
                 avg_cost = float(b_data["avg_cost"])
 
                 cur_p = self.ib._prices.get(sym, avg_cost) if hasattr(self.ib, '_prices') else avg_cost
@@ -428,16 +444,15 @@ class IBBridgeWorker:
                 pnl_usd = round((cur_p - avg_cost) * qty, 2)
                 pnl_pct = round(((cur_p - avg_cost) / avg_cost * 100), 2) if avg_cost > 0 else 0.0
 
-                if sym in sb_open:
-                    existing_pos = sb_open[sym]
+                if sym in sb_open_stocks:
+                    existing_pos = sb_open_stocks[sym]
                     old_shares = int(existing_pos.get("shares") or 0)
                     old_avg = float(existing_pos.get("avg_price") or 0)
-                    # Si difiere la cantidad o el precio promedio, el broker manda
                     if old_shares != qty or abs(old_avg - avg_cost) > 0.01:
                         update_payload = {
                             "shares": qty,
                             "avg_price": round(avg_cost, 4),
-                            "total_cost": round(qty * avg_cost * (100 if ":OPT:" in sym else 1), 2),
+                            "total_cost": round(qty * avg_cost, 2),
                             "current_price": cur_p,
                             "unrealized_pnl": pnl_usd,
                             "unrealized_pnl_pct": pnl_pct,
@@ -450,15 +465,14 @@ class IBBridgeWorker:
                             update_payload["take_profit"] = tp_calc
 
                         sb.table("stocks_positions").update(update_payload).eq("id", existing_pos["id"]).execute()
-                        log_info(MODULE, f"🔄 [SYNC BROKER] Posición ajustada para {sym}: {old_shares} -> {qty} acc @ ${avg_cost:.2f}")
+                        log_info(MODULE, f"🔄 [SYNC STOCKS] Posición ajustada para {sym}: {old_shares} -> {qty} acc @ ${avg_cost:.2f}")
                 else:
-                    # Crear posición nueva en Supabase que existe en el Broker
                     new_pos = {
                         "ticker": sym,
                         "direction": "long",
                         "shares": qty,
                         "avg_price": round(avg_cost, 4),
-                        "total_cost": round(qty * avg_cost * (100 if ":OPT:" in sym else 1), 2),
+                        "total_cost": round(qty * avg_cost, 2),
                         "current_price": cur_p,
                         "unrealized_pnl": pnl_usd,
                         "unrealized_pnl_pct": pnl_pct,
@@ -466,23 +480,43 @@ class IBBridgeWorker:
                         "trailing_sl_price": sl_calc,
                         "highest_price_reached": max(avg_cost, cur_p),
                         "take_profit": tp_calc,
-                        "group_name": "OPTIONS" if ":OPT:" in sym else "IB_PAPER",
+                        "group_name": "IB_PAPER",
                         "first_buy_at": now_iso,
                         "status": "open",
                         "updated_at": now_iso
                     }
                     sb.table("stocks_positions").insert(new_pos).execute()
-                    log_info(MODULE, f"📥 [SYNC BROKER] Posición del Broker restaurada en Supabase: {sym} {qty} acc @ ${avg_cost:.2f}")
+                    log_info(MODULE, f"📥 [SYNC STOCKS] Acción del Broker agregada a Supabase: {sym} {qty} acc @ ${avg_cost:.2f}")
 
-            # 3. Cerrar en Supabase cualquier posición que el Broker ya no tenga (qty == 0)
-            if broker_positions:
-                for sym, p_data in sb_open.items():
-                    if sym not in broker_positions or int(broker_positions[sym]["shares"]) <= 0:
-                        sb.table("stocks_positions").update({
+            # Cerrar en stocks_positions cualquier acción que el broker ya no tenga
+            for sym, p_data in sb_open_stocks.items():
+                if sym not in broker_stocks:
+                    sb.table("stocks_positions").update({"status": "closed", "updated_at": now_iso}).eq("id", p_data["id"]).execute()
+                    log_info(MODULE, f"📤 [SYNC STOCKS] Acción cerrada en Supabase porque ya no existe en el Broker: {sym}")
+
+            # ── 3. RECONCILIAR OPT_PAPER_TRADES (SÓLO OPCIONES) ──
+            try:
+                opt_open_res = sb.table("opt_paper_trades").select("*").eq("status", "open").execute()
+                sb_open_opts = {t["symbol"]: t for t in (opt_open_res.data or [])}
+
+                # Simbolos subyacentes con opciones abiertas en el broker
+                broker_opt_symbols = set()
+                for opt_key, b_data in broker_options.items():
+                    und_sym = b_data.get("underlying") or opt_key.split(":")[0]
+                    broker_opt_symbols.add(und_sym.upper())
+
+                # Cerrar en opt_paper_trades cualquier posición que NO esté en el broker
+                for sym, opt_t in sb_open_opts.items():
+                    if sym.upper() not in broker_opt_symbols:
+                        sb.table("opt_paper_trades").update({
                             "status": "closed",
+                            "exit_reason": "manual_simulated",
+                            "exit_time": now_iso,
                             "updated_at": now_iso
-                        }).eq("id", p_data["id"]).execute()
-                        log_info(MODULE, f"📤 [SYNC BROKER] Posición cerrada en Supabase porque ya no existe en el Broker: {sym}")
+                        }).eq("id", opt_t["id"]).execute()
+                        log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada en opt_paper_trades por no existir en TWS.")
+            except Exception as opt_sync_e:
+                log_warning(MODULE, f"Error reconciliando opt_paper_trades: {opt_sync_e}")
 
         except Exception as sync_e:
             log_error(MODULE, f"Error en reconciliación con el broker: {sync_e}")

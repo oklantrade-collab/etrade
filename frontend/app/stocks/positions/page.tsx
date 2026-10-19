@@ -62,9 +62,9 @@ export default function StocksPositions() {
       if (!openRes.ok || !closedRes.ok) throw new Error('API Error')
 
       const openData = await openRes.json()
-      const closedData = await closedRes.json()
-      
-      setPositions(Array.isArray(openData.positions) ? openData.positions : [])
+      const rawOpen = Array.isArray(openData.positions) ? openData.positions : []
+      const filteredOpen = rawOpen.filter((p: any) => p.group_name !== 'OPTIONS' && !String(p.ticker || '').includes(':OPT'))
+      setPositions(filteredOpen)
       setClosedPositions(Array.isArray(closedData) ? closedData : [])
     } catch (err) {
       console.error(err)

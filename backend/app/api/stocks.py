@@ -285,14 +285,15 @@ async def get_stocks_positions():
     for attempt in range(max_retries):
         try:
             sb = get_supabase()
-            # 1. Fetch all open positions
+            # 1. Fetch all open positions (excluding options)
             res = sb.table("stocks_positions")\
                 .select("*")\
                 .eq("status", "open")\
+                .neq("group_name", "OPTIONS")\
                 .order("first_buy_at", desc=True)\
                 .execute()
             
-            positions = res.data or []
+            positions = [p for p in (res.data or []) if ":OPT:" not in str(p.get("ticker", "")) and p.get("group_name") != "OPTIONS"]
             if not positions:
                 return {"positions": []}
 

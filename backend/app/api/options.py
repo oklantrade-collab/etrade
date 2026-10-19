@@ -594,6 +594,14 @@ def evaluate_exits(user: dict = ceo_only):
     return {"ok": True, "result": result}
 
 
+@router.delete("/positions/{position_id}")
+def delete_position(position_id: int):
+    """Elimina permanentemente una posición de opciones (opt_paper_trades)."""
+    sb = get_supabase()
+    res = sb.table("opt_paper_trades").delete().eq("id", position_id).execute()
+    return {"ok": True, "deleted_id": position_id}
+
+
 # ---------------------------------------------------------------------------
 # Sprint 7: Performance, Calibración & Gate G3
 # ---------------------------------------------------------------------------

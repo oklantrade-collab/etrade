@@ -1,5 +1,5 @@
 'use client'
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useState, useRef } from 'react'
 import { OptionsShell, optCard } from '@/components/options/OptionsShell'
 
 const STRAT: Record<string, string> = {
@@ -30,6 +30,11 @@ export default function OptionsPositions() {
   const [err, setErr] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
 
+  // Modales
+  const [showChart, setShowChart] = useState(false)
+  const [selectedTicker, setSelectedTicker] = useState('')
+  const [selectedModalPos, setSelectedModalPos] = useState<any>(null)
+
   const loadData = () => {
     setLoading(true)
     fetch(`/api/v1/options/positions?status=${tab}`)
@@ -54,7 +59,7 @@ export default function OptionsPositions() {
   }
 
   const handleManualExit = async (id: number) => {
-    if (!confirm('¿Simular salida manual para esta posición paper?')) return
+    if (!confirm('¿Cerrar / simular salida para esta posición de opción?')) return
     try {
       const res = await fetch(`/api/v1/options/positions/${id}/simulate-exit`, {
         method: 'POST',
@@ -70,6 +75,22 @@ export default function OptionsPositions() {
       }
     } catch {
       setErr('Error de red al simular salida')
+    }
+  }
+
+  const handleDelete = async (id: number, sym: string) => {
+    if (!confirm(`¿ELIMINAR registro de opción de ${sym} permanentemente?`)) return
+    try {
+      const res = await fetch(`/api/v1/options/positions/${id}`, { method: 'DELETE' })
+      if (res.ok) {
+        setItems(prev => prev.filter(p => p.id !== id))
+        setMsg(`Posición de ${sym} eliminada permanentemente.`)
+        loadData()
+      } else {
+        setErr('Error al eliminar la posición.')
+      }
+    } catch {
+      setErr('Error de red al eliminar la posición.')
     }
   }
 
@@ -90,8 +111,30 @@ export default function OptionsPositions() {
   const td: React.CSSProperties = { color: '#AAA', fontSize: 12, padding: '8px 10px', borderTop: '1px solid rgba(255,255,255,0.04)' }
   const kpiCard: React.CSSProperties = { background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: 8, padding: '10px 14px', flex: 1, minWidth: 140 }
 
+  const actionBtnStyle: React.CSSProperties = {
+    padding: '4px 8px',
+    borderRadius: '6px',
+    fontSize: '11px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    transition: 'all 0.2s',
+  }
+
   return (
     <OptionsShell title="Options Positions" active="/options/positions">
+      {/* MODAL DETALLES */}
+      {selectedModalPos && (
+        <OptionDetailModal pos={selectedModalPos} onClose={() => setSelectedModalPos(null)} />
+      )}
+
+      {/* MODAL TRADINGVIEW */}
+      {showChart && (
+        <ChartModal symbol={selectedTicker} onClose={() => setShowChart(false)} />
+      )}
+
       {/* KPIs Header */}
       {summary && (
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
@@ -172,7 +215,7 @@ export default function OptionsPositions() {
               cursor: 'pointer',
             }}
           >
-            Posiciones Abiertas ({summary?.open_positions ?? 0})
+            Posiciones Abiertas ({summary?.open_positions ?? items.filter(i => i.status === 'open').length})
           </button>
           <button
             onClick={() => setTab('closed')}
@@ -187,7 +230,7 @@ export default function OptionsPositions() {
               cursor: 'pointer',
             }}
           >
-            Historial / Cerradas ({summary?.closed_positions ?? 0})
+            Historial / Cerradas ({summary?.closed_positions ?? items.filter(i => i.status === 'closed').length})
           </button>
         </div>
 
@@ -196,7 +239,7 @@ export default function OptionsPositions() {
         {!loading && items.length === 0 && (
           <div style={{ color: '#666', fontSize: 13, padding: '30px 0', textAlign: 'center' }}>
             {tab === 'open'
-              ? 'No hay posiciones paper abiertas actualmente. Seleccione candidatas en "Opportunities" para simular entradas.'
+              ? 'No hay posiciones paper abiertas actualmente en cartera.'
               : 'No hay posiciones cerradas en el historial.'}
           </div>
         )}
@@ -216,7 +259,7 @@ export default function OptionsPositions() {
                     <th style={th}>Mark Actual</th>
                     <th style={th}>P&L No Realizado</th>
                     <th style={th}>Pérdida Máx</th>
-                    <th style={th}>Acción</th>
+                    <th style={{ ...th, textAlign: 'center' }}>Acciones</th>
                   </>
                 ) : (
                   <>
@@ -224,6 +267,7 @@ export default function OptionsPositions() {
                     <th style={th}>P&L Realizado</th>
                     <th style={th}>Motivo Salida</th>
                     <th style={th}>Fecha Cierre</th>
+                    <th style={{ ...th, textAlign: 'center' }}>Acciones</th>
                   </>
                 )}
               </tr>
@@ -249,22 +293,37 @@ export default function OptionsPositions() {
                           ${n(p.unrealized_pnl)}
                         </td>
                         <td style={td}>${n(p.max_loss_total)}</td>
-                        <td style={td}>
-                          <button
-                            onClick={e => { e.stopPropagation(); handleManualExit(p.id) }}
-                            style={{
-                              background: 'rgba(239, 83, 80, 0.15)',
-                              color: '#EF5350',
-                              border: '1px solid rgba(239, 83, 80, 0.3)',
-                              borderRadius: 4,
-                              padding: '3px 8px',
-                              fontSize: 10,
-                              cursor: 'pointer',
-                              fontWeight: 600,
-                            }}
-                          >
-                            Cerrar
-                          </button>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', alignItems: 'center' }}>
+                            <button
+                              onClick={e => { e.stopPropagation(); setSelectedTicker(p.symbol); setShowChart(true); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(56,189,248,0.1)', color: '#38BDF8', border: '1px solid rgba(56,189,248,0.2)' }}
+                              title="Ver Gráfico Subyacente (TradingView)"
+                            >
+                              📊
+                            </button>
+                            <button
+                              onClick={e => { e.stopPropagation(); setSelectedModalPos(p); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(255,255,255,0.05)', color: '#FFF', border: '1px solid rgba(255,255,255,0.15)' }}
+                              title="Ver Detalles"
+                            >
+                              🔍
+                            </button>
+                            <button
+                              onClick={e => { e.stopPropagation(); handleManualExit(p.id); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(38,166,154,0.15)', color: '#26A69A', border: '1px solid rgba(38,166,154,0.3)' }}
+                              title="Cerrar Posición"
+                            >
+                              ✓
+                            </button>
+                            <button
+                              onClick={e => { e.stopPropagation(); handleDelete(p.id, p.symbol); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(239,83,80,0.15)', color: '#EF5350', border: '1px solid rgba(239,83,80,0.3)' }}
+                              title="Eliminar Registro"
+                            >
+                              🗑️
+                            </button>
+                          </div>
                         </td>
                       </>
                     ) : (
@@ -289,6 +348,31 @@ export default function OptionsPositions() {
                           ) : (p.exit_reason || '—')}
                         </td>
                         <td style={td}>{p.exit_time ? new Date(p.exit_time).toLocaleDateString() : '—'}</td>
+                        <td style={{ ...td, textAlign: 'center' }}>
+                          <div style={{ display: 'flex', gap: '6px', justifyContent: 'center', alignItems: 'center' }}>
+                            <button
+                              onClick={e => { e.stopPropagation(); setSelectedTicker(p.symbol); setShowChart(true); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(56,189,248,0.1)', color: '#38BDF8', border: '1px solid rgba(56,189,248,0.2)' }}
+                              title="Ver Gráfico Subyacente (TradingView)"
+                            >
+                              📊
+                            </button>
+                            <button
+                              onClick={e => { e.stopPropagation(); setSelectedModalPos(p); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(255,255,255,0.05)', color: '#FFF', border: '1px solid rgba(255,255,255,0.15)' }}
+                              title="Ver Detalles"
+                            >
+                              🔍
+                            </button>
+                            <button
+                              onClick={e => { e.stopPropagation(); handleDelete(p.id, p.symbol); }}
+                              style={{ ...actionBtnStyle, background: 'rgba(239,83,80,0.15)', color: '#EF5350', border: '1px solid rgba(239,83,80,0.3)' }}
+                              title="Eliminar Registro"
+                            >
+                              🗑️
+                            </button>
+                          </div>
+                        </td>
                       </>
                     )}
                   </tr>
@@ -300,7 +384,7 @@ export default function OptionsPositions() {
                           <div>
                             <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 12 }}>
                               <div>
-                                <b style={{ color: '#FFF', fontSize: 13 }}>Fills de Entrada (Simulados Conservadores)</b>
+                                <b style={{ color: '#FFF', fontSize: 13 }}>Fills de Entrada (Detalle Operativo)</b>
                                 <table style={{ marginTop: 6, fontSize: 11 }}>
                                   <thead>
                                     <tr>
@@ -390,5 +474,157 @@ export default function OptionsPositions() {
         )}
       </div>
     </OptionsShell>
+  )
+}
+
+// ── COMPONENTES MODAL ────────────────────────────────────────────────────────
+
+function DetailItem({ label, val, color }: { label: string; val: any; color?: string }) {
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.02)', padding: '12px 14px', borderRadius: '10px', border: '1px solid rgba(255,255,255,0.04)' }}>
+      <p style={{ margin: 0, fontSize: '10px', color: '#777', textTransform: 'uppercase', fontWeight: 800 }}>{label}</p>
+      <p style={{ margin: '4px 0 0', fontSize: '14px', fontWeight: 700, color: color || '#FFF' }}>{val || '—'}</p>
+    </div>
+  )
+}
+
+function OptionDetailModal({ pos, onClose }: { pos: any; onClose: () => void }) {
+  if (!pos) return null
+  return (
+    <div 
+      onClick={onClose}
+      style={{
+        position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+        background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)',
+        zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        cursor: 'pointer'
+      }}
+    >
+      <div 
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: '#12161F', width: '520px', maxHeight: '90vh', borderRadius: '20px',
+          border: '1px solid rgba(255,255,255,0.1)', overflow: 'hidden',
+          boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)',
+          display: 'flex', flexDirection: 'column', cursor: 'default'
+        }}
+      >
+        <div style={{ padding: '24px 28px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <h2 style={{ fontSize: '22px', fontWeight: 900, margin: 0, color: '#FFF' }}>{pos.symbol}</h2>
+              <span style={{
+                background: pos.direction === 'bullish' ? 'rgba(38,166,154,0.15)' : 'rgba(239,83,80,0.15)',
+                color: pos.direction === 'bullish' ? '#26A69A' : '#EF5350',
+                padding: '3px 8px', borderRadius: 4, fontSize: 11, fontWeight: 700
+              }}>
+                {pos.direction === 'bullish' ? 'CALL / ALCISTA' : 'PUT / BAJISTA'}
+              </span>
+            </div>
+            <p style={{ color: '#00C896', fontSize: '11px', fontWeight: 800, textTransform: 'uppercase', margin: '4px 0 0 0' }}>
+              {STRAT[pos.strategy_type] || pos.strategy_type} · Vencimiento: {pos.expiry}
+            </p>
+          </div>
+          <button onClick={onClose} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', color: '#FFF', width: '32px', height: '32px', borderRadius: '50%', cursor: 'pointer', fontWeight: 900, fontSize: 18 }}>×</button>
+        </div>
+
+        <div style={{ padding: '24px 28px', overflowY: 'auto', flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+          <DetailItem label="Subyacente" val={pos.symbol} color="#FFF" />
+          <DetailItem label="Estrategia" val={STRAT[pos.strategy_type] || pos.strategy_type} color="#00C896" />
+          <DetailItem label="Vencimiento" val={pos.expiry} color="#FFF" />
+          <DetailItem label="Cantidad (Contratos)" val={`${pos.qty}x (100 sh/c)`} color="#FFF" />
+          <DetailItem label="Débito Entrada" val={`$${n(pos.entry_debit)}`} color="#FFF" />
+          <DetailItem label="Total Invertido" val={`$${n(pos.entry_total_invested)}`} color="#FFF" />
+          <DetailItem label="Mark Actual" val={pos.last_mark_price ? `$${n(pos.last_mark_price)}` : '—'} color="#38BDF8" />
+          <DetailItem label="P&L No Realizado" val={`$${n(pos.unrealized_pnl)}`} color={(pos.unrealized_pnl || 0) >= 0 ? '#26A69A' : '#EF5350'} />
+          <DetailItem label="Pérdida Máxima" val={`$${n(pos.max_loss_total)}`} color="#EF5350" />
+          <DetailItem label="Breakeven" val={pos.breakeven ? `$${n(pos.breakeven)}` : '—'} color="#FFA726" />
+          <DetailItem label="Estado Posición" val={pos.status?.toUpperCase()} color={pos.status === 'open' ? '#26A69A' : '#888'} />
+          <DetailItem label="Fecha Entrada" val={pos.entry_time ? new Date(pos.entry_time).toLocaleString() : '—'} color="#AAA" />
+          {pos.status === 'closed' && (
+            <>
+              <DetailItem label="Fecha Cierre" val={pos.exit_time ? new Date(pos.exit_time).toLocaleString() : '—'} color="#AAA" />
+              <DetailItem label="Crédito Salida" val={pos.exit_credit ? `$${n(pos.exit_credit)}` : '—'} color="#FFF" />
+              <DetailItem label="P&L Realizado" val={`$${n(pos.realized_pnl)}`} color={(pos.realized_pnl || 0) >= 0 ? '#26A69A' : '#EF5350'} />
+              <DetailItem label="Motivo Cierre" val={EXIT_REASONS[pos.exit_reason]?.label || pos.exit_reason || '—'} color="#FFA726" />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TradingViewWidget({ symbol }: { symbol: string }) {
+  const containerId = `tv-chart-opt-${symbol}`;
+  const containerRef = useRef<any>(null);
+  const scriptLoaded = useRef(false);
+
+  useEffect(() => {
+    if (scriptLoaded.current) return;
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.async = true;
+    script.onload = () => {
+      if ((window as any).TradingView && containerRef.current) {
+        const tvTimezone = typeof window !== "undefined" ? (localStorage.getItem("app_timezone") || "America/Lima") : "America/Lima";
+
+        new (window as any).TradingView.widget({
+          "autosize": true,
+          "symbol": symbol,
+          "interval": "15",
+          "timezone": tvTimezone,
+          "theme": "dark",
+          "style": "1",
+          "locale": "es",
+          "toolbar_bg": "#161922",
+          "enable_publishing": false,
+          "allow_symbol_change": true,
+          "container_id": containerId,
+          "backgroundColor": "#0F1117",
+          "gridColor": "rgba(255, 255, 255, 0.05)",
+          "hide_side_toolbar": false,
+          "studies": [
+            "BB@tv-basicstudies",
+            "MAExp@tv-basicstudies",
+            "MASimple@tv-basicstudies"
+          ],
+          "studies_overrides": {
+            "moving average.length": 3,
+            "moving average.plot.color": "#E3FF00",
+            "moving average.ma.color": "#E3FF00",
+            "moving average.linewidth": 2
+          },
+          "overrides": {
+            "mainSeriesProperties.style": 1,
+          }
+        });
+      }
+    };
+    document.head.appendChild(script);
+    scriptLoaded.current = true;
+  }, [symbol, containerId]);
+
+  return (
+    <div ref={containerRef} id={containerId} style={{ height: '100%', width: '100%', borderRadius: '16px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }} />
+  );
+}
+
+function ChartModal({ symbol, onClose }: { symbol: string, onClose: () => void }) {
+  return (
+    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1200, backdropFilter: 'blur(5px)' }}>
+      <div style={{ background: '#0F1117', width: '95%', height: '92%', borderRadius: '24px', border: '1px solid #38BDF8', overflow: 'hidden', display: 'flex', flexDirection: 'column', boxShadow: '0 0 50px rgba(56,189,248,0.2)' }}>
+        <div style={{ padding: '15px 25px', background: '#161922', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+          <div>
+            <h3 style={{ margin: 0, color: '#FFF', fontSize: '16px', fontWeight: 900 }}>GRÁFICO TÉCNICO SUBYACENTE: {symbol}</h3>
+            <span style={{ fontSize: '11px', color: '#38BDF8' }}>Acción origen de la opción en TradingView</span>
+          </div>
+          <button onClick={onClose} style={{ background: '#EF4444', border: 'none', color: '#FFF', padding: '6px 15px', borderRadius: '8px', fontSize: '10px', fontWeight: 900, cursor: 'pointer' }}>CERRAR GRÁFICO</button>
+        </div>
+        <div style={{ flex: 1, background: '#000' }}>
+          <TradingViewWidget symbol={symbol} />
+        </div>
+      </div>
+    </div>
   )
 }
