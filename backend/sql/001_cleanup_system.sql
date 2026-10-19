@@ -52,6 +52,8 @@ DECLARE
   deleted_regime       INTEGER := 0;
   deleted_cron         INTEGER := 0;
   deleted_news         INTEGER := 0;
+  deleted_stocks_pos   INTEGER := 0;
+  deleted_positions    INTEGER := 0;
   total_deleted        INTEGER := 0;
   start_time           TIMESTAMPTZ := NOW();
   tmp_count            INTEGER := 0;
@@ -154,7 +156,19 @@ BEGIN
   WHERE analyzed_at < NOW() - INTERVAL '30 days';
   GET DIAGNOSTICS deleted_news = ROW_COUNT;
 
-  -- ── L. TOTAL ──────────────────────────────
+  -- ── L. STOCKS POSITIONS (error o closed > 30 días) ──
+  DELETE FROM stocks_positions
+  WHERE status = 'error'
+     OR (status = 'closed' AND updated_at < NOW() - INTERVAL '30 days');
+  GET DIAGNOSTICS deleted_stocks_pos = ROW_COUNT;
+
+  -- ── M. POSITIONS CRYPTO/FOREX (closed > 30 días) ────
+  DELETE FROM positions
+  WHERE status = 'closed'
+    AND (closed_at < NOW() - INTERVAL '30 days' OR updated_at < NOW() - INTERVAL '30 days');
+  GET DIAGNOSTICS deleted_positions = ROW_COUNT;
+
+  -- ── N. TOTAL ──────────────────────────────
   total_deleted := deleted_candles
                  + deleted_logs
                  + deleted_diagnostics
@@ -165,7 +179,9 @@ BEGIN
                  + deleted_indicators
                  + deleted_regime
                  + deleted_cron
-                 + deleted_news;
+                 + deleted_news
+                 + deleted_stocks_pos
+                 + deleted_positions;
 
   -- ── M. REGISTRAR EN LOG ───────────────────
   INSERT INTO db_cleanup_log (
@@ -211,6 +227,8 @@ BEGIN
     'deleted_regime',       deleted_regime,
     'deleted_cron',         deleted_cron,
     'deleted_news',         deleted_news,
+    'deleted_stocks_pos',   deleted_stocks_pos,
+    'deleted_positions',    deleted_positions,
     'total_deleted',        total_deleted
   );
 

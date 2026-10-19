@@ -41,12 +41,13 @@ export default function LogsPage() {
     loadLogs()
   }, [moduleFilter, levelFilter, cycleIdFilter])
 
-  // Auto-refresh every 15 seconds
+  // Auto-refresh every 30 seconds (pauses when tab is hidden to save Egress)
   useEffect(() => {
     if (!autoRefresh) return
     const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
       loadLogs()
-    }, 15000)
+    }, 30000)
     return () => clearInterval(interval)
   }, [autoRefresh, moduleFilter, levelFilter, cycleIdFilter])
 
@@ -71,9 +72,9 @@ export default function LogsPage() {
   async function loadLogs() {
     let q = supabase
       .from('system_logs')
-      .select('*')
+      .select('id, created_at, level, module, message, cycle_id')
       .order('created_at', { ascending: false })
-      .limit(200)
+      .limit(100)
 
     if (moduleFilter !== 'all') q = q.eq('module', moduleFilter)
     if (levelFilter !== 'all') q = q.eq('level', levelFilter)

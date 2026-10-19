@@ -99,86 +99,108 @@ async function directCleanup(supabase: ReturnType<typeof createClient>) {
   // ── 1. System Logs (48 horas) ──
   try {
     const cutoff = new Date(now.getTime() - 48 * 60 * 60 * 1000)
-    const { data } = await supabase
+    const { count } = await supabase
       .from('system_logs')
-      .delete()
+      .delete({ count: 'exact' })
       .lt('created_at', cutoff.toISOString())
-      .select('id')
 
-    results.system_logs = data?.length || 0
+    results.system_logs = count || 0
   } catch (e) { results.system_logs = -1 }
 
   // ── 2. Pilot Diagnostics (24 horas) ──
   try {
     const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-    const { data } = await supabase
+    const { count } = await supabase
       .from('pilot_diagnostics')
-      .delete()
+      .delete({ count: 'exact' })
       .lt('timestamp', cutoff.toISOString())
-      .select('id')
 
-    results.pilot_diagnostics = data?.length || 0
+    results.pilot_diagnostics = count || 0
   } catch (e) { results.pilot_diagnostics = -1 }
 
   // ── 3. Strategy Evaluations (7 días) ──
   try {
     const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-    const { data } = await supabase
+    const { count } = await supabase
       .from('strategy_evaluations')
-      .delete()
+      .delete({ count: 'exact' })
       .lt('created_at', cutoff.toISOString())
-      .select('id')
 
-    results.strategy_evaluations = data?.length || 0
+    results.strategy_evaluations = count || 0
   } catch (e) { results.strategy_evaluations = -1 }
 
   // ── 4. Volume Spikes (14 días) ──
   try {
     const cutoff = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000)
-    const { data } = await supabase
+    const { count } = await supabase
       .from('volume_spikes')
-      .delete()
+      .delete({ count: 'exact' })
       .lt('detected_at', cutoff.toISOString())
-      .select('id')
 
-    results.volume_spikes = data?.length || 0
+    results.volume_spikes = count || 0
   } catch (e) { results.volume_spikes = -1 }
 
   // ── 5. Signals Log (14 días) ──
   try {
     const cutoff = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000)
-    const { data } = await supabase
+    const { count } = await supabase
       .from('signals_log')
-      .delete()
+      .delete({ count: 'exact' })
       .lt('detected_at', cutoff.toISOString())
-      .select('id')
 
-    results.signals_log = data?.length || 0
+    results.signals_log = count || 0
   } catch (e) { results.signals_log = -1 }
 
   // ── 6. Cooldowns inactivos ──
   try {
-    const { data } = await supabase
+    const { count } = await supabase
       .from('cooldowns')
-      .delete()
+      .delete({ count: 'exact' })
       .eq('active', false)
-      .select('id')
 
-    results.cooldowns = data?.length || 0
+    results.cooldowns = count || 0
   } catch (e) { results.cooldowns = -1 }
 
   // ── 7. Pending Orders completadas (7 días) ──
   try {
     const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-    const { data } = await supabase
+    const { count } = await supabase
       .from('pending_orders')
-      .delete()
+      .delete({ count: 'exact' })
       .in('status', ['cancelled', 'expired', 'triggered'])
       .lt('created_at', cutoff.toISOString())
-      .select('id')
 
-    results.pending_orders = data?.length || 0
+    results.pending_orders = count || 0
   } catch (e) { results.pending_orders = -1 }
+
+  // ── 8. Stocks Positions muertas (error o closed > 30 días) ──
+  try {
+    const cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const { count: cErr } = await supabase
+      .from('stocks_positions')
+      .delete({ count: 'exact' })
+      .eq('status', 'error')
+
+    const { count: cClosed } = await supabase
+      .from('stocks_positions')
+      .delete({ count: 'exact' })
+      .eq('status', 'closed')
+      .lt('updated_at', cutoff.toISOString())
+
+    results.stocks_positions = (cErr || 0) + (cClosed || 0)
+  } catch (e) { results.stocks_positions = -1 }
+
+  // ── 9. Positions Crypto/Forex cerradas (> 30 días) ──
+  try {
+    const cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
+    const { count } = await supabase
+      .from('positions')
+      .delete({ count: 'exact' })
+      .eq('status', 'closed')
+      .lt('closed_at', cutoff.toISOString())
+
+    results.positions = count || 0
+  } catch (e) { results.positions = -1 }
 
   // ── Total ──
   const total = Object.values(results)

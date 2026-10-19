@@ -44,6 +44,11 @@ def _safe_log_call(log_func, text: str):
 
 
 
+# Throttle de errores en DB para proteger cuota de disco y Egress en Supabase Free:
+# Evita bucles de reinicio o desconexiones repetitivas escribiendo miles de filas/dia
+_DB_LOG_THROTTLE: dict[tuple[str, str], float] = {}
+DB_LOG_THROTTLE_SECONDS = 300.0  # Máximo 1 error idéntico por módulo cada 5 minutos
+
 def log_to_db(
     module: str,
     level: str,
@@ -58,6 +63,19 @@ def log_to_db(
     # OPTIMIZACIÓN DISK IO: Solo guardar en DB los ERRORES graves.
     if level.upper() not in ['ERROR', 'CRITICAL']:
         return
+
+    # THROTTLE DE EGRESS & DISCO: Máximo 1 log idéntico cada 5 minutos
+    global _DB_LOG_THROTTLE
+    now = time.time()
+    msg_key = (module, (message or "")[:60])
+    last_logged = _DB_LOG_THROTTLE.get(msg_key, 0.0)
+    if (now - last_logged) < DB_LOG_THROTTLE_SECONDS:
+        return
+    
+    # Limpieza ocasional del dict si crece
+    if len(_DB_LOG_THROTTLE) > 500:
+        _DB_LOG_THROTTLE = {k: v for k, v in _DB_LOG_THROTTLE.items() if (now - v) < 600}
+    _DB_LOG_THROTTLE[msg_key] = now
 
     try:
         from app.core.supabase_client import get_supabase

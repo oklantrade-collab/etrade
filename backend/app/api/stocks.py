@@ -420,8 +420,13 @@ async def get_stocks_journal(limit: int = 100):
     for attempt in range(max_retries):
         try:
             sb = get_supabase()
+            JOURNAL_COLS = (
+                "id, ticker, group_name, direction, shares, avg_price, "
+                "current_price, total_cost, unrealized_pnl, unrealized_pnl_pct, "
+                "status, first_buy_at, updated_at, exit_triggered_by, sl_close_reason"
+            )
             res = sb.table("stocks_positions")\
-                .select("*")\
+                .select(JOURNAL_COLS)\
                 .eq("status", "closed")\
                 .order("updated_at", desc=True)\
                 .limit(limit)\
