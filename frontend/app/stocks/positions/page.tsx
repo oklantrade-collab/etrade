@@ -69,7 +69,15 @@ export default function StocksPositions() {
         !String(p.strategy || '').toUpperCase().startsWith('OPT')
       )
       setPositions(filteredOpen)
-      setClosedPositions(Array.isArray(closedData) ? closedData : [])
+
+      const closedData = await closedRes.json()
+      const rawClosed = Array.isArray(closedData) ? closedData : (Array.isArray(closedData?.positions) ? closedData.positions : [])
+      const filteredClosed = rawClosed.filter((p: any) =>
+        p.group_name !== 'OPTIONS' &&
+        !String(p.ticker || '').includes(':OPT') &&
+        !String(p.strategy || '').toUpperCase().startsWith('OPT')
+      )
+      setClosedPositions(filteredClosed)
     } catch (err) {
       console.error(err)
     } finally {

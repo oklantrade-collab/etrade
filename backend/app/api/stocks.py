@@ -432,6 +432,7 @@ async def get_stocks_journal(limit: int = 100):
             res = sb.table("stocks_positions")\
                 .select(JOURNAL_COLS)\
                 .eq("status", "closed")\
+                .neq("group_name", "OPTIONS")\
                 .order("updated_at", desc=True)\
                 .limit(limit)\
                 .execute()
@@ -441,6 +442,8 @@ async def get_stocks_journal(limit: int = 100):
             
             for entry in journal:
                 try:
+                    if entry.get("group_name") == "OPTIONS" or ":OPT:" in str(entry.get("ticker", "")) or str(entry.get("strategy", "")).upper().startswith("OPT"):
+                        continue
                     entry["strategy"] = entry.get("strategy") or entry.get("rule_code") or "V5_STOCKS"
                     entry["exit_strategy"] = entry.get("exit_triggered_by") or entry.get("sl_close_reason") or "CLOSED"
                     entry["exit_reason"] = entry["exit_strategy"]
