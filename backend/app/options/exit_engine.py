@@ -53,7 +53,11 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
         cur_p = float(c15.iloc[-1])
         res["current_price"] = cur_p
 
-        # 1. Indicadores en 15 Minutos (EMA3, EMA9, Fib Bands)
+        # 1. Indicadores en 15 Minutos (EMA3, EMA9, Fib Bands, Bollinger, Vela Cerrada, SIPV Clímax)
+        o15 = _safe_col(df_15m, "open")
+        h15 = _safe_col(df_15m, "high")
+        l15 = _safe_col(df_15m, "low")
+
         ema3_15m_s = c15.ewm(span=3, adjust=False).mean()
         ema9_15m_s = c15.ewm(span=9, adjust=False).mean()
         res["ema3_15m"] = float(ema3_15m_s.iloc[-1])
@@ -63,7 +67,36 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
         fib_15m = calculate_fibonacci_bands(df_15m, cur_p)
         res["upper_6_15m"] = float(fib_15m.get("upper_6") or 0.0)
         res["lower_6_15m"] = float(fib_15m.get("lower_6") or 0.0)
+        res["bb_upper_15m"] = float(fib_15m.get("upper_band") or 0.0)
+        res["bb_lower_15m"] = float(fib_15m.get("lower_band") or 0.0)
         res["atr_15m"] = float(fib_15m.get("atr") or (cur_p * 0.005))
+
+        # Vela cerrada de 15m (para Trailing Stop y SIPV Clímax de 15m)
+        idx_closed_15m = -2 if len(df_15m) >= 2 else -1
+        h_closed_15m = float(h15.iloc[idx_closed_15m])
+        l_closed_15m = float(l15.iloc[idx_closed_15m])
+        o_closed_15m = float(o15.iloc[idx_closed_15m])
+        c_closed_15m = float(c15.iloc[idx_closed_15m])
+
+        res["candle_closed_high_15m"] = h_closed_15m
+        res["candle_closed_low_15m"] = l_closed_15m
+        res["candle_closed_open_15m"] = o_closed_15m
+        res["candle_closed_close_15m"] = c_closed_15m
+
+        # SIPV Clímax 15m con filtro Bollinger:
+        # CALLs: High > BB_Upper (15m) y mecha superior >= 40% (o vela roja con mecha >= 30%)
+        rng_closed_15m = max(1e-4, h_closed_15m - l_closed_15m)
+        u_wick_15m = max(0.0, h_closed_15m - max(o_closed_15m, c_closed_15m))
+        l_wick_15m = max(0.0, min(o_closed_15m, c_closed_15m) - l_closed_15m)
+        bb_u_15m = res["bb_upper_15m"]
+        bb_l_15m = res["bb_lower_15m"]
+
+        res["is_sipv_sell_15m"] = (bb_u_15m > 0 and h_closed_15m > bb_u_15m) and (
+            (u_wick_15m / rng_closed_15m >= 0.40) or (c_closed_15m < o_closed_15m and (u_wick_15m / rng_closed_15m >= 0.30))
+        )
+        res["is_sipv_buy_15m"] = (bb_l_15m > 0 and l_closed_15m < bb_l_15m) and (
+            (l_wick_15m / rng_closed_15m >= 0.40) or (c_closed_15m > o_closed_15m and (l_wick_15m / rng_closed_15m >= 0.30))
+        )
 
         # 2. Indicadores en 1 Hora (EMA3 Slope, RSI 14, Bollinger, Fib Bands, SIPV)
         if df_1h is not None and not df_1h.empty and len(df_1h) >= 10:
@@ -111,6 +144,8 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
             l_wick = max(0.0, min(o_closed, c_closed) - l_closed)
             res["is_sipv_sell"] = (u_wick / rng_closed >= 0.40) or (c_closed < o_closed and (u_wick / rng_closed >= 0.30))
             res["is_sipv_buy"] = (l_wick / rng_closed >= 0.40) and (c_closed >= o_closed)
+            res["is_sipv_sell_1h"] = res["is_sipv_sell"]
+            res["is_sipv_buy_1h"] = res["is_sipv_buy"]
 
         res["valid"] = True
         _TECH_CONTEXT_CACHE[sym] = (now_ts, res)
@@ -135,6 +170,7 @@ DB_EXIT_REASONS_MAP = {
     "ema3_flat_descending_1h": "signal_invalidation",
     "ema3_flat_ascending_1h": "signal_invalidation",
     "sipv_trend_flip_1h": "signal_invalidation",
+    "sipv_trend_flip_15m": "signal_invalidation",
 }
 
 
@@ -145,7 +181,7 @@ def evaluate_technical_rules_and_stops(
 ) -> tuple[bool, str | None, dict[str, Any]]:
     """
     Evalúa las 5 reglas de salida institucional y la actualización monotónica
-    del Stop Loss (EMA9 15m) y Trailing Stop (Midpoint 1H) para CALLs y PUTs.
+    del Stop Loss (EMA9 15m) y Trailing Stop (Midpoint 15m) para CALLs y PUTs.
     """
     if not tech or not tech.get("valid"):
         return False, None, {}
@@ -182,17 +218,18 @@ def evaluate_technical_rules_and_stops(
                 new_sl = proposed_sl
                 new_sl_type = "EMA9_15M"
 
-        # Trailing Stop 1H Midpoint (si High > BB_Upper y Close > Open)
-        bb_upper_1h = float(tech.get("bb_upper_1h") or 0.0)
-        h_1h = float(tech.get("candle_closed_high_1h") or tech.get("candle_high_1h") or 0.0)
-        c_1h = float(tech.get("candle_closed_close_1h") or tech.get("candle_close_1h") or 0.0)
-        o_1h = float(tech.get("candle_closed_open_1h") or tech.get("candle_open_1h") or 0.0)
+        # Trailing Stop 15m Midpoint (si High > BB_Upper 15m y vela verde: Close > Open)
+        bb_upper_15m = float(tech.get("bb_upper_15m") or 0.0)
+        h_15m = float(tech.get("candle_closed_high_15m") or 0.0)
+        l_15m = float(tech.get("candle_closed_low_15m") or 0.0)
+        c_15m = float(tech.get("candle_closed_close_15m") or 0.0)
+        o_15m = float(tech.get("candle_closed_open_15m") or 0.0)
 
-        if bb_upper_1h > 0 and h_1h > bb_upper_1h and c_1h > o_1h:
-            midpoint_1h = round(o_1h + ((c_1h - o_1h) / 2.0), 2)
-            if midpoint_1h > new_sl:
-                new_sl = midpoint_1h
-                new_sl_type = "MIDPOINT_1H"
+        if bb_upper_15m > 0 and h_15m > bb_upper_15m and c_15m > o_15m:
+            midpoint_15m = round((h_15m + l_15m) / 2.0, 2)
+            if midpoint_15m > new_sl:
+                new_sl = midpoint_15m
+                new_sl_type = "MIDPOINT_15M"
 
     elif is_put:
         # En PUT: Si EMA9 baja, reducir techo de SL dinámico
@@ -202,17 +239,18 @@ def evaluate_technical_rules_and_stops(
                 new_sl = proposed_sl
                 new_sl_type = "EMA9_15M"
 
-        # Trailing Stop 1H Midpoint para PUTs (si Low < BB_Lower y Close < Open)
-        bb_lower_1h = float(tech.get("bb_lower_1h") or 0.0)
-        l_1h = float(tech.get("candle_closed_low_1h") or tech.get("candle_low_1h") or 0.0)
-        c_1h = float(tech.get("candle_closed_close_1h") or tech.get("candle_close_1h") or 0.0)
-        o_1h = float(tech.get("candle_closed_open_1h") or tech.get("candle_open_1h") or 0.0)
+        # Trailing Stop 15m Midpoint para PUTs (si Low < BB_Lower 15m y vela roja: Close < Open)
+        bb_lower_15m = float(tech.get("bb_lower_15m") or 0.0)
+        h_15m = float(tech.get("candle_closed_high_15m") or 0.0)
+        l_15m = float(tech.get("candle_closed_low_15m") or 0.0)
+        c_15m = float(tech.get("candle_closed_close_15m") or 0.0)
+        o_15m = float(tech.get("candle_closed_open_15m") or 0.0)
 
-        if bb_lower_1h > 0 and l_1h < bb_lower_1h and c_1h < o_1h:
-            midpoint_1h = round((o_1h + c_1h) / 2.0, 2)
-            if new_sl == 0.0 or midpoint_1h < new_sl:
-                new_sl = midpoint_1h
-                new_sl_type = "MIDPOINT_1H"
+        if bb_lower_15m > 0 and l_15m < bb_lower_15m and c_15m < o_15m:
+            midpoint_15m = round((h_15m + l_15m) / 2.0, 2)
+            if new_sl == 0.0 or midpoint_15m < new_sl:
+                new_sl = midpoint_15m
+                new_sl_type = "MIDPOINT_15M"
 
     exit_plan["stop_loss_underlying"] = new_sl
     exit_plan["trailing_sl_type"] = new_sl_type
@@ -244,8 +282,10 @@ def evaluate_technical_rules_and_stops(
     lower_6_15m = float(tech.get("lower_6_15m") or 0.0)
     lower_6_1h = float(tech.get("lower_6_1h") or 0.0)
     ema3_slope_1h = float(tech.get("ema3_slope_1h") or 0.0)
-    is_sipv_sell = bool(tech.get("is_sipv_sell", False))
-    is_sipv_buy = bool(tech.get("is_sipv_buy", False))
+    is_sipv_sell_15m = bool(tech.get("is_sipv_sell_15m", False))
+    is_sipv_buy_15m = bool(tech.get("is_sipv_buy_15m", False))
+    is_sipv_sell_1h = bool(tech.get("is_sipv_sell_1h", tech.get("is_sipv_sell", False)))
+    is_sipv_buy_1h = bool(tech.get("is_sipv_buy_1h", tech.get("is_sipv_buy", False)))
 
     if is_call:
         # Regla 1: EMA3 < EMA9 en 15m
@@ -277,8 +317,13 @@ def evaluate_technical_rules_and_stops(
                 "exit_plan": exit_plan
             }
 
-        # Regla 5: SIPV marca SELL o cambio de tendencia en 1H
-        if is_sipv_sell:
+        # Regla 5: SIPV Clímax 15m (o confirmación en 1H)
+        if is_sipv_sell_15m:
+            return True, "sipv_trend_flip_15m", {
+                "detail": "Cierre de CALL: SIPV Clímax 15m (High > Banda Bollinger Superior con mecha de rechazo)",
+                "exit_plan": exit_plan
+            }
+        elif is_sipv_sell_1h:
             return True, "sipv_trend_flip_1h", {
                 "detail": "Cierre de CALL: SIPV marca SELL / Rechazo institucional en techo 1H",
                 "exit_plan": exit_plan
@@ -314,12 +359,19 @@ def evaluate_technical_rules_and_stops(
                 "exit_plan": exit_plan
             }
 
-        # Regla 5 (Inversa): SIPV marca BUY o absorción en suelo 1H
-        if is_sipv_buy:
+        # Regla 5 (Inversa): SIPV Clímax 15m (o confirmación en 1H)
+        if is_sipv_buy_15m:
+            return True, "sipv_trend_flip_15m", {
+                "detail": "Cierre de PUT: SIPV Clímax 15m (Low < Banda Bollinger Inferior con mecha de absorción)",
+                "exit_plan": exit_plan
+            }
+        elif is_sipv_buy_1h:
             return True, "sipv_trend_flip_1h", {
                 "detail": "Cierre de PUT: SIPV marca BUY / Absorción institucional en suelo 1H",
                 "exit_plan": exit_plan
             }
+
+
 
     return False, None, {"exit_plan": exit_plan}
 

@@ -138,7 +138,7 @@ def test_put_exit_ema3_flat_ascending():
     assert reason == "ema3_flat_ascending_1h"
 
 
-def test_call_exit_sipv_sell():
+def test_call_exit_sipv_sell_15m():
     pos = {"strategy_type": "long_call", "direction": "bullish", "symbol": "SPY"}
     tech = {
         "valid": True,
@@ -147,14 +147,14 @@ def test_call_exit_sipv_sell():
         "ema9_15m": 770.0,
         "ema3_slope_1h": 0.05,
         "rsi_1h": 62.0,
-        "is_sipv_sell": True
+        "is_sipv_sell_15m": True
     }
     should_exit, reason, info = evaluate_technical_rules_and_stops(pos, tech, datetime.now(timezone.utc))
     assert should_exit is True
-    assert reason == "sipv_trend_flip_1h"
+    assert reason == "sipv_trend_flip_15m"
 
 
-def test_put_exit_sipv_buy():
+def test_put_exit_sipv_buy_15m():
     pos = {"strategy_type": "long_put", "direction": "bearish", "symbol": "SPY"}
     tech = {
         "valid": True,
@@ -163,14 +163,30 @@ def test_put_exit_sipv_buy():
         "ema9_15m": 760.0,
         "ema3_slope_1h": -0.05,
         "rsi_1h": 38.0,
-        "is_sipv_buy": True
+        "is_sipv_buy_15m": True
+    }
+    should_exit, reason, info = evaluate_technical_rules_and_stops(pos, tech, datetime.now(timezone.utc))
+    assert should_exit is True
+    assert reason == "sipv_trend_flip_15m"
+
+
+def test_call_exit_sipv_sell_1h_fallback():
+    pos = {"strategy_type": "long_call", "direction": "bullish", "symbol": "SPY"}
+    tech = {
+        "valid": True,
+        "current_price": 772.0,
+        "ema3_15m": 771.5,
+        "ema9_15m": 770.0,
+        "ema3_slope_1h": 0.05,
+        "rsi_1h": 62.0,
+        "is_sipv_sell_1h": True
     }
     should_exit, reason, info = evaluate_technical_rules_and_stops(pos, tech, datetime.now(timezone.utc))
     assert should_exit is True
     assert reason == "sipv_trend_flip_1h"
 
 
-def test_trailing_stop_1h_midpoint_call():
+def test_trailing_stop_15m_midpoint_call():
     pos = {
         "strategy_type": "long_call",
         "direction": "bullish",
@@ -179,22 +195,51 @@ def test_trailing_stop_1h_midpoint_call():
     }
     tech = {
         "valid": True,
-        "current_price": 772.0,
-        "bb_upper_1h": 770.0,
-        "candle_closed_high_1h": 773.0,  # High > BB_Upper
-        "candle_closed_open_1h": 766.0,
-        "candle_closed_close_1h": 772.0,  # Close > Open
-        "ema3_15m": 772.0,
-        "ema9_15m": 770.5,
+        "current_price": 771.50,
+        "bb_upper_15m": 770.0,
+        "candle_closed_high_15m": 771.64,  # High > BB_Upper (15m)
+        "candle_closed_low_15m": 769.05,
+        "candle_closed_open_15m": 769.20,
+        "candle_closed_close_15m": 771.50,  # Close > Open (Vela verde)
+        "ema3_15m": 771.0,
+        "ema9_15m": 770.2,
         "ema3_slope_1h": 0.08,
         "rsi_1h": 64.0
     }
     should_exit, reason, info = evaluate_technical_rules_and_stops(pos, tech, datetime.now(timezone.utc))
     assert should_exit is False
-    # Midpoint = 766.0 + (772.0 - 766.0) / 2 = 769.0
+    # Midpoint = round((771.64 + 769.05) / 2.0, 2) = 770.35
     new_sl = info["exit_plan"]["stop_loss_underlying"]
-    assert new_sl == 769.0
-    assert info["exit_plan"]["trailing_sl_type"] == "MIDPOINT_1H"
+    assert new_sl == 770.35
+    assert info["exit_plan"]["trailing_sl_type"] == "MIDPOINT_15M"
+
+
+def test_trailing_stop_15m_midpoint_put():
+    pos = {
+        "strategy_type": "long_put",
+        "direction": "bearish",
+        "symbol": "SPY",
+        "exit_plan": {"stop_loss_underlying": 765.0, "trailing_sl_type": "INITIAL"}
+    }
+    tech = {
+        "valid": True,
+        "current_price": 757.00,
+        "bb_lower_15m": 760.0,
+        "candle_closed_high_15m": 759.50,
+        "candle_closed_low_15m": 756.20,   # Low < BB_Lower (15m)
+        "candle_closed_open_15m": 759.00,
+        "candle_closed_close_15m": 757.00,  # Close < Open (Vela roja)
+        "ema3_15m": 757.5,
+        "ema9_15m": 758.8,
+        "ema3_slope_1h": -0.08,
+        "rsi_1h": 34.0
+    }
+    should_exit, reason, info = evaluate_technical_rules_and_stops(pos, tech, datetime.now(timezone.utc))
+    assert should_exit is False
+    # Midpoint = round((759.50 + 756.20) / 2.0, 2) = 757.85
+    new_sl = info["exit_plan"]["stop_loss_underlying"]
+    assert new_sl == 757.85
+    assert info["exit_plan"]["trailing_sl_type"] == "MIDPOINT_15M"
 
 
 def test_sl_underlying_pierced():

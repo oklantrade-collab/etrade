@@ -352,6 +352,7 @@ export default function OptionsPositions() {
                                 fontWeight: 600,
                               }}>
                                 {p.exit_plan?.detailed_exit_reason?.includes('ema3_flat') ? '⚡ Agotamiento EMA3 1H' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('sipv_trend_flip_15m') ? '🔄 Giro SIPV 15m' :
                                  p.exit_plan?.detailed_exit_reason?.includes('sipv') ? '🔄 Giro SIPV 1H' :
                                  p.exit_plan?.detailed_exit_reason?.includes('ema_cross') ? '⚡ Cruce EMA 15m' :
                                  p.exit_plan?.detailed_exit_reason?.includes('rsi_climax') ? '🎯 Clímax RSI 1H' :
