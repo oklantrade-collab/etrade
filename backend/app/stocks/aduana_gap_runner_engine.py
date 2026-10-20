@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from app.core.logger import log_info, log_warning, log_error
+from app.strategy.panic_recovery_gate import calculate_fibonacci_bands
 
 MODULE = "ADUANA_GAP_RUNNER"
 
@@ -74,6 +75,21 @@ def compute_bollinger_bands(series: pd.Series, period: int = 20, num_std: float 
     upper = sma + (std * num_std)
     lower = sma - (std * num_std)
     return {"basis": sma, "upper": upper, "lower": lower, "std": std}
+
+
+def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """Calcula el Average True Range (ATR) de Wilder sobre el DataFrame."""
+    if df is None or len(df) < 2:
+        return 0.0
+    c = _safe_col(df, "close")
+    h = _safe_col(df, "high")
+    l = _safe_col(df, "low")
+    if len(c) < 2:
+        return 0.0
+    prev_c = c.shift(1).fillna(c)
+    tr = np.maximum(h - l, np.maximum(abs(h - prev_c), abs(l - prev_c)))
+    atr_series = tr.rolling(window=min(period, len(tr)), min_periods=1).mean()
+    return float(atr_series.iloc[-1])
 
 
 def calculate_gap_velocity_ranking(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -384,16 +400,29 @@ def evaluate_gap_runner_aduana_exit(
     df_1d: Optional[pd.DataFrame] = None
 ) -> Dict[str, Any]:
     """
-    Reglas de Supervisión y Salida ADUANA (Parte C):
-    a) EMA3 > EMA9 en 1H o 1D (Tendencia base).
-    b) EMA3 en 1H debe estar en modo ascendente (slope > 0).
-    c) Mínimo ángulo permitido EMA3: si se acerca a lateral o caída (slope <= 0.0005) -> Salida defensiva.
-    d) Tamaño de vela (High - Low) en 1H empieza a disminuir a partir de la vela cuyo High > BB Upper 1H.
-       Agotamiento institucional -> Toma de beneficios TP 50% y trailing ratchet al Low anterior.
+    Reglas de Supervisión, Stop Loss, Trailing Stop y Salidas ADUANA GAP RUNNER:
+    
+    1. Temporalidad 15 Minutos:
+       a) Trailing SL EMA9: Si EMA9[t] > EMA9[t-1] -> Stop Loss debajo de (EMA9[t] - delta).
+       b) Primer Cierre Parcial (SELL 50%): En UPPER_6 o RSI_15m > 80.
+       c) Excepción de Fuerza Parabólica (Super-Runner Hold):
+          Si (Open_15m > BB_Upper_15m) y (SIPV es "BUY") -> HOLD (mantener).
+       d) Si no hay datos de UPPER_5/6 -> aplicar según c (RSI > 80 con excepción de Hold).
+       e) Clímax Absoluto 1H (Cierre Total 100%): Si RSI_1H > 85 en vela de 1H -> CIERRE TOTAL.
+       
+    2. Trailing STOP en 1 Hora:
+       a) Al terminar vela de 1H:
+          Si (High_1H > BB_Upper_1H) y (Close_1H > Open_1H) (vela verde perforando BB Upper):
+          Trailing STOP = Open_1H + (Close_1H - Open_1H) / 2.0 (mitad del cuerpo verde).
+          
+    3. Supervisión Defensiva de Reversión (Parte C):
+       - Aplanamiento de ángulo EMA3 1H (slope <= 0.0005) y precio pierde EMA3.
+       - Compresión de tamaño de vela 1H sobre BB Upper tras perforación institucional.
     """
     res = {
         "should_exit": False,
         "exit_type": "none",       # 'full', 'partial_50', 'trailing_update'
+        "action": "none",          # 'hold', 'sell', etc.
         "rule_code": "",
         "reason": "",
         "shares_to_exit": 0,
@@ -401,7 +430,9 @@ def evaluate_gap_runner_aduana_exit(
         "ema3_1h": 0.0,
         "ema9_1h": 0.0,
         "ema3_slope_1h": 0.0,
-        "range_compression_detected": False
+        "range_compression_detected": False,
+        "rsi_1h": 50.0,
+        "rsi_15m": 50.0
     }
 
     avg_price = float(position.get("avg_price") or current_price)
@@ -422,13 +453,181 @@ def evaluate_gap_runner_aduana_exit(
         return res
 
     # ─────────────────────────────────────────────────────────────
-    # VALIDACIÓN 2: Ángulo y Pendiente de EMA3 en 1H (Reglas C.a, C.b, C.c)
+    # VALIDACIÓN 2 (Regla 1.e): Clímax Absoluto 1H (RSI_1H > 85 -> CIERRE TOTAL)
     # ─────────────────────────────────────────────────────────────
-    if df_1h is not None and len(df_1h) >= 4:
-        c1h = _safe_col(df_1h, "close")
-        h1h = _safe_col(df_1h, "high")
-        l1h = _safe_col(df_1h, "low")
+    c1h = _safe_col(df_1h, "close") if df_1h is not None else pd.Series(dtype=float)
+    h1h = _safe_col(df_1h, "high") if df_1h is not None else pd.Series(dtype=float)
+    l1h = _safe_col(df_1h, "low") if df_1h is not None else pd.Series(dtype=float)
+    o1h = _safe_col(df_1h, "open") if df_1h is not None else pd.Series(dtype=float)
 
+    if len(c1h) >= 4:
+        rsi_1h_series = compute_rsi(c1h, period=min(14, len(c1h) - 1))
+        rsi_1h_val = float(rsi_1h_series.iloc[-1]) if len(rsi_1h_series) > 0 else 50.0
+        res["rsi_1h"] = round(rsi_1h_val, 1)
+
+        if rsi_1h_val > 85.0:
+            res.update({
+                "should_exit": True,
+                "exit_type": "full",
+                "rule_code": "ADUANA_GAP_CLIMAX_RSI85",
+                "shares_to_exit": total_shares,
+                "reason": f"Clímax Parabólico Extremo 1H: RSI_1H={rsi_1h_val:.1f} > 85.0 -> Cierre Total Inmediato (100%)"
+            })
+            return res
+
+    # ─────────────────────────────────────────────────────────────
+    # VALIDACIÓN 3: CÁLCULO PREVIO DE TRAILING STOPS MONOTÓNICOS (Reglas 2.a, 1.a y Ratchet)
+    # ─────────────────────────────────────────────────────────────
+    best_trail_sl = cur_sl
+    best_trail_rule = ""
+    best_trail_reason = ""
+
+    # ── Regla 2.a: Trailing STOP en 1 Hora (Midpoint al 50% de Vela Verde sobre BB Upper) ──
+    if len(c1h) >= 2:
+        bb_1h = compute_bollinger_bands(c1h, period=min(20, len(c1h)))
+        for idx in [-2, -1]:
+            if abs(idx) <= len(df_1h):
+                h_1h_val = float(h1h.iloc[idx])
+                o_1h_val = float(o1h.iloc[idx])
+                c_1h_val = float(c1h.iloc[idx])
+                bb_u_1h_val = float(bb_1h["upper"].iloc[idx])
+
+                # Condición 2.a: High > BB Upper y Close > Open (vela verde)
+                if h_1h_val >= bb_u_1h_val and c_1h_val > o_1h_val:
+                    midpoint_1h = round(o_1h_val + ((c_1h_val - o_1h_val) / 2.0), 2)
+                    if midpoint_1h > best_trail_sl and midpoint_1h < current_price:
+                        best_trail_sl = midpoint_1h
+                        best_trail_rule = "ADUANA_GAP_TRAIL_MIDPOINT_1H"
+                        best_trail_reason = (
+                            f"Trailing STOP 1H al 50% de vela verde sobre BB Upper: ${midpoint_1h:.2f} "
+                            f"(Open=${o_1h_val:.2f}, Close=${c_1h_val:.2f}, BB_Upper=${bb_u_1h_val:.2f})"
+                        )
+
+    # ── Regla 1.a: Trailing STOP en 15m (EMA9 Ascendente -> EMA9 - Delta) ──
+    if df_15m is not None and len(df_15m) >= 2:
+        c15 = _safe_col(df_15m, "close")
+        ema9_15m_series = c15.ewm(span=9, adjust=False).mean()
+        ema9_now = float(ema9_15m_series.iloc[-1])
+        ema9_prev = float(ema9_15m_series.iloc[-2])
+
+        if ema9_now > ema9_prev:
+            atr_15 = compute_atr(df_15m, 14)
+            delta = max(0.01 * current_price, 0.5 * atr_15)
+            trail_ema9_15m = round(ema9_now - delta, 2)
+
+            if trail_ema9_15m > best_trail_sl and trail_ema9_15m < current_price:
+                best_trail_sl = trail_ema9_15m
+                best_trail_rule = "ADUANA_GAP_TRAIL_EMA9"
+                best_trail_reason = (
+                    f"Trailing SL 15m EMA9 ascendente: ${trail_ema9_15m:.2f} "
+                    f"(EMA9=${ema9_now:.2f} > Prev=${ema9_prev:.2f}, Delta=${delta:.2f})"
+                )
+
+    # ── Fallback Ratchet PnL > +7% (solo si ni 1.a ni 2.a produjeron un trailing stop) ──
+    if not best_trail_rule:
+        pnl_pct = ((current_price - avg_price) / avg_price) * 100.0 if avg_price > 0 else 0.0
+        if pnl_pct >= 7.0 and df_15m is not None and len(df_15m) >= 2:
+            l15 = _safe_col(df_15m, "low")
+            c15 = _safe_col(df_15m, "close")
+            ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+            low_prev_15m = float(l15.iloc[-2])
+
+            proposed_ratchet = round(min(ema3_15m, low_prev_15m), 2)
+            if proposed_ratchet > best_trail_sl and proposed_ratchet < current_price:
+                best_trail_sl = proposed_ratchet
+                best_trail_rule = "ADUANA_GAP_TRAIL_RATCHET_7PCT"
+                best_trail_reason = f"Trailing Ratchet 15m elevado a ${proposed_ratchet:.2f} (+{pnl_pct:.1f}% ganancia protegida)"
+
+    # Asignar stop loss si se superó el actual
+    if best_trail_sl > cur_sl and best_trail_sl < current_price:
+        res["new_stop_loss"] = best_trail_sl
+        res["exit_type"] = "trailing_update"
+        res["rule_code"] = best_trail_rule
+        res["reason"] = best_trail_reason
+
+    # ─────────────────────────────────────────────────────────────
+    # VALIDACIÓN 4 (Reglas 1.b, 1.c, 1.d): Salida Parcial SELL 50% en 15m con Excepción HOLD
+    # ─────────────────────────────────────────────────────────────
+    is_rocket_hold = False
+    if df_15m is not None and len(df_15m) >= 2:
+        c15 = _safe_col(df_15m, "close")
+        o15 = _safe_col(df_15m, "open")
+        h15 = _safe_col(df_15m, "high")
+        l15 = _safe_col(df_15m, "low")
+
+        # RSI 15m
+        rsi_15m_series = compute_rsi(c15, period=min(14, len(c15) - 1))
+        rsi_15m_val = float(rsi_15m_series.iloc[-1]) if len(rsi_15m_series) > 0 else 50.0
+        res["rsi_15m"] = round(rsi_15m_val, 1)
+
+        # Bandas de Bollinger 15m
+        bb_15m = compute_bollinger_bands(c15, period=min(20, len(c15)))
+        bb_upper_15m = float(bb_15m["upper"].iloc[-1])
+        open_15m_curr = float(o15.iloc[-1])
+
+        # Niveles Fibonacci Bollinger 15m (UPPER_6)
+        fib_15m = calculate_fibonacci_bands(df_15m, current_price)
+        upper_6 = float(fib_15m.get("upper_6") or 0.0)
+        has_upper_data = (upper_6 > 0 and not math.isnan(upper_6))
+
+        # SIPV en 15m
+        sipv_is_buy = False
+        sipv_pos = str(position.get("sipv_15m") or position.get("sipv_signal_15m") or "").upper()
+        if sipv_pos == "BUY":
+            sipv_is_buy = True
+        elif len(df_15m) >= 2:
+            last_c15 = float(c15.iloc[-2])
+            last_o15 = float(o15.iloc[-2])
+            last_h15 = float(h15.iloc[-2])
+            last_l15 = float(l15.iloc[-2])
+            rng15 = last_h15 - last_l15
+            body15 = last_c15 - last_o15
+            if rng15 > 0 and (body15 / rng15) >= 0.30 and body15 > 0:
+                sipv_is_buy = True
+
+        is_at_upper_6 = has_upper_data and (current_price >= upper_6)
+        is_rsi_over_80 = (rsi_15m_val >= 80.0)
+        hit_tp_signal = is_at_upper_6 or is_rsi_over_80
+
+        # Regla 1.c y 1.d: Excepción de Fuerza Parabólica (Super-Runner Hold)
+        open_above_bb_15m = (open_15m_curr > bb_upper_15m)
+        is_rocket_hold = open_above_bb_15m and sipv_is_buy
+
+        if hit_tp_signal:
+            if is_rocket_hold:
+                res.update({
+                    "action": "hold",
+                    "rule_code": "ADUANA_GAP_ROCKET_HOLD",
+                    "reason": (
+                        f"HOLD Super-Runner: Open 15m (${open_15m_curr:.2f}) > BB Upper (${bb_upper_15m:.2f}) "
+                        f"y SIPV es BUY. Manteniendo a pesar de "
+                        f"{'UPPER_6 ($' + str(round(upper_6, 2)) + ')' if is_at_upper_6 else ''}"
+                        f"{' / ' if is_at_upper_6 and is_rsi_over_80 else ''}"
+                        f"{'RSI 15m=' + str(round(rsi_15m_val, 1)) if is_rsi_over_80 else ''}"
+                    )
+                })
+            else:
+                # Regla 1.b: Primer cierre parcial SELL 50%
+                if not position.get("tp_block1_executed") and total_shares >= 2:
+                    exit_shares = max(1, total_shares // 2)
+                    res.update({
+                        "should_exit": True,
+                        "exit_type": "partial_50",
+                        "rule_code": "ADUANA_GAP_TP_UPPER6" if is_at_upper_6 else "ADUANA_GAP_TP_RSI80",
+                        "shares_to_exit": exit_shares,
+                        "reason": (
+                            f"Primer Cierre Parcial (SELL 50%): "
+                            f"{'Alcanzado UPPER_6 ($' + str(round(upper_6, 2)) + ')' if is_at_upper_6 else ''}"
+                            f"{' | ' if is_at_upper_6 and is_rsi_over_80 else ''}"
+                            f"{'RSI 15m sobrecomprado (' + str(round(rsi_15m_val, 1)) + ' >= 80)' if is_rsi_over_80 else ''}"
+                        )
+                    })
+                    return res
+
+    # ─────────────────────────────────────────────────────────────
+    # VALIDACIÓN 4: Ángulo y Pendiente de EMA3 en 1H (Reglas C.a, C.b, C.c)
+    # ─────────────────────────────────────────────────────────────
+    if len(c1h) >= 4:
         ema3_1h_series = c1h.ewm(span=3, adjust=False).mean()
         ema9_1h_series = c1h.ewm(span=9, adjust=False).mean()
 
@@ -447,7 +646,6 @@ def evaluate_gap_runner_aduana_exit(
 
         # Regla C.c: Si la pendiente de EMA3 1H se aplana o cae (slope <= 0.0005) y el precio pierde la EMA3
         if avg_slope <= 0.0005 and current_price < ema3_now:
-            # Salida defensiva: si está en ganancia, liquidar 50% para proteger; si está en pérdida, salida total.
             is_in_profit = current_price > avg_price
             exit_type = "partial_50" if (is_in_profit and total_shares >= 2) else "full"
             exit_shares = max(1, total_shares // 2) if exit_type == "partial_50" else total_shares
@@ -465,12 +663,11 @@ def evaluate_gap_runner_aduana_exit(
             return res
 
         # ─────────────────────────────────────────────────────────────
-        # VALIDACIÓN 3: Compresión de Rango sobre Bollinger Superior 1H (Regla C.d)
+        # VALIDACIÓN 5: Compresión de Rango sobre Bollinger Superior 1H (Regla C.d)
         # ─────────────────────────────────────────────────────────────
         bb_1h = compute_bollinger_bands(c1h, period=min(20, len(c1h)))
         bb_upper_1h = float(bb_1h["upper"].iloc[-1])
 
-        # Revisar si la vela actual o anterior perforó la banda superior (High > BB Upper)
         high_now = float(h1h.iloc[-1])
         low_now = float(l1h.iloc[-1])
         high_prev = float(h1h.iloc[-2])
@@ -482,16 +679,14 @@ def evaluate_gap_runner_aduana_exit(
             range_now = high_now - low_now
             range_prev = high_prev - low_prev
 
-            # Si el tamaño de vela (High - Low) empieza a disminuir sensiblemente (compresión < 65% del rango previo)
+            # Si el tamaño de vela (High - Low) empieza a disminuir sensiblemente (< 65% del rango previo)
             if range_prev > 0 and (range_now / range_prev) < 0.65:
                 res["range_compression_detected"] = True
-                
-                # Salida por agotamiento institucional en techo
+
                 is_in_profit = current_price > avg_price
                 exit_type = "partial_50" if (is_in_profit and total_shares >= 2) else "full"
                 exit_shares = max(1, total_shares // 2) if exit_type == "partial_50" else total_shares
-                
-                # Trailing Ratchet: elevar SL al mínimo de la vela de 1H previa
+
                 new_ratchet_sl = round(max(cur_sl, low_prev), 2)
 
                 res.update({
@@ -506,26 +701,5 @@ def evaluate_gap_runner_aduana_exit(
                     )
                 })
                 return res
-
-    # ─────────────────────────────────────────────────────────────
-    # VALIDACIÓN 4: Trailing Ratchet Acelerado en 15m (Proteger Ganancia > +7%)
-    # ─────────────────────────────────────────────────────────────
-    pnl_pct = ((current_price - avg_price) / avg_price) * 100.0 if avg_price > 0 else 0.0
-
-    if pnl_pct >= 7.0 and df_15m is not None and len(df_15m) >= 2:
-        l15 = _safe_col(df_15m, "low")
-        c15 = _safe_col(df_15m, "close")
-        ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
-        low_prev_15m = float(l15.iloc[-2])
-
-        proposed_sl = round(max(cur_sl, min(ema3_15m, low_prev_15m)), 2)
-        if proposed_sl > cur_sl and proposed_sl < current_price:
-            res.update({
-                "should_exit": False,
-                "exit_type": "trailing_update",
-                "new_stop_loss": proposed_sl,
-                "reason": f"Trailing Ratchet 15m elevado a ${proposed_sl:.2f} (+{pnl_pct:.1f}% ganancia protegida)"
-            })
-            return res
 
     return res

@@ -22,7 +22,10 @@ files_to_sync = [
     "app/workers/forex_worker_standalone.py",
     "app/workers/forex_execution_service.py",
     "app/api/positions.py",
-    "app/api/options.py"
+    "app/api/options.py",
+    "app/stocks/aduana_gap_runner_engine.py",
+    "app/stocks/stocks_order_executor.py",
+    "app/stocks/stocks_adaptive_tp_v2.py"
 ]
 
 def check_syntax():

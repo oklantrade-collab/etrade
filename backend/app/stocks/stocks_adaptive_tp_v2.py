@@ -541,6 +541,19 @@ def evaluate_stock_tp_v2(
                 df_1h=df_1h,
                 df_1d=None
             )
+            # Actualizar trailing SL si se calculó uno superior
+            if gap_exit_res.get('new_stop_loss'):
+                new_sl = gap_exit_res.get('new_stop_loss')
+                cur_sl = float(position.get('stop_loss') or 0.0)
+                if new_sl > cur_sl and new_sl < current_price:
+                    from app.core.supabase_client import get_supabase
+                    sb_inst = get_supabase()
+                    sb_inst.table("stocks_positions").update({
+                        "stop_loss": new_sl,
+                        "trailing_sl_price": new_sl,
+                        "sl_activation_reason": str(gap_exit_res.get('reason', 'ADUANA Ratchet'))[:50]
+                    }).eq("id", position["id"]).execute()
+
             if gap_exit_res.get('should_exit'):
                 ex_type = gap_exit_res.get('exit_type')
                 shs = gap_exit_res.get('shares_to_exit', 0)
@@ -563,17 +576,13 @@ def evaluate_stock_tp_v2(
                         'reason': gap_exit_res.get('reason', 'ADUANA GAP Cierre Total'),
                         'debug_indicators': {}
                     }
-            elif gap_exit_res.get('new_stop_loss'):
-                new_sl = gap_exit_res.get('new_stop_loss')
-                cur_sl = float(position.get('stop_loss') or 0.0)
-                if new_sl > cur_sl and new_sl < current_price:
-                    from app.core.supabase_client import get_supabase
-                    sb_inst = get_supabase()
-                    sb_inst.table("stocks_positions").update({
-                        "stop_loss": new_sl,
-                        "trailing_sl_price": new_sl,
-                        "sl_activation_reason": str(gap_exit_res.get('reason', 'ADUANA Ratchet'))[:50]
-                    }).eq("id", position["id"]).execute()
+            elif gap_exit_res.get('action') == 'hold':
+                return {
+                    'action': 'hold',
+                    'trigger': gap_exit_res.get('rule_code', 'ADUANA_GAP_ROCKET_HOLD'),
+                    'reason': gap_exit_res.get('reason', 'ADUANA Super-Runner Hold'),
+                    'debug_indicators': {}
+                }
     except Exception as e_gap_exit:
         log_error("ADUANA_TP_V2", f"Error en evaluate_gap_runner_aduana_exit para {ticker}: {e_gap_exit}")
 

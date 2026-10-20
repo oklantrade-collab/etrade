@@ -186,7 +186,8 @@ def test_aduana_exit_on_ema3_1h_slope_flattening():
 
 def test_aduana_exit_on_bb_upper_range_compression():
     """Toma de Ganancias ADUANA: Vela 1H perfora BB Upper y luego el rango se comprime fuertemente."""
-    h1_candles = [{'open': 10.0, 'high': 10.2, 'low': 9.9, 'close': 10.1, 'volume': 100000}] * 20
+    # Velas con oscilación realista para que RSI 1H esté en zona normal (~65) y no dispare falso clímax >85
+    h1_candles = [{'open': 9.9 + (i % 3) * 0.15, 'high': 10.3, 'low': 9.8, 'close': 10.0 + ((i + 1) % 3) * 0.15, 'volume': 100000} for i in range(20)]
     # Vela penúltima: perfora fuertemente BB Upper con rango amplio (High 12.0, Low 10.2, Rango = 1.80)
     h1_candles.append({'open': 10.3, 'high': 12.0, 'low': 10.2, 'close': 11.8, 'volume': 500000})
     # Vela actual: comprimida en el techo (High 12.1, Low 11.6, Rango = 0.50 < 0.65 * 1.80)
@@ -213,3 +214,191 @@ def test_aduana_exit_on_bb_upper_range_compression():
     assert res['exit_type'] == 'partial_50'
     assert res['shares_to_exit'] == 50
     assert res['new_stop_loss'] == 10.20  # Low de la vela 1H previa
+
+
+def test_aduana_exit_climax_rsi85():
+    """Regla 1.e: Si RSI 1H > 85, Cierre Total inmediato (100%)."""
+    # 25 velas con subida vertical continua para empujar RSI 1H > 85
+    h1_candles = []
+    base_p = 10.0
+    for i in range(25):
+        base_p += 0.8
+        h1_candles.append({
+            'open': base_p - 0.7,
+            'high': base_p + 0.2,
+            'low': base_p - 0.7,
+            'close': base_p,
+            'volume': 200000
+        })
+    df_1h = _make_df(h1_candles)
+
+    pos = {
+        'id': 'pos-climax',
+        'ticker': 'ROCKET',
+        'status': 'open',
+        'avg_price': 15.0,
+        'stop_loss': 20.0,
+        'shares': 120
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=base_p,
+        df_1h=df_1h
+    )
+
+    assert res['should_exit'] is True
+    assert res['exit_type'] == 'full'
+    assert res['rule_code'] == 'ADUANA_GAP_CLIMAX_RSI85'
+    assert res['shares_to_exit'] == 120
+    assert res['rsi_1h'] > 85.0
+
+
+def test_aduana_exit_upper6_partial_tp():
+    """Reglas 1.b & 1.d: Cierre parcial 50% al alcanzar UPPER_6 o RSI 15m > 80 (sin Rocket Hold)."""
+    # 20 velas de 15m para tener bandas Fibonacci y Bollinger válidas
+    candles_15m = []
+    p = 10.0
+    for i in range(20):
+        candles_15m.append({
+            'open': p,
+            'high': p + 0.3,
+            'low': p - 0.2,
+            'close': p + 0.1,
+            'volume': 50000
+        })
+        p += 0.1
+    # Última vela: Open dentro de Bollinger (Open=12.0, BB Upper ~12.2), precio actual explota a 13.50 (UPPER_6)
+    candles_15m.append({
+        'open': 12.0,
+        'high': 13.6,
+        'low': 11.9,
+        'close': 13.5,
+        'volume': 250000
+    })
+    df_15m = _make_df(candles_15m)
+
+    pos = {
+        'id': 'pos-upper6',
+        'ticker': 'FAST',
+        'status': 'open',
+        'avg_price': 11.0,
+        'stop_loss': 10.5,
+        'shares': 100,
+        'tp_block1_executed': False
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=13.5,
+        df_15m=df_15m
+    )
+
+    assert res['should_exit'] is True
+    assert res['exit_type'] == 'partial_50'
+    assert res['shares_to_exit'] == 50
+    assert 'UPPER' in res['rule_code'] or 'RSI' in res['rule_code']
+
+
+def test_aduana_exit_rocket_hold_exception():
+    """Regla 1.c: Si Open 15m > BB Upper y SIPV es BUY -> HOLD (no vender parcial)."""
+    # Velas estables seguidas de una vela que abre muy por encima de BB Upper
+    candles_15m = [{'open': 10.0, 'high': 10.2, 'low': 9.9, 'close': 10.1, 'volume': 50000}] * 20
+    # Penúltima vela: cerró con cuerpo verde fuerte (SIPV Buy)
+    candles_15m.append({'open': 10.1, 'high': 11.0, 'low': 10.1, 'close': 10.9, 'volume': 150000})
+    # Última vela: Open a 11.80 (muy por encima de BB Upper ~10.40)
+    candles_15m.append({'open': 11.8, 'high': 12.5, 'low': 11.7, 'close': 12.4, 'volume': 300000})
+    df_15m = _make_df(candles_15m)
+
+    pos = {
+        'id': 'pos-rocket',
+        'ticker': 'MOON',
+        'status': 'open',
+        'avg_price': 10.2,
+        'stop_loss': 9.8,
+        'shares': 100,
+        'sipv_15m': 'BUY'
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=12.4,
+        df_15m=df_15m
+    )
+
+    assert res['should_exit'] is False
+    assert res['action'] == 'hold'
+    assert res['rule_code'] == 'ADUANA_GAP_ROCKET_HOLD'
+
+
+def test_aduana_trailing_15m_ema9():
+    """Regla 1.a: Si EMA9 15m asciende, mover Stop Loss debajo de (EMA9 - delta)."""
+    candles_15m = []
+    for i in range(15):
+        base_p = 10.0 + (i * 0.1)
+        candles_15m.append({
+            'open': base_p - 0.05,
+            'high': base_p + 0.15,
+            'low': base_p - 0.1,
+            'close': base_p + ((i % 2) * 0.04),
+            'volume': 40000
+        })
+    df_15m = _make_df(candles_15m)
+
+    cur_p = 11.6
+    pos = {
+        'id': 'pos-trail15',
+        'ticker': 'STEADY',
+        'status': 'open',
+        'avg_price': 10.0,
+        'stop_loss': 9.5,  # SL antiguo abajo
+        'shares': 100,
+        'tp_block1_executed': True  # Ya se tomó TP parcial previamente
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=cur_p,
+        df_15m=df_15m
+    )
+
+    assert res['new_stop_loss'] is not None
+    assert res['new_stop_loss'] > 9.5
+    assert res['new_stop_loss'] < cur_p
+    assert res['rule_code'] == 'ADUANA_GAP_TRAIL_EMA9'
+
+
+def test_aduana_trailing_1h_midpoint():
+    """Regla 2.a: Trailing STOP en 1H colocado al 50% de vela verde que perfora BB Upper."""
+    # 20 velas con oscilación sana para mantener RSI 1H < 85
+    h1_candles = [{'open': 9.8 + (i % 3) * 0.2, 'high': 10.4, 'low': 9.7, 'close': 10.0 + ((i + 1) % 3) * 0.2, 'volume': 100000} for i in range(20)]
+    # Última vela cerrada perfora BB Upper (High=14.50 > BB Upper ~10.50): Open=10.0, Close=14.0
+    # Midpoint esperado: 10.0 + (14.0 - 10.0) / 2 = 12.00
+    h1_candles.append({
+        'open': 10.0,
+        'high': 14.5,
+        'low': 9.9,
+        'close': 14.0,
+        'volume': 500000
+    })
+    df_1h = _make_df(h1_candles)
+
+    pos = {
+        'id': 'pos-midpoint',
+        'ticker': 'BURST',
+        'status': 'open',
+        'avg_price': 10.2,
+        'stop_loss': 9.8,  # SL inicial
+        'shares': 100
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=14.2,
+        df_1h=df_1h
+    )
+
+    assert res['new_stop_loss'] == 12.00
+    assert res['rule_code'] == 'ADUANA_GAP_TRAIL_MIDPOINT_1H'
+    assert res['exit_type'] == 'trailing_update'
+
