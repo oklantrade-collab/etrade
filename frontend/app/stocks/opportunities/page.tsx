@@ -8,6 +8,43 @@ import toast from 'react-hot-toast'
 // APEX Priority Queue Panel
 // ════════════════════════════════════════════
 
+function GapRunnerStocksBadge({ isRunner, gapPct }: { isRunner?: boolean; gapPct?: number }) {
+  if (!isRunner) return null;
+  const pctStr = gapPct != null && gapPct !== 0 ? ` +${Math.abs(gapPct).toFixed(1)}%` : '';
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '3px 8px',
+      borderRadius: 6,
+      background: 'rgba(34, 197, 94, 0.22)',
+      color: '#22C55E',
+      fontWeight: 900,
+      fontSize: 10,
+      letterSpacing: '0.3px',
+      border: '1px solid rgba(34, 197, 94, 0.5)',
+      boxShadow: '0 0 10px rgba(34,197,94,0.3)',
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    }}>
+      <span style={{ fontSize: 11 }}>🚀</span>
+      <span>OPEN GAP UP</span>
+      {pctStr && <span style={{ opacity: 0.9 }}>{pctStr}</span>}
+      <span style={{
+        fontSize: 8,
+        background: '#22C55E',
+        color: '#000',
+        padding: '1px 4px',
+        borderRadius: 3,
+        fontWeight: 900,
+      }}>
+        +25 PTS
+      </span>
+    </span>
+  );
+}
+
 function StatusBadge({ status, isOB }: { status: string, isOB: boolean }) {
   const configs: any = {
     'pending':    { label: 'PENDING',    color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', icon: '⏳' },
@@ -52,16 +89,19 @@ function PriorityQueuePanel({
   activeTab?: string,
   activeLimit?: number
 }) {
+  const isGapUp = activeTab === 'GAP_UP';
   const isTop3 = activeTab === 'TOP3';
   const isQueue = activeTab === 'QUEUE';
-  const displayQueue = isTop3 ? queue.slice(0, activeLimit) : queue.slice(0, 10);
+  const displayQueue = (isTop3 || isGapUp) ? queue.slice(0, activeLimit) : queue.slice(0, 10);
   const hasQueue = displayQueue && displayQueue.length > 0;
 
-  const title = isTop3 
-    ? `🎯 TOP ${activeLimit || 3} FOCO DE COMPRA (Líderes para Entrada del BOT)`
-    : (isQueue ? '📊 EN COLA APEX (Acciones con Mayor APEX Score del Día)' : '🎯 COLA DE COMPRA DEL BOT (Rally & Fuerza Compradora)');
+  const title = isGapUp
+    ? `🚀 OPEN GAP UP RUNNERS (Prioridad 1 Institucional para el BOT)`
+    : (isTop3 
+      ? `🎯 TOP ${activeLimit || 3} FOCO DE COMPRA (Líderes para Entrada del BOT)`
+      : (isQueue ? '📊 EN COLA APEX (Acciones con Mayor APEX Score del Día)' : '🎯 COLA DE COMPRA DEL BOT (Rally & Fuerza Compradora)'));
 
-  const badgeText = isTop3 ? `TOP ${activeLimit || 3} FOCO ACTIVO` : 'MOMENTUM V5.5';
+  const badgeText = isGapUp ? 'PRIORIDAD 1 INSTITUCIONAL' : (isTop3 ? `TOP ${activeLimit || 3} FOCO ACTIVO` : 'MOMENTUM V5.5');
 
   const capPct = capital?.capital_max_total > 0
     ? Math.round((capital.capital_invested / capital.capital_max_total) * 100)
@@ -154,8 +194,9 @@ function PriorityQueuePanel({
                   </div>
 
                   <div style={{ minWidth: '60px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                       <span style={{ fontWeight: 900, fontSize: '15px', color: isOB ? '#EF4444' : '#FFF' }}>{item.ticker}</span>
+                      <GapRunnerStocksBadge isRunner={item.is_gap_runner} gapPct={item.gap_pct} />
                       {item.entry_reason?.includes('high_growth') && (
                         <span style={{ fontSize: '7px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 3px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
                       )}
@@ -894,6 +935,27 @@ function AnalysisModal({ stock, onClose }: any) {
                                     </div>
                                 )}
                             </div>
+
+                            {/* ESCUDO DEFENSIVO ADUANA GAP RUNNER (STOCKS) */}
+                            {Boolean(stock.is_gap_runner) && (
+                                <div style={{ marginTop:'15px', padding:'15px', background:'rgba(34,197,94,0.08)', borderRadius:'12px', border:'1px solid rgba(34,197,94,0.3)', boxShadow:'0 0 15px rgba(34,197,94,0.1)' }}>
+                                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px' }}>
+                                        <div style={{ display:'flex', alignItems:'center', gap:'6px' }}>
+                                            <span style={{ fontSize:'14px' }}>🛡️</span>
+                                            <span style={{ color:'#22C55E', fontWeight:950, fontSize:'11px', textTransform:'uppercase', letterSpacing:'1px' }}>ESCUDO DEFENSIVO ADUANA GAP RUNNER (STOCKS)</span>
+                                        </div>
+                                        <span style={{ background:'#22C55E', color:'#000', fontSize:'9px', padding:'2px 8px', borderRadius:'4px', fontWeight:950 }}>
+                                            PRIORIDAD 1 INSTITUCIONAL
+                                        </span>
+                                    </div>
+                                    <div style={{ fontSize:'11px', color:'#CCC', lineHeight:1.6 }}>
+                                        <div><b>• Hard Stop Loss:</b> Cierre de vela de 15m por debajo de EMA9 15m.</div>
+                                        <div><b>• Trailing Stop Dinámico:</b> Activación al midpoint 1H tras superar R1 (+1.5R de ganancia) para proteger el trade.</div>
+                                        <div><b>• Toma de Beneficios (3 Tranches):</b> 50% en Upper 5 | 25% en Upper 6 | 25% trailing libre hasta Clímax RSI 1H &gt; 85 o 15:50 ET liquidación obligatoria.</div>
+                                        <div><b>• Anti-Trap Shield:</b> Sin dilución pendiente (S-3/ATM), confirmación de apertura libre de trampa bajista.</div>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -1066,6 +1128,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         <div style={{ display:'flex', alignItems:'center', gap: '4px', flexWrap: 'wrap' }}>
           <span style={{ fontWeight: 950, color: '#FFF', fontSize: '14px', letterSpacing: '-0.5px' }}>{opp.ticker}</span>
+          <GapRunnerStocksBadge isRunner={opp.is_gap_runner} gapPct={opp.gap_pct} />
           {opp.queue_rank && (
             <span style={{ fontSize: '8px', background: 'rgba(56,189,248,0.2)', border: '1px solid #38BDF8', color: '#38BDF8', padding: '1px 5px', borderRadius: '4px', fontWeight: 950 }}>🎯 COLA #{opp.queue_rank}</span>
           )}
@@ -1204,7 +1267,7 @@ export default function OpportunitiesIntelligence() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [selectedStock, setSelectedStock] = useState<any | null>(null)
-  const [activeTab, setActiveTab] = useState<'TOP3' | 'ALPHA' | 'HOT' | 'QUEUE' | 'VALUE'>('TOP3')
+  const [activeTab, setActiveTab] = useState<'TOP3' | 'GAP_UP' | 'ALPHA' | 'HOT' | 'QUEUE' | 'VALUE'>('TOP3')
   const [newsStock, setNewsStock] = useState<any | null>(null)
   const [marketStatus, setMarketStatus] = useState({ is_open: false, status: 'CARGANDO...' })
   const [priorityQueue, setPriorityQueue] = useState<any[]>([])
@@ -1392,18 +1455,32 @@ export default function OpportunitiesIntelligence() {
       return (a.queue_rank || 999) - (b.queue_rank || 999);
     });
 
+  // Open Gap Up Runners: Prioridad 1 Institucional
+  const gapUpList = opportunitiesWithQueue
+    .filter(o => o.is_gap_runner)
+    .sort((a, b) => {
+      const scoreDiff = (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0);
+      if (scoreDiff !== 0) return scoreDiff;
+      return (b.gap_pct || 0) - (a.gap_pct || 0);
+    });
+
   const hotList = opportunitiesWithQueue
     .filter(o => o._from_priority_queue || (o.price <= settings.hotMaxPrice && o.volume >= settings.minVolume))
     .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0))
     .slice(0, 20);
 
   const alphaList = opportunitiesWithQueue
-    .filter(o => o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0))
-    .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0));
+    .filter(o => o.is_gap_runner || o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0))
+    .sort((a, b) => {
+      // Prioridad 1 Absoluta a OPEN GAP UP
+      if (a.is_gap_runner && !b.is_gap_runner) return -1;
+      if (!a.is_gap_runner && b.is_gap_runner) return 1;
+      return (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0);
+    });
 
   const top3List = alphaList.slice(0, settings.activeStocksLimit || 3);
   const valueList = opportunitiesWithQueue.filter(o => o.is_pro_member);
-  const displayList = activeTab === 'TOP3' ? top3List : (activeTab === 'ALPHA' ? alphaList : (activeTab === 'HOT' ? hotList : (activeTab === 'QUEUE' ? queueList : valueList)));
+  const displayList = activeTab === 'TOP3' ? top3List : (activeTab === 'GAP_UP' ? gapUpList : (activeTab === 'ALPHA' ? alphaList : (activeTab === 'HOT' ? hotList : (activeTab === 'QUEUE' ? queueList : valueList))));
 
   return (
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
@@ -1427,7 +1504,8 @@ export default function OpportunitiesIntelligence() {
             <button onClick={() => setShowSettings(!showSettings)} style={{ background: showSettings ? '#22C55E' : 'rgba(255,255,255,0.05)', color: showSettings ? '#000' : '#FFF', border: 'none', padding: '10px 16px', borderRadius: '12px', fontSize: '12px', fontWeight: 900, cursor: 'pointer' }}>⚙️ FILTROS</button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)', alignItems: 'center' }}>
                 <TabButton label={`🎯 Top ${settings.activeStocksLimit || 3} Foco de Compra`} active={activeTab === 'TOP3'} onClick={() => setActiveTab('TOP3')} count={top3List.length}/>
-                <TabButton label="🚀 Alpha Runners (Orden BOT Completo)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
+                <TabButton label="🚀 Open Gap Up (Prioridad 1)" active={activeTab === 'GAP_UP'} onClick={() => setActiveTab('GAP_UP')} count={gapUpList.length}/>
+                <TabButton label="⚡ Alpha Runners (Orden BOT Completo)" active={activeTab === 'ALPHA'} onClick={() => setActiveTab('ALPHA')} count={alphaList.length}/>
                 <TabButton label="🔥 Hot by Volume (Top 20)" active={activeTab === 'HOT'} onClick={() => setActiveTab('HOT')} count={hotList.length}/>
                 <TabButton label="🎯 En Cola APEX" active={activeTab === 'QUEUE'} onClick={() => setActiveTab('QUEUE')} count={queueList.length}/>
                 <TabButton label="💎 Inversión Pro" active={activeTab === 'VALUE'} onClick={() => setActiveTab('VALUE')} count={valueList.length}/>
@@ -1489,9 +1567,57 @@ export default function OpportunitiesIntelligence() {
         </div>
       )}
 
+      {/* ADUANA OPEN GAP UP INSTITUTIONAL BANNER (STOCKS) */}
+      {gapUpList.length > 0 && (
+        <div style={{
+          background: 'linear-gradient(90deg, rgba(34,197,94,0.18) 0%, rgba(56,189,248,0.15) 50%, rgba(245,158,11,0.18) 100%)',
+          border: '1px solid rgba(34,197,94,0.4)',
+          borderRadius: 14,
+          padding: '14px 20px',
+          marginBottom: 18,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+          boxShadow: '0 0 20px rgba(34,197,94,0.12)'
+        }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <b style={{ color: '#FFF', fontSize: 14, letterSpacing: '-0.3px' }}>
+                🚀 PRIORIDAD ABSOLUTA ADUANA OPEN GAP RUNNERS ACTIVA
+              </b>
+              <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 4, background: '#22C55E', color: '#000', fontWeight: 900 }}>
+                PRIORIDAD 1 INSTITUCIONAL
+              </span>
+            </div>
+            <p style={{ color: '#CCC', fontSize: 12, margin: '4px 0 0' }}>
+              Detectados <b>{gapUpList.length}</b> activos de STOCKS con OPEN GAP UP institucional. Reciben <b>Score Boost (+25 pts)</b>, prioridad 0 en la cola de compra del BOT y Escudo Defensivo ADUANA (SL 15m EMA9, Trailing Stop Midpoint 1H, TP parcial Upper 5 / Upper 6).
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={() => setActiveTab('GAP_UP')}
+              style={{
+                background: activeTab === 'GAP_UP' ? '#22C55E' : 'rgba(255,255,255,0.08)',
+                color: activeTab === 'GAP_UP' ? '#000' : '#FFF',
+                border: '1px solid rgba(34,197,94,0.5)',
+                padding: '8px 14px',
+                borderRadius: 8,
+                fontSize: 11,
+                fontWeight: 900,
+                cursor: 'pointer',
+              }}
+            >
+              VER {gapUpList.length} RUNNERS 🚀
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* APEX Priority Queue Panel */}
       <PriorityQueuePanel 
-        queue={activeTab === 'TOP3' ? (top3List.length > 0 ? top3List : priorityQueue) : (activeTab === 'QUEUE' ? queueList : priorityQueue)} 
+        queue={activeTab === 'TOP3' ? (top3List.length > 0 ? top3List : priorityQueue) : (activeTab === 'GAP_UP' ? gapUpList : (activeTab === 'QUEUE' ? queueList : priorityQueue))} 
         capital={pqCapital} 
         summary={pqSummary} 
         activeTab={activeTab} 

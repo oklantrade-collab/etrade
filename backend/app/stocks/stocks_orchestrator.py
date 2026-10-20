@@ -101,6 +101,7 @@ def calculate_composite_rank(
     change_pct: float = None,
     has_news: bool = False,
     is_ema3_1h_ascending: bool = True,
+    is_gap_runner: bool = False,
 ) -> float:
     """
     Calcula el Composite Rank — métrica única para ordenar la cola de Alta Prioridad.
@@ -138,14 +139,17 @@ def calculate_composite_rank(
         rank = max(0.0, rank - 20.0)
 
     # ── BOOSTS DE MÁXIMA PRIORIDAD PARA RALLIES ACTIVOS ──
-    if is_intraday_alpha:
+    if is_gap_runner:
+        rank = max(rank + 25.0, 99.5)
+    elif is_intraday_alpha:
         rank = max(rank, 98.5)
     elif is_high_priority_growth or bf_val >= 85.0:
         rank = max(rank, 95.0)
     elif bf_val >= 70.0:
         rank = max(rank, 88.0)
 
-    return round(min(99.0, max(0.0, rank)), 2)
+    max_cap = 99.9 if is_gap_runner else 99.0
+    return round(min(max_cap, max(0.0, rank)), 2)
 
 
 
@@ -807,6 +811,15 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             )
             enters_by_breakout = breakout_5m.get('triggered', False)
 
+            # Detección y Priorización Institucional ADUANA OPEN GAP UP (LONGs)
+            from app.options.aduana_gap_runner_options import get_min_gap_threshold
+            min_thresh = get_min_gap_threshold(ticker)
+            gap_val = float(snap.get('gap_pct') or 0.0)
+            chg_val = float(snap.get('change_pct') or 0.0)
+            eff_gap = gap_val if gap_val != 0.0 else chg_val
+            is_trap = bool(snap.get('is_trap', False))
+            is_open_gap_runner = (eff_gap >= min_thresh) and not is_trap
+
             # Calcular Composite Rank centrado en Fuerza Compradora y Potencial de Ganancia
             rank = calculate_composite_rank(
                 apex_4h, apex_1d, ret_exp, conf, float(snap.get('rvol', 1.0) or 1.0), cfg,
@@ -817,6 +830,7 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 change_pct=change_p_val,
                 has_news=has_news_val,
                 is_ema3_1h_ascending=is_ema3_asc,
+                is_gap_runner=is_open_gap_runner,
             )
 
             if enters_by_expansion:
@@ -833,8 +847,16 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             # Definir estado inicial
             status = 'pending' if (enters_by_expansion or enters_by_pullback or enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
 
+            if is_open_gap_runner:
+                rank = max(rank + 25.0, 99.8)   # Prioridad 1 Absoluta para el BOT
+                status = 'pending'
+                entry_reason = f'gap_runner_open_{eff_gap:.1f}%'
+                log_info(MODULE, f'🚀 {ticker}: ADUANA OPEN GAP RUNNER (+{eff_gap:.1f}%) | PRIORIDAD INSTITUCIONAL 1')
+
             # Recalcular rank con boost si es super-runner expansión, pullback Sección B, intraday alpha o alto crecimiento
-            if enters_by_expansion:
+            if is_open_gap_runner:
+                rank = max(rank, 99.8)
+            elif enters_by_expansion:
                 rank = max(rank, 99.5)
             elif enters_by_pullback:
                 rank = max(rank, 98.8)
@@ -845,8 +867,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             elif enters_by_growth:
                 rank = max(rank, 95.0)
 
-            entry_reason = 'apex_auto'
-            if enters_by_expansion:
+            if is_open_gap_runner:
+                entry_reason = f'gap_runner_open_{eff_gap:.1f}%'
+            elif enters_by_expansion:
                 entry_reason = f'expansion_runner_bb1d_{snap.get("room_to_bb_upper_1d", 0):.0f}%'
             elif enters_by_pullback:
                 entry_reason = f'{pullback_type}: {snap.get("pullback_reason", "")}'[:50]
@@ -871,12 +894,14 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 'return_expected':   ret_exp,
                 'confidence':        conf,
                 'composite_rank':    rank,
-                'is_overbought':     False if (enters_by_pullback or enters_by_expansion) else overbought['blocked'],
+                'is_overbought':     False if (enters_by_pullback or enters_by_expansion or is_open_gap_runner) else overbought['blocked'],
                 'is_expansion_runner': enters_by_expansion,
+                'is_gap_runner':     is_open_gap_runner,
+                'gap_pct':           eff_gap if is_open_gap_runner else float(snap.get('gap_pct') or 0.0),
                 'overbought_reason': overbought.get('reason', ''),
                 'rsi':               overbought['rsi'],
                 'fib_zone':          overbought['fib_zone'],
-                'has_rule_signal':   enters_by_expansion or enters_by_pullback or enters_by_rule or enters_by_breakout or enters_by_growth,
+                'has_rule_signal':   enters_by_expansion or enters_by_pullback or enters_by_rule or enters_by_breakout or enters_by_growth or is_open_gap_runner,
                 'is_pullback_b':     enters_by_pullback,
                 'pullback_rule_code': pullback_type if enters_by_pullback else '',
                 'is_breakout_5m':    enters_by_breakout,
@@ -899,13 +924,14 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             log_warning(MODULE, f'{ticker}: {e}')
             continue
 
-    # Ordenar la cola (Prioriza: 1. No sobrecompradas, 2. Señal activa, 3. Alta Fuerza Compradora BF >= 70, 4. Composite Rank descendente)
+    # Ordenar la cola (Prioriza: 1. No sobrecompradas, 2. Open Gap Runner (Prioridad 1 Institucional), 3. Señal activa, 4. Alta Fuerza Compradora BF >= 70, 5. Composite Rank descendente)
     def sort_key(c):
+        is_runner      = bool(c.get('is_gap_runner'))
         has_signal     = bool(c.get('has_rule_signal') or c.get('is_pullback_b') or c.get('is_breakout_5m'))
         not_overbought = not bool(c.get('is_overbought'))
         bf             = float(c.get('buying_force_score') or 0.0)
         rank           = float(c.get('composite_rank') or 0.0)
-        return (not_overbought, has_signal, bf >= 70.0, rank)
+        return (not_overbought, is_runner, has_signal, bf >= 70.0, rank)
 
     queue_candidates.sort(key=sort_key, reverse=True)
 
@@ -956,9 +982,10 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             await _upsert_queue(supabase, candidate, status='blocked')
             continue
 
-        # En mercado BEARISH, SOLO se permite comprar si es un ALPHA_RUNNER / SUPER_RUNNER / EXPANSION_RUNNER
+        # En mercado BEARISH, SOLO se permite comprar si es un ALPHA_RUNNER / SUPER_RUNNER / EXPANSION_RUNNER / GAP_RUNNER
         if is_macro_bearish:
             is_exempt_runner = bool(
+                candidate.get('is_gap_runner') or
                 candidate.get('is_expansion_runner') or
                 candidate.get('is_intraday_alpha') or
                 'ALPHA_RUNNER' in str(candidate.get('group_name', '')) or

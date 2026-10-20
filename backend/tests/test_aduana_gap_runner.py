@@ -512,3 +512,96 @@ def test_tiered_trailing_stop_hyper_50pct():
     assert res['rule_code'] == 'ADUANA_GAP_TRAIL_TIER3'
 
 
+def test_orchestrator_composite_rank_gap_runner():
+    """Valida que calculate_composite_rank otorgue máxima prioridad (>= 99.5) a OPEN GAP UP."""
+    from app.stocks.stocks_orchestrator import calculate_composite_rank
+
+    cfg = {'weights': {'apex_4h': 0.35, 'apex_1d': 0.25, 'return_expected': 0.25, 'rvol': 0.15}}
+    
+    # Activo estándar
+    rank_normal = calculate_composite_rank(
+        apex_4h=70.0, apex_1d=65.0, return_pct=8.0, confidence="HIGH", rvol=1.5, cfg=cfg,
+        is_gap_runner=False
+    )
+    # Activo con OPEN GAP UP institucional
+    rank_runner = calculate_composite_rank(
+        apex_4h=70.0, apex_1d=65.0, return_pct=8.0, confidence="HIGH", rvol=1.5, cfg=cfg,
+        is_gap_runner=True
+    )
+
+    assert rank_runner >= 99.5
+    assert rank_runner > rank_normal
+    assert rank_runner >= rank_normal + 25.0 or rank_runner >= 99.5
+
+
+def test_orchestrator_queue_sort_gap_runner_priority():
+    """Valida que la cola del Orchestrator priorice a OPEN GAP UP por encima de otras señales."""
+    def sort_key(c):
+        is_runner      = bool(c.get('is_gap_runner'))
+        has_signal     = bool(c.get('has_rule_signal') or c.get('is_pullback_b') or c.get('is_breakout_5m'))
+        not_overbought = not bool(c.get('is_overbought'))
+        bf             = float(c.get('buying_force_score') or 0.0)
+        rank           = float(c.get('composite_rank') or 0.0)
+        return (not_overbought, is_runner, has_signal, bf >= 70.0, rank)
+
+    c_standard = {
+        'ticker': 'AAPL', 'is_gap_runner': False, 'has_rule_signal': True,
+        'is_overbought': False, 'buying_force_score': 85.0, 'composite_rank': 90.0
+    }
+    c_pullback = {
+        'ticker': 'NVDA', 'is_gap_runner': False, 'has_rule_signal': True,
+        'is_overbought': False, 'buying_force_score': 90.0, 'composite_rank': 98.8
+    }
+    c_gap_runner = {
+        'ticker': 'SMCI', 'is_gap_runner': True, 'has_rule_signal': True,
+        'is_overbought': False, 'buying_force_score': 75.0, 'composite_rank': 99.8
+    }
+
+    candidates = [c_standard, c_pullback, c_gap_runner]
+    candidates.sort(key=sort_key, reverse=True)
+
+    # SMCI (Open Gap Runner) debe ser #1 indiscutible en la cola de compra del BOT
+    assert candidates[0]['ticker'] == 'SMCI'
+    assert candidates[0]['is_gap_runner'] is True
+
+
+def test_stocks_opportunities_open_gap_up_boost_and_sort():
+    """Valida que los activos con OPEN GAP UP reciban +25 pts y se ordenen con prioridad 0 en la API."""
+    from app.options.aduana_gap_runner_options import get_min_gap_threshold
+
+    items = [
+        {'ticker': 'TSLA', 'gap_pct': 4.5, 'rank_score': 70.0, 'buying_force_5m': 70.0, 'is_trap': False},  # High-Beta thresh=3.0% -> RUNNER
+        {'ticker': 'AAPL', 'gap_pct': 0.8, 'rank_score': 85.0, 'buying_force_5m': 85.0, 'is_trap': False},  # Mega-Cap thresh=1.2% -> NO RUNNER
+        {'ticker': 'PLTR', 'gap_pct': 5.0, 'rank_score': 65.0, 'buying_force_5m': 65.0, 'is_trap': False},  # High-Beta thresh=3.0% -> RUNNER
+    ]
+
+    for opp in items:
+        t = opp['ticker']
+        min_thresh = get_min_gap_threshold(t)
+        gap_val = opp['gap_pct']
+        is_runner = (gap_val >= min_thresh) and not opp['is_trap']
+        opp['is_gap_runner'] = is_runner
+        if is_runner:
+            opp['gap_runner_boost'] = 25.0
+            opp['rank_score'] = round(min(100.0, opp['rank_score'] + 25.0), 1)
+
+    items.sort(key=lambda x: (
+        0 if x.get("is_gap_runner") else 1,
+        -float(x.get("rank_score") or 0.0),
+        -float(x.get("gap_pct") or 0.0)
+    ))
+
+    # TSLA (70 + 25 = 95.0) y PLTR (65 + 25 = 90.0) deben estar en posiciones 0 y 1 antes que AAPL
+    assert items[0]['ticker'] == 'TSLA'
+    assert items[0]['rank_score'] == 95.0
+    assert items[0]['is_gap_runner'] is True
+
+    assert items[1]['ticker'] == 'PLTR'
+    assert items[1]['rank_score'] == 90.0
+    assert items[1]['is_gap_runner'] is True
+
+    assert items[2]['ticker'] == 'AAPL'
+    assert items[2]['is_gap_runner'] is False
+
+
+

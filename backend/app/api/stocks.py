@@ -23,7 +23,7 @@ LAST_DATA_CACHE = {"data": None, "timestamp": 0}
 CACHE_TTL = 5  # 5 segundos de gracia para el Dashboard
 
 @router.get("/opportunities")
-async def get_stocks_opportunities():
+async def get_stocks_opportunities(gap_runner_only: bool = False):
     """
     Get current stock opportunities and scanner results.
     Aggregates watchlist_daily + technical_scores + trade_opportunities.
@@ -236,14 +236,51 @@ async def get_stocks_opportunities():
             except Exception as e_live:
                 log_warning("stocks_api", f"Live top gainers scan skipped: {e_live}")
 
-            # Re-rankear y ordenar por rank_score descendente
-            flattened.sort(key=lambda x: float(x.get("rank_score") or x.get("buying_force_5m") or 0.0), reverse=True)
+            # ── 5. EVALUACIÓN Y PRIORIZACIÓN INSTITUCIONAL ADUANA OPEN GAP UP (LONGs) ──
+            from app.options.aduana_gap_runner_options import get_min_gap_threshold, get_asset_class
+
+            for opp in flattened:
+                t = (opp.get("ticker") or "").upper()
+                gap_val = float(opp.get("gap_pct") or 0.0)
+                chg_val = float(opp.get("change_pct") or 0.0)
+                eff_gap = gap_val if gap_val != 0.0 else chg_val
+                min_thresh = get_min_gap_threshold(t)
+                is_trap = bool(opp.get("is_trap", False))
+
+                # Califica como Open Gap Up institucional si supera el umbral y no es trampa
+                is_runner = (eff_gap >= min_thresh) and not is_trap
+                opp["is_gap_runner"] = is_runner
+                opp["gap_type"] = "OPEN_GAP_UP" if is_runner else None
+                opp["gap_pct"] = eff_gap
+                opp["asset_class"] = get_asset_class(t)
+                opp["min_gap_required"] = min_thresh
+
+                if is_runner:
+                    # Score Boost institucional de +25 puntos para liderar la cola de compras
+                    base_rank = float(opp.get("rank_score") or opp.get("buying_force_5m") or 50.0)
+                    opp["gap_runner_boost"] = 25.0
+                    opp["rank_score"] = round(min(100.0, base_rank + 25.0), 1)
+                    opp["is_high_priority"] = True
+
+            if gap_runner_only:
+                flattened = [i for i in flattened if i.get("is_gap_runner")]
+
+            # Re-rankear y ordenar: Prioridad 0 absoluta a OPEN GAP UP, luego rank_score desc, gap_pct desc
+            flattened.sort(key=lambda x: (
+                0 if x.get("is_gap_runner") else 1,
+                -float(x.get("rank_score") or x.get("buying_force_5m") or 0.0),
+                -float(x.get("gap_pct") or 0.0)
+            ))
             for idx, item in enumerate(flattened, 1):
                 item["rank"] = idx
+
+            gap_runners = [i for i in flattened if i.get("is_gap_runner")]
 
             return {
                 "opportunities": flattened,
                 "total": len(flattened),
+                "total_gap_runners": len(gap_runners),
+                "has_gap_runners": len(gap_runners) > 0,
                 "market_status": market_status
             }
         except Exception as e:

@@ -25,6 +25,7 @@ files_to_sync = [
     "app/api/options.py",
     "app/stocks/aduana_gap_runner_engine.py",
     "app/stocks/stocks_order_executor.py",
+    "app/stocks/stocks_orchestrator.py",
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/options/aduana_gap_runner_options.py",
     "app/options/opt_contract_picker.py",
