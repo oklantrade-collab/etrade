@@ -28,7 +28,11 @@ files_to_sync = [
     "app/stocks/stocks_adaptive_tp_v2.py",
     "app/options/aduana_gap_runner_options.py",
     "app/options/opt_contract_picker.py",
-    "app/options/opt_gap_aduana_defense.py"
+    "app/options/opt_gap_aduana_defense.py",
+    "app/options/score.py",
+    "app/options/portfolio_selector.py",
+    "app/options/candidates.py",
+    "app/options/catalysts/service.py"
 ]
 
 def check_syntax():
