@@ -1,0 +1,423 @@
+"""
+Unit Tests for ADUANA GAP RUNNER OPTIONS Engine
+===============================================
+Pruebas exhaustivas para:
+- Clasificación de clase de activo y umbrales dinámicos de Gap.
+- Ranking de velocidad por minuto para CALLs y PUTs.
+- Validación de filtros MTF (1H Bollinger, RSI, EMA3/EMA9, 5m velas 1 y 2).
+- Tranches 1, 2 y 3 (incluyendo HOD Breakout para CALLs y LOD Breakdown para PUTs).
+- Selector inteligente de contratos (Delta, DTE, Liquidez, Sizing de Tranches).
+- Defensivas ADUANA Opciones (Hard SL -35%, Stall Guard 20m, Trailing Tiers 2/3, Clímax RSI).
+"""
+
+import os
+import sys
+sys.path.append(os.path.abspath("backend"))
+
+import pytest
+import pandas as pd
+import numpy as np
+from datetime import date, timedelta
+
+from app.options.aduana_gap_runner_options import (
+    get_asset_class,
+    get_min_gap_threshold,
+    calculate_options_velocity_ranking,
+    evaluate_options_gap_entry_tranches,
+    evaluate_options_gap_aduana_exit
+)
+from app.options.opt_contract_picker import (
+    select_best_option_contract,
+    calculate_tranche_allocation
+)
+from app.options.opt_gap_aduana_defense import evaluate_opt_gap_defense
+
+
+def _make_df(rows):
+    return pd.DataFrame(rows)
+
+
+def test_asset_class_and_gap_thresholds():
+    """Valida la clasificación dinámica de activos y sus umbrales de gap mínimos."""
+    assert get_asset_class("SPY") == "ETF"
+    assert get_min_gap_threshold("SPY") == 0.60
+
+    assert get_asset_class("NVDA") == "MEGA_CAP"
+    assert get_min_gap_threshold("NVDA") == 1.20
+
+    assert get_asset_class("COIN") == "HIGH_BETA"
+    assert get_min_gap_threshold("COIN") == 3.00
+
+    assert get_asset_class("IRON") == "SMALL_CAP"
+    assert get_min_gap_threshold("IRON") == 5.00
+
+
+def test_velocity_ranking_calls_and_puts():
+    """Valida que el ranking de velocidad ordene correctamente por mayor aceleración."""
+    df_slow = _make_df([
+        {'open': 100.0, 'close': 100.2},
+        {'open': 100.2, 'close': 100.5}   # +0.3 en 5m
+    ])
+    df_fast = _make_df([
+        {'open': 100.0, 'close': 100.5},
+        {'open': 100.5, 'close': 102.0}   # +1.5 en 5m (más rápido)
+    ])
+    df_drop_fast = _make_df([
+        {'open': 100.0, 'close': 99.5},
+        {'open': 99.5, 'close': 97.5}    # -2.0 en 5m (caída rápida)
+    ])
+    df_drop_slow = _make_df([
+        {'open': 100.0, 'close': 99.8},
+        {'open': 99.8, 'close': 99.3}    # -0.5 en 5m
+    ])
+
+    # 1. Ranking CALLs
+    cands_call = [
+        {'ticker': 'SLOW', 'df_5m': df_slow},
+        {'ticker': 'FAST', 'df_5m': df_fast}
+    ]
+    ranked_call = calculate_options_velocity_ranking(cands_call, direction="CALL")
+    assert ranked_call[0]['ticker'] == 'FAST'
+    assert ranked_call[0]['velocity_rank'] == 1
+    assert ranked_call[0]['rate_pct_per_min'] > ranked_call[1]['rate_pct_per_min']
+
+    # 2. Ranking PUTs
+    cands_put = [
+        {'ticker': 'DROP_SLOW', 'df_5m': df_drop_slow},
+        {'ticker': 'DROP_FAST', 'df_5m': df_drop_fast}
+    ]
+    ranked_put = calculate_options_velocity_ranking(cands_put, direction="PUT")
+    assert ranked_put[0]['ticker'] == 'DROP_FAST'
+    assert ranked_put[0]['velocity_rank'] == 1
+    assert ranked_put[0]['rate_pct_per_min'] > ranked_put[1]['rate_pct_per_min']
+
+
+def test_call_tranche_1_approves():
+    """Valida que Tranche 1 de CALL se aprueba con vela 1 verde, vela 2 micro-gap y espacio 1H."""
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 101.5, 'low': 99.8, 'close': 101.2, 'volume': 50000}, # Vela 1 verde
+        {'open': 101.2, 'high': 102.0, 'low': 101.0, 'close': 101.8, 'volume': 60000}  # Vela 2 micro-gap
+    ])
+    # 1H con espacio alcista y EMA3 > EMA9
+    h1_candles = [
+        {'open': 95.0 + (i % 3) * 0.5, 'high': 98.0, 'low': 94.0, 'close': 95.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [95.8, 96.2, 96.5, 96.9, 97.2]:
+        h1_candles.append({'open': p - 0.3, 'high': p + 0.8, 'low': p - 0.5, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="NVDA",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=1.80, # Supera umbral de 1.20% para Mega-Cap
+        direction="CALL",
+        sipv_signal="BUY"
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 1
+    assert res['rule_code'] == 'OPT_GAP_TRANCHE_1_CALL'
+    assert res['initial_sl_underlying'] is not None
+
+
+def test_call_tranche_1_blocks_on_red_candle():
+    """Valida bloqueo de CALL cuando la vela 1 de 5m fue roja."""
+    df_5m = _make_df([
+        {'open': 101.5, 'high': 101.8, 'low': 99.8, 'close': 100.0, 'volume': 50000}, # Vela 1 roja
+        {'open': 100.0, 'high': 100.5, 'low': 99.5, 'close': 100.2, 'volume': 30000}
+    ])
+    h1_candles = [
+        {'open': 95.0 + (i % 3) * 0.5, 'high': 98.0, 'low': 94.0, 'close': 95.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [95.8, 96.2, 96.5, 96.9, 97.2]:
+        h1_candles.append({'open': p - 0.3, 'high': p + 0.8, 'low': p - 0.5, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="NVDA",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=2.0,
+        direction="CALL"
+    )
+
+    assert res['should_enter'] is False
+    assert "Vela 1 de 5m fue roja" in res['reason']
+
+
+def test_put_tranche_1_approves():
+    """Valida que Tranche 1 de PUT se aprueba con vela 1 roja, vela 2 micro-gap bajista y espacio 1H."""
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 98.5, 'close': 98.8, 'volume': 50000}, # Vela 1 roja
+        {'open': 98.7, 'high': 98.9, 'low': 97.5, 'close': 97.9, 'volume': 60000}    # Vela 2 micro-gap bajista
+    ])
+    # 1H con tendencia bajista (EMA3 < EMA9 y pendiente bajista, RSI ~44)
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-3.80, # Gap Down de -3.8% (supera umbral de -3.0% para High-Beta)
+        direction="PUT",
+        sipv_signal="SELL"
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 1
+    assert res['rule_code'] == 'OPT_GAP_TRANCHE_1_PUT'
+    assert res['initial_sl_underlying'] is not None
+
+
+def test_put_tranche_1_blocks_on_green_candle():
+    """Valida bloqueo de PUT cuando la vela 1 de 5m fue verde (rebote)."""
+    df_5m = _make_df([
+        {'open': 98.0, 'high': 100.5, 'low': 97.8, 'close': 100.0, 'volume': 50000}, # Vela 1 verde
+        {'open': 100.0, 'high': 100.4, 'low': 99.5, 'close': 99.8, 'volume': 30000}
+    ])
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-4.0,
+        direction="PUT"
+    )
+
+    assert res['should_enter'] is False
+    assert "Vela 1 de 5m fue verde" in res['reason']
+
+
+def test_call_tranche_2_approves_on_hod_breakout():
+    """Valida Tranche 2 de CALL por ruptura del High of Day (HOD) en 5m con volumen."""
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 101.0, 'low': 99.8, 'close': 100.5, 'volume': 20000},
+        {'open': 100.5, 'high': 101.2, 'low': 100.2, 'close': 100.8, 'volume': 20000},
+        {'open': 100.8, 'high': 102.5, 'low': 100.7, 'close': 102.2, 'volume': 50000} # Ruptura de HOD ($101.20)
+    ])
+    df_15m = _make_df([
+        {'open': 100.0, 'high': 101.2, 'low': 99.8, 'close': 100.8, 'volume': 40000},
+        {'open': 100.7, 'high': 102.5, 'low': 100.6, 'close': 102.2, 'volume': 50000}
+    ])
+    pos = {
+        'id': 'pos-call-t2',
+        'status': 'open',
+        'reentry_count': 0,
+        'avg_price': 100.5,
+        'direction': 'CALL'
+    }
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="NVDA",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        gap_pct=1.5,
+        active_position=pos,
+        direction="CALL"
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 2
+    assert res['rule_code'] in ('OPT_GAP_TRANCHE_2_CALL', 'OPT_GAP_TRANCHE_2_HOD')
+    assert res['initial_sl_underlying'] == 100.5 # Breakeven
+
+
+def test_put_tranche_2_approves_on_lod_breakdown():
+    """Valida Tranche 2 de PUT por ruptura del Low of Day (LOD) en 5m con volumen."""
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 98.5, 'close': 99.0, 'volume': 20000},
+        {'open': 99.0, 'high': 99.2, 'low': 98.2, 'close': 98.4, 'volume': 20000},
+        {'open': 98.4, 'high': 98.5, 'low': 97.0, 'close': 97.2, 'volume': 50000} # Quiebre de LOD ($98.20)
+    ])
+    df_15m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 98.2, 'close': 98.4, 'volume': 40000},
+        {'open': 98.4, 'high': 98.5, 'low': 97.0, 'close': 97.2, 'volume': 50000}
+    ])
+    pos = {
+        'id': 'pos-put-t2',
+        'status': 'open',
+        'reentry_count': 0,
+        'avg_price': 99.0,
+        'direction': 'PUT'
+    }
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        gap_pct=-3.5,
+        active_position=pos,
+        direction="PUT"
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 2
+    assert res['rule_code'] in ('OPT_GAP_TRANCHE_2_PUT', 'OPT_GAP_TRANCHE_2_LOD')
+    assert res['initial_sl_underlying'] == 99.0 # Breakeven
+
+
+def test_tranche_allocation_sizing():
+    """Valida la distribución de contratos enteros en tranches."""
+    t1, t2, t3, model = calculate_tranche_allocation(6)
+    assert model == "3_TRANCHES"
+    assert t1 == 2 and t2 == 2 and t3 == 2
+
+    t1, t2, t3, model = calculate_tranche_allocation(2)
+    assert model == "2_TRANCHES"
+    assert t1 == 1 and t2 == 1 and t3 == 0
+
+    t1, t2, t3, model = calculate_tranche_allocation(1)
+    assert model == "SINGLE"
+    assert t1 == 1 and t2 == 0 and t3 == 0
+
+
+def test_contract_picker_delta_and_liquidity():
+    """Valida la selección del strike con Delta óptimo (~0.50) y spread estrecho."""
+    today = date(2026, 10, 20)
+    exp = today + timedelta(days=7)
+
+    contracts = [
+        # Opción 1: Muy OTM (Delta 0.20)
+        {'conid': 101, 'right': 'C', 'strike': 120.0, 'expiry': exp.isoformat(),
+         'bid': 0.40, 'ask': 0.45, 'delta': 0.20, 'open_interest': 500, 'volume': 100},
+        # Opción 2: ATM Óptima (Delta 0.52, spread estrecho)
+        {'conid': 102, 'right': 'C', 'strike': 100.0, 'expiry': exp.isoformat(),
+         'bid': 3.10, 'ask': 3.20, 'delta': 0.52, 'open_interest': 1200, 'volume': 450},
+        # Opción 3: Spread muy amplio (descartada)
+        {'conid': 103, 'right': 'C', 'strike': 105.0, 'expiry': exp.isoformat(),
+         'bid': 1.00, 'ask': 1.80, 'delta': 0.48, 'open_interest': 800, 'volume': 200}
+    ]
+
+    best, _ = select_best_option_contract(
+        contracts=contracts,
+        underlying_price=100.0,
+        direction="CALL",
+        budget_usd=1000.0,
+        now_date=today
+    )
+
+    assert best is not None
+    assert best.conid == 102
+    assert best.strike == 100.0
+    assert best.delta == 0.52
+    assert best.target_total_contracts == 3 # $1000 / $315 = 3 contratos
+
+
+def test_defense_hard_stop_loss_premium():
+    """Valida Hard SL cuando la prima de la opción sufre una caída <= -35%."""
+    pos = {
+        'id': 'pos-sl',
+        'avg_price': 4.00,
+        'direction': 'CALL'
+    }
+    # Prima cae a $2.50 (-37.5% de pérdida)
+    res = evaluate_opt_gap_defense(
+        position=pos,
+        current_underlying_price=100.0,
+        current_option_premium=2.50
+    )
+    assert res['should_exit'] is True
+    assert res['exit_type'] == 'hard_stop'
+    assert res['rule_code'] == 'OPT_GAP_HARD_SL_PREM'
+
+
+def test_defense_stall_guard():
+    """Valida Stall Guard cuando la posición lleva 25 min sin avanzar y pierde -18% por Theta."""
+    pos = {
+        'id': 'pos-stall',
+        'avg_price': 3.00,
+        'reentry_count': 0,
+        'direction': 'CALL'
+    }
+    res = evaluate_opt_gap_defense(
+        position=pos,
+        current_underlying_price=100.0,
+        current_option_premium=2.45, # -18.3%
+        position_age_minutes=25.0
+    )
+    assert res['should_exit'] is True
+    assert res['exit_type'] == 'stall_guard'
+    assert res['rule_code'] == 'OPT_GAP_STALL_GUARD'
+
+
+def test_defense_trailing_tier2_profit():
+    """Valida Trailing Ratchet Tier 2 (piso garantizado de +15% cuando la prima ganó >= +25%)."""
+    pos = {
+        'id': 'pos-tier2',
+        'avg_price': 2.00,
+        'highest_premium_seen': 2.60, # Ganó +30% pico
+        'direction': 'CALL'
+    }
+    # La prima retrocede a $2.25 (piso de +15% es $2.30)
+    res = evaluate_opt_gap_defense(
+        position=pos,
+        current_underlying_price=102.0,
+        current_option_premium=2.25
+    )
+    assert res['should_exit'] is True
+    assert res['exit_type'] == 'trailing_stop'
+    assert res['rule_code'] == 'OPT_GAP_TRAIL_TIER2'
+
+
+def test_defense_trailing_tier3_hyper_profit():
+    """Valida Trailing Ratchet Tier 3 (blindaje del 70% del pico cuando la prima subió >= +50%)."""
+    # Compra a $2.00, subió a $3.60 (+80% pico)
+    # Ganancia pico = $1.60. 70% blindado = $1.60 * 0.70 = $1.12. Nivel blindado = $2.00 + $1.12 = $3.12
+    pos = {
+        'id': 'pos-tier3',
+        'avg_price': 2.00,
+        'highest_premium_seen': 3.60,
+        'direction': 'CALL'
+    }
+    # La prima retrocede a $3.05 (por debajo de $3.12)
+    res = evaluate_opt_gap_defense(
+        position=pos,
+        current_underlying_price=105.0,
+        current_option_premium=3.05
+    )
+    assert res['should_exit'] is True
+    assert res['exit_type'] == 'trailing_stop'
+    assert res['rule_code'] == 'OPT_GAP_TRAIL_TIER3'
+
+
+def test_defense_tp_climax_total():
+    """Valida Take Profit Clímax Total cuando RSI 1H >= 85 (CALL) o <= 15 (PUT)."""
+    # 1. Clímax CALL
+    df_1h_overbought = _make_df([{'close': 100.0 + i*2.0} for i in range(25)])
+    pos_call = {'id': 'pos-climax-call', 'avg_price': 2.00, 'direction': 'CALL'}
+    res_call = evaluate_opt_gap_defense(
+        position=pos_call,
+        current_underlying_price=150.0,
+        current_option_premium=5.00,
+        df_1h=df_1h_overbought
+    )
+    assert res_call['should_exit'] is True
+    assert res_call['rule_code'] == 'OPT_GAP_TP_CLIMAX'
+
+    # 2. Clímax PUT
+    df_1h_oversold = _make_df([{'close': 100.0 - i*2.0} for i in range(25)])
+    pos_put = {'id': 'pos-climax-put', 'avg_price': 2.00, 'direction': 'PUT'}
+    res_put = evaluate_opt_gap_defense(
+        position=pos_put,
+        current_underlying_price=50.0,
+        current_option_premium=6.00,
+        df_1h=df_1h_oversold
+    )
+    assert res_put['should_exit'] is True
+    assert res_put['rule_code'] == 'OPT_GAP_TP_CLIMAX'
