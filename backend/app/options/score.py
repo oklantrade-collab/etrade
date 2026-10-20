@@ -6,7 +6,54 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.options.aduana_gap_runner_options import get_asset_class, get_min_gap_threshold
+
 MODEL_VERSION = "v1.0-s5"
+
+
+def is_gap_runner_opportunity(cand: dict[str, Any], underlying: dict[str, Any] | None = None) -> tuple[bool, str | None, float]:
+    """
+    Determina si una oportunidad califica como ADUANA GAP RUNNER (CALL para Gap Up, PUT para Gap Down).
+    Retorna (is_runner, gap_type, gap_pct).
+    """
+    if underlying is None:
+        underlying = {}
+
+    # 1. Indicadores explícitos en la candidata
+    exit_plan = cand.get("exit_plan") or {}
+    score_bd = cand.get("score_breakdown") or {}
+    if cand.get("is_gap_runner") or exit_plan.get("is_gap_runner") or score_bd.get("is_gap_runner"):
+        gtype = cand.get("gap_type") or exit_plan.get("gap_type") or score_bd.get("gap_type") or (
+            "OPEN_GAP_UP" if str(cand.get("direction")).upper() in ("CALL", "BULLISH") else "OPEN_GAP_DOWN"
+        )
+        gpct = float(cand.get("gap_pct") or exit_plan.get("gap_pct") or score_bd.get("gap_pct") or 0.0)
+        return True, gtype, gpct
+
+    if cand.get("direction_source") == "gap_runner" or cand.get("strategy_type") in ("gap_runner_call", "gap_runner_put"):
+        gtype = "OPEN_GAP_UP" if str(cand.get("direction")).upper() in ("CALL", "BULLISH") else "OPEN_GAP_DOWN"
+        return True, gtype, float(cand.get("gap_pct") or 0.0)
+
+    # 2. Indicadores en el subyacente
+    sym = (underlying.get("symbol") or cand.get("symbol") or "").upper()
+    if not sym:
+        return False, None, 0.0
+
+    min_gap = get_min_gap_threshold(sym)
+    cand_dir = (cand.get("direction") or underlying.get("direction") or "").lower()
+    is_bullish = cand_dir in ("call", "bullish")
+    is_bearish = cand_dir in ("put", "bearish")
+
+    # Revisar catalyst_meta o c1_gap en el underlying
+    cat_meta = underlying.get("catalyst_meta") or {}
+    c1 = cat_meta.get("c1_gap") or {}
+    gap_pct = float(c1.get("gap_pct") or underlying.get("gap_pct") or cand.get("gap_pct") or 0.0)
+
+    if is_bullish and gap_pct >= min_gap:
+        return True, "OPEN_GAP_UP", gap_pct
+    if is_bearish and gap_pct <= -min_gap:
+        return True, "OPEN_GAP_DOWN", gap_pct
+
+    return False, None, gap_pct
 
 
 def _clip(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -57,6 +104,19 @@ def compute_apex_signal_score(cand: dict[str, Any], underlying: dict[str, Any]) 
     cand_norm_dir = "bullish" if cand_dir in ("call", "bullish") else ("bearish" if cand_dir in ("put", "bearish") else cand_dir)
 
     dir_source = cand.get("direction_source") or underlying.get("direction_source") or "unverified"
+    is_runner, gap_type, gap_pct = is_gap_runner_opportunity(cand, underlying)
+
+    if dir_source == "gap_runner" or is_runner:
+        score = 100.0
+        note = f"🚀 ADUANA GAP RUNNER ({gap_type or 'RUNNER'} {gap_pct:+.2f}%)"
+        return _clip(score), {
+            "direction_source": "gap_runner",
+            "apex_score": 100.0,
+            "note": note,
+            "is_gap_runner": True,
+            "gap_type": gap_type,
+            "gap_pct": gap_pct
+        }
 
     if dir_source == "catalyst":
         cat_score = float(underlying.get("catalyst_score") or cand.get("catalyst_score") or 60.0)
@@ -301,7 +361,12 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
         s_iv * w_iv +
         s_ctx * w_ctx
     )
-    final_score = round(_clip(weighted_sum / total_w), 1)
+    raw_base_score = round(_clip(weighted_sum / total_w), 1)
+
+    # Detección y Priorización Institucional ADUANA GAP RUNNER (+25 puntos)
+    is_runner, gap_type, gap_pct = is_gap_runner_opportunity(cand, underlying)
+    gap_runner_boost = 25.0 if is_runner else 0.0
+    final_score = round(min(100.0, raw_base_score + gap_runner_boost), 1)
 
     min_score = float(eff.get("min_score", 60))
     eligible_by_score = final_score >= min_score
@@ -403,6 +468,11 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
         "config_version": int(eff.get("config_version") or 1),
         "score_total": final_score,
         "final_score": final_score,
+        "raw_base_score": raw_base_score,
+        "is_gap_runner": is_runner,
+        "gap_runner_boost": gap_runner_boost,
+        "gap_type": gap_type,
+        "gap_pct": gap_pct,
         "coverage": coverage,
         "missing_components": missing_components,
         "min_score_required": min_score,
@@ -463,11 +533,22 @@ def rank_and_score_candidates(candidates: list[dict[str, Any]],
         res = score_candidate(row, und, eff)
         row["score"] = res["score"]
         row["score_breakdown"] = res["score_breakdown"]
+        row["is_gap_runner"] = res["score_breakdown"].get("is_gap_runner", False)
+        row["gap_type"] = res["score_breakdown"].get("gap_type")
+        row["gap_pct"] = res["score_breakdown"].get("gap_pct")
         scored.append(row)
 
-    # Ordenamiento: score desc, ev_ratio desc, max_loss_total asc, id asc
+    # Ordenamiento: Prioridad 1 a Gap Runners, score desc, ev_ratio desc, max_loss_total asc, id asc
     def sort_key(item: dict[str, Any]):
+        is_runner = bool(
+            item.get("is_gap_runner")
+            or (item.get("exit_plan") or {}).get("is_gap_runner")
+            or (item.get("score_breakdown") or {}).get("is_gap_runner")
+            or item.get("direction_source") == "gap_runner"
+            or item.get("strategy_type") in ("gap_runner_call", "gap_runner_put")
+        )
         return (
+            0 if is_runner else 1,
             -float(item.get("score") or 0.0),
             -float(item.get("ev_ratio") or 0.0),
             float(item.get("max_loss_total") or 999999.0),

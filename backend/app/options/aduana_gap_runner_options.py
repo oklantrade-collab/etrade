@@ -292,7 +292,7 @@ def evaluate_options_gap_entry_tranches(
                 res["reason"] = f"PUT bloqueado: RSI 1H ({cur_rsi_1h:.1f}) < 40 (sobrevendido extremo para entrada inicial)"
                 return res
 
-        # Tendencia EMA3 vs EMA9 en 1H
+        # Tendencia EMA3 vs EMA9 en 1H o Apertura con Gap sobre EMA9
         ema3_1h = c1h.ewm(span=3, adjust=False).mean()
         ema9_1h = c1h.ewm(span=9, adjust=False).mean()
         cur_ema3 = float(ema3_1h.iloc[-1])
@@ -300,17 +300,21 @@ def evaluate_options_gap_entry_tranches(
         cur_ema9 = float(ema9_1h.iloc[-1])
 
         if is_call:
-            if cur_ema3 < cur_ema9:
-                res["reason"] = f"CALL bloqueado: EMA3 1H (${cur_ema3:.2f}) < EMA9 (${cur_ema9:.2f})"
+            is_breakout_ema9 = (cur_open_1h >= cur_ema9)
+            is_trend_ok = (cur_ema3 >= cur_ema9) or is_breakout_ema9
+            if not is_trend_ok:
+                res["reason"] = f"CALL bloqueado: EMA3 1H (${cur_ema3:.2f}) < EMA9 (${cur_ema9:.2f}) y Open (${cur_open_1h:.2f}) < EMA9"
                 return res
-            if cur_ema3 < prev_ema3:
+            if not is_breakout_ema9 and cur_ema3 < prev_ema3:
                 res["reason"] = f"CALL bloqueado: Pendiente EMA3 1H no ascendente (${cur_ema3:.2f} < ${prev_ema3:.2f})"
                 return res
         else:
-            if cur_ema3 > cur_ema9:
-                res["reason"] = f"PUT bloqueado: EMA3 1H (${cur_ema3:.2f}) > EMA9 (${cur_ema9:.2f})"
+            is_breakdown_ema9 = (cur_open_1h <= cur_ema9)
+            is_trend_ok = (cur_ema3 <= cur_ema9) or is_breakdown_ema9
+            if not is_trend_ok:
+                res["reason"] = f"PUT bloqueado: EMA3 1H (${cur_ema3:.2f}) > EMA9 (${cur_ema9:.2f}) y Open (${cur_open_1h:.2f}) > EMA9"
                 return res
-            if cur_ema3 > prev_ema3:
+            if not is_breakdown_ema9 and cur_ema3 > prev_ema3:
                 res["reason"] = f"PUT bloqueado: Pendiente EMA3 1H no descendente (${cur_ema3:.2f} > ${prev_ema3:.2f})"
                 return res
 

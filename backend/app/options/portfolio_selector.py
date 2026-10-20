@@ -36,6 +36,17 @@ class SelectionResult:
         return asdict(self)
 
 
+def is_gap_runner_candidate(cand: dict[str, Any]) -> bool:
+    """Detecta si la candidata es un Gap Runner (Open Gap Up o Open Gap Down)."""
+    return bool(
+        cand.get("is_gap_runner")
+        or (cand.get("exit_plan") or {}).get("is_gap_runner")
+        or (cand.get("score_breakdown") or {}).get("is_gap_runner")
+        or cand.get("direction_source") == "gap_runner"
+        or cand.get("strategy_type") in ("gap_runner_call", "gap_runner_put")
+    )
+
+
 def select_portfolio(candidates: list[dict[str, Any]],
                      existing_positions: list[aduana.OpenPosition] | list[dict[str, Any]],
                      eff: dict[str, Any],
@@ -97,10 +108,11 @@ def select_portfolio(candidates: list[dict[str, Any]],
     # 4. Filtrar y ordenar candidatas elegibles
     # Solo entran candidatas aprobadas por ADUANA/valoracion ('eligible') y con score >= min_score
     eligible = [c for c in candidates if c.get("eligibility_status") in ("eligible", "pending")]
-    # Ordenamiento greedy: score descendente, ev_ratio desc, max_loss_total asc, id asc
+    # Ordenamiento greedy: Prioridad 1 a Gap Runners, score descendente, ev_ratio desc, max_loss_total asc, id asc
     sorted_candidates = sorted(
         eligible,
         key=lambda x: (
+            0 if is_gap_runner_candidate(x) else 1,
             -float(x.get("score") or 0.0),
             -float(x.get("ev_ratio") or 0.0),
             float(x.get("max_loss_total") or 999999.0),
@@ -220,6 +232,7 @@ def select_portfolio(candidates: list[dict[str, Any]],
         sel_cand["qty"] = qty
         sel_cand["max_loss_total"] = loss_total
         sel_cand["selected_order"] = len(selected) + 1
+        sel_cand["is_gap_runner"] = is_gap_runner_candidate(cand)
 
         selected.append(sel_cand)
         used_underlyings.add(uid)

@@ -286,6 +286,7 @@ CANDIDATE_SUMMARY_COLS = (
     "id,underlying_id,strategy_type,direction,direction_source,expiry,legs,qty,"
     "entry_debit,max_loss_total,max_profit_contract,breakeven,ev_view_net,ev_neutral_net,"
     "pop_view,pop_neutral,score,eligibility_status,rank_global,rank_strategy,created_at,"
+    "exit_plan,score_breakdown,"
     "opt_underlyings(symbol,price,apex_score,data_state,direction)"
 )
 
@@ -329,6 +330,7 @@ def get_candidate(candidate_id: int):
 @router.get("/opportunities")
 def list_opportunities(strategy: str | None = None, direction: str | None = None,
                        status: str = "all", symbol: str | None = None, min_score: float | None = None,
+                       gap_runner_only: bool = False, gap_type: str | None = None,
                        limit: int = 100):
     """Vista consolidada de Opportunities con ranking, score, desglose y resumen de cartera."""
     sb = get_supabase()
@@ -348,6 +350,48 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     except Exception as e:
         return {"items": [], "error": str(e)[:200]}
 
+    from app.options.aduana_gap_runner_options import get_min_gap_threshold
+
+    # Enriquecer candidatas con indicadores ADUANA GAP RUNNER
+    for item in items:
+        exit_plan = item.get("exit_plan") or {}
+        score_bd = item.get("score_breakdown") or {}
+        und = item.get("opt_underlyings") or {}
+        sym = (und.get("symbol") or "").upper()
+
+        is_runner = bool(
+            exit_plan.get("is_gap_runner")
+            or score_bd.get("is_gap_runner")
+            or item.get("direction_source") == "gap_runner"
+            or item.get("strategy_type") in ("gap_runner_call", "gap_runner_put")
+        )
+        g_type = exit_plan.get("gap_type") or score_bd.get("gap_type")
+        g_pct = float(exit_plan.get("gap_pct") or score_bd.get("gap_pct") or 0.0)
+
+        if not is_runner and sym:
+            min_gap = get_min_gap_threshold(sym)
+            c_dir = (item.get("direction") or "").lower()
+            u_gap = float(und.get("gap_pct") or exit_plan.get("gap_pct") or 0.0)
+            if c_dir in ("call", "bullish") and u_gap >= min_gap:
+                is_runner = True
+                g_type = "OPEN_GAP_UP"
+                g_pct = u_gap
+            elif c_dir in ("put", "bearish") and u_gap <= -min_gap:
+                is_runner = True
+                g_type = "OPEN_GAP_DOWN"
+                g_pct = u_gap
+
+        item["is_gap_runner"] = is_runner
+        item["gap_type"] = g_type
+        item["gap_pct"] = g_pct
+        item["catalyst_state"] = exit_plan.get("catalyst_state")
+
+    if gap_runner_only:
+        items = [i for i in items if i.get("is_gap_runner")]
+
+    if gap_type:
+        items = [i for i in items if (i.get("gap_type") or "").upper() == gap_type.upper()]
+
     if symbol:
         items = [i for i in items if (i.get("opt_underlyings") or {}).get("symbol") == symbol.upper()]
 
@@ -357,15 +401,19 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     rejected = [i for i in items if i.get("eligibility_status") == "rejected"]
     calls = [i for i in items if i.get("direction") in ("CALL", "bullish")]
     puts = [i for i in items if i.get("direction") in ("PUT", "bearish")]
+    gap_runners = [i for i in items if i.get("is_gap_runner")]
+    gap_up_runners = [i for i in gap_runners if i.get("gap_type") == "OPEN_GAP_UP"]
+    gap_down_runners = [i for i in gap_runners if i.get("gap_type") == "OPEN_GAP_DOWN"]
 
     def _distinct_by_symbol(cands: list[dict], top_n: int = 3) -> list[dict]:
         out = []
         seen = set()
         sorted_cands = sorted(cands, key=lambda x: (
-            float(x.get("score") or 0.0),
-            float(x.get("ev_ratio") or x.get("ev_view_net") or 0.0),
-            float(x.get("max_profit_contract") or 0.0)
-        ), reverse=True)
+            0 if x.get("is_gap_runner") else 1,   # Prioridad a Gap Runners
+            -float(x.get("score") or 0.0),
+            -float(x.get("ev_ratio") or x.get("ev_view_net") or 0.0),
+            -float(x.get("max_profit_contract") or 0.0)
+        ))
         for c in sorted_cands:
             sym = (c.get("opt_underlyings") or {}).get("symbol") or "UNKNOWN"
             if sym not in seen:
@@ -388,6 +436,10 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
             "total_candidates": total,
             "total_calls": len(calls),
             "total_puts": len(puts),
+            "total_gap_runners": len(gap_runners),
+            "total_gap_up": len(gap_up_runners),
+            "total_gap_down": len(gap_down_runners),
+            "has_gap_runners": len(gap_runners) > 0,
             "top_calls": top_calls,
             "top_puts": top_puts,
             "selected_count": len(selected),

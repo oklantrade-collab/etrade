@@ -110,6 +110,50 @@ function StatusBadge({ status }: { status: string }) {
   return <span style={{ color: '#888', fontSize: 10 }}>{status}</span>
 }
 
+function GapRunnerBadge({ isRunner, gapType, gapPct }: { isRunner?: boolean; gapType?: string; gapPct?: number }) {
+  if (!isRunner) return null
+  const isUp = gapType === 'OPEN_GAP_UP'
+  const bg = isUp ? 'rgba(34, 197, 94, 0.22)' : 'rgba(232, 121, 249, 0.22)'
+  const color = isUp ? '#22C55E' : '#E879F9'
+  const border = isUp ? 'rgba(34, 197, 94, 0.5)' : 'rgba(232, 121, 249, 0.5)'
+  const icon = isUp ? '🚀' : '📉'
+  const label = isUp ? 'GAP UP RUNNER' : 'GAP DOWN RUNNER'
+  const pctStr = gapPct != null && gapPct !== 0 ? ` ${gapPct > 0 ? '+' : ''}${gapPct.toFixed(1)}%` : ''
+
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '3px 8px',
+      borderRadius: 6,
+      background: bg,
+      color,
+      fontWeight: 900,
+      fontSize: 10,
+      letterSpacing: '0.3px',
+      border: `1px solid ${border}`,
+      boxShadow: isUp ? '0 0 10px rgba(34,197,94,0.3)' : '0 0 10px rgba(232,121,249,0.3)',
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    }}>
+      <span style={{ fontSize: 11 }}>{icon}</span>
+      <span>{label}</span>
+      {pctStr && <span style={{ opacity: 0.9 }}>{pctStr}</span>}
+      <span style={{
+        fontSize: 8,
+        background: isUp ? '#22C55E' : '#E879F9',
+        color: '#000',
+        padding: '1px 4px',
+        borderRadius: 3,
+        fontWeight: 900,
+      }}>
+        +25 PTS
+      </span>
+    </span>
+  )
+}
+
 function CatalystSemaphores({ meta }: { meta?: any }) {
   const c1 = Boolean(meta?.c1_gap?.confirmed || meta?.c1_gap?.triggered)
   const c2 = Boolean(meta?.c2_basis_1h?.triggered || meta?.c2_basis_1h?.type)
@@ -178,6 +222,7 @@ export default function OpportunitiesPage() {
   const [msg, setMsg] = useState<string | null>(null)
   const [status, setStatus] = useState<string>('all')
   const [direction, setDirection] = useState<string>('all')
+  const [gapFilter, setGapFilter] = useState<'all' | 'gap_runners' | 'gap_up' | 'gap_down'>('all')
   const [strategy, setStrategy] = useState<string>('')
   const [search, setSearch] = useState<string>('')
   const [sel, setSel] = useState<number | null>(null)
@@ -200,6 +245,9 @@ export default function OpportunitiesPage() {
     if (direction !== 'all') p.set('direction', direction)
     if (strategy) p.set('strategy', strategy)
     if (search) p.set('symbol', search)
+    if (gapFilter === 'gap_runners') p.set('gap_runner_only', 'true')
+    if (gapFilter === 'gap_up') { p.set('gap_runner_only', 'true'); p.set('gap_type', 'OPEN_GAP_UP') }
+    if (gapFilter === 'gap_down') { p.set('gap_runner_only', 'true'); p.set('gap_type', 'OPEN_GAP_DOWN') }
 
     try {
       const res = await fetch(`/api/v1/options/opportunities?${p.toString()}`).then(r => r.json())
@@ -213,7 +261,7 @@ export default function OpportunitiesPage() {
 
   useEffect(() => {
     loadData()
-  }, [status, direction, strategy])
+  }, [status, direction, strategy, gapFilter])
 
   const openDetail = async (id: number) => {
     if (sel === id) {
@@ -414,6 +462,72 @@ export default function OpportunitiesPage() {
         </div>
       )}
 
+      {/* ADUANA GAP RUNNER INSTITUTIONAL PRIORITY BANNER */}
+      {Boolean(summary?.has_gap_runners || (summary?.total_gap_runners ?? 0) > 0) && (
+        <div style={{
+          background: 'linear-gradient(90deg, rgba(34,197,94,0.18) 0%, rgba(56,189,248,0.15) 50%, rgba(171,71,188,0.18) 100%)',
+          border: '1px solid rgba(34,197,94,0.4)',
+          borderRadius: 12,
+          padding: '14px 20px',
+          marginBottom: 18,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          gap: 12,
+          boxShadow: '0 4px 20px rgba(34,197,94,0.15)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 24 }}>⚡</span>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <b style={{ color: '#FFF', fontSize: 14, letterSpacing: '-0.3px' }}>
+                  PRIORIDAD ABSOLUTA ADUANA GAP RUNNERS ACTIVA
+                </b>
+                <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 4, background: '#22C55E', color: '#000', fontWeight: 900 }}>
+                  PRIORIDAD 1 CARTERA
+                </span>
+              </div>
+              <p style={{ color: '#CCC', fontSize: 12, margin: '3px 0 0' }}>
+                Detectados {summary?.total_gap_runners} activos con GAP institucional en la apertura. Reciben <b>Score Boost (+25 pts)</b>, primer orden en asignación de presupuesto y trailing ratchets de protección.
+              </p>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              onClick={() => setGapFilter(gapFilter === 'gap_up' ? 'all' : 'gap_up')}
+              style={{
+                fontSize: 11,
+                padding: '6px 12px',
+                borderRadius: 8,
+                background: gapFilter === 'gap_up' ? '#22C55E' : 'rgba(34,197,94,0.25)',
+                color: gapFilter === 'gap_up' ? '#000' : '#22C55E',
+                fontWeight: 900,
+                border: '1px solid rgba(34,197,94,0.5)',
+                cursor: 'pointer',
+              }}
+            >
+              🚀 {summary?.total_gap_up ?? 0} GAP UP (CALLs)
+            </button>
+            <button
+              onClick={() => setGapFilter(gapFilter === 'gap_down' ? 'all' : 'gap_down')}
+              style={{
+                fontSize: 11,
+                padding: '6px 12px',
+                borderRadius: 8,
+                background: gapFilter === 'gap_down' ? '#E879F9' : 'rgba(171,71,188,0.25)',
+                color: gapFilter === 'gap_down' ? '#000' : '#E879F9',
+                fontWeight: 900,
+                border: '1px solid rgba(171,71,188,0.5)',
+                cursor: 'pointer',
+              }}
+            >
+              📉 {summary?.total_gap_down ?? 0} GAP DOWN (PUTs)
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* CAPITAL ALLOCATION & RISK BAR (Stocks Style) */}
       {summary && (
         <div style={{
@@ -495,10 +609,11 @@ export default function OpportunitiesPage() {
                   }}
                 >
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ color: '#FFF', fontWeight: 900, fontSize: 14 }}>
                         {c.opt_underlyings?.symbol}
                       </span>
+                      <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
                       <span style={{ fontSize: 11, color: '#22C55E', fontWeight: 700 }}>
                         {STRAT[c.strategy_type] || c.strategy_type}
                       </span>
@@ -518,17 +633,18 @@ export default function OpportunitiesPage() {
                       onClick={() => handleSimulateEntry(c.id)}
                       disabled={simulating || c.eligibility_status === 'rejected'}
                       style={{
-                        background: c.eligibility_status === 'rejected' ? 'rgba(255,255,255,0.05)' : 'rgba(34,197,94,0.2)',
-                        color: c.eligibility_status === 'rejected' ? '#666' : '#22C55E',
-                        border: '1px solid rgba(34,197,94,0.4)',
+                        background: c.eligibility_status === 'rejected' ? 'rgba(255,255,255,0.05)' : (c.is_gap_runner ? 'linear-gradient(135deg, #22C55E 0%, #16A34A 100%)' : 'rgba(34,197,94,0.2)'),
+                        color: c.eligibility_status === 'rejected' ? '#666' : (c.is_gap_runner ? '#000' : '#22C55E'),
+                        border: c.is_gap_runner ? '1px solid #22C55E' : '1px solid rgba(34,197,94,0.4)',
                         borderRadius: 6,
                         padding: '5px 10px',
                         fontSize: 10,
-                        fontWeight: 800,
+                        fontWeight: 900,
                         cursor: c.eligibility_status === 'rejected' ? 'not-allowed' : 'pointer',
+                        boxShadow: c.is_gap_runner ? '0 0 10px rgba(34,197,94,0.4)' : 'none',
                       }}
                     >
-                      ★ Entrada Paper
+                      {c.is_gap_runner ? '🚀 Tranche 1 (Gap Runner)' : '★ Entrada Paper'}
                     </button>
                   </div>
                 </div>
@@ -577,10 +693,11 @@ export default function OpportunitiesPage() {
                   }}
                 >
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                       <span style={{ color: '#FFF', fontWeight: 900, fontSize: 14 }}>
                         {c.opt_underlyings?.symbol}
                       </span>
+                      <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
                       <span style={{ fontSize: 11, color: '#AB47BC', fontWeight: 700 }}>
                         {STRAT[c.strategy_type] || c.strategy_type}
                       </span>
@@ -600,17 +717,18 @@ export default function OpportunitiesPage() {
                       onClick={() => handleSimulateEntry(c.id)}
                       disabled={simulating || c.eligibility_status === 'rejected'}
                       style={{
-                        background: c.eligibility_status === 'rejected' ? 'rgba(255,255,255,0.05)' : 'rgba(171,71,188,0.2)',
-                        color: c.eligibility_status === 'rejected' ? '#666' : '#AB47BC',
-                        border: '1px solid rgba(171,71,188,0.4)',
+                        background: c.eligibility_status === 'rejected' ? 'rgba(255,255,255,0.05)' : (c.is_gap_runner ? 'linear-gradient(135deg, #E879F9 0%, #AB47BC 100%)' : 'rgba(171,71,188,0.2)'),
+                        color: c.eligibility_status === 'rejected' ? '#666' : (c.is_gap_runner ? '#000' : '#AB47BC'),
+                        border: c.is_gap_runner ? '1px solid #E879F9' : '1px solid rgba(171,71,188,0.4)',
                         borderRadius: 6,
                         padding: '5px 10px',
                         fontSize: 10,
-                        fontWeight: 800,
+                        fontWeight: 900,
                         cursor: c.eligibility_status === 'rejected' ? 'not-allowed' : 'pointer',
+                        boxShadow: c.is_gap_runner ? '0 0 10px rgba(232,121,249,0.4)' : 'none',
                       }}
                     >
-                      ★ Entrada Paper
+                      {c.is_gap_runner ? '📉 Tranche 1 (Gap Runner)' : '★ Entrada Paper'}
                     </button>
                   </div>
                 </div>
@@ -654,6 +772,50 @@ export default function OpportunitiesPage() {
                 }}
               >
                 🟣 Solo PUTs
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', padding: 3, borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+              <button
+                onClick={() => setGapFilter('all')}
+                style={{
+                  padding: '6px 11px', borderRadius: 6, fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer',
+                  background: gapFilter === 'all' ? 'rgba(255,255,255,0.1)' : 'transparent',
+                  color: gapFilter === 'all' ? '#FFF' : '#888',
+                }}
+              >
+                Todos los Flujos
+              </button>
+              <button
+                onClick={() => setGapFilter(gapFilter === 'gap_runners' ? 'all' : 'gap_runners')}
+                style={{
+                  padding: '6px 11px', borderRadius: 6, fontSize: 11, fontWeight: 800, border: 'none', cursor: 'pointer',
+                  background: gapFilter === 'gap_runners' ? 'linear-gradient(135deg, rgba(34,197,94,0.3) 0%, rgba(171,71,188,0.3) 100%)' : 'rgba(255,255,255,0.03)',
+                  color: gapFilter === 'gap_runners' ? '#FFF' : '#FFD700',
+                  boxShadow: gapFilter === 'gap_runners' ? '0 0 10px rgba(255,215,0,0.2)' : 'none',
+                }}
+              >
+                ⚡ Gap Runners ({summary?.total_gap_runners ?? 0})
+              </button>
+              <button
+                onClick={() => setGapFilter(gapFilter === 'gap_up' ? 'all' : 'gap_up')}
+                style={{
+                  padding: '6px 10px', borderRadius: 6, fontSize: 11, fontWeight: 800, border: 'none', cursor: 'pointer',
+                  background: gapFilter === 'gap_up' ? 'rgba(34,197,94,0.25)' : 'transparent',
+                  color: gapFilter === 'gap_up' ? '#22C55E' : '#888',
+                }}
+              >
+                🚀 Gap Up ({summary?.total_gap_up ?? 0})
+              </button>
+              <button
+                onClick={() => setGapFilter(gapFilter === 'gap_down' ? 'all' : 'gap_down')}
+                style={{
+                  padding: '6px 10px', borderRadius: 6, fontSize: 11, fontWeight: 800, border: 'none', cursor: 'pointer',
+                  background: gapFilter === 'gap_down' ? 'rgba(171,71,188,0.25)' : 'transparent',
+                  color: gapFilter === 'gap_down' ? '#E879F9' : '#888',
+                }}
+              >
+                📉 Gap Down ({summary?.total_gap_down ?? 0})
               </button>
             </div>
 
@@ -798,8 +960,9 @@ export default function OpportunitiesPage() {
                             {c.rank_global ? `#${c.rank_global}` : '—'}
                           </td>
                           <td style={{ ...td, color: '#FFF', fontWeight: 900 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                               <span>{group.symbol}</span>
+                              <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
                               {group.rest.length > 0 && (
                                 <button
                                   onClick={(e) => {
@@ -874,7 +1037,10 @@ export default function OpportunitiesPage() {
                             >
                               <td style={{ ...td, color: '#555', paddingLeft: 20 }}>↳</td>
                               <td style={{ ...td, color: '#888', fontSize: 11 }}>
-                                {alt.opt_underlyings?.symbol}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                  <span>{alt.opt_underlyings?.symbol}</span>
+                                  <GapRunnerBadge isRunner={alt.is_gap_runner} gapType={alt.gap_type} gapPct={alt.gap_pct} />
+                                </div>
                               </td>
                               <td style={{ ...td, color: '#999', fontSize: 11 }}>
                                 {STRAT[alt.strategy_type] || alt.strategy_type}
@@ -1024,6 +1190,20 @@ export default function OpportunitiesPage() {
                                       <Payoff data={detail.payoff} be={detail.breakeven} />
                                     </div>
 
+                                    {c.is_gap_runner && (
+                                      <div style={{ marginTop: 10, background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 8, padding: '10px 14px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                          <span style={{ fontSize: 13 }}>🛡️</span>
+                                          <b style={{ color: '#22C55E', fontSize: 11 }}>ESCUDO DEFENSIVO ADUANA GAP RUNNER</b>
+                                        </div>
+                                        <div style={{ fontSize: 10, color: '#CCC', lineHeight: 1.5 }}>
+                                          • <b>Hard Stop Loss:</b> -35% en prima | <b>Stall Guard:</b> 20 min sin avance<br/>
+                                          • <b>Trailing Ratchet:</b> Tier 2 (+25% PnL ➔ asegura +15%) y Tier 3 (+50% PnL ➔ asegura 70% pico)<br/>
+                                          • <b>Salidas Técnicas:</b> Monitoreo EMA9 15m y Clímax Total en RSI 1H {String(c.direction).toUpperCase().includes('CALL') || String(c.direction).toUpperCase().includes('BULL') ? '> 85' : '< 15'}
+                                        </div>
+                                      </div>
+                                    )}
+
                                     {/* Botón de Entrada Paper */}
                                     <div style={{ marginTop: 14, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
                                       <button
@@ -1071,7 +1251,10 @@ export default function OpportunitiesPage() {
                             {c.rank_global ? `#${c.rank_global}` : '—'}
                           </td>
                           <td style={{ ...td, color: '#FFF', fontWeight: 800 }}>
-                            {c.opt_underlyings?.symbol}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                              <span>{c.opt_underlyings?.symbol}</span>
+                              <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
+                            </div>
                           </td>
                           <td style={td}>{STRAT[c.strategy_type] || c.strategy_type}</td>
                           <td style={td}>
@@ -1217,6 +1400,20 @@ export default function OpportunitiesPage() {
                                     <div style={{ marginTop: 8 }}>
                                       <Payoff data={detail.payoff} be={detail.breakeven} />
                                     </div>
+
+                                    {c.is_gap_runner && (
+                                      <div style={{ marginTop: 10, background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 8, padding: '10px 14px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                                          <span style={{ fontSize: 13 }}>🛡️</span>
+                                          <b style={{ color: '#22C55E', fontSize: 11 }}>ESCUDO DEFENSIVO ADUANA GAP RUNNER</b>
+                                        </div>
+                                        <div style={{ fontSize: 10, color: '#CCC', lineHeight: 1.5 }}>
+                                          • <b>Hard Stop Loss:</b> -35% en prima | <b>Stall Guard:</b> 20 min sin avance<br/>
+                                          • <b>Trailing Ratchet:</b> Tier 2 (+25% PnL ➔ asegura +15%) y Tier 3 (+50% PnL ➔ asegura 70% pico)<br/>
+                                          • <b>Salidas Técnicas:</b> Monitoreo EMA9 15m y Clímax Total en RSI 1H {String(c.direction).toUpperCase().includes('CALL') || String(c.direction).toUpperCase().includes('BULL') ? '> 85' : '< 15'}
+                                        </div>
+                                      </div>
+                                    )}
 
                                     {/* Botón de Entrada Paper */}
                                     <div style={{ marginTop: 14, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>

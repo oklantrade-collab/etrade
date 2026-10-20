@@ -155,11 +155,40 @@ def run_catalyst_scan(
             c_dict = {c.name: c.to_dict() for c in resolution.components}
             c_active = [c.name for c in resolution.components if c.triggered]
 
+            from app.options.aduana_gap_runner_options import get_asset_class, get_min_gap_threshold
+            asset_class = get_asset_class(sym)
+            min_gap_req = get_min_gap_threshold(sym)
+            c1_gap = c_dict.get("gap_go", {})
+            gap_pct = float(c1_gap.get("detail", {}).get("gap_pct") or c1_gap.get("gap_pct") or 0.0)
+            if gap_pct == 0.0 and prev_close > 0:
+                gap_pct = round(((price - prev_close) / prev_close) * 100.0, 2)
+
+            is_gap_runner = False
+            gap_type = None
+
+            if resolution.direction in ("bullish", "CALL") and gap_pct >= min_gap_req:
+                is_gap_runner = True
+                gap_type = "OPEN_GAP_UP"
+            elif resolution.direction in ("bearish", "PUT") and gap_pct <= -min_gap_req:
+                is_gap_runner = True
+                gap_type = "OPEN_GAP_DOWN"
+
+            if is_gap_runner:
+                c_active.append("gap_runner")
+                final_cat_score = round(min(100.0, resolution.total_score + 25.0), 1)
+            else:
+                final_cat_score = round(resolution.total_score, 1)
+
             candidate_payload = {
                 "symbol": sym,
                 "direction": resolution.direction,
                 "decision": resolution.decision,
-                "catalyst_score": round(resolution.total_score, 1),
+                "catalyst_score": final_cat_score,
+                "is_gap_runner": is_gap_runner,
+                "gap_type": gap_type,
+                "gap_pct": gap_pct,
+                "asset_class": asset_class,
+                "min_gap_required": min_gap_req,
                 "c1_gap": c_dict.get("gap_go", {}),
                 "c2_basis_1h": c_dict.get("sipv_basis_1h", {}),
                 "c3_adx": c_dict.get("adx_di_5m", {}),

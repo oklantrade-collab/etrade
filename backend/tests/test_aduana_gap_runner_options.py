@@ -421,3 +421,92 @@ def test_defense_tp_climax_total():
     )
     assert res_put['should_exit'] is True
     assert res_put['rule_code'] == 'OPT_GAP_TP_CLIMAX'
+
+
+# ==============================================================================
+# TESTS DE PRIORIZACIÓN DE COMPRA EN OPPORTUNITIES (GAP RUNNERS)
+# ==============================================================================
+
+def test_is_gap_runner_opportunity_detection():
+    """Valida la detección de Gap Runner tanto en candidatas directas como por subyacente."""
+    from app.options.score import is_gap_runner_opportunity
+
+    # 1. Candidata marcada directamente
+    c1 = {'id': 1, 'is_gap_runner': True, 'gap_type': 'OPEN_GAP_UP', 'gap_pct': 4.5}
+    is_r, gtype, gpct = is_gap_runner_opportunity(c1)
+    assert is_r is True
+    assert gtype == 'OPEN_GAP_UP'
+    assert gpct == 4.5
+
+    # 2. Subyacente Mega-Cap con Gap Up >= 1.2%
+    c2 = {'id': 2, 'direction': 'CALL'}
+    u2 = {'symbol': 'NVDA', 'catalyst_meta': {'c1_gap': {'gap_pct': 1.8}}}
+    is_r2, gtype2, gpct2 = is_gap_runner_opportunity(c2, u2)
+    assert is_r2 is True
+    assert gtype2 == 'OPEN_GAP_UP'
+
+    # 3. Subyacente ETF con Gap Down <= -0.6%
+    c3 = {'id': 3, 'direction': 'PUT'}
+    u3 = {'symbol': 'SPY', 'catalyst_meta': {'c1_gap': {'gap_pct': -0.9}}}
+    is_r3, gtype3, gpct3 = is_gap_runner_opportunity(c3, u3)
+    assert is_r3 is True
+    assert gtype3 == 'OPEN_GAP_DOWN'
+
+    # 4. Subyacente que NO supera umbral (ej. NVDA con +0.5% < 1.2%)
+    c4 = {'id': 4, 'direction': 'CALL'}
+    u4 = {'symbol': 'NVDA', 'catalyst_meta': {'c1_gap': {'gap_pct': 0.5}}}
+    is_r4, _, _ = is_gap_runner_opportunity(c4, u4)
+    assert is_r4 is False
+
+
+def test_score_boost_gap_runner_call_and_put():
+    """Valida que un Gap Runner reciba un Score Boost institucional de +25 puntos."""
+    from app.options.score import score_candidate
+    eff = {'w_expectancy': 30, 'w_apex_signal': 20, 'w_liquidity': 20, 'w_risk': 15, 'w_iv_greeks': 10, 'w_context': 5}
+    legs = [{'bid': 2.0, 'ask': 2.1, 'iv': 0.35, 'delta': 0.50, 'side': 'buy'}]
+
+    # Candidata regular (sin gap runner)
+    cand_reg = {
+        'id': 10, 'strategy_type': 'long_call', 'direction': 'CALL',
+        'ev_ratio': 0.20, 'ev_view_net': 15.0, 'max_loss_contract': 100.0,
+        'legs': legs
+    }
+    und_reg = {'symbol': 'AMZN', 'direction': 'CALL', 'apex_score': 60.0}
+    res_reg = score_candidate(cand_reg, und_reg, eff)
+    assert res_reg['score_breakdown']['is_gap_runner'] is False
+    assert res_reg['score_breakdown']['gap_runner_boost'] == 0.0
+
+    # Misma candidata pero calificada como OPEN GAP UP Runner
+    cand_gap = dict(cand_reg)
+    cand_gap['id'] = 11
+    cand_gap['is_gap_runner'] = True
+    cand_gap['gap_type'] = 'OPEN_GAP_UP'
+    cand_gap['gap_pct'] = 3.5
+    res_gap = score_candidate(cand_gap, und_reg, eff)
+
+    assert res_gap['score_breakdown']['is_gap_runner'] is True
+    assert res_gap['score_breakdown']['gap_runner_boost'] == 25.0
+    # El score final debe ser mayor por el boost de 25 pts (hasta 100 máx)
+    assert res_gap['score'] >= res_reg['score'] + 15.0
+
+
+def test_portfolio_selector_gap_runner_first_priority():
+    """Valida que select_portfolio asigne prioridad absoluta a Gap Runners frente a candidatas comunes."""
+    from app.options.portfolio_selector import select_portfolio
+    eff = {'max_open_risk_usd': 150.0, 'max_risk_per_trade_usd': 100.0, 'max_daily_selections': 3, 'min_score': 50.0}
+
+    # 3 candidatas elegibles
+    # Cand 1: Spread común con score 80
+    c1 = {'id': 101, 'underlying_id': 1, 'symbol': 'AAPL', 'direction': 'bullish', 'score': 80.0, 'max_loss_total': 80.0, 'eligibility_status': 'eligible'}
+    # Cand 2: Gap Runner con score 75
+    c2 = {'id': 102, 'underlying_id': 2, 'symbol': 'NVDA', 'direction': 'bullish', 'score': 75.0, 'max_loss_total': 70.0, 'is_gap_runner': True, 'gap_type': 'OPEN_GAP_UP', 'eligibility_status': 'eligible'}
+    # Cand 3: Spread común con score 78
+    c3 = {'id': 103, 'underlying_id': 3, 'symbol': 'MSFT', 'direction': 'bullish', 'score': 78.0, 'max_loss_total': 60.0, 'eligibility_status': 'eligible'}
+
+    res = select_portfolio([c1, c2, c3], existing_positions=[], eff=eff)
+    selected = res.selected
+    assert len(selected) >= 1
+    # La candidata #1 seleccionada DEBE ser el Gap Runner (NVDA id 102), a pesar de que c1 tenía score 80
+    assert selected[0]['id'] == 102
+    assert selected[0]['symbol'] == 'NVDA'
+    assert selected[0]['is_gap_runner'] is True

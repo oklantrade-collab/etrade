@@ -46,7 +46,9 @@ def candidate_row(c: st.Candidate, underlying_id: int, direction_source: str, se
         "settings_version": settings_version, "snapshot_at": snapshot_at,
     }
     if catalyst_state is not None:
-        row["catalyst_state"] = catalyst_state
+        if row.get("exit_plan") is None:
+            row["exit_plan"] = {}
+        row["exit_plan"]["catalyst_state"] = catalyst_state
     return row
 
 
