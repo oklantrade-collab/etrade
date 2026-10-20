@@ -337,38 +337,140 @@ def evaluate_options_gap_entry_tranches(
         o2 = float(o5m.iloc[-1])
 
         if is_call:
-            # Vela 1 debe ser verde
-            if c1 <= o1:
-                res["reason"] = f"CALL bloqueado: Vela 1 de 5m fue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
-                return res
-            # Vela 2: Open >= Close vela anterior
-            if o2 < (c1 * 0.998):
-                res["reason"] = f"CALL bloqueado: Vela 2 de 5m abrió por debajo del cierre previo (Open ${o2:.2f} < Close ${c1:.2f})"
-                return res
             if sipv_signal and str(sipv_signal).upper() not in ("BUY", "STRONG_BUY", "ALCISTA"):
                 res["reason"] = f"CALL bloqueado: SIPV indica '{sipv_signal}' en vez de BUY"
                 return res
 
-            initial_sl = round(min(l1, o1 * 0.995), 2)
-            rule_code = "OPT_GAP_TRANCHE_1_CALL"
-            reason_msg = f"CALL Tranche 1 aprobado: Vela 1 verde (+${c1-o1:.2f}), Vela 2 continuación micro-gap (Open ${o2:.2f}), Macro 1H con espacio."
+            if len(df_5m) == 2:
+                # Ruta A: Apertura directa
+                if c1 <= o1:
+                    res["reason"] = f"CALL bloqueado: Vela 1 de 5m fue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
+                    return res
+                if o2 < (c1 * 0.998):
+                    res["reason"] = f"CALL bloqueado: Vela 2 de 5m abrió por debajo del cierre previo (Open ${o2:.2f} < Close ${c1:.2f})"
+                    return res
+
+                initial_sl = round(min(l1, o1 * 0.995), 2)
+                rule_code = "OPT_GAP_TRANCHE_1_CALL"
+                reason_msg = f"CALL Tranche 1 aprobado: Vela 1 verde (+${c1-o1:.2f}), Vela 2 continuación micro-gap (Open ${o2:.2f}), Macro 1H con espacio."
+            else:
+                # len(df_5m) >= 3: Verificar si hubo sacudida previa (velas rojas)
+                had_red = bool((c5m.iloc[:-2] <= o5m.iloc[:-2]).any())
+                if had_red:
+                    # Ruta B: Dip & Rip
+                    is_turn_green_1 = c1 > o1
+                    is_turn_green_2 = (c2 >= o2) and (c2 >= c1)
+
+                    if not is_turn_green_1:
+                        res["reason"] = f"CALL bloqueado: vela previa de 5m sigue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
+                        return res
+                    if not is_turn_green_2:
+                        res["reason"] = f"CALL bloqueado: vela 2 de confirmación no superó la anterior (Close ${c2:.2f} vs Prev ${c1:.2f})"
+                        return res
+
+                    low_dip = float(min(l5m.iloc[:-2].min(), l1))
+                    open_day = float(o5m.iloc[0])
+                    est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct > 0 else open_day * 0.95
+
+                    # Candado anti-desplome
+                    if low_dip <= est_prev_close:
+                        res["reason"] = f"CALL Dip & Rip bloqueado: sacudida perforó cierre previo (${est_prev_close:.2f})"
+                        return res
+
+                    initial_gap_pts = open_day - est_prev_close
+                    if initial_gap_pts > 0:
+                        max_drop = open_day - (0.75 * initial_gap_pts)
+                        if low_dip < max_drop:
+                            res["reason"] = f"CALL Dip & Rip bloqueado: retroceso borró más del 75% del Gap inicial (Low ${low_dip:.2f} < ${max_drop:.2f})"
+                            return res
+
+                    delta = max(0.01 * cur_p, 0.15 * float(h1 - l1))
+                    initial_sl = round(low_dip - delta, 2)
+                    if initial_sl <= 0 or initial_sl >= cur_p:
+                        initial_sl = round(low_dip * 0.99, 2)
+
+                    rule_code = "OPT_GAP_DIP_AND_RIP_CALL"
+                    reason_msg = f"CALL Dip & Rip Tranche 1 aprobado: Sacudida inicial absorbida (Low ${low_dip:.2f}), confirmación 2 velas verdes (${c1:.2f}->${c2:.2f}), Macro 1H con espacio."
+                else:
+                    # No hubo rojas: Continuación directa
+                    if c1 <= o1:
+                        res["reason"] = f"CALL bloqueado: Vela anterior de 5m fue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
+                        return res
+                    if o2 < (c1 * 0.998):
+                        res["reason"] = f"CALL bloqueado: Vela actual de 5m abrió por debajo del cierre previo (Open ${o2:.2f} < Close ${c1:.2f})"
+                        return res
+
+                    initial_sl = round(min(l1, o1 * 0.995), 2)
+                    rule_code = "OPT_GAP_TRANCHE_1_CALL"
+                    reason_msg = f"CALL Tranche 1 aprobado: Vela previa verde (+${c1-o1:.2f}), Vela actual micro-gap (Open ${o2:.2f}), Macro 1H con espacio."
 
         else:
-            # Vela 1 debe ser roja
-            if c1 >= o1:
-                res["reason"] = f"PUT bloqueado: Vela 1 de 5m fue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
-                return res
-            # Vela 2: Open <= Close vela anterior
-            if o2 > (c1 * 1.002):
-                res["reason"] = f"PUT bloqueado: Vela 2 de 5m abrió por encima del cierre previo (Open ${o2:.2f} > Close ${c1:.2f})"
-                return res
             if sipv_signal and str(sipv_signal).upper() not in ("SELL", "STRONG_SELL", "BAJISTA"):
                 res["reason"] = f"PUT bloqueado: SIPV indica '{sipv_signal}' en vez de SELL"
                 return res
 
-            initial_sl = round(max(h1, o1 * 1.005), 2)
-            rule_code = "OPT_GAP_TRANCHE_1_PUT"
-            reason_msg = f"PUT Tranche 1 aprobado: Vela 1 roja (-${o1-c1:.2f}), Vela 2 continuación bajista (Open ${o2:.2f}), Macro 1H con espacio."
+            if len(df_5m) == 2:
+                # Ruta A: Apertura directa bajista
+                if c1 >= o1:
+                    res["reason"] = f"PUT bloqueado: Vela 1 de 5m fue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
+                    return res
+                if o2 > (c1 * 1.002):
+                    res["reason"] = f"PUT bloqueado: Vela 2 de 5m abrió por encima del cierre previo (Open ${o2:.2f} > Close ${c1:.2f})"
+                    return res
+
+                initial_sl = round(max(h1, o1 * 1.005), 2)
+                rule_code = "OPT_GAP_TRANCHE_1_PUT"
+                reason_msg = f"PUT Tranche 1 aprobado: Vela 1 roja (-${o1-c1:.2f}), Vela 2 continuación bajista (Open ${o2:.2f}), Macro 1H con espacio."
+            else:
+                # len(df_5m) >= 3: Verificar si hubo rebote matutino (velas verdes)
+                had_green = bool((c5m.iloc[:-2] >= o5m.iloc[:-2]).any())
+                if had_green:
+                    # Ruta B: Pop & Drop
+                    is_turn_red_1 = c1 < o1
+                    is_turn_red_2 = (c2 <= o2) and (c2 <= c1)
+
+                    if not is_turn_red_1:
+                        res["reason"] = f"PUT bloqueado: vela previa de 5m sigue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
+                        return res
+                    if not is_turn_red_2:
+                        res["reason"] = f"PUT bloqueado: vela 2 de confirmación no cayó bajo la anterior (Close ${c2:.2f} vs Prev ${c1:.2f})"
+                        return res
+
+                    high_pop = float(max(h5m.iloc[:-2].max(), h1))
+                    open_day = float(o5m.iloc[0])
+                    est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct < 0 else open_day * 1.05
+
+                    # Candado anti-reversión
+                    if high_pop >= est_prev_close:
+                        res["reason"] = f"PUT Pop & Drop bloqueado: rebote perforó cierre previo (${est_prev_close:.2f})"
+                        return res
+
+                    initial_gap_pts = est_prev_close - open_day
+                    if initial_gap_pts > 0:
+                        max_bounce = open_day + (0.75 * initial_gap_pts)
+                        if high_pop > max_bounce:
+                            res["reason"] = f"PUT Pop & Drop bloqueado: rebote borró más del 75% del Gap inicial bajista (High ${high_pop:.2f} > ${max_bounce:.2f})"
+                            return res
+
+                    delta = max(0.01 * cur_p, 0.15 * float(h1 - l1))
+                    initial_sl = round(high_pop + delta, 2)
+                    if initial_sl <= cur_p:
+                        initial_sl = round(high_pop * 1.01, 2)
+
+                    rule_code = "OPT_GAP_POP_AND_DROP_PUT"
+                    reason_msg = f"PUT Pop & Drop Tranche 1 aprobado: Rebote inicial rechazado (High ${high_pop:.2f}), confirmación 2 velas rojas (${c1:.2f}->${c2:.2f}), Macro 1H con espacio."
+                else:
+                    # No hubo verdes: Continuación directa bajista
+                    if c1 >= o1:
+                        res["reason"] = f"PUT bloqueado: Vela anterior de 5m fue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
+                        return res
+                    if o2 > (c1 * 1.002):
+                        res["reason"] = f"PUT bloqueado: Vela actual de 5m abrió por encima del cierre previo (Open ${o2:.2f} > Close ${c1:.2f})"
+                        return res
+
+                    initial_sl = round(max(h1, o1 * 1.005), 2)
+                    rule_code = "OPT_GAP_TRANCHE_1_PUT"
+                    reason_msg = f"PUT Tranche 1 aprobado: Vela previa roja (-${o1-c1:.2f}), Vela actual bajista (Open ${o2:.2f}), Macro 1H con espacio."
 
         res.update({
             "should_enter": True,

@@ -604,4 +604,89 @@ def test_stocks_opportunities_open_gap_up_boost_and_sort():
     assert items[2]['is_gap_runner'] is False
 
 
+def test_tranche_1_approves_on_dip_and_rip_pattern():
+    """Valida que el patrón 'Dip & Rip' (sacudida roja + giro de 2 velas verdes) apruebe Tranche 1."""
+    # Simulación caso HOST: Gap Up +18%, apertura roja (sacudida a 1.88) y giro con 2 velas verdes
+    df_5m = _make_df([
+        {'open': 2.10, 'high': 2.12, 'low': 1.95, 'close': 1.96, 'volume': 80000},  # V1 Roja (Dip)
+        {'open': 1.96, 'high': 1.98, 'low': 1.88, 'close': 1.90, 'volume': 75000},  # V2 Roja (Dip Low = 1.88)
+        {'open': 1.90, 'high': 2.05, 'low': 1.89, 'close': 2.02, 'volume': 110000}, # V3 Verde (Giro/Absorción)
+        {'open': 2.02, 'high': 2.20, 'low': 2.01, 'close': 2.15, 'volume': 130000}, # V4 Verde (Confirmación)
+    ])
+    df_15m = _make_df([{'open': 2.10, 'high': 2.20, 'low': 1.88, 'close': 2.15, 'volume': 395000}])
+    # 1H con espacio a Bollinger Upper y RSI ~55
+    h1_candles = [{'open': 1.70 + (i % 2) * 0.05, 'high': 2.30, 'low': 1.65, 'close': 1.72 + ((i + 1) % 2) * 0.05, 'volume': 500000} for i in range(25)]
+    df_1h = _make_df(h1_candles)
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="HOST",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=18.0,
+        active_position=None
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 1
+    assert res['rule_code'] == 'GAP_DIP_AND_RIP_1'
+    assert res['tranche_shares_ratio'] == 0.3333
+    # SL inicial debe estar en o por debajo del mínimo de la sacudida (1.88)
+    assert res['initial_sl'] <= 1.88
+    assert "Dip & Rip Tranche 1 activado" in res['reason']
+
+
+def test_dip_and_rip_blocks_if_pullback_erases_gap():
+    """Valida que el patrón se anule si la sacudida perfora el cierre de la sesión previa (falling knife)."""
+    # Precio actual 2.00 con Gap de 10% -> Prev Close estimado ~ 1.818
+    # Sacudida cae a 1.70 (debajo del cierre anterior)
+    df_5m = _make_df([
+        {'open': 2.00, 'high': 2.02, 'low': 1.70, 'close': 1.72, 'volume': 80000},  # V1 Roja perfora cierre previo
+        {'open': 1.72, 'high': 1.75, 'low': 1.68, 'close': 1.70, 'volume': 75000},  # V2 Roja
+        {'open': 1.70, 'high': 1.85, 'low': 1.69, 'close': 1.82, 'volume': 90000},  # V3 Verde
+        {'open': 1.82, 'high': 1.95, 'low': 1.81, 'close': 1.90, 'volume': 95000},  # V4 Verde
+    ])
+    df_15m = _make_df([{'open': 2.00, 'high': 2.02, 'low': 1.68, 'close': 1.90, 'volume': 340000}])
+    df_1h = _make_df([{'open': 1.70, 'high': 2.20, 'low': 1.65, 'close': 1.75, 'volume': 500000}] * 25)
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="KNIFE",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=10.0,
+        active_position=None
+    )
+
+    assert res['should_enter'] is False
+    assert "perforó cierre previo" in res['reason']
+
+
+def test_dip_and_rip_blocks_if_pullback_erases_more_than_75pct_of_gap():
+    """Valida bloqueo cuando la sacudida borra más del 75% del Gap inicial."""
+    # Prev Close estimado = 10.00 / 1.20 = 8.33. Open Day = 10.00. Gap = 1.67.
+    # Max allowed drop = 10.00 - (0.75 * 1.67) = 8.75.
+    # Sacudida cae a 8.60 (borra ~84% del gap).
+    df_5m = _make_df([
+        {'open': 10.00, 'high': 10.05, 'low': 8.60, 'close': 8.70, 'volume': 80000},  # V1
+        {'open': 8.70, 'high': 9.20, 'low': 8.65, 'close': 9.15, 'volume': 75000},   # V2
+        {'open': 9.15, 'high': 9.50, 'low': 9.10, 'close': 9.45, 'volume': 90000},   # V3
+    ])
+    df_15m = _make_df([{'open': 10.00, 'high': 10.05, 'low': 8.60, 'close': 9.45, 'volume': 245000}])
+    df_1h = _make_df([{'open': 8.50, 'high': 11.00, 'low': 8.30, 'close': 8.80, 'volume': 500000}] * 25)
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="OVERDIP",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=20.0,
+        active_position=None
+    )
+
+    assert res['should_enter'] is False
+    assert "borró más del 75% del Gap" in res['reason']
+
+
+
 

@@ -267,43 +267,120 @@ def evaluate_gap_runner_entry_tranches(
     # CASO A: TRANCHE 1 (Primer 1/3 - 33.3%)
     # ─────────────────────────────────────────────────────────────
     if not is_open_pos:
-        # 2.b: Vela 1 (5m) debe ser VERDE (Close > Open)
-        c_v1 = float(c5.iloc[-2])
-        o_v1 = float(o5.iloc[-2])
-        is_candle_1_green = c_v1 > o_v1
+        c_prev = float(c5.iloc[-2])
+        o_prev = float(o5.iloc[-2])
+        l_prev = float(l5.iloc[-2])
+        h_prev = float(h5.iloc[-2])
 
-        if not is_candle_1_green:
-            res["reason"] = f"Vela 1 (5m) no es alcista (Close ${c_v1:.2f} <= Open ${o_v1:.2f}). Filtro Anti-Trampa"
+        c_last = float(c5.iloc[-1])
+        o_last = float(o5.iloc[-1])
+        l_last = float(l5.iloc[-1])
+        h_last = float(h5.iloc[-1])
+
+        # Caso 1: Solo 2 velas de 5m (Ruta Directa inmediata en apertura)
+        if len(df_5m) == 2:
+            is_candle_1_green = c_prev > o_prev
+            if not is_candle_1_green:
+                res["reason"] = f"Vela 1 (5m) no es alcista (Close ${c_prev:.2f} <= Open ${o_prev:.2f}). Filtro Anti-Trampa"
+                return res
+
+            is_micro_gap_up = o_last >= (c_prev * 0.998)
+            is_candle_2_bullish = c_last >= o_last
+            if not (is_micro_gap_up and is_candle_2_bullish):
+                res["reason"] = f"Vela 2 (5m) no confirma empuje continuo (Open ${o_last:.2f} vs Close_Prev ${c_prev:.2f})"
+                return res
+
+            init_sl = round(min(l_prev, cur_p * 0.95), 2)
+            if init_sl <= 0 or init_sl >= cur_p:
+                init_sl = round(cur_p * 0.95, 2)
+
+            res.update({
+                "should_enter": True,
+                "tranche_step": 1,
+                "tranche_shares_ratio": 0.3333,
+                "rule_code": "GAP_TRANCHE_1",
+                "initial_sl": init_sl,
+                "reason": (
+                    f"Tranche 1/3 activado: Vela 1 verde 5m (${o_prev:.2f}->${c_prev:.2f}), "
+                    f"Vela 2 confirmada (${o_last:.2f}), RSI 1H={rsi_1h_val:.1f}, SL=${init_sl:.2f}"
+                )
+            })
             return res
 
-        # 2.c: Vela 2 (5m): Open > Close de la vela anterior (micro-gap) o continuación fuerte
-        o_v2 = float(o5.iloc[-1])
-        c_v2 = float(c5.iloc[-1])
-        is_micro_gap_up = o_v2 >= (c_v1 * 0.998)  # Tolerancia mínima 0.2%
-        is_candle_2_bullish = c_v2 >= o_v2
+        # Caso 2: len(df_5m) >= 3 (Evaluar si hubo retroceso/sacudida 'Dip & Rip' o continuación)
+        had_red_pullback = bool((c5.iloc[:-2] <= o5.iloc[:-2]).any())
+        if had_red_pullback:
+            # RUTA B: DIP & RIP (1..n velas rojas seguidas de 2 velas verdes de giro)
+            is_turn_green_1 = c_prev > o_prev
+            is_turn_green_2 = (c_last >= o_last) and (c_last >= c_prev)
 
-        if not (is_micro_gap_up and is_candle_2_bullish):
-            res["reason"] = f"Vela 2 (5m) no confirma empuje continuo (Open ${o_v2:.2f} vs Close_Prev ${c_v1:.2f})"
+            if not is_turn_green_1:
+                res["reason"] = f"Dip & Rip en retroceso: vela anterior de 5m sigue roja (${o_prev:.2f}->${c_prev:.2f}). Esperando suelo."
+                return res
+            if not is_turn_green_2:
+                res["reason"] = f"Dip & Rip esperando 2da vela verde de confirmación (Close ${c_last:.2f} vs Prev ${c_prev:.2f})."
+                return res
+
+            # Mínimo estructural de la sacudida
+            low_dip = float(min(l5.iloc[:-2].min(), l_prev))
+            open_day = float(o5.iloc[0])
+            est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct > 0 else open_day * 0.95
+
+            # Candado Anti-Desplome: No puede romper por debajo del cierre del día anterior
+            if low_dip <= est_prev_close:
+                res["reason"] = f"Dip & Rip bloqueado: Low de sacudida (${low_dip:.2f}) perforó cierre previo (${est_prev_close:.2f}). Caída libre."
+                return res
+
+            # Candado Anti-Desplome: Conservar al menos 25% del Gap inicial (no borrar más del 75%)
+            initial_gap_pts = open_day - est_prev_close
+            if initial_gap_pts > 0:
+                max_allowed_drop = open_day - (0.75 * initial_gap_pts)
+                if low_dip < max_allowed_drop:
+                    res["reason"] = f"Dip & Rip bloqueado: sacudida borró más del 75% del Gap inicial (Low ${low_dip:.2f} < Piso ${max_allowed_drop:.2f})"
+                    return res
+
+            delta = max(0.01 * cur_p, 0.15 * float(h_prev - l_prev))
+            init_sl = round(low_dip - delta, 2)
+            if init_sl <= 0 or init_sl >= cur_p:
+                init_sl = round(low_dip * 0.99, 2)
+
+            res.update({
+                "should_enter": True,
+                "tranche_step": 1,
+                "tranche_shares_ratio": 0.3333,
+                "rule_code": "GAP_DIP_AND_RIP_1",
+                "initial_sl": init_sl,
+                "reason": (
+                    f"Dip & Rip Tranche 1 activado: Sacudida absorbida (Low ${low_dip:.2f}), "
+                    f"2 velas verdes de giro (${c_prev:.2f}->${c_last:.2f}), RSI 1H={rsi_1h_val:.1f}, SL=${init_sl:.2f}"
+                )
+            })
             return res
+        else:
+            # Todas las velas previas fueron verdes (Ruta Directa retrasada)
+            is_turn_green_1 = c_prev > o_prev
+            is_turn_green_2 = (c_last >= o_last) and (o_last >= c_prev * 0.998)
 
-        # Cálculo de Stop Loss inicial: Low de la vela 1 de 5m
-        low_v1 = float(l5.iloc[-2])
-        init_sl = round(min(low_v1, cur_p * 0.95), 2)
-        if init_sl <= 0 or init_sl >= cur_p:
-            init_sl = round(cur_p * 0.95, 2)
+            if not (is_turn_green_1 and is_turn_green_2):
+                res["reason"] = f"Vela 5m no confirma empuje continuo (Close ${c_last:.2f} vs Prev ${c_prev:.2f})"
+                return res
 
-        res.update({
-            "should_enter": True,
-            "tranche_step": 1,
-            "tranche_shares_ratio": 0.3333,
-            "rule_code": "GAP_TRANCHE_1",
-            "initial_sl": init_sl,
-            "reason": (
-                f"Tranche 1/3 activado: Vela 1 verde 5m (${o_v1:.2f}->${c_v1:.2f}), "
-                f"Vela 2 confirmada (${o_v2:.2f}), RSI 1H={rsi_1h_val:.1f}, SL=${init_sl:.2f}"
-            )
-        })
-        return res
+            init_sl = round(min(l_prev, cur_p * 0.95), 2)
+            if init_sl <= 0 or init_sl >= cur_p:
+                init_sl = round(cur_p * 0.95, 2)
+
+            res.update({
+                "should_enter": True,
+                "tranche_step": 1,
+                "tranche_shares_ratio": 0.3333,
+                "rule_code": "GAP_TRANCHE_1",
+                "initial_sl": init_sl,
+                "reason": (
+                    f"Tranche 1/3 activado (Ruta Directa): Vela previa verde 5m (${o_prev:.2f}->${c_prev:.2f}), "
+                    f"Vela actual confirmada (${o_last:.2f}), RSI 1H={rsi_1h_val:.1f}, SL=${init_sl:.2f}"
+                )
+            })
+            return res
 
     # ─────────────────────────────────────────────────────────────
     # CASO B: TRANCHE 2 (Segundo 1/3 - 66.6% acumulado)

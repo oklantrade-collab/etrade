@@ -1033,8 +1033,12 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
+        # Prioridad 0: Regla Open Gap Runner (Tranche 1 directa o Dip & Rip)
+        if candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('GAP_'):
+            rule_code = candidate['triggered_rule']
+            order_type = 'market'
         # Prioridad 1: Gatillo Estructural Sección B (3a, 4a, 4b, 4c, 4d)
-        if candidate.get('is_pullback_b') and candidate.get('pullback_rule_code'):
+        elif candidate.get('is_pullback_b') and candidate.get('pullback_rule_code'):
             rule_code = candidate['pullback_rule_code']
             order_type = 'market'
         # Prioridad 2: Breakout 5m override — Fast Track

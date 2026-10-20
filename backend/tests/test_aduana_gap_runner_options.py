@@ -510,3 +510,128 @@ def test_portfolio_selector_gap_runner_first_priority():
     assert selected[0]['id'] == 102
     assert selected[0]['symbol'] == 'NVDA'
     assert selected[0]['is_gap_runner'] is True
+
+
+def test_call_tranche_1_approves_on_dip_and_rip():
+    """Valida que CALL Tranche 1 se apruebe con el patrón Dip & Rip (sacudida roja + 2 verdes)."""
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 98.5, 'close': 98.8, 'volume': 50000},  # V1 Roja (Dip)
+        {'open': 98.8, 'high': 99.0, 'low': 98.0, 'close': 98.2, 'volume': 45000},   # V2 Roja (Dip Low = 98.0)
+        {'open': 98.2, 'high': 99.6, 'low': 98.1, 'close': 99.5, 'volume': 75000},   # V3 Verde (Giro)
+        {'open': 99.5, 'high': 101.2, 'low': 99.4, 'close': 100.8, 'volume': 90000}, # V4 Verde (Confirmación)
+    ])
+    h1_candles = [
+        {'open': 95.0 + (i % 3) * 0.5, 'high': 98.0, 'low': 94.0, 'close': 95.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [95.8, 96.2, 96.5, 96.9, 97.2]:
+        h1_candles.append({'open': p - 0.3, 'high': p + 0.8, 'low': p - 0.5, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="NVDA",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=3.0,
+        direction="CALL",
+        sipv_signal="BUY"
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 1
+    assert res['rule_code'] == 'OPT_GAP_DIP_AND_RIP_CALL'
+    assert res['initial_sl_underlying'] <= 98.0
+    assert "Dip & Rip Tranche 1 aprobado" in res['reason']
+
+
+def test_put_tranche_1_approves_on_pop_and_drop():
+    """Valida que PUT Tranche 1 se apruebe con el patrón Pop & Drop (rebote verde + 2 rojas)."""
+    df_5m = _make_df([
+        {'open': 98.0, 'high': 100.0, 'low': 97.8, 'close': 99.8, 'volume': 50000},   # V1 Verde (Pop)
+        {'open': 99.8, 'high': 101.5, 'low': 99.6, 'close': 101.2, 'volume': 45000},  # V2 Verde (Pop High = 101.5)
+        {'open': 101.2, 'high': 101.3, 'low': 99.8, 'close': 100.0, 'volume': 80000},  # V3 Roja (Rechazo)
+        {'open': 100.0, 'high': 100.1, 'low': 98.2, 'close': 98.5, 'volume': 95000},   # V4 Roja (Confirmación)
+    ])
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-5.0,
+        direction="PUT",
+        sipv_signal="SELL"
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 1
+    assert res['rule_code'] == 'OPT_GAP_POP_AND_DROP_PUT'
+    assert res['initial_sl_underlying'] >= 101.5
+    assert "Pop & Drop Tranche 1 aprobado" in res['reason']
+
+
+def test_call_dip_and_rip_blocks_if_pierces_prev_close():
+    """Valida bloqueo de CALL cuando la sacudida rompe por debajo del cierre previo."""
+    # cur_p = 100.0, gap_pct = 5.0 -> est_prev_close = 95.23
+    # Sacudida cae a 94.0 (perfora 95.23)
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.1, 'low': 94.0, 'close': 94.5, 'volume': 50000},
+        {'open': 94.5, 'high': 95.0, 'low': 93.8, 'close': 94.2, 'volume': 45000},
+        {'open': 94.2, 'high': 97.0, 'low': 94.1, 'close': 96.5, 'volume': 75000},
+        {'open': 96.5, 'high': 99.0, 'low': 96.4, 'close': 98.5, 'volume': 90000},
+    ])
+    h1_candles = [{'open': 94.0, 'high': 105.0, 'low': 93.0, 'close': 95.0, 'volume': 100000}] * 25
+    df_1h = _make_df(h1_candles)
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="NVDA",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=5.0,
+        direction="CALL",
+        sipv_signal="BUY"
+    )
+
+    assert res['should_enter'] is False
+    assert "perforó cierre previo" in res['reason']
+
+
+def test_put_pop_and_drop_blocks_if_pierces_prev_close():
+    """Valida bloqueo de PUT cuando el rebote supera el cierre previo."""
+    # cur_p = 95.0, gap_pct = -5.0 -> est_prev_close = 100.0
+    # Rebote sube a 102.0 (supera 100.0)
+    df_5m = _make_df([
+        {'open': 95.0, 'high': 102.0, 'low': 94.8, 'close': 101.5, 'volume': 50000},
+        {'open': 101.5, 'high': 102.5, 'low': 101.0, 'close': 102.2, 'volume': 45000},
+        {'open': 102.2, 'high': 102.3, 'low': 99.0, 'close': 99.5, 'volume': 75000},
+        {'open': 99.5, 'high': 99.6, 'low': 97.0, 'close': 97.5, 'volume': 90000},
+    ])
+    h1_candles = [{'open': 102.0, 'high': 105.0, 'low': 94.0, 'close': 101.0, 'volume': 100000}] * 25
+    df_1h = _make_df(h1_candles)
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-5.0,
+        direction="PUT",
+        sipv_signal="SELL"
+    )
+
+    assert res['should_enter'] is False
+    assert "rebote perforó cierre previo" in res['reason']
+
