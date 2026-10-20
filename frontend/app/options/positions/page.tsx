@@ -279,7 +279,14 @@ export default function OptionsPositions() {
                     onClick={() => openRow(p.id)}
                     style={{ cursor: 'pointer', background: sel === p.id ? 'rgba(255,255,255,0.03)' : 'transparent' }}
                   >
-                    <td style={{ ...td, color: '#FFF', fontWeight: 700 }}>{p.symbol}</td>
+                    <td style={{ ...td, color: '#FFF', fontWeight: 700 }}>
+                      <div>{p.symbol}</div>
+                      {p.exit_plan?.stop_loss_underlying > 0 && (
+                        <div style={{ fontSize: 9, color: '#FFA726', fontWeight: 500, marginTop: 2 }}>
+                          🛡️ SL: ${n(p.exit_plan.stop_loss_underlying)} ({p.exit_plan.trailing_sl_type})
+                        </div>
+                      )}
+                    </td>
                     <td style={td}>{STRAT[p.strategy_type] || p.strategy_type}</td>
                     <td style={td}>{p.direction === 'bullish' ? '▲' : '▼'}</td>
                     <td style={td}>{p.qty}</td>
@@ -334,17 +341,31 @@ export default function OptionsPositions() {
                         </td>
                         <td style={td}>
                           {p.exit_reason && EXIT_REASONS[p.exit_reason] ? (
-                            <span style={{
-                              display: 'inline-block',
-                              padding: '2px 8px',
-                              borderRadius: 4,
-                              background: EXIT_REASONS[p.exit_reason].bg,
-                              color: EXIT_REASONS[p.exit_reason].color,
-                              fontSize: 10,
-                              fontWeight: 600,
-                            }}>
-                              {EXIT_REASONS[p.exit_reason].label}
-                            </span>
+                            <div>
+                              <span style={{
+                                display: 'inline-block',
+                                padding: '2px 8px',
+                                borderRadius: 4,
+                                background: EXIT_REASONS[p.exit_reason].bg,
+                                color: EXIT_REASONS[p.exit_reason].color,
+                                fontSize: 10,
+                                fontWeight: 600,
+                              }}>
+                                {p.exit_plan?.detailed_exit_reason?.includes('ema3_flat') ? '⚡ Agotamiento EMA3 1H' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('sipv') ? '🔄 Giro SIPV 1H' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('ema_cross') ? '⚡ Cruce EMA 15m' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('rsi_climax') ? '🎯 Clímax RSI 1H' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('upper_6') ? '🎯 TP Upper 6' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('lower_6') ? '🎯 TP Lower 6' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('sl_underlying') ? '🛡️ SL Subyacente' :
+                                 EXIT_REASONS[p.exit_reason].label}
+                              </span>
+                              {p.exit_plan?.detailed_exit_text && (
+                                <div style={{ fontSize: 9, color: '#888', marginTop: 3, maxWidth: 220, lineHeight: 1.2 }}>
+                                  {p.exit_plan.detailed_exit_text}
+                                </div>
+                              )}
+                            </div>
                           ) : (p.exit_reason || '—')}
                         </td>
                         <td style={td}>{p.exit_time ? new Date(p.exit_time).toLocaleDateString() : '—'}</td>

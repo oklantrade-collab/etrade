@@ -14,8 +14,14 @@ from app.options import settings_defaults as sd
 from app.options import health
 from app.options import event_calendar
 
-PASSIVE_EXITS = {"stop", "stop_loss", "forced_close_time", "bad_data_close"}
-ACTIVE_EXITS = {"take_profit", "signal_invalidation", "manual_simulated"}
+PASSIVE_EXITS = {
+    "stop", "stop_loss", "forced_close_time", "bad_data_close",
+    "sl_underlying_pierced", "ema_cross_15m", "ema3_flat_descending_1h", "ema3_flat_ascending_1h"
+}
+ACTIVE_EXITS = {
+    "take_profit", "signal_invalidation", "manual_simulated",
+    "tp_rsi_climax_1h", "tp_upper_6", "tp_lower_6", "sipv_trend_flip_1h"
+}
 
 
 def classify_exit(reason: str) -> str:
@@ -24,7 +30,9 @@ def classify_exit(reason: str) -> str:
         return "PASIVA"
     if reason in ACTIVE_EXITS:
         return "ACTIVA"
-    raise ValueError(f"motivo de salida desconocido: {reason}")
+    if "tp" in reason or "profit" in reason:
+        return "ACTIVA"
+    return "PASIVA"
 
 
 @dataclass
