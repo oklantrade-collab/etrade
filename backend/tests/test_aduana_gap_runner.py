@@ -688,5 +688,91 @@ def test_dip_and_rip_blocks_if_pullback_erases_more_than_75pct_of_gap():
     assert "borró más del 75% del Gap" in res['reason']
 
 
+def test_gap_fill_and_rip_with_wick_sweep_approves():
+    """Valida que un Gap Fill con barrido de mecha de hasta -3% bajo cierre previo apruebe (caso HOST)."""
+    # Open 2.23 (Gap 16.15%). Cierre previo = 2.23 / 1.1615 = 1.92.
+    # Sacudida cae a 1.87 (-2.6% bajo cierre previo de 1.92).
+    # Velas 3 y 4 confirman giro y recuperan sobre 1.92 (1.93 -> 2.03).
+    df_5m = _make_df([
+        {'open': 2.23, 'high': 2.27, 'low': 1.92, 'close': 2.02, 'volume': 600000},  # V1 Roja
+        {'open': 2.00, 'high': 2.01, 'low': 1.87, 'close': 1.90, 'volume': 50000},   # V2 Roja (Low = 1.87)
+        {'open': 1.90, 'high': 1.95, 'low': 1.87, 'close': 1.93, 'volume': 35000},   # V3 Verde
+        {'open': 1.90, 'high': 2.06, 'low': 1.90, 'close': 2.03, 'volume': 45000},   # V4 Verde (Recupera sobre 1.92)
+    ])
+    df_15m = _make_df([{'open': 2.23, 'high': 2.27, 'low': 1.87, 'close': 2.03, 'volume': 730000}])
+    df_1h = _make_df([{'open': 1.80, 'high': 2.30, 'low': 1.70, 'close': 1.92, 'volume': 500000}] * 25)
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="HOST",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=16.15,
+        active_position=None
+    )
+
+    assert res['should_enter'] is True
+    assert res['rule_code'] in ('GAP_DIP_AND_RIP_1', 'GAP_FILL_AND_RIP_1')
+    assert res['initial_sl'] <= 1.87
+    assert "Tranche 1 activado" in res['reason']
+
+
+def test_orb_15m_breakout_approves():
+    """Valida la estrategia ORB: Ruptura de rango de apertura de 15m con volumen."""
+    # Primeros 15m (velas 1, 2, 3) consolidan entre 10.00 y 10.50
+    # Vela 4 (09:45-09:50) rompe el techo de 10.50 con volumen expansivo (35k vs 10k promedio)
+    df_5m = _make_df([
+        {'open': 10.00, 'high': 10.50, 'low': 9.90, 'close': 10.30, 'volume': 10000},
+        {'open': 10.30, 'high': 10.45, 'low': 10.10, 'close': 10.40, 'volume': 8000},
+        {'open': 10.40, 'high': 10.48, 'low': 10.15, 'close': 10.35, 'volume': 11000},  # V3 Roja
+        {'open': 10.35, 'high': 10.80, 'low': 10.30, 'close': 10.75, 'volume': 35000},  # V4 Ruptura ORB
+    ])
+    df_15m = _make_df([{'open': 10.00, 'high': 10.50, 'low': 9.90, 'close': 10.40, 'volume': 29000}])
+    df_1h = _make_df([{'open': 9.50, 'high': 12.00, 'low': 9.40, 'close': 10.00, 'volume': 300000}] * 25)
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="ORB_STOCK",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=8.0,
+        active_position=None
+    )
+
+    assert res['should_enter'] is True
+    assert res['rule_code'] == 'GAP_ORB_BREAKOUT_1'
+    assert res['initial_sl'] <= 10.00
+    assert "ORB 15m Breakout activado" in res['reason']
+
+
+def test_vwap_reload_approves():
+    """Valida la estrategia VWAP Reload: Testeo y rebote sobre VWAP entre 10:00 y 11:30 ET."""
+    # 6 velas de 5m (30 minutos transcurridos). Precio testea VWAP y rebota con vela verde.
+    candles = [
+        {'open': 10.0, 'high': 10.8, 'low': 9.9, 'close': 10.6, 'volume': 20000},
+        {'open': 10.6, 'high': 10.9, 'low': 10.4, 'close': 10.7, 'volume': 15000},
+        {'open': 10.7, 'high': 10.8, 'low': 10.4, 'close': 10.75, 'volume': 12000},
+        {'open': 10.75, 'high': 10.8, 'low': 10.4, 'close': 10.7, 'volume': 10000},
+        {'open': 10.7, 'high': 10.75, 'low': 10.45, 'close': 10.5, 'volume': 9000},
+        {'open': 10.5, 'high': 10.85, 'low': 10.48, 'close': 10.80, 'volume': 25000},
+    ]
+    df_5m = _make_df(candles)
+    df_15m = _make_df([{'open': 10.0, 'high': 10.9, 'low': 9.9, 'close': 10.8, 'volume': 91000}])
+    df_1h = _make_df([{'open': 9.5, 'high': 12.0, 'low': 9.4, 'close': 10.0, 'volume': 300000}] * 25)
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="VWAP_STOCK",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=10.0,
+        active_position=None
+    )
+
+    assert res['should_enter'] is True
+    assert res['rule_code'] == 'GAP_VWAP_RELOAD_1'
+
+
+
 
 

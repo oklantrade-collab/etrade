@@ -73,15 +73,23 @@ def _safe_col(df: pd.DataFrame, col_name: str) -> pd.Series:
     """Retorna la serie de la columna en minúscula o mayúscula de forma segura."""
     if df is None or df.empty:
         return pd.Series(dtype=float)
+    col = None
     if col_name in df.columns:
-        return df[col_name].astype(float)
-    cap = col_name.capitalize()
-    if cap in df.columns:
-        return df[cap].astype(float)
-    upper = col_name.upper()
-    if upper in df.columns:
-        return df[upper].astype(float)
-    return pd.Series(dtype=float)
+        col = df[col_name]
+    elif col_name.capitalize() in df.columns:
+        col = df[col_name.capitalize()]
+    elif col_name.upper() in df.columns:
+        col = df[col_name.upper()]
+    elif isinstance(df.columns, pd.MultiIndex):
+        for c in df.columns:
+            if c[0].lower() == col_name.lower():
+                col = df[c]
+                break
+    if col is None:
+        return pd.Series(dtype=float)
+    if isinstance(col, pd.DataFrame):
+        col = col.iloc[:, 0]
+    return col.astype(float)
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -116,6 +124,21 @@ def compute_bollinger_bands(series: pd.Series, period: int = 20, num_std: float 
     upper = sma + (std * num_std)
     lower = sma - (std * num_std)
     return {"basis": sma, "upper": upper, "lower": lower, "std": std}
+
+
+def compute_vwap(df: pd.DataFrame) -> pd.Series:
+    """Calcula el VWAP intradía a partir de velas OHLCV."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    h = _safe_col(df, "high")
+    l = _safe_col(df, "low")
+    c = _safe_col(df, "close")
+    v = _safe_col(df, "volume")
+    typical_price = (h + l + c) / 3.0
+    cum_vol = v.cumsum()
+    cum_pv = (typical_price * v).cumsum()
+    vwap = cum_pv / cum_vol.replace(0, np.nan)
+    return vwap.ffill()
 
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
@@ -355,43 +378,90 @@ def evaluate_options_gap_entry_tranches(
                 reason_msg = f"CALL Tranche 1 aprobado: Vela 1 verde (+${c1-o1:.2f}), Vela 2 continuación micro-gap (Open ${o2:.2f}), Macro 1H con espacio."
             else:
                 # len(df_5m) >= 3: Verificar si hubo sacudida previa (velas rojas)
-                had_red = bool((c5m.iloc[:-2] <= o5m.iloc[:-2]).any())
+                had_red = bool(np.any(c5m.iloc[:-2].to_numpy() <= o5m.iloc[:-2].to_numpy()))
                 if had_red:
-                    # Ruta B: Dip & Rip
+                    # Ruta B: Dip & Rip / Gap Fill & Rip
                     is_turn_green_1 = c1 > o1
                     is_turn_green_2 = (c2 >= o2) and (c2 >= c1)
 
-                    if not is_turn_green_1:
-                        res["reason"] = f"CALL bloqueado: vela previa de 5m sigue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
-                        return res
-                    if not is_turn_green_2:
-                        res["reason"] = f"CALL bloqueado: vela 2 de confirmación no superó la anterior (Close ${c2:.2f} vs Prev ${c1:.2f})"
-                        return res
+                    if is_turn_green_1 and is_turn_green_2:
+                        low_dip = float(min(float(np.min(l5m.iloc[:-2].to_numpy())), l1))
+                        open_day = float(o5m.iloc[0])
+                        est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct > 0 else open_day * 0.95
 
-                    low_dip = float(min(l5m.iloc[:-2].min(), l1))
-                    open_day = float(o5m.iloc[0])
-                    est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct > 0 else open_day * 0.95
+                        # Candado anti-desplome con tolerancia de mecha del 3% bajo el cierre previo
+                        is_gap_fill_sweep = (low_dip <= est_prev_close * 1.01) and (low_dip >= est_prev_close * 0.97)
 
-                    # Candado anti-desplome
-                    if low_dip <= est_prev_close:
-                        res["reason"] = f"CALL Dip & Rip bloqueado: sacudida perforó cierre previo (${est_prev_close:.2f})"
-                        return res
-
-                    initial_gap_pts = open_day - est_prev_close
-                    if initial_gap_pts > 0:
-                        max_drop = open_day - (0.75 * initial_gap_pts)
-                        if low_dip < max_drop:
-                            res["reason"] = f"CALL Dip & Rip bloqueado: retroceso borró más del 75% del Gap inicial (Low ${low_dip:.2f} < ${max_drop:.2f})"
+                        if low_dip < (est_prev_close * 0.97):
+                            res["reason"] = f"CALL Dip & Rip bloqueado: sacudida perforó cierre previo (${est_prev_close:.2f}) por más del 3%"
                             return res
 
-                    delta = max(0.01 * cur_p, 0.15 * float(h1 - l1))
-                    initial_sl = round(low_dip - delta, 2)
-                    if initial_sl <= 0 or initial_sl >= cur_p:
-                        initial_sl = round(low_dip * 0.99, 2)
+                        if low_dip < est_prev_close and cur_p < est_prev_close:
+                            res["reason"] = f"CALL Gap Fill en curso: esperando que recupere cierre previo (${est_prev_close:.2f}, actual ${cur_p:.2f})"
+                            return res
 
-                    rule_code = "OPT_GAP_DIP_AND_RIP_CALL"
-                    reason_msg = f"CALL Dip & Rip Tranche 1 aprobado: Sacudida inicial absorbida (Low ${low_dip:.2f}), confirmación 2 velas verdes (${c1:.2f}->${c2:.2f}), Macro 1H con espacio."
-                else:
+                        if not is_gap_fill_sweep:
+                            initial_gap_pts = open_day - est_prev_close
+                            if initial_gap_pts > 0:
+                                max_drop = open_day - (0.80 * initial_gap_pts)
+                                if low_dip < max_drop:
+                                    res["reason"] = f"CALL Dip & Rip bloqueado: retroceso borró más del 80% del Gap inicial (Low ${low_dip:.2f} < ${max_drop:.2f})"
+                                    return res
+
+                        delta = max(0.01 * cur_p, 0.15 * float(h1 - l1))
+                        initial_sl = round(low_dip - delta, 2)
+                        if initial_sl <= 0 or initial_sl >= cur_p:
+                            initial_sl = round(low_dip * 0.99, 2)
+
+                        rule_code = "OPT_GAP_DIP_AND_RIP_CALL"
+                        fill_tag = " (Gap Fill)" if is_gap_fill_sweep else ""
+                        reason_msg = f"Dip & Rip Tranche 1 aprobado{fill_tag}: Sacudida inicial absorbida (Low ${low_dip:.2f}), confirmación 2 velas verdes (${c1:.2f}->${c2:.2f}), Macro 1H con espacio."
+                        res.update({
+                            "should_enter": True,
+                            "tranche_step": 1,
+                            "tranche_contracts_ratio": 0.3333,
+                            "rule_code": rule_code,
+                            "initial_sl_underlying": initial_sl,
+                            "reason": reason_msg
+                        })
+                        return res
+
+                # ESTRATEGIA 2: ORB 15m Breakout (CALLs)
+                if len(df_5m) >= 4:
+                    h15_range = float(np.max(h5m.iloc[:3].to_numpy()))
+                    l15_range = float(np.min(l5m.iloc[:3].to_numpy()))
+                    if cur_p > h15_range and c2 > o2:
+                        initial_sl = round(min(l15_range, cur_p * 0.97), 2)
+                        res.update({
+                            "should_enter": True,
+                            "tranche_step": 1,
+                            "tranche_contracts_ratio": 0.3333,
+                            "rule_code": "OPT_GAP_ORB_CALL",
+                            "initial_sl_underlying": initial_sl,
+                            "reason": f"CALL ORB 15m Breakout aprobado: Superó techo de apertura (${h15_range:.2f}), SL=${initial_sl:.2f}."
+                        })
+                        return res
+
+                # ESTRATEGIA 3: VWAP Reload (CALLs)
+                if len(df_5m) >= 6:
+                    vwap_series = compute_vwap(df_5m)
+                    cur_vwap = float(vwap_series.iloc[-1]) if len(vwap_series) > 0 else 0.0
+                    if cur_vwap > 0 and cur_p >= cur_vwap:
+                        recent_lows = l5m.iloc[-3:].to_numpy()
+                        if np.any((recent_lows <= cur_vwap * 1.004) & (recent_lows >= cur_vwap * 0.990)) and c2 > o2:
+                            test_low = float(np.min(recent_lows))
+                            initial_sl = round(test_low * 0.995, 2)
+                            res.update({
+                                "should_enter": True,
+                                "tranche_step": 1,
+                                "tranche_contracts_ratio": 0.3333,
+                                "rule_code": "OPT_GAP_VWAP_CALL",
+                                "initial_sl_underlying": initial_sl,
+                                "reason": f"CALL VWAP Reload aprobado: Rebote en VWAP (${cur_vwap:.2f}) con vela verde, SL=${initial_sl:.2f}."
+                            })
+                            return res
+
+                if not had_red:
                     # No hubo rojas: Continuación directa
                     if c1 <= o1:
                         res["reason"] = f"CALL bloqueado: Vela anterior de 5m fue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
@@ -403,6 +473,22 @@ def evaluate_options_gap_entry_tranches(
                     initial_sl = round(min(l1, o1 * 0.995), 2)
                     rule_code = "OPT_GAP_TRANCHE_1_CALL"
                     reason_msg = f"CALL Tranche 1 aprobado: Vela previa verde (+${c1-o1:.2f}), Vela actual micro-gap (Open ${o2:.2f}), Macro 1H con espacio."
+                    res.update({
+                        "should_enter": True,
+                        "tranche_step": 1,
+                        "tranche_contracts_ratio": 0.3333,
+                        "rule_code": rule_code,
+                        "initial_sl_underlying": initial_sl,
+                        "reason": reason_msg
+                    })
+                    return res
+
+                if had_red:
+                    if not is_turn_green_1:
+                        res["reason"] = f"CALL bloqueado: vela previa de 5m sigue roja (Close ${c1:.2f} <= Open ${o1:.2f})"
+                    elif not is_turn_green_2:
+                        res["reason"] = f"CALL bloqueado: vela 2 de confirmación no superó la anterior (Close ${c2:.2f} vs Prev ${c1:.2f})"
+                    return res
 
         else:
             if sipv_signal and str(sipv_signal).upper() not in ("SELL", "STRONG_SELL", "BAJISTA"):
@@ -421,45 +507,101 @@ def evaluate_options_gap_entry_tranches(
                 initial_sl = round(max(h1, o1 * 1.005), 2)
                 rule_code = "OPT_GAP_TRANCHE_1_PUT"
                 reason_msg = f"PUT Tranche 1 aprobado: Vela 1 roja (-${o1-c1:.2f}), Vela 2 continuación bajista (Open ${o2:.2f}), Macro 1H con espacio."
+                res.update({
+                    "should_enter": True,
+                    "tranche_step": 1,
+                    "tranche_contracts_ratio": 0.3333,
+                    "rule_code": rule_code,
+                    "initial_sl_underlying": initial_sl,
+                    "reason": reason_msg
+                })
+                return res
             else:
                 # len(df_5m) >= 3: Verificar si hubo rebote matutino (velas verdes)
-                had_green = bool((c5m.iloc[:-2] >= o5m.iloc[:-2]).any())
+                had_green = bool(np.any(c5m.iloc[:-2].to_numpy() >= o5m.iloc[:-2].to_numpy()))
                 if had_green:
-                    # Ruta B: Pop & Drop
+                    # Ruta B: Pop & Drop / Gap Fill & Drop
                     is_turn_red_1 = c1 < o1
                     is_turn_red_2 = (c2 <= o2) and (c2 <= c1)
 
-                    if not is_turn_red_1:
-                        res["reason"] = f"PUT bloqueado: vela previa de 5m sigue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
-                        return res
-                    if not is_turn_red_2:
-                        res["reason"] = f"PUT bloqueado: vela 2 de confirmación no cayó bajo la anterior (Close ${c2:.2f} vs Prev ${c1:.2f})"
-                        return res
+                    if is_turn_red_1 and is_turn_red_2:
+                        high_pop = float(max(float(np.max(h5m.iloc[:-2].to_numpy())), h1))
+                        open_day = float(o5m.iloc[0])
+                        est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct < 0 else open_day * 1.05
 
-                    high_pop = float(max(h5m.iloc[:-2].max(), h1))
-                    open_day = float(o5m.iloc[0])
-                    est_prev_close = open_day / (1.0 + (gap_pct / 100.0)) if gap_pct < 0 else open_day * 1.05
+                        # Candado anti-reversión con tolerancia de mecha del 3% sobre el cierre previo
+                        is_gap_fill_sweep = (high_pop >= est_prev_close * 0.99) and (high_pop <= est_prev_close * 1.03)
 
-                    # Candado anti-reversión
-                    if high_pop >= est_prev_close:
-                        res["reason"] = f"PUT Pop & Drop bloqueado: rebote perforó cierre previo (${est_prev_close:.2f})"
-                        return res
-
-                    initial_gap_pts = est_prev_close - open_day
-                    if initial_gap_pts > 0:
-                        max_bounce = open_day + (0.75 * initial_gap_pts)
-                        if high_pop > max_bounce:
-                            res["reason"] = f"PUT Pop & Drop bloqueado: rebote borró más del 75% del Gap inicial bajista (High ${high_pop:.2f} > ${max_bounce:.2f})"
+                        if high_pop > (est_prev_close * 1.03):
+                            res["reason"] = f"PUT Pop & Drop bloqueado: rebote perforó cierre previo (${est_prev_close:.2f}) por más del 3%"
                             return res
 
-                    delta = max(0.01 * cur_p, 0.15 * float(h1 - l1))
-                    initial_sl = round(high_pop + delta, 2)
-                    if initial_sl <= cur_p:
-                        initial_sl = round(high_pop * 1.01, 2)
+                        if high_pop > est_prev_close and cur_p > est_prev_close:
+                            res["reason"] = f"PUT Gap Fill en curso: esperando que caiga bajo el cierre previo (${est_prev_close:.2f}, actual ${cur_p:.2f})"
+                            return res
 
-                    rule_code = "OPT_GAP_POP_AND_DROP_PUT"
-                    reason_msg = f"PUT Pop & Drop Tranche 1 aprobado: Rebote inicial rechazado (High ${high_pop:.2f}), confirmación 2 velas rojas (${c1:.2f}->${c2:.2f}), Macro 1H con espacio."
-                else:
+                        if not is_gap_fill_sweep:
+                            initial_gap_pts = est_prev_close - open_day
+                            if initial_gap_pts > 0:
+                                max_bounce = open_day + (0.80 * initial_gap_pts)
+                                if high_pop > max_bounce:
+                                    res["reason"] = f"PUT Pop & Drop bloqueado: rebote borró más del 80% del Gap inicial bajista (High ${high_pop:.2f} > ${max_bounce:.2f})"
+                                    return res
+
+                        delta = max(0.01 * cur_p, 0.15 * float(h1 - l1))
+                        initial_sl = round(high_pop + delta, 2)
+                        if initial_sl <= cur_p:
+                            initial_sl = round(high_pop * 1.01, 2)
+
+                        rule_code = "OPT_GAP_POP_AND_DROP_PUT"
+                        fill_tag = " (Gap Fill)" if is_gap_fill_sweep else ""
+                        reason_msg = f"Pop & Drop Tranche 1 aprobado{fill_tag}: Rebote inicial rechazado (High ${high_pop:.2f}), confirmación 2 velas rojas (${c1:.2f}->${c2:.2f}), Macro 1H con espacio."
+                        res.update({
+                            "should_enter": True,
+                            "tranche_step": 1,
+                            "tranche_contracts_ratio": 0.3333,
+                            "rule_code": rule_code,
+                            "initial_sl_underlying": initial_sl,
+                            "reason": reason_msg
+                        })
+                        return res
+
+                # ESTRATEGIA 2: ORB 15m Breakdown (PUTs)
+                if len(df_5m) >= 4:
+                    l15_range = float(np.min(l5m.iloc[:3].to_numpy()))
+                    h15_range = float(np.max(h5m.iloc[:3].to_numpy()))
+                    if cur_p < l15_range and c2 < o2:
+                        initial_sl = round(max(h15_range, cur_p * 1.03), 2)
+                        res.update({
+                            "should_enter": True,
+                            "tranche_step": 1,
+                            "tranche_contracts_ratio": 0.3333,
+                            "rule_code": "OPT_GAP_ORB_PUT",
+                            "initial_sl_underlying": initial_sl,
+                            "reason": f"PUT ORB 15m Breakdown aprobado: Perforó piso de apertura (${l15_range:.2f}), SL=${initial_sl:.2f}."
+                        })
+                        return res
+
+                # ESTRATEGIA 3: VWAP Rejection (PUTs)
+                if len(df_5m) >= 6:
+                    vwap_series = compute_vwap(df_5m)
+                    cur_vwap = float(vwap_series.iloc[-1]) if len(vwap_series) > 0 else 0.0
+                    if cur_vwap > 0 and cur_p <= cur_vwap:
+                        recent_highs = h5m.iloc[-3:].to_numpy()
+                        if np.any((recent_highs >= cur_vwap * 0.996) & (recent_highs <= cur_vwap * 1.010)) and c2 < o2:
+                            test_high = float(np.max(recent_highs))
+                            initial_sl = round(test_high * 1.005, 2)
+                            res.update({
+                                "should_enter": True,
+                                "tranche_step": 1,
+                                "tranche_contracts_ratio": 0.3333,
+                                "rule_code": "OPT_GAP_VWAP_PUT",
+                                "initial_sl_underlying": initial_sl,
+                                "reason": f"PUT VWAP Rejection aprobado: Rechazo en VWAP (${cur_vwap:.2f}) con vela roja, SL=${initial_sl:.2f}."
+                            })
+                            return res
+
+                if not had_green:
                     # No hubo verdes: Continuación directa bajista
                     if c1 >= o1:
                         res["reason"] = f"PUT bloqueado: Vela anterior de 5m fue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
@@ -471,6 +613,22 @@ def evaluate_options_gap_entry_tranches(
                     initial_sl = round(max(h1, o1 * 1.005), 2)
                     rule_code = "OPT_GAP_TRANCHE_1_PUT"
                     reason_msg = f"PUT Tranche 1 aprobado: Vela previa roja (-${o1-c1:.2f}), Vela actual bajista (Open ${o2:.2f}), Macro 1H con espacio."
+                    res.update({
+                        "should_enter": True,
+                        "tranche_step": 1,
+                        "tranche_contracts_ratio": 0.3333,
+                        "rule_code": rule_code,
+                        "initial_sl_underlying": initial_sl,
+                        "reason": reason_msg
+                    })
+                    return res
+
+                if had_green:
+                    if not is_turn_red_1:
+                        res["reason"] = f"PUT bloqueado: vela previa de 5m sigue verde (Close ${c1:.2f} >= Open ${o1:.2f})"
+                    elif not is_turn_red_2:
+                        res["reason"] = f"PUT bloqueado: vela 2 de confirmación no cayó bajo la anterior (Close ${c2:.2f} vs Prev ${c1:.2f})"
+                    return res
 
         res.update({
             "should_enter": True,
