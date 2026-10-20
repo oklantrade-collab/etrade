@@ -309,37 +309,57 @@ def evaluate_gap_runner_entry_tranches(
     # CASO B: TRANCHE 2 (Segundo 1/3 - 66.6% acumulado)
     # ─────────────────────────────────────────────────────────────
     elif is_open_pos and reentry_count == 0:
-        if df_15m is None or len(df_15m) < 2:
-            res["reason"] = "Esperando formación de 2da vela de 15m para Tranche 2"
-            return res
+        is_15m_continuation = False
+        o15_v2 = 0.0
+        c15_v1 = 0.0
+        if df_15m is not None and len(df_15m) >= 2:
+            c15 = _safe_col(df_15m, "close")
+            o15 = _safe_col(df_15m, "open")
+            c15_v1 = float(c15.iloc[-2])
+            o15_v2 = float(o15.iloc[-1])
+            is_15m_continuation = o15_v2 >= (c15_v1 * 0.998)
 
-        c15 = _safe_col(df_15m, "close")
-        o15 = _safe_col(df_15m, "open")
+        # Alternativa de Escalamiento HOD Breakout en 5m
+        is_hod_breakout = False
+        hod_prior = 0.0
+        v_now = 0.0
+        if df_5m is not None and len(df_5m) >= 3:
+            h5_prior = _safe_col(df_5m, "high").iloc[:-1]
+            hod_prior = float(h5_prior.max()) if len(h5_prior) > 0 else 0.0
+            cur_high_5m = float(_safe_col(df_5m, "high").iloc[-1])
+            cur_close_5m = float(_safe_col(df_5m, "close").iloc[-1])
+            v5_series = _safe_col(df_5m, "volume")
+            v_now = float(v5_series.iloc[-1]) if len(v5_series) > 0 else 0.0
+            v_avg = float(v5_series.rolling(10, min_periods=1).mean().iloc[-1]) if len(v5_series) > 0 else 1.0
+            is_vol_ok = (v_now >= 10000 and v_now >= v_avg * 1.2) or (v_now >= 25000)
+            is_hod_breakout = (cur_high_5m >= hod_prior and cur_close_5m >= (hod_prior * 0.998)) and is_vol_ok
 
-        c15_v1 = float(c15.iloc[-2])
-        o15_v2 = float(o15.iloc[-1])
+        can_enter_t2 = is_15m_continuation or is_hod_breakout
 
-        # En 15m: Open 2da vela > Close vela 1 (continuación alcista en 15m)
-        is_15m_continuation = o15_v2 >= (c15_v1 * 0.998)
-
-        if not is_15m_continuation:
-            res["reason"] = f"15m Vela 2 sin continuación (Open ${o15_v2:.2f} < Close_Prev ${c15_v1:.2f})"
+        if not can_enter_t2:
+            res["reason"] = (
+                f"Tranche 2 en espera: esperando continuación 15m (Open ${o15_v2:.2f} >= Close ${c15_v1:.2f}) "
+                f"o Ruptura HOD en 5m"
+            )
             return res
 
         # Subir SL al precio medio de compra para eliminar riesgo (Breakeven)
         entry_avg = float(active_position.get("avg_price") or cur_p)
         new_sl = round(max(float(active_position.get("stop_loss") or 0.0), entry_avg), 2)
+        rule_code_t2 = "GAP_TRANCHE_2" if is_15m_continuation else "GAP_TRANCHE_2_HOD_BREAKOUT"
+        t2_reason = (
+            f"Tranche 2/3 activado en 15m: Vela 2 Open ${o15_v2:.2f} >= Close ${c15_v1:.2f}. SL Breakeven ${new_sl:.2f}"
+            if is_15m_continuation else
+            f"Tranche 2/3 activado por HOD Breakout 5m: Máximo ${hod_prior:.2f} superado con volumen ({int(v_now):,}). SL Breakeven ${new_sl:.2f}"
+        )
 
         res.update({
             "should_enter": True,
             "tranche_step": 2,
             "tranche_shares_ratio": 0.3333,
-            "rule_code": "GAP_TRANCHE_2",
+            "rule_code": rule_code_t2,
             "initial_sl": new_sl,
-            "reason": (
-                f"Tranche 2/3 activado en 15m: Vela 2 Open ${o15_v2:.2f} >= Close ${c15_v1:.2f}. "
-                f"SL ajustado a Breakeven ${new_sl:.2f}"
-            )
+            "reason": t2_reason
         })
         return res
 
@@ -347,43 +367,61 @@ def evaluate_gap_runner_entry_tranches(
     # CASO C: TRANCHE 3 (Tercer 1/3 - Posición Completa 100%)
     # ─────────────────────────────────────────────────────────────
     elif is_open_pos and reentry_count == 1:
-        if df_15m is None or len(df_15m) < 3:
-            res["reason"] = "Esperando formación de 3ra vela de 15m para Tranche 3"
-            return res
+        is_15m_continuation = False
+        low_v2_15m = cur_p * 0.95
+        o15_v3 = 0.0
+        c15_v2 = 0.0
+        if df_15m is not None and len(df_15m) >= 3:
+            c15 = _safe_col(df_15m, "close")
+            o15 = _safe_col(df_15m, "open")
+            l15 = _safe_col(df_15m, "low")
+            c15_v2 = float(c15.iloc[-2])
+            o15_v3 = float(o15.iloc[-1])
+            low_v2_15m = float(l15.iloc[-2])
+            is_15m_continuation = o15_v3 >= (c15_v2 * 0.998)
 
-        c15 = _safe_col(df_15m, "close")
-        o15 = _safe_col(df_15m, "open")
-        l15 = _safe_col(df_15m, "low")
+        # Alternativa HOD Breakout en 5m para Tranche 3
+        is_hod_breakout = False
+        hod_prior = 0.0
+        v_now = 0.0
+        if df_5m is not None and len(df_5m) >= 4:
+            h5_prior = _safe_col(df_5m, "high").iloc[:-1]
+            hod_prior = float(h5_prior.max()) if len(h5_prior) > 0 else 0.0
+            cur_high_5m = float(_safe_col(df_5m, "high").iloc[-1])
+            cur_close_5m = float(_safe_col(df_5m, "close").iloc[-1])
+            v5_series = _safe_col(df_5m, "volume")
+            v_now = float(v5_series.iloc[-1]) if len(v5_series) > 0 else 0.0
+            v_avg = float(v5_series.rolling(10, min_periods=1).mean().iloc[-1]) if len(v5_series) > 0 else 1.0
+            is_vol_ok = (v_now >= 10000 and v_now >= v_avg * 1.2) or (v_now >= 25000)
+            is_hod_breakout = (cur_high_5m >= hod_prior and cur_close_5m >= (hod_prior * 0.998)) and is_vol_ok
 
-        c15_v2 = float(c15.iloc[-2])
-        o15_v3 = float(o15.iloc[-1])
-
-        is_15m_continuation = o15_v3 >= (c15_v2 * 0.998)
-        # Filtro de sobrecompra: RSI 1H <= 72.0
+        can_enter_t3 = is_15m_continuation or is_hod_breakout
         is_rsi_acceptable = (rsi_1h_val <= 72.0)
 
-        if not is_15m_continuation:
-            res["reason"] = f"15m Vela 3 sin continuación (Open ${o15_v3:.2f} < Close_Prev ${c15_v2:.2f})"
+        if not can_enter_t3:
+            res["reason"] = "Tranche 3 en espera: esperando confirmación de vela 3 en 15m o Ruptura HOD en 5m"
             return res
 
         if not is_rsi_acceptable:
             res["reason"] = f"Tranche 3 pausado: RSI 1H ({rsi_1h_val:.1f} > 72.0) en zona extrema"
             return res
 
-        # Subir SL al mínimo de la 2da vela de 15m
-        low_v2_15m = float(l15.iloc[-2])
+        # Subir SL al mínimo de la 2da vela de 15m o soporte de ruptura
         new_sl = round(max(float(active_position.get("stop_loss") or 0.0), low_v2_15m), 2)
+        rule_code_t3 = "GAP_TRANCHE_3" if is_15m_continuation else "GAP_TRANCHE_3_HOD_BREAKOUT"
+        t3_reason = (
+            f"Tranche 3/3 Posición Completa en 15m: Vela 3 confirmada, RSI 1H={rsi_1h_val:.1f}. SL anclado a Low 15m ${new_sl:.2f}"
+            if is_15m_continuation else
+            f"Tranche 3/3 Posición Completa por HOD Breakout: Máximo superado ${hod_prior:.2f}, RSI 1H={rsi_1h_val:.1f}. SL ${new_sl:.2f}"
+        )
 
         res.update({
             "should_enter": True,
             "tranche_step": 3,
             "tranche_shares_ratio": 0.3334,
-            "rule_code": "GAP_TRANCHE_3",
+            "rule_code": rule_code_t3,
             "initial_sl": new_sl,
-            "reason": (
-                f"Tranche 3/3 Posición Completa: Vela 3 15m confirmada, RSI 1H={rsi_1h_val:.1f}. "
-                f"SL anclado a Low 15m ${new_sl:.2f}"
-            )
+            "reason": t3_reason
         })
         return res
 
@@ -523,10 +561,54 @@ def evaluate_gap_runner_aduana_exit(
                     f"(EMA9=${ema9_now:.2f} > Prev=${ema9_prev:.2f}, Delta=${delta:.2f})"
                 )
 
-    # ── Fallback Ratchet PnL > +7% (solo si ni 1.a ni 2.a produjeron un trailing stop) ──
-    if not best_trail_rule:
-        pnl_pct = ((current_price - avg_price) / avg_price) * 100.0 if avg_price > 0 else 0.0
-        if pnl_pct >= 7.0 and df_15m is not None and len(df_15m) >= 2:
+    # ── MEJORA 2: TRAILING STOP ESCALONADO DINÁMICO POR ZONAS DE GANANCIA (TIERED RATCHET) ──
+    pnl_pct = ((current_price - avg_price) / avg_price) * 100.0 if avg_price > 0 else 0.0
+
+    # TIER 3: SUPER-RUNNER PARABÓLICO (PnL >= +50.0%)
+    if pnl_pct >= 50.0:
+        piso_70_pct = avg_price + ((current_price - avg_price) * 0.70)
+        candidate_5m = piso_70_pct
+
+        if df_5m is not None and len(df_5m) >= 3:
+            c5 = _safe_col(df_5m, "close")
+            l5 = _safe_col(df_5m, "low")
+            ema3_5m = float(c5.ewm(span=3, adjust=False).mean().iloc[-1])
+            low_prev_5m = float(l5.iloc[-2])
+            candidate_5m = max(piso_70_pct, min(ema3_5m, low_prev_5m))
+
+        proposed_tier3 = round(candidate_5m, 2)
+        if proposed_tier3 > best_trail_sl and proposed_tier3 < current_price:
+            best_trail_sl = proposed_tier3
+            best_trail_rule = "ADUANA_GAP_TRAIL_TIER3"
+            best_trail_reason = (
+                f"Trailing Hiper-Protector Tier 3 (+{pnl_pct:.1f}%): Ceñido en ${proposed_tier3:.2f} "
+                f"(Blindando 70% de ganancia en 5m)"
+            )
+
+    # TIER 2: GANANCIA FUERTE (+25.0% a +49.9%)
+    elif pnl_pct >= 25.0:
+        piso_15_pct = avg_price * 1.15
+        candidate_15m = piso_15_pct
+
+        if df_15m is not None and len(df_15m) >= 2:
+            c15 = _safe_col(df_15m, "close")
+            l15 = _safe_col(df_15m, "low")
+            ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+            low_prev_15m = float(l15.iloc[-2])
+            candidate_15m = max(piso_15_pct, min(ema3_15m, low_prev_15m))
+
+        proposed_tier2 = round(candidate_15m, 2)
+        if proposed_tier2 > best_trail_sl and proposed_tier2 < current_price:
+            best_trail_sl = proposed_tier2
+            best_trail_rule = "ADUANA_GAP_TRAIL_TIER2"
+            best_trail_reason = (
+                f"Trailing Escalonado Tier 2 (+{pnl_pct:.1f}%): Elevado a ${proposed_tier2:.2f} "
+                f"(Asegurando piso de +15% / EMA3 15m)"
+            )
+
+    # TIER 1 / FALLBACK RATCHET (+7.0% a +24.9% si no se asignó regla previa superior)
+    elif pnl_pct >= 7.0 and not best_trail_rule:
+        if df_15m is not None and len(df_15m) >= 2:
             l15 = _safe_col(df_15m, "low")
             c15 = _safe_col(df_15m, "close")
             ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])

@@ -402,3 +402,113 @@ def test_aduana_trailing_1h_midpoint():
     assert res['rule_code'] == 'ADUANA_GAP_TRAIL_MIDPOINT_1H'
     assert res['exit_type'] == 'trailing_update'
 
+
+def test_tranche_2_approves_on_hod_breakout():
+    """Mejora 1: Tranche 2 aprobado por ruptura de High of Day (HOD) en 5m con volumen."""
+    # 5m: velas iniciales con High en 11.00, seguidas de ruptura con volumen a 11.50
+    df_5m = _make_df([
+        {'open': 10.0, 'high': 10.8, 'low': 9.9, 'close': 10.5, 'volume': 50000},
+        {'open': 10.5, 'high': 11.0, 'low': 10.4, 'close': 10.6, 'volume': 30000},
+        {'open': 10.6, 'high': 10.7, 'low': 10.3, 'close': 10.4, 'volume': 20000},
+        # Ruptura de HOD ($11.00) con volumen
+        {'open': 10.5, 'high': 11.5, 'low': 10.5, 'close': 11.4, 'volume': 80000}
+    ])
+    # 15m sin continuación (abrió abajo en vela 2)
+    df_15m = _make_df([
+        {'open': 10.0, 'high': 11.0, 'low': 9.9, 'close': 10.6, 'volume': 100000},
+        {'open': 10.4, 'high': 11.5, 'low': 10.3, 'close': 11.4, 'volume': 100000}
+    ])
+    df_1h = _make_df([{'open': 9.5, 'high': 12.5, 'low': 9.4, 'close': 11.0, 'volume': 200000}] * 20)
+
+    pos = {
+        'id': 'pos-hod',
+        'ticker': 'BREAKOUT',
+        'status': 'open',
+        'reentry_count': 0,
+        'avg_price': 10.5,
+        'stop_loss': 9.9,
+        'shares': 100
+    }
+
+    res = evaluate_gap_runner_entry_tranches(
+        ticker="BREAKOUT",
+        df_5m=df_5m,
+        df_15m=df_15m,
+        df_1h=df_1h,
+        gap_pct=15.0,
+        active_position=pos
+    )
+
+    assert res['should_enter'] is True
+    assert res['tranche_step'] == 2
+    assert res['rule_code'] == 'GAP_TRANCHE_2_HOD_BREAKOUT'
+    assert res['initial_sl'] == 10.5  # Breakeven
+
+
+def test_tiered_trailing_stop_profit_25pct():
+    """Mejora 2 (Tier 2): Ganancia flotante +30% activa piso garantizado de al menos +15% neto."""
+    df_15m = _make_df([
+        {'open': 10.0, 'high': 10.5, 'low': 9.8, 'close': 10.2, 'volume': 50000},
+        {'open': 10.2, 'high': 13.2, 'low': 10.1, 'close': 13.0, 'volume': 150000}
+    ])
+    df_5m = _make_df([
+        {'open': 12.0, 'high': 13.2, 'low': 11.9, 'close': 13.0, 'volume': 50000}
+    ])
+
+    pos = {
+        'id': 'pos-tier2',
+        'ticker': 'WINNER',
+        'status': 'open',
+        'avg_price': 10.0,
+        'stop_loss': 9.5,
+        'shares': 100,
+        'tp_block1_executed': True
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=13.0,  # +30% ganancia
+        df_5m=df_5m,
+        df_15m=df_15m
+    )
+
+    assert res['new_stop_loss'] is not None
+    assert res['new_stop_loss'] >= 11.50  # Piso +15% garantizado (10.0 * 1.15)
+    assert res['new_stop_loss'] < 13.0
+    assert res['rule_code'] == 'ADUANA_GAP_TRAIL_TIER2'
+
+
+def test_tiered_trailing_stop_hyper_50pct():
+    """Mejora 2 (Tier 3): Ganancia flotante +70% activa blindaje de al menos 70% de la ganancia pico."""
+    # Promedio compra 10.0, precio actual 17.0 (+70% ganancia)
+    # 70% de la ganancia = 10.0 + (17.0 - 10.0) * 0.70 = 14.90
+    df_5m = _make_df([
+        {'open': 15.0, 'high': 16.0, 'low': 14.8, 'close': 15.8, 'volume': 80000},
+        {'open': 15.8, 'high': 17.2, 'low': 15.7, 'close': 17.0, 'volume': 120000}
+    ])
+    df_15m = _make_df([
+        {'open': 14.0, 'high': 17.2, 'low': 13.8, 'close': 17.0, 'volume': 200000}
+    ])
+
+    pos = {
+        'id': 'pos-hyper',
+        'ticker': 'PARABOLIC',
+        'status': 'open',
+        'avg_price': 10.0,
+        'stop_loss': 11.5,
+        'shares': 100
+    }
+
+    res = evaluate_gap_runner_aduana_exit(
+        position=pos,
+        current_price=17.0,  # +70% ganancia
+        df_5m=df_5m,
+        df_15m=df_15m
+    )
+
+    assert res['new_stop_loss'] is not None
+    assert res['new_stop_loss'] >= 14.90  # 70% de ganancia blindada
+    assert res['new_stop_loss'] < 17.0
+    assert res['rule_code'] == 'ADUANA_GAP_TRAIL_TIER3'
+
+

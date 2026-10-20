@@ -325,10 +325,10 @@ def execute_market_order(
     elif rule_code == "GAP_TRANCHE_1":
         # Tranche inicial 1/3 (33.3%)
         shares = max(5, int((shares * 0.33) // 5) * 5)
-    elif rule_code == "GAP_TRANCHE_2":
+    elif rule_code in ("GAP_TRANCHE_2", "GAP_TRANCHE_2_HOD_BREAKOUT"):
         # Tranche segundo 1/3 (33.3%)
         shares = max(5, int((shares * 0.33) // 5) * 5)
-    elif rule_code == "GAP_TRANCHE_3":
+    elif rule_code in ("GAP_TRANCHE_3", "GAP_TRANCHE_3_HOD_BREAKOUT"):
         # Tranche final 1/3 (33.4%)
         shares = max(5, int((shares * 0.34) // 5) * 5)
     elif rule_code == "FT_RUNNER_BUY":
