@@ -98,6 +98,7 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         "ema3_1h_prev": current_price or 0.0,
         "ema3_slope_1h": 0.0,
         "ema9_1h": current_price or 0.0,
+        "rsi_1h": 50.0,
         "candle_open_1h": current_price or 0.0,
         "candle_high_1h": current_price or 0.0,
         "candle_low_1h": current_price or 0.0,
@@ -172,6 +173,19 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         is_descending = not is_ascending
         is_ema3_above_ema9 = bool(ema3_live > ema9_curr)
 
+        # Calcular RSI 14 en 1H
+        rsi_1h = 50.0
+        try:
+            if len(close_series) >= 5:
+                delta_1h = close_series.diff()
+                gain_1h = delta_1h.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+                loss_1h = (-delta_1h.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+                rs_1h = gain_1h / (loss_1h + 1e-9)
+                rsi_s_1h = 100.0 - (100.0 / (1.0 + rs_1h))
+                rsi_1h = round(float(rsi_s_1h.iloc[-1]), 1)
+        except Exception:
+            rsi_1h = 50.0
+
         # Métricas de la vela de 1H en formación (SIPV)
         last_row = df_1h.iloc[-1]
         c_open = float(last_row["Open"])
@@ -237,6 +251,7 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "ema3_1h_prev": round(ema3_prev, 4),
             "ema3_slope_1h": round(ema3_slope, 4),
             "ema9_1h": round(ema9_curr, 4),
+            "rsi_1h": rsi_1h,
             "candle_open_1h": round(c_open, 2),
             "candle_high_1h": round(c_high, 2),
             "candle_low_1h": round(c_low, 2),

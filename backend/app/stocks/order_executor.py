@@ -82,9 +82,9 @@ class OrderExecutor:
             log_warning(MODULE, f"Max positions reached ({active_count}/{self.max_positions})")
             return []
 
-        # 2. Check daily loss
+        # 2. Check daily loss (solo bloquea si es pérdida negativa real)
         daily_loss = await self._get_daily_pnl()
-        if abs(daily_loss) >= self.max_daily_loss:
+        if daily_loss < 0 and abs(daily_loss) >= self.max_daily_loss:
             log_warning(MODULE, f"🛑 Daily loss limit reached: ${daily_loss:.2f} / ${self.max_daily_loss}")
             return []
 

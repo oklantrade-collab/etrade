@@ -238,6 +238,7 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
 
             # ── 5. EVALUACIÓN Y PRIORIZACIÓN INSTITUCIONAL ADUANA OPEN GAP UP (LONGs) ──
             from app.options.aduana_gap_runner_options import get_min_gap_threshold, get_asset_class
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
 
             for opp in flattened:
                 t = (opp.get("ticker") or "").upper()
@@ -247,8 +248,29 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 min_thresh = get_min_gap_threshold(t)
                 is_trap = bool(opp.get("is_trap", False))
 
-                # Califica como Open Gap Up institucional si supera el umbral y no es trampa
-                is_runner = (eff_gap >= min_thresh) and not is_trap
+                # Requisito Mínimo en 1H: (EMA3 > EMA9) o (RSI <= 70)
+                is_ema3_above_ema9 = opp.get("is_ema3_above_ema9")
+                rsi_1h_val = opp.get("rsi_1h")
+                if is_ema3_above_ema9 is None or rsi_1h_val is None:
+                    try:
+                        p_val = float(opp.get("price") or 0.0)
+                        h1_data = get_live_1h_candle_and_sipv(t, p_val)
+                        if is_ema3_above_ema9 is None:
+                            is_ema3_above_ema9 = h1_data.get("is_ema3_above_ema9", False)
+                            opp["is_ema3_above_ema9"] = is_ema3_above_ema9
+                        if rsi_1h_val is None:
+                            rsi_1h_val = float(h1_data.get("rsi_1h") or 50.0)
+                            opp["rsi_1h"] = rsi_1h_val
+                    except Exception:
+                        if is_ema3_above_ema9 is None: is_ema3_above_ema9 = False
+                        if rsi_1h_val is None: rsi_1h_val = 50.0
+
+                rsi_1h_num = float(rsi_1h_val if rsi_1h_val is not None else 50.0)
+                meets_1h_criteria = bool(is_ema3_above_ema9 or (rsi_1h_num <= 70.0))
+                opp["meets_1h_criteria"] = meets_1h_criteria
+
+                # Califica como Open Gap Up institucional si supera el umbral, no es trampa Y cumple el requisito mínimo de 1H
+                is_runner = (eff_gap >= min_thresh) and (not is_trap) and meets_1h_criteria
                 opp["is_gap_runner"] = is_runner
                 opp["gap_type"] = "OPEN_GAP_UP" if is_runner else None
                 opp["gap_pct"] = eff_gap
@@ -261,6 +283,9 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                     opp["gap_runner_boost"] = 25.0
                     opp["rank_score"] = round(min(100.0, base_rank + 25.0), 1)
                     opp["is_high_priority"] = True
+                else:
+                    opp["gap_runner_boost"] = 0.0
+                    opp["is_high_priority"] = False
 
             if gap_runner_only:
                 flattened = [i for i in flattened if i.get("is_gap_runner")]

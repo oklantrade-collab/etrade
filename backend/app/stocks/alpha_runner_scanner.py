@@ -371,6 +371,7 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "ema3_slope_1h": live_1h.get("ema3_slope_1h", 0.0),
                 "ema3_1h_live": live_1h.get("ema3_1h_live", 0.0),
                 "ema9_1h": live_1h.get("ema9_1h", 0.0),
+                "rsi_1h": live_1h.get("rsi_1h", 50.0),
                 "sipv_upper_rejection": live_1h.get("sipv_upper_rejection", False),
                 "sipv_lower_absorption": live_1h.get("sipv_lower_absorption", False),
                 "sipv_status_reason": live_1h.get("status_reason", ""),

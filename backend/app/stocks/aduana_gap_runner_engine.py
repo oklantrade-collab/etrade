@@ -234,23 +234,23 @@ def evaluate_gap_runner_entry_tranches(
         else:
             room_to_bb_upper_pct = 0.0
 
-        # Regla 2.a: Open_1H < (Banda Superior - Delta) y RSI 1H <= 70.0
-        # (Se calibra RSI <= 70.0 en lugar de 60 para evitar vetar runners reales con gap fuerte)
-        has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0)
-        has_healthy_rsi = (rsi_1h_val <= 70.0)
+        # EMA3 y EMA9 de 1H
+        ema3_1h = float(c1h.ewm(span=3, adjust=False).mean().iloc[-1])
+        ema9_1h = float(c1h.ewm(span=9, adjust=False).mean().iloc[-1])
+        ema3_above_ema9 = bool(ema3_1h > ema9_1h)
 
-        macro_1h_ok = has_bb_room and has_healthy_rsi
+        # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) o (RSI <= 70.0)
+        meets_1h_req = ema3_above_ema9 or (rsi_1h_val <= 70.0)
+        has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9
+
+        macro_1h_ok = meets_1h_req
         res["macro_1h_ok"] = macro_1h_ok
         res["rsi_1h"] = round(rsi_1h_val, 1)
         res["room_to_bb_upper_1h"] = round(room_to_bb_upper_pct, 1)
 
         if not macro_1h_ok:
-            if not has_bb_room:
-                res["reason"] = f"Macro 1H sin espacio a BB Superior (Open=${open_1h_now:.2f} >= BB_Upper=${bb_upper_1h:.2f} - Delta=${delta:.2f})"
-                return res
-            if not has_healthy_rsi:
-                res["reason"] = f"RSI 1H sobrecomprado ({rsi_1h_val:.1f} > 70.0). Riesgo de clímax extremo"
-                return res
+            res["reason"] = f"Filtro mínimo 1H no cumplido: EMA3 (${ema3_1h:.2f}) <= EMA9 (${ema9_1h:.2f}) Y RSI 1H ({rsi_1h_val:.1f} > 70.0)"
+            return res
     else:
         # Fallback para IPOs con historial joven en 1H
         macro_1h_ok = True

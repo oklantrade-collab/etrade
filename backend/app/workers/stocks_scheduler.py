@@ -154,9 +154,20 @@ async def get_watchlist(config: dict) -> list[str]:
         for p in (pos_res.data or []):
             tickers.add(p["ticker"])
 
+        # Inyectar Top Gainers y Alpha Runners en vivo (Rallies del dia)
+        try:
+            from app.stocks.alpha_runner_scanner import scan_top_gainers_live
+            live_gainers = scan_top_gainers_live(limit=25)
+            for g in (live_gainers or []):
+                tg = g.get("ticker")
+                if tg and tg not in tickers:
+                    tickers.add(tg)
+        except Exception as e_live:
+            log_warning(MODULE, f"Error inyectando live gainers a watchlist: {e_live}")
+
         if tickers:
             ticker_list = list(tickers)
-            log_info(MODULE, f"Watchlist from DB (today + positions): {len(ticker_list)} tickers")
+            log_info(MODULE, f"Watchlist from DB (today + positions + live runners): {len(ticker_list)} tickers")
             return ticker_list
 
         # 3. Fallback: most recent watchlist (last 3 days)

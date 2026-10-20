@@ -646,7 +646,20 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             snap = snap_res.data[0] if snap_res.data else {}
 
             if not snap or not snap.get('price'):
-                continue
+                try:
+                    import yfinance as yf
+                    p_curr = float(yf.Ticker(ticker).fast_info.last_price or 0.0)
+                    if p_curr > 0:
+                        snap = {
+                            'symbol': ticker,
+                            'price': p_curr,
+                            'change_pct': float(snap.get('change_pct') or 0.0) if isinstance(snap, dict) else 0.0,
+                            'gap_pct': float(snap.get('gap_pct') or 0.0) if isinstance(snap, dict) else 0.0,
+                        }
+                    else:
+                        continue
+                except Exception:
+                    continue
 
             # Enriquecer snap con signals_json de technical_scores (para disponer de pullback_triggered, pool_type, etc.)
             try:
@@ -813,12 +826,20 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 
             # Detección y Priorización Institucional ADUANA OPEN GAP UP (LONGs)
             from app.options.aduana_gap_runner_options import get_min_gap_threshold
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
             min_thresh = get_min_gap_threshold(ticker)
             gap_val = float(snap.get('gap_pct') or 0.0)
             chg_val = float(snap.get('change_pct') or 0.0)
             eff_gap = gap_val if gap_val != 0.0 else chg_val
             is_trap = bool(snap.get('is_trap', False))
-            is_open_gap_runner = (eff_gap >= min_thresh) and not is_trap
+
+            # Requisito Mínimo en 1H: (EMA3 > EMA9) o (RSI <= 70)
+            h1_snap = get_live_1h_candle_and_sipv(ticker, float(snap.get('price') or 0.0))
+            is_ema3_above_ema9 = bool(h1_snap.get('is_ema3_above_ema9', False))
+            rsi_1h_snap = float(h1_snap.get('rsi_1h') or snap.get('rsi') or 50.0)
+            meets_1h_req = is_ema3_above_ema9 or (rsi_1h_snap <= 70.0)
+
+            is_open_gap_runner = (eff_gap >= min_thresh) and (not is_trap) and meets_1h_req
 
             # Calcular Composite Rank centrado en Fuerza Compradora y Potencial de Ganancia
             rank = calculate_composite_rank(
