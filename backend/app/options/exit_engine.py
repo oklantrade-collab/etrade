@@ -146,9 +146,20 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
     und_rows = sb.table("opt_underlyings").select("*").in_("id", uids).execute().data or []
     und_map = {u["id"]: u for u in und_rows}
 
-    # Cotizaciones recientes
+    # Cotizaciones recientes y mapeo por conid y contract_id
+    contracts_rows = sb.table("opt_contracts").select("id, conid").execute().data or []
+    conid_by_cid = {c["id"]: c.get("conid") for c in contracts_rows}
+    cid_by_conid = {c["conid"]: c["id"] for c in contracts_rows if c.get("conid")}
+
     quotes_rows = sb.table("opt_quotes_latest").select("*").execute().data or []
-    quotes_map = {q["conid"]: q for q in quotes_rows if q.get("conid")}
+    quotes_map: dict[Any, dict[str, Any]] = {}
+    for q in quotes_rows:
+        cid = q.get("contract_id")
+        if cid:
+            quotes_map[cid] = q
+            conid = conid_by_cid.get(cid)
+            if conid:
+                quotes_map[conid] = q
 
     closed_count = 0
     exits_summary: list[dict[str, Any]] = []

@@ -162,12 +162,13 @@ def simulate_exit_fill(position: dict[str, Any],
 
     for ef in entry_fills:
         conid = ef.get("conid")
+        cid = ef.get("contract_id")
         orig_side = ef.get("side") or "buy"
         strike = float(ef.get("strike") or 0.0)
         right = ef.get("right") or "C"
 
         # Buscar cotizacion de salida
-        q = (quotes_by_contract or {}).get(conid) or ef
+        q = (quotes_by_contract or {}).get(conid) or (quotes_by_contract or {}).get(cid) or ef
         bid = float(q.get("bid") or 0.0)
         ask = float(q.get("ask") or 0.0)
         mdt = str(q.get("market_data_type") or "UNKNOWN")
@@ -228,15 +229,18 @@ def mark_position_to_market(position: dict[str, Any],
     invested = float(position.get("entry_total_invested") or 0.0)
 
     if not entry_fills:
-        return {"unrealized_pnl": 0.0, "unrealized_pnl_pct": 0.0, "last_mark_price": 0.0, "valid": False}
+        last_m = float(position.get("last_mark_price") or position.get("entry_debit") or 0.0)
+        unr = float(position.get("unrealized_pnl") or 0.0)
+        return {"unrealized_pnl": unr, "unrealized_pnl_pct": 0.0, "last_mark_price": last_m, "valid": False}
 
     net_proceeds = 0.0
     valid = True
 
     for ef in entry_fills:
         conid = ef.get("conid")
+        cid = ef.get("contract_id")
         orig_side = ef.get("side") or "buy"
-        q = (quotes_by_contract or {}).get(conid) or {}
+        q = (quotes_by_contract or {}).get(conid) or (quotes_by_contract or {}).get(cid) or {}
         bid = q.get("bid")
         ask = q.get("ask")
 

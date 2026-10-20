@@ -131,6 +131,33 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             formatted_exp = f"{exp_d[:4]}-{exp_d[4:6]}-{exp_d[6:8]}" if len(exp_d) == 8 else exp_d
                             strike_num = float(parts[3])
                             is_call = parts[-1].upper() == "C"
+
+                            # Buscar contrato en opt_contracts para vincular conid/contract_id
+                            cid = None
+                            conid = None
+                            try:
+                                c_res = sb.table("opt_contracts").select("id, conid").eq("expiry", formatted_exp).eq("strike", strike_num).eq("right", "C" if is_call else "P").limit(1).execute()
+                                if c_res.data:
+                                    cid = c_res.data[0].get("id")
+                                    conid = c_res.data[0].get("conid")
+                            except Exception:
+                                pass
+
+                            fills = [{
+                                "contract_id": cid,
+                                "conid": conid,
+                                "side": "buy",
+                                "closing_side": "sell",
+                                "right": "C" if is_call else "P",
+                                "strike": strike_num,
+                                "bid": exec_price,
+                                "ask": exec_price,
+                                "fill_price": exec_price,
+                                "slippage_applied": 0.0,
+                                "market_data_type": "DELAYED",
+                                "fee_usd": 0.0,
+                            }]
+
                             sb.table("opt_paper_trades").insert({
                                 "symbol": und_sym,
                                 "strategy_type": "long_call" if is_call else "long_put",
@@ -140,6 +167,9 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 "expiry": formatted_exp,
                                 "entry_time": now_iso,
                                 "entry_debit": exec_price,
+                                "entry_fills": fills,
+                                "last_mark_price": exec_price,
+                                "unrealized_pnl": 0.0,
                                 "entry_total_invested": round(shares * exec_price * 100, 2),
                                 "max_loss_total": round(shares * exec_price * 100, 2),
                                 "max_profit_total": 9999.0,
