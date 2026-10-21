@@ -414,7 +414,14 @@ async def get_stocks_positions():
                 # Obtener precio real de IB (en memoria)
                 cur_price = live_prices.get(ticker, 0)
                 
-                # Fallback a DB si IB no tiene el dato todavía
+                # Fallback a market_snapshot (cotizaciones reales actualizadas minuto a minuto en DB)
+                if cur_price <= 0 and ticker in snap_map and snap_map[ticker].get("price"):
+                    try:
+                        cur_price = float(snap_map[ticker]["price"])
+                    except Exception:
+                        pass
+
+                # Fallback a DB si IB ni snapshot tienen el dato todavía
                 if cur_price <= 0:
                     cur_price = float(pos.get("current_price") or pos.get("avg_price") or 0)
                 
@@ -495,99 +502,116 @@ async def get_stocks_orders(limit: int = 100):
 
 @router.get("/journal")
 async def get_stocks_journal(limit: int = 100):
-    """Get trade journal history from closed positions with retry logic."""
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            sb = get_supabase()
-            JOURNAL_COLS = (
-                "id, ticker, group_name, direction, shares, avg_price, "
-                "current_price, total_cost, unrealized_pnl, unrealized_pnl_pct, "
-                "status, first_buy_at, updated_at, exit_triggered_by, sl_close_reason"
-            )
-            res = sb.table("stocks_positions")\
-                .select(JOURNAL_COLS)\
-                .eq("status", "closed")\
-                .neq("group_name", "OPTIONS")\
-                .order("updated_at", desc=True)\
-                .limit(limit)\
-                .execute()
-            
-            journal = res.data or []
-            sanitized_journal = []
-            
-            # ── VALIDACIÓN CON EL BROKER (ELIMINACIÓN DE CIERRES FICTICIOS) ──
-            # Obtenemos las posiciones reales del broker y opciones abiertas
-            broker_open_stocks = set()
-            try:
-                cfg_res = sb.table("stocks_config").select("value").eq("key", "ib_broker_portfolio").limit(1).execute()
-                if cfg_res.data:
-                    import ast
-                    b_dict = ast.literal_eval(cfg_res.data[0].get("value") or "{}")
-                    for k, v in b_dict.items():
-                        sh = float(v.get("shares") or 0)
-                        sec_t = str(v.get("sec_type") or "").upper()
-                        if sh > 0 and sec_t != "OPT" and ":OPT:" not in k:
-                            broker_open_stocks.add(str(v.get("symbol", k)).upper())
-            except Exception as b_err:
-                log_warning("stocks_api", f"Error reading broker_portfolio in journal: {b_err}")
+    """Get trade journal history from trades_journal (real executions) and stocks_positions, filtering out 0.00 ghost sync rows."""
+    sb = get_supabase()
+    entries = []
 
-            open_opt_symbols = set()
-            try:
-                opt_res = sb.table("opt_paper_trades").select("symbol").eq("status", "open").execute()
-                for o in (opt_res.data or []):
-                    open_opt_symbols.add(str(o.get("symbol", "")).upper())
-            except Exception:
-                pass
-            
-            for entry in journal:
-                try:
-                    ticker_str = str(entry.get("ticker", "")).upper()
-                    # 1. Si es una opción o subyacente con opciones abiertas (ej. SPY CALL), NO debe aparecer en diario de STOCKS
-                    if entry.get("group_name") == "OPTIONS" or ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or ticker_str in open_opt_symbols:
-                        continue
-                    
-                    # 2. VALIDACIÓN CON EL BROKER: Si el broker todavía tiene acciones abiertas de este ticker (ej. ROIV),
-                    # el cierre fue ficticio/prematuro y NO está confirmado por el broker. Suprimir de CLOSED HISTORY.
-                    if ticker_str in broker_open_stocks:
-                        continue
-                    entry["strategy"] = entry.get("strategy") or entry.get("rule_code") or "V5_STOCKS"
-                    entry["exit_strategy"] = entry.get("exit_triggered_by") or entry.get("sl_close_reason") or "CLOSED"
-                    entry["exit_reason"] = entry["exit_strategy"]
-                    entry["first_buy_at"] = entry.get("first_buy_at")
-                    entry["updated_at"] = entry.get("updated_at")
-                    entry["exit_date"] = entry.get("updated_at")
-                    entry["closed_at"] = entry.get("updated_at")
-                    
-                    # Asegurar valores numéricos con fallbacks seguros
-                    def to_f(val):
-                        try: return float(val) if val is not None else 0.0
-                        except: return 0.0
-
-                    entry["unrealized_pnl"] = to_f(entry.get("unrealized_pnl"))
-                    entry["unrealized_pnl_pct"] = to_f(entry.get("unrealized_pnl_pct"))
-                    entry["pnl_usd"] = entry["unrealized_pnl"]
-                    entry["pnl_pct"] = entry["unrealized_pnl_pct"]
-                    entry["avg_price"] = to_f(entry.get("avg_price"))
-                    entry["exit_price"] = to_f(entry.get("current_price"))
-                    entry["shares"] = int(to_f(entry.get("shares")))
-                    entry["total_cost"] = entry["avg_price"] * entry["shares"]
-                    entry["company_name"] = entry.get("ticker", "UNKNOWN")
-                    entry["status"] = "closed"
-                    
-                    sanitized_journal.append(entry)
-                except Exception as item_e:
-                    log_warning("stocks_api", f"Skipping journal item due to error: {item_e}")
-                    continue
-                
-            return sanitized_journal
-        except Exception as e:
-            if attempt < max_retries - 1 and ("10061" in str(e) or "disconnected" in str(e)):
-                reset_supabase()
-                await asyncio.sleep(1)
+    # 1. Consultar trades_journal (fuente primaria de trades reales ejecutados y confirmados)
+    try:
+        t_res = sb.table("trades_journal")\
+            .select("*")\
+            .order("exit_date", desc=True)\
+            .limit(limit)\
+            .execute()
+        for t in (t_res.data or []):
+            ticker_str = str(t.get("ticker", "")).upper()
+            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or t.get("group_name") == "OPTIONS":
                 continue
-            log_error("stocks_api", f"Error in journal: {e}")
-            return []
+
+            entry_p = float(t.get("entry_price") or 0.0)
+            exit_p = float(t.get("exit_price") or entry_p)
+            sh = int(float(t.get("shares") or 0))
+            pnl_u = float(t.get("pnl_usd") if t.get("pnl_usd") is not None else (exit_p - entry_p) * sh)
+            pnl_p = float(t.get("pnl_pct") if t.get("pnl_pct") is not None else (((exit_p - entry_p) / entry_p * 100) if entry_p > 0 else 0.0))
+
+            entries.append({
+                "id": t.get("id"),
+                "ticker": ticker_str,
+                "group_name": t.get("trade_type") or "HOT",
+                "strategy": t.get("trade_type") or "V5_STOCKS",
+                "side": "buy",
+                "shares": sh,
+                "entry_price": entry_p,
+                "avg_price": entry_p,
+                "exit_price": exit_p,
+                "current_price": exit_p,
+                "total_cost": round(entry_p * sh, 2),
+                "pnl_usd": round(pnl_u, 2),
+                "unrealized_pnl": round(pnl_u, 2),
+                "pnl_pct": round(pnl_p, 2),
+                "unrealized_pnl_pct": round(pnl_p, 2),
+                "exit_reason": t.get("exit_reason") or "CLOSED",
+                "first_buy_at": t.get("entry_date"),
+                "entry_date": t.get("entry_date"),
+                "updated_at": t.get("exit_date"),
+                "exit_date": t.get("exit_date"),
+                "status": "closed"
+            })
+    except Exception as je:
+        log_warning("stocks_api", f"Error reading trades_journal: {je}")
+
+    # 2. Complementar con stocks_positions cerradas pero descartando registros ficticios con PnL = 0.00
+    try:
+        JOURNAL_COLS = (
+            "id, ticker, group_name, direction, shares, avg_price, "
+            "current_price, total_cost, unrealized_pnl, unrealized_pnl_pct, "
+            "status, first_buy_at, updated_at, exit_triggered_by, sl_close_reason"
+        )
+        p_res = sb.table("stocks_positions")\
+            .select(JOURNAL_COLS)\
+            .eq("status", "closed")\
+            .neq("group_name", "OPTIONS")\
+            .order("updated_at", desc=True)\
+            .limit(limit)\
+            .execute()
+
+        seen_keys = {f"{e['ticker']}_{e['first_buy_at']}" for e in entries}
+        for p in (p_res.data or []):
+            ticker_str = str(p.get("ticker", "")).upper()
+            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or p.get("group_name") == "OPTIONS":
+                continue
+
+            avg_p = float(p.get("avg_price") or 0.0)
+            cur_p = float(p.get("current_price") or 0.0)
+            pnl_u = float(p.get("unrealized_pnl") or 0.0)
+
+            # FILTRO: Descartar cierres artificiales/ficticios donde entry == exit y pnl == 0 (ej. sync o limpieza sin trade real)
+            if abs(avg_p - cur_p) < 0.0001 and abs(pnl_u) < 0.0001:
+                continue
+
+            key = f"{ticker_str}_{p.get('first_buy_at')}"
+            if key in seen_keys:
+                continue
+
+            entries.append({
+                "id": p.get("id"),
+                "ticker": ticker_str,
+                "group_name": p.get("group_name") or "HOT",
+                "strategy": p.get("group_name") or "V5_STOCKS",
+                "side": "buy",
+                "shares": int(float(p.get("shares") or 0)),
+                "entry_price": avg_p,
+                "avg_price": avg_p,
+                "exit_price": cur_p,
+                "current_price": cur_p,
+                "total_cost": round(avg_p * float(p.get("shares") or 0), 2),
+                "pnl_usd": round(pnl_u, 2),
+                "unrealized_pnl": round(pnl_u, 2),
+                "pnl_pct": round(float(p.get("unrealized_pnl_pct") or 0.0), 2),
+                "unrealized_pnl_pct": round(float(p.get("unrealized_pnl_pct") or 0.0), 2),
+                "exit_reason": p.get("exit_triggered_by") or p.get("sl_close_reason") or "CLOSED",
+                "first_buy_at": p.get("first_buy_at"),
+                "entry_date": p.get("first_buy_at"),
+                "updated_at": p.get("updated_at"),
+                "exit_date": p.get("updated_at"),
+                "status": "closed"
+            })
+    except Exception as pe:
+        log_warning("stocks_api", f"Error reading stocks_positions fallback in journal: {pe}")
+
+    # Ordenar por fecha de salida descendente
+    entries.sort(key=lambda x: str(x.get("exit_date") or x.get("updated_at") or ""), reverse=True)
+    return entries[:limit]
 
 @router.get("/rules")
 async def get_stocks_rules():
