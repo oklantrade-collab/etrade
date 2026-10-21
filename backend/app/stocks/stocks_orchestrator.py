@@ -274,10 +274,12 @@ def calculate_position_size(
     capital_per_op: float,
     cfg:            dict,
     all_ranks:      list,
+    rule_code:      str = '',
 ) -> dict:
     """
     Calcula cuánto capital y cuántas acciones comprar.
     Sizing proporcional al rank si está habilitado.
+    Para GAP_TRANCHE_1 se asigna un tercio (1/3 = 33.3%) del capital por operación.
     """
     proportional = cfg.get('apex_proportional_sizing', True)
     factor_norm  = 1.0
@@ -291,10 +293,18 @@ def calculate_position_size(
     else:
         capital_op = capital_per_op
 
+    # Si es Tranche 1 de Open Gap Runner, aplicar 1/3 (33.3%)
+    if str(rule_code).startswith('GAP_TRANCHE_1') or 'TRANCHE_1' in str(rule_code):
+        capital_op = capital_op * 0.3333
+
     if price <= 0:
         return {'capital': 0, 'shares': 0, 'error': 'Precio inválido'}
 
-    shares = int(capital_op / price)
+    raw_shares = int(capital_op / price)
+    shares = int(raw_shares // 5) * 5
+    if shares < 5 and raw_shares >= 1:
+        shares = raw_shares
+
     if shares <= 0:
         shares = 1
 
@@ -1017,24 +1027,15 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
                 log_info(MODULE, f"⏸️ {ticker}: Omitida por Filtro Macro Bearish (no es Alpha Runner ni Super-Runner).")
                 continue
 
-        sizing = calculate_position_size(
-            ticker         = ticker,
-            price          = price,
-            composite_rank = candidate['composite_rank'],
-            capital_per_op = cap_per_op,
-            cfg            = cfg,
-            all_ranks      = all_ranks,
-        )
-
-        if sizing['shares'] <= 0 or price <= 0:
-            continue
-
         rule_sig   = candidate.get('rule_signal', {})
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
         # Prioridad 0: Regla Open Gap Runner (Tranche 1 directa o Dip & Rip)
         if candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('GAP_'):
+            rule_code = candidate['triggered_rule']
+            order_type = 'market'
+        elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('FT_'):
             rule_code = candidate['triggered_rule']
             order_type = 'market'
         # Prioridad 1: Gatillo Estructural Sección B (3a, 4a, 4b, 4c, 4d)
@@ -1045,10 +1046,26 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         elif candidate.get('is_breakout_5m'):
             rule_code = 'Aa30_STK'
             order_type = 'market'
+        elif candidate.get('triggered_rule'):
+            rule_code = candidate['triggered_rule']
+            order_type = 'market'
         elif rule_sig.get('has_signal'):
             best_rule  = rule_sig.get('best_rule', {})
             order_type = best_rule.get('order_type', 'market')
             rule_code  = rule_sig.get('rule_code', 'APEX_AUTO')
+
+        sizing = calculate_position_size(
+            ticker         = ticker,
+            price          = price,
+            composite_rank = candidate['composite_rank'],
+            capital_per_op = cap_per_op,
+            cfg            = cfg,
+            all_ranks      = all_ranks,
+            rule_code      = rule_code,
+        )
+
+        if sizing['shares'] <= 0 or price <= 0:
+            continue
 
         log_info(MODULE,
             f'✅ COMPRANDO {ticker}: {sizing["shares"]} shares × '
@@ -1058,14 +1075,18 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             f'Regla={rule_code} ({order_type})'
         )
 
-        context = candidate.get('snap', {})
+        context = candidate.get('snap', {}) or {}
         context['price'] = price
+        context['rule_code'] = rule_code
+        context['gap_pct'] = candidate.get('gap_pct', 0.0)
+        context['is_sweet_spot'] = candidate.get('is_sweet_spot', False)
 
         rule_mock = {
             'rule_code':   rule_code,
             'group_name':  candidate.get('group_name', ''),
             'close_all':   False,
             'dca_enabled': False,
+            'strategy':    'ADUANA_GAP_RUNNER' if str(rule_code).startswith('GAP_') else candidate.get('group_name', ''),
         }
 
         try:
@@ -1174,6 +1195,149 @@ async def _upsert_queue(
 
 
 # ════════════════════════════════════════════
+# MÓDULO 8.5 — CONSUMIDOR DE COLA DE PRIORIDAD
+# ════════════════════════════════════════════
+
+async def process_priority_queue_buys(supabase=None, cfg=None) -> list:
+    """
+    Consume los candidatos pendientes en 'stocks_priority_queue',
+    ordenados por composite_rank DESC, y ejecuta compras respetando capital y slots.
+    Se invoca al final de cada ciclo de 5m en stocks_scheduler y en cada ciclo APEX de 15m.
+    """
+    if supabase is None:
+        supabase = get_supabase()
+    if cfg is None:
+        cfg = await load_orchestrator_config(supabase)
+    if not cfg:
+        return []
+
+    # 1. Filtro horario y cutoff 15:15 ET
+    from app.core.market_hours import is_market_open, get_nyc_now
+    is_open, status = is_market_open()
+    allow_ah = cfg.get('allow_after_hours', False)
+    if not is_open and not allow_ah:
+        log_info(MODULE, f'⏸️ Priority Queue: Mercado cerrado ({status}) y After-hours desactivado.')
+        return []
+
+    nyc_now = get_nyc_now()
+    if nyc_now.weekday() < 5 and (nyc_now.hour > 15 or (nyc_now.hour == 15 and nyc_now.minute >= 15)) and not allow_ah:
+        log_info(MODULE, f"⏸️ Priority Queue: Cutoff EOD 15:15 ET alcanzado ({nyc_now.strftime('%H:%M:%S')} ET). Aperturas bloqueadas.")
+        return []
+
+    # 2. Capital disponible y slots
+    capital = await calculate_available_capital(cfg, supabase)
+    if not capital['can_buy']:
+        log_info(MODULE, f"⏸️ Priority Queue: Sin slots o capital disponible: {capital['reason']}")
+        return []
+
+    # 3. Macro context
+    from app.stocks.stocks_adaptive_tp import fetch_macro_data
+    macro = await fetch_macro_data(supabase)
+    is_macro_bearish = (macro.get('sentiment') == 'bearish')
+
+    # 4. Posiciones abiertas y blacklist/cooldown
+    pos_res = supabase.table('stocks_positions').select('ticker').eq('status', 'open').execute()
+    owned_tickers = {p['ticker'] for p in (pos_res.data or [])}
+
+    blacklisted_tickers = set()
+    cooling_down_tickers = set()
+    try:
+        now_utc = datetime.now(timezone.utc)
+        start_of_day_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        journal_res = supabase.table('trades_journal') \
+            .select('ticker, exit_date, pnl_pct, exit_reason') \
+            .gte('exit_date', start_of_day_utc) \
+            .execute()
+        for jr in (journal_res.data or []):
+            t = jr.get('ticker')
+            if not t:
+                continue
+            pnl_p = float(jr.get('pnl_pct') or 0.0)
+            reason = str(jr.get('exit_reason') or '').lower()
+            if pnl_p <= -2.5 or 'hard_cap' in reason or 'sl_' in reason:
+                blacklisted_tickers.add(t)
+            exit_d_str = jr.get('exit_date')
+            if exit_d_str:
+                try:
+                    exit_dt = datetime.fromisoformat(str(exit_d_str).replace('Z', '+00:00'))
+                    if (now_utc - exit_dt).total_seconds() / 60.0 < 60.0:
+                        cooling_down_tickers.add(t)
+                except Exception:
+                    pass
+    except Exception as cd_err:
+        log_warning(MODULE, f"Error verificando cooldown intradía: {cd_err}")
+
+    # 5. Obtener candidatos pendientes de stocks_priority_queue
+    q_res = supabase.table('stocks_priority_queue') \
+        .select('*') \
+        .eq('status', 'pending') \
+        .order('composite_rank', desc=True) \
+        .limit(25) \
+        .execute()
+
+    pending_items = q_res.data or []
+    if not pending_items:
+        return []
+
+    candidates = []
+    for item in pending_items:
+        t = item['ticker']
+        if t in owned_tickers:
+            try:
+                supabase.table('stocks_priority_queue').update({'status': 'owned'}).eq('ticker', t).execute()
+            except Exception:
+                pass
+            continue
+        if t in blacklisted_tickers:
+            log_info(MODULE, f"⛔ Priority Queue: {t} bloqueada por lista negra intradía")
+            continue
+        if t in cooling_down_tickers:
+            log_info(MODULE, f"⏳ Priority Queue: {t} en cooldown <60 min")
+            continue
+
+        price = float(item.get('price_at_rank') or item.get('price') or 0.0)
+        if price <= 0:
+            try:
+                import yfinance as yf
+                fast = yf.Ticker(t).fast_info
+                price = float(fast.get('last_price') or fast.get('regular_market_previous_close') or 0.0)
+            except Exception:
+                price = 0.0
+
+        if price <= 0:
+            continue
+
+        c_dict = {
+            'ticker': t,
+            'price': price,
+            'composite_rank': float(item.get('composite_rank') or 0.0),
+            'apex_score_4h': float(item.get('apex_score_4h') or 90.0),
+            'apex_score_1d': float(item.get('apex_score_1d') or 90.0),
+            'apex_4h': float(item.get('apex_score_4h') or 90.0),
+            'return_expected': float(item.get('return_expected') or 20.0),
+            'confidence': item.get('confidence', 'high'),
+            'is_overbought': bool(item.get('is_overbought', False)),
+            'group_name': item.get('group_name', 'HOT'),
+            'entry_reason': item.get('entry_reason', ''),
+            'triggered_rule': item.get('triggered_rule', ''),
+            'rsi': float(item.get('rsi_at_entry') or 50.0),
+            'fib_zone': int(item.get('fib_zone') or 0),
+            'is_gap_runner': 'GAP' in str(item.get('group_name', '')) or 'GAP' in str(item.get('triggered_rule', '')),
+            'is_intraday_alpha': 'ALPHA' in str(item.get('group_name', '')) or 'ALPHA' in str(item.get('triggered_rule', '')),
+            'rule_signal': {'has_signal': True, 'rule_code': item.get('triggered_rule')},
+            'snap': {'price': price, 'close': price, 'rvol': 2.0}
+        }
+        candidates.append(c_dict)
+
+    if not candidates:
+        return []
+
+    log_info(MODULE, f"🎯 Priority Queue Consumer: Ejecutando compras para {len(candidates)} candidatos pendientes...")
+    executed = await execute_priority_buys(candidates, capital, cfg, supabase, is_macro_bearish=is_macro_bearish)
+    return executed
+
+
+# ════════════════════════════════════════════
 # FUNCIÓN PRINCIPAL — CICLO DEL ORCHESTRATOR
 # ════════════════════════════════════════════
 
@@ -1223,6 +1387,24 @@ async def run_orchestrator_cycle(supabase=None):
     is_macro_bearish = (macro.get('sentiment') == 'bearish')
     if is_macro_bearish:
         log_warning(MODULE, f"⚠️ MERCADO BEARISH ({macro.get('score')}): Compras de acciones ordinarias suspendidas por seguridad. Se evaluarán y ejecutarán EXCLUSIVAMENTE Alpha Runners y Super-Runners con volumen institucional.")
+
+    # 3.5. Primero consumir candidatos pendientes existentes en la cola de prioridad
+    try:
+        pending_exec = await process_priority_queue_buys(supabase, cfg)
+        if pending_exec:
+            log_info(MODULE, f"🎯 Prioridad ejecutada previamente desde cola: {len(pending_exec)} compras.")
+            # Recalcular capital disponible tras compras pendientes
+            capital = await calculate_available_capital(cfg, supabase)
+            if not capital['can_buy']:
+                log_info(MODULE, '⏸️ Slots o capital agotados tras ejecutar candidatos pendientes de cola.')
+                return {
+                    'queue_size': len(pending_exec),
+                    'executed': len(pending_exec),
+                    'capital': capital,
+                    'top_ticker': pending_exec[0]['ticker'] if pending_exec else None,
+                }
+    except Exception as pq_e:
+        log_warning(MODULE, f"Aviso consumiendo cola pendiente: {pq_e}")
 
     # 4. Construir cola de prioridad
     queue = await build_priority_queue(cfg, supabase, macro)

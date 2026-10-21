@@ -1870,15 +1870,24 @@ async def run_stocks_cycle(force=False):
                  f"Volume Spikes: {spike_count} | "
                  f"Duration: {duration_s}s")
 
-        # ── Sprint 7: Execute pending opportunities & monitor positions ──
+        # ── Sprint 7+: Execute pending Priority Queue opportunities ──
+        try:
+            from app.stocks.stocks_orchestrator import process_priority_queue_buys
+            exec_results = await process_priority_queue_buys(sb, config)
+            if exec_results:
+                log_info(MODULE, f"📊 Executed {len(exec_results)} Priority Queue trade(s)")
+        except Exception as e:
+            log_warning(MODULE, f"Priority Queue execution error: {e}")
+
+        # Fallback legacy trade_opportunities (si hubiera)
         try:
             from app.stocks.order_executor import OrderExecutor
             executor = OrderExecutor()
             exec_results = await executor.execute_pending_opportunities()
             if exec_results:
-                log_info(MODULE, f"📊 Executed {len(exec_results)} trade(s)")
+                log_info(MODULE, f"📊 Executed {len(exec_results)} legacy trade(s)")
         except Exception as e:
-            log_warning(MODULE, f"Execution step skipped: {e}")
+            log_warning(MODULE, f"Legacy execution step skipped: {e}")
 
         try:
             from app.stocks.position_monitor import PositionMonitor
@@ -2640,9 +2649,11 @@ async def start_stocks_scheduler(force=False):
         kwargs={"force": force},
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
-        # 1b. TP MANAGER: every 5 minutes during market hours
+    # 1b. TP MANAGER: every 5 minutes during market hours
     scheduler.add_job(
         run_stocks_tp_v2_cycle,
         trigger=IntervalTrigger(minutes=5),
@@ -2650,6 +2661,8 @@ async def start_stocks_scheduler(force=False):
         name="Stocks TP Manager (3 Blocks, 5m)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     # 1b-opt. OPTIONS DEFENSE & RATCHET MONITOR: cada 1 minuto
@@ -2660,6 +2673,8 @@ async def start_stocks_scheduler(force=False):
         name="Options Gap Defense & Ratchet Monitor (1m)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     # 1c. FAST-TICK POSITION MONITOR (15 segundos): Seguimiento al minuto/15s para Regla 2d-3, 2a, 2b y TSL B.5
@@ -2681,6 +2696,8 @@ async def start_stocks_scheduler(force=False):
         name="Alpha Runner Fast-Tick Monitor (15s)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=60,
+        coalesce=True,
     )
 
     # 2. INVERSIÓN PRO: daily at 16:05 ET (5 min after market close)
@@ -2691,6 +2708,8 @@ async def start_stocks_scheduler(force=False):
         name="Inversión Pro (market close daily analysis)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     # 5. APEX SCORE: every 15 minutes during market hours
@@ -2701,6 +2720,8 @@ async def start_stocks_scheduler(force=False):
         name="APEX Score (15m probability engine)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     # 6. APEX BACKTESTING: every 4 hours
@@ -2711,6 +2732,8 @@ async def start_stocks_scheduler(force=False):
         name="APEX Backtesting (4H accuracy check)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     # 3. MEGA BARRIDO DIARIO: 16:01 ET (Justo post-cierre) Lunes a Viernes
@@ -2721,6 +2744,8 @@ async def start_stocks_scheduler(force=False):
         name="Market Sweep (All US Tickers < $200 + 1M Vol)",
         max_instances=1,
         replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
     )
 
     # 4. REFRESH FUNDAMENTALS: Domingos 18:00 EST (Pre-apertura)

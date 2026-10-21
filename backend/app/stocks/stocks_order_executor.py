@@ -165,21 +165,29 @@ def execute_market_order(
         try:
             from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
             live_1h = get_live_1h_candle_and_sipv(ticker, price)
-            if not live_1h.get("is_ema3_1h_ascending", True):
-                slope = live_1h.get("ema3_slope_1h", 0.0)
-                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H es descendente/plana ({slope:+.4f}). No se compran acciones en modo descendente.")
-                return {
-                    "success": False,
-                    "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
-                }
-            if not live_1h.get("is_ema3_above_ema9", True):
-                ema3_val = live_1h.get("ema3_1h_live", 0.0)
-                ema9_val = live_1h.get("ema9_1h", 0.0)
-                log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). Falta cruce alcista en 1 hora.")
-                return {
-                    "success": False,
-                    "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
-                }
+            is_gap_strategy = (
+                str(rule_code).startswith('GAP_') or
+                str(rule_code).startswith('FT_') or
+                'RUNNER' in str(rule_code) or
+                'GAP' in str(rule.get('group_name', '')) or
+                'GAP' in str(rule.get('strategy', ''))
+            )
+            if not is_gap_strategy:
+                if not live_1h.get("is_ema3_1h_ascending", True):
+                    slope = live_1h.get("ema3_slope_1h", 0.0)
+                    log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H es descendente/plana ({slope:+.4f}). No se compran acciones en modo descendente.")
+                    return {
+                        "success": False,
+                        "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
+                    }
+                if not live_1h.get("is_ema3_above_ema9", True):
+                    ema3_val = live_1h.get("ema3_1h_live", 0.0)
+                    ema9_val = live_1h.get("ema9_1h", 0.0)
+                    log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). Falta cruce alcista en 1 hora.")
+                    return {
+                        "success": False,
+                        "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
+                    }
 
             # ── VALIDACIÓN 0.15: GUARDIA ADUANA DE IMPULSO COMPRADOR (ADX >= 18 & +DI > -DI & Anti-Falling Knife) ──
             minus_di = float(live_1h.get("minus_di_5m") or 15.0)
@@ -189,16 +197,16 @@ def execute_market_order(
             is_last_green = bool(live_1h.get("is_last_candle_green", True))
             lower_wick = float(live_1h.get("lower_wick_ratio") or 0.0)
 
-            # 1. Bloqueo si vendedores dominan (-DI > +DI)
-            if minus_di > plus_di:
+            # 1. Bloqueo si vendedores dominan (-DI > +DI) (Exento para Gap Runners confirmados por Aduana)
+            if minus_di > plus_di and not is_gap_strategy:
                 log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Fuerza vendedora dominante (-DI {minus_di:.1f} > +DI {plus_di:.1f}). Sin impulso comprador.")
                 return {
                     "success": False,
                     "reason": f"Aduana Entrada Rechazada: Fuerza vendedora dominante (-DI {minus_di:.1f} > +DI {plus_di:.1f}). No hay impulso positivo para LONG."
                 }
 
-            # 2. Bloqueo si ADX es menor a 18 (mercado sin fuerza/aletargado)
-            if adx_val < 18.0:
+            # 2. Bloqueo si ADX es menor a 18 (mercado sin fuerza/aletargado) (Exento para Gap Runners con volumen de apertura)
+            if adx_val < 18.0 and not is_gap_strategy:
                 log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: ADX {adx_val:.1f} < 18.0. Mercado sin fuerza de tendencia.")
                 return {
                     "success": False,
@@ -258,7 +266,7 @@ def execute_market_order(
             except Exception:
                 is_opening_window = False
 
-        is_gap_tranche = str(rule.get("code") or context.get("rule_code") or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (rule.get("strategy") == "ADUANA_GAP_RUNNER")
+        is_gap_tranche = str(rule.get("code") or context.get("rule_code") or rule_code or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (rule.get("strategy") == "ADUANA_GAP_RUNNER") or str(rule_code).startswith("GAP_")
 
         if gap_pct > 25.0 and is_opening_window and not is_gap_tranche:
             log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Gap Up excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de agotamiento en apertura (Filtro Anti-LQDA).")
@@ -560,7 +568,7 @@ def place_limit_order(
             except Exception:
                 is_opening_window = False
 
-        is_gap_tranche = str(rule.get("code") or context.get("rule_code") or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (rule.get("strategy") == "ADUANA_GAP_RUNNER")
+        is_gap_tranche = str(rule.get("code") or context.get("rule_code") or rule_code or context.get("strategy") or "").startswith("GAP_TRANCHE_") or (rule.get("strategy") == "ADUANA_GAP_RUNNER") or str(rule_code).startswith("GAP_")
 
         if gap_pct > 25.0 and is_opening_window and not is_gap_tranche:
             log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Gap Up excesivo ({gap_pct:+.1f}% > +25%). Riesgo extremo de agotamiento en apertura (Filtro Anti-LQDA).")
