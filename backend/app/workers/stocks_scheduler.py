@@ -360,24 +360,29 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             log_debug(MODULE, f"Skipping {ticker}: volume {volume_24h} < {min_vol}")
             return None
 
-        # 3b. GAP PROTECTION FILTER (Anti-IFRX & Anti-Falling Knife)
+                # 3b. GAP PROTECTION FILTER (Anti-IFRX & Anti-Falling Knife para compras LONG de acciones)
         gap_pct = float(f_data.get("gap_pct", 0) if f_data else 0)
-        today_open = float(df_1d.iloc[-1]["open"])
-        current_price = float(df_15m.iloc[-1]["close"])
+        today_open = float(df_1d.iloc[-1]["open"]) if len(df_1d) > 0 else current_price
+        current_price = float(df_15m.iloc[-1]["close"]) if len(df_15m) > 0 else current_price
 
-        # Case 1: Gap Up Trap (Merged)
-        # Si abre con gap alcista (> 1.5%) pero la vela del día ya es roja (precio < apertura),
-        # significa debilidad inmediata y toma de ganancias.
-        if gap_pct > 1.5 and current_price < today_open:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap (${current_price} < Open ${today_open}). Gap: {gap_pct}%.")
-            return None
-        # Case 2: Falling Knife (Gap Down)
-        # Un gap a la baja severo arruina el sentimiento para todo el día.
-        # Bloqueamos inmediatamente si la acción abre con -2.0% o peor.
-        if gap_pct < -2.0:
-            log_info(MODULE, f"🚫 Blocking {ticker}: Gap Down ({gap_pct}%). Bearish sentiment for the day.")
-            return None
+        # Verificamos si es candidata a Opciones o Gap Runner antes de vetar por completo
+        is_opt_eligible = False
+        try:
+            from app.options.aduana_gap_runner_options import is_optionable
+            is_opt_eligible = is_optionable(ticker)
+        except Exception:
+            is_opt_eligible = ticker in ["SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL"]
 
+        # Si NO es candidata a opciones y es una acción ordinaria ilíquida cayendo a cuchillo o en trampa de apertura, bloquear
+        if not is_opt_eligible:
+            # Case 1: Gap Up Trap (Merged)
+            if gap_pct > 1.5 and current_price < today_open:
+                log_info(MODULE, f"🚫 Blocking {ticker}: Gap Up Trap (${current_price} < Open ${today_open}). Gap: {gap_pct}%.")
+                return None
+            # Case 2: Falling Knife (Gap Down)
+            if gap_pct < -2.0:
+                log_info(MODULE, f"🚫 Blocking {ticker}: Gap Down ({gap_pct}%). Bearish sentiment for the day.")
+                return None
         # Case 3: Extreme Parabolic Extension (> 45% governed by TrapShield)
         # Fast-Track para IPO Super-Runners: Si la acción tiene <= 15 velas diarias o es IPO con volumen fuerte (>= 1.5M o RVOL >= 2.0),
         # permitimos el paso a la categoría especializada IPO_SUPER_RUNNER con stops de 5m en vez de vetarlo.
@@ -777,10 +782,20 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             except Exception as q_err:
                 log_warning(MODULE, f"Error bloqueando trampa para {ticker}: {q_err}")
 
-        # 1.4 ESTRATEGIA ADUANA OPEN GAP RUNNER (Piramidación 3 Tranches: 1/3, 2/3, 3/3)
+                # 1.4 ESTRATEGIA ADUANA OPEN GAP RUNNER (Stocks & Opciones CALLs/PUTs con Piramidación 3 Tranches)
         gap_val = float(trap_shield_res.get('gap_pct') or ind_15m.get('gap_pct') or 0.0)
         gap_runner_handled = False
-        if gap_val >= 5.0 and not trap_shield_res.get('is_trap', False) and not trap_shield_res.get('is_toxic_dilution', False):
+        
+        # Umbral mínimo adaptativo por tipo de activo (ETFs 0.6%, Mega-Caps 1.2%, High-Beta 3.0%)
+        min_gap_req = 3.0
+        try:
+            from app.options.aduana_gap_runner_options import get_min_gap_threshold
+            min_gap_req = get_min_gap_threshold(ticker)
+        except Exception:
+            min_gap_req = 3.0
+
+        # ── 1.4.A EJECUCIÓN STOCKS (Solo Gap Up alcista) ──
+        if gap_val >= min_gap_req and not trap_shield_res.get('is_trap', False) and not trap_shield_res.get('is_toxic_dilution', False):
             try:
                 from app.stocks.aduana_gap_runner_engine import evaluate_gap_runner_entry_tranches
                 pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
@@ -821,7 +836,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             'fib_zone': 0,
                             'last_updated': datetime.now(timezone.utc).isoformat()
                         }, on_conflict='ticker').execute()
-                        log_info(MODULE, f"🚀 ADUANA GAP RUNNER 99.8: {ticker} | {rule_cd} | {gap_eval['reason']}")
+                        log_info(MODULE, f"🚀 ADUANA GAP RUNNER STOCKS 99.8: {ticker} | {rule_cd} | {gap_eval['reason']}")
                         gap_runner_handled = True
                     elif active_pos is not None and t_step in [2, 3]:
                         cap_total = float(config.get("stock_capital_total", 1000.0))
@@ -847,13 +862,191 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             "reentry_count": new_count,
                             "last_reentry_at": datetime.now(timezone.utc).isoformat()
                         }).eq("id", active_pos["id"]).execute()
-                        log_info(MODULE, f"🔥 ADUANA GAP RUNNER PYRAMID ({new_count}/2): {ticker} +{tranche_shares} sh @ ${current_price:.2f} (SL a ${init_sl:.2f})")
+                        log_info(MODULE, f"🔥 ADUANA GAP RUNNER STOCKS PYRAMID ({new_count}/2): {ticker} +{tranche_shares} sh @ ${current_price:.2f} (SL a ${init_sl:.2f})")
                         gap_runner_handled = True
             except Exception as e_gap_sched:
-                log_warning(MODULE, f"Error en Aduana Gap Runner para {ticker}: {e_gap_sched}")
+                log_warning(MODULE, f"Error en Aduana Gap Runner Stocks para {ticker}: {e_gap_sched}")
 
+        # ── 1.4.B EJECUCIÓN OPCIONES (CALLs y PUTs institucionales) ──
+        try:
+            from app.options.aduana_gap_runner_options import (
+                evaluate_options_gap_entry_tranches,
+                is_optionable as check_optionable
+            )
+            from app.options.opt_contract_picker import fetch_and_select_best_option_contract
+
+            # Verificar si el ticker es opción-elegible y si supera el umbral de gap (positivo o negativo)
+            if abs(gap_val) >= min_gap_req and check_optionable(ticker):
+                opt_direction = "CALL" if gap_val > 0 else "PUT"
+
+                # Obtener posición abierta en opt_paper_trades
+                opt_pos_res = sb.table("opt_paper_trades").select("*").eq("symbol", ticker).eq("status", "open").execute()
+                active_opt_pos = opt_pos_res.data[0] if (opt_pos_res.data and len(opt_pos_res.data) > 0) else None
+
+                # Obtener SPY 5m como referencia direccional de mercado
+                spy_ref_df = None
+                try:
+                    if ticker == "SPY":
+                        spy_ref_df = df_5m
+                    else:
+                        spy_ref_df = await provider.get_ohlcv("SPY", interval="5m", period="2d")
+                except Exception:
+                    spy_ref_df = None
+
+                opt_gap_eval = evaluate_options_gap_entry_tranches(
+                    ticker=ticker,
+                    df_5m=df_5m,
+                    df_15m=df_15m,
+                    df_1h=df_1h,
+                    gap_pct=gap_val,
+                    active_position=active_opt_pos,
+                    df_market_ref=spy_ref_df,
+                    config=config
+                )
+
+                if opt_gap_eval.get("should_enter"):
+                    opt_rule_cd = opt_gap_eval.get("rule_code", f"OPT_GAP_{opt_direction}")
+                    opt_t_step = opt_gap_eval.get("tranche_step", 1)
+
+                    # Seleccionar el contrato ATM óptimo
+                    best_contract, opt_rej = fetch_and_select_best_option_contract(
+                        symbol=ticker,
+                        underlying_price=current_price,
+                        direction=opt_direction,
+                        budget_usd=float(config.get("options_trade_budget_usd", 1000.0)),
+                        supabase=sb
+                    )
+
+                    if best_contract:
+                        opt_exp_compact = best_contract.expiry.strftime("%Y%m%d")
+                        opt_ticker_formatted = f"{ticker}:OPT:{opt_exp_compact}:{best_contract.strike}:{best_contract.right}"
+
+                        if opt_t_step == 1:
+                            contracts_to_buy = max(1, best_contract.tranche_1_contracts)
+                        elif opt_t_step == 2:
+                            contracts_to_buy = max(1, best_contract.tranche_2_contracts)
+                        else:
+                            contracts_to_buy = max(1, best_contract.tranche_3_contracts)
+
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        opt_price = best_contract.ask if best_contract.ask > 0 else best_contract.mid
+
+                        if active_opt_pos is None and opt_t_step == 1:
+                            # 1. Registrar en opt_paper_trades
+                            new_paper_trade = {
+                                "symbol": ticker,
+                                "strategy_type": "long_call" if best_contract.right == "C" else "long_put",
+                                "direction": "bullish" if best_contract.right == "C" else "bearish",
+                                "status": "open",
+                                "qty": contracts_to_buy,
+                                "expiry": best_contract.expiry.isoformat(),
+                                "entry_time": now_iso,
+                                "entry_debit": opt_price,
+                                "entry_costs": round(0.70 * contracts_to_buy, 2),
+                                "entry_total_invested": round(opt_price * 100 * contracts_to_buy, 2),
+                                "max_loss_total": round(opt_price * 100 * contracts_to_buy, 2),
+                                "max_profit_total": 9999.0,
+                                "breakeven": round(best_contract.strike + opt_price, 2) if best_contract.right == "C" else round(best_contract.strike - opt_price, 2),
+                                "last_mark_price": opt_price,
+                                "last_mark_at": now_iso,
+                                "unrealized_pnl": 0.0,
+                                "exit_plan": {
+                                    "initial_sl": opt_gap_eval.get("initial_sl"),
+                                    "stop_loss_underlying": opt_gap_eval.get("initial_sl"),
+                                    "trailing_sl_type": "INITIAL",
+                                    "highest_premium_seen": opt_price,
+                                    "reentry_count": 0,
+                                    "tranche_step": 1,
+                                    "rule_code": opt_rule_cd,
+                                    "entry_reason": opt_gap_eval.get("reason"),
+                                    "last_eval_at": now_iso
+                                },
+                                "entry_fills": [{
+                                    "conid": best_contract.conid,
+                                    "contract_id": best_contract.contract_id,
+                                    "strike": best_contract.strike,
+                                    "right": best_contract.right,
+                                    "bid": best_contract.bid,
+                                    "ask": best_contract.ask,
+                                    "fill_price": opt_price,
+                                    "side": "buy",
+                                    "closing_side": "sell",
+                                    "market_data_type": "REALTIME"
+                                }],
+                                "model_version": "aduana_gap_runner_v6",
+                                "created_at": now_iso,
+                                "updated_at": now_iso
+                            }
+                            sb.table("opt_paper_trades").insert(new_paper_trade).execute()
+
+                            # 2. Despachar a stocks_orders para ejecución IB Bridge / TWS
+                            sb.table("stocks_orders").insert({
+                                "ticker": opt_ticker_formatted,
+                                "group_name": "OPEN_GAP_RUNNER_OPT",
+                                "rule_code": opt_rule_cd,
+                                "order_type": "market",
+                                "direction": "buy",
+                                "shares": contracts_to_buy,
+                                "market_price": opt_price,
+                                "status": "pending",
+                                "created_at": now_iso
+                            }).execute()
+
+                            log_info(MODULE, f"🎯 APERTURA OPCIONES AUTO: {opt_ticker_formatted} | {contracts_to_buy}x @ ${opt_price:.2f} ({opt_rule_cd})")
+
+                            # 3. Notificación Telegram
+                            opt_msg = (
+                                f"🚀 [OPTIONS GAP RUNNER] APERTURA EJECUTADA\n"
+                                f"Ticker: {ticker} ({opt_direction})\n"
+                                f"Contrato: {best_contract.strike} {best_contract.right} (Exp: {best_contract.expiry})\n"
+                                f"Cantidad: {contracts_to_buy} contratos @ ${opt_price:.2f}\n"
+                                f"Total Invertido: ${opt_price * 100 * contracts_to_buy:.2f}\n"
+                                f"Regla: {opt_rule_cd}\n"
+                                f"Motivo: {opt_gap_eval.get('reason')}"
+                            )
+                            send_telegram_opt_alert(opt_msg)
+
+                        elif active_opt_pos is not None and opt_t_step in [2, 3]:
+                            # Piramidación Livermore en Opciones
+                            old_qty = int(active_opt_pos.get("qty") or 1)
+                            old_debit = float(active_opt_pos.get("entry_debit") or opt_price)
+                            new_total_qty = old_qty + contracts_to_buy
+                            new_avg_debit = round(((old_debit * old_qty) + (opt_price * contracts_to_buy)) / new_total_qty, 4)
+
+                            active_exit_plan = dict(active_opt_pos.get("exit_plan") or {})
+                            active_exit_plan["reentry_count"] = int(active_exit_plan.get("reentry_count") or 0) + 1
+                            active_exit_plan["tranche_step"] = opt_t_step
+                            active_exit_plan["last_eval_at"] = now_iso
+                            if opt_gap_eval.get("initial_sl"):
+                                active_exit_plan["stop_loss_underlying"] = opt_gap_eval["initial_sl"]
+
+                            sb.table("opt_paper_trades").update({
+                                "qty": new_total_qty,
+                                "entry_debit": new_avg_debit,
+                                "entry_total_invested": round(new_avg_debit * 100 * new_total_qty, 2),
+                                "max_loss_total": round(new_avg_debit * 100 * new_total_qty, 2),
+                                "exit_plan": active_exit_plan,
+                                "updated_at": now_iso
+                            }).eq("id", active_opt_pos["id"]).execute()
+
+                            sb.table("stocks_orders").insert({
+                                "ticker": opt_ticker_formatted,
+                                "group_name": "OPEN_GAP_RUNNER_OPT",
+                                "rule_code": opt_rule_cd,
+                                "order_type": "market",
+                                "direction": "buy",
+                                "shares": contracts_to_buy,
+                                "market_price": opt_price,
+                                "status": "pending",
+                                "created_at": now_iso
+                            }).execute()
+
+                            log_info(MODULE, f"🔥 PIRAMIDACIÓN OPCIONES ({opt_t_step}/3): {opt_ticker_formatted} +{contracts_to_buy}x (Total: {new_total_qty}) @ ${opt_price:.2f}")
+
+        except Exception as e_opt_sched:
+            log_warning(MODULE, f"Error en evaluación de Gap Runner Opciones para {ticker}: {e_opt_sched}")
         # 1.5 Si es candidato FAST-TRACK IPO SUPER-RUNNER / ALPHA RUNNER: Máxima Prioridad Rank 99.5
-        elif not gap_runner_handled and (is_ipo_runner or is_alpha_runner_cat) and not trap_shield_res.get('is_toxic_dilution', False):
+        if not gap_runner_handled and (is_ipo_runner or is_alpha_runner_cat) and not trap_shield_res.get('is_toxic_dilution', False):
             try:
                 from app.stocks.fast_track_runner_engine import evaluate_fast_track_entry, evaluate_fast_track_reentry
                 pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
@@ -1615,7 +1808,15 @@ async def run_stocks_cycle(force=False):
             log_warning(MODULE, f"Error inyectando Alpha Runners en vivo al ciclo: {e_ar_inject}")
 
         # Priorizar Alpha Runners al inicio de la lista de evaluación
-        tickers = list(dict.fromkeys(live_runner_tickers + (base_tickers or [])))
+                # Inyectar subyacentes opcionables clave para garantizar que SPY, QQQ y Mega-Caps siempre se evalúen
+        opt_underlying_tickers = []
+        try:
+            opt_und_res = sb.table("opt_underlyings").select("symbol").eq("optionable", True).execute()
+            opt_underlying_tickers = [u["symbol"] for u in (opt_und_res.data or []) if u.get("symbol")]
+        except Exception:
+            opt_underlying_tickers = ["SPY", "QQQ", "IWM", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL"]
+
+        tickers = list(dict.fromkeys(opt_underlying_tickers + live_runner_tickers + (base_tickers or [])))
         if not tickers:
             log_warning(MODULE, "Empty watchlist — nothing to process")
             return
@@ -2183,6 +2384,235 @@ async def run_stocks_tp_v2_cycle():
             )
 
 
+
+def send_telegram_opt_alert(message: str):
+    """Envío seguro y sin bloqueo de alertas Telegram para Opciones."""
+    try:
+        from app.workers.alerts_service import send_telegram_message
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(send_telegram_message(message))
+        except RuntimeError:
+            asyncio.run(send_telegram_message(message))
+    except Exception:
+        pass
+
+
+async def run_options_gap_defense_cycle():
+    """
+    Supervisión autónoma continua de posiciones abiertas en opt_paper_trades:
+    1. Carga posiciones 'open' de opt_paper_trades.
+    2. Obtiene cotización y velas multi-timeframe (5m, 15m, 1h).
+    3. Evalúa evaluate_options_gap_aduana_exit.
+    4. Ejecuta Hard SL (-35%), Stall Guard (20 min), Trailing Ratchet Tier 2/3, Breakeven Shield, VWAP Exit, RSI Climax TP.
+    5. Actualiza Stop Loss dinámico monotónico y watermark en opt_paper_trades.
+    """
+    sb = get_supabase()
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.isoformat()
+
+    try:
+        open_trades = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
+        if not open_trades:
+            return
+
+        from app.data.yfinance_provider import YFinanceProvider
+        from app.options.aduana_gap_runner_options import evaluate_options_gap_aduana_exit
+        from app.options.bs import bs_price
+        provider = YFinanceProvider()
+
+        for pos in open_trades:
+            pid = pos["id"]
+            symbol = pos["symbol"]
+            strat = pos.get("strategy_type", "long_call")
+            is_call = "call" in strat.lower() or pos.get("direction") == "bullish"
+            entry_debit = float(pos.get("entry_debit") or 0.0)
+            qty = int(pos.get("qty") or 1)
+            exit_plan = dict(pos.get("exit_plan") or {})
+
+            # Obtener velas multi-timeframe del subyacente
+            df_5m = await provider.get_ohlcv(symbol, interval="5m", period="5d")
+            df_15m = await provider.get_ohlcv(symbol, interval="15m", period="10d")
+            df_1h = await provider.get_ohlcv(symbol, interval="1h", period="30d")
+
+            if df_5m is None or df_5m.empty:
+                continue
+
+            cur_stock_p = float(df_5m["close"].iloc[-1])
+
+            # Calcular prima actual de la opción
+            cur_opt_premium = None
+            legs = pos.get("entry_fills") or []
+            strike = float(legs[0].get("strike") or cur_stock_p) if legs else cur_stock_p
+            expiry_str = pos.get("expiry") or ""
+
+            # 1. Intentar obtener cotización live de la opción desde yfinance
+            if expiry_str:
+                try:
+                    import yfinance as yf
+                    t_yf = yf.Ticker(symbol)
+                    chain = t_yf.option_chain(expiry_str[:10])
+                    chain_df = chain.calls if is_call else chain.puts
+                    match = chain_df[chain_df["strike"] == strike]
+                    if not match.empty:
+                        b = float(match["bid"].iloc[0] or 0.0)
+                        a = float(match["ask"].iloc[0] or 0.0)
+                        l = float(match["lastPrice"].iloc[0] or 0.0)
+                        if b > 0 and a > 0:
+                            cur_opt_premium = round((b + a) / 2.0, 4)
+                        elif l > 0:
+                            cur_opt_premium = round(l, 4)
+                except Exception:
+                    pass
+
+            # 2. Si no se obtuvo prima de mercado, calcular vía Black-Scholes teórico
+            if cur_opt_premium is None or cur_opt_premium <= 0:
+                try:
+                    from datetime import date
+                    dte_days = 7.0
+                    if expiry_str:
+                        exp_d = date.fromisoformat(expiry_str[:10])
+                        dte_days = max(1.0, float((exp_d - now_dt.date()).days))
+                    t_years = dte_days / 365.0
+                    iv_est = 0.25
+                    bs_val = bs_price(cur_stock_p, strike, t_years, 0.045, iv_est, "C" if is_call else "P")
+                    if bs_val is not None:
+                        cur_opt_premium = round(bs_val, 4)
+                except Exception:
+                    pass
+
+            if cur_opt_premium is None or cur_opt_premium <= 0:
+                cur_opt_premium = float(pos.get("last_mark_price") or entry_debit)
+
+            # Actualizar watermark más alto visto
+            highest_seen = float(exit_plan.get("highest_premium_seen") or entry_debit)
+            if cur_opt_premium > highest_seen:
+                highest_seen = cur_opt_premium
+                exit_plan["highest_premium_seen"] = highest_seen
+
+            # Calcular edad de la posición en minutos
+            pos_age_min = 0.0
+            if pos.get("entry_time"):
+                try:
+                    e_dt = datetime.fromisoformat(str(pos["entry_time"]).replace("Z", "+00:00"))
+                    pos_age_min = max(0.0, (now_dt - e_dt).total_seconds() / 60.0)
+                except Exception:
+                    pass
+
+            # Posición formateada para la evaluación
+            eval_pos = dict(pos)
+            eval_pos["direction"] = "CALL" if is_call else "PUT"
+            eval_pos["highest_premium_seen"] = highest_seen
+            eval_pos["stop_loss_underlying"] = exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0
+            eval_pos["reentry_count"] = exit_plan.get("reentry_count", 0)
+
+            eval_res = evaluate_options_gap_aduana_exit(
+                position=eval_pos,
+                current_underlying_price=cur_stock_p,
+                current_option_premium=cur_opt_premium,
+                df_5m=df_5m,
+                df_15m=df_15m,
+                df_1h=df_1h,
+                position_age_minutes=pos_age_min,
+                sipv_signal=None
+            )
+
+            # PnL no realizado actual
+            unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
+
+            if eval_res.get("should_exit"):
+                exit_code = eval_res.get("rule_code", "OPT_GAP_EXIT")
+                exit_reason_txt = eval_res.get("reason", exit_code)
+                realized_pnl_usd = unrealized_pnl_usd
+                realized_pnl_pct = round(((cur_opt_premium - entry_debit) / entry_debit * 100.0), 2) if entry_debit > 0 else 0.0
+
+                exit_plan["detailed_exit_reason"] = exit_code
+                exit_plan["detailed_exit_text"] = exit_reason_txt
+                exit_plan["closed_at"] = now_iso
+
+                # Cerrar posición en opt_paper_trades
+                sb.table("opt_paper_trades").update({
+                    "status": "closed",
+                    "exit_time": now_iso,
+                    "exit_credit": cur_opt_premium,
+                    "last_mark_price": cur_opt_premium,
+                    "last_mark_at": now_iso,
+                    "realized_pnl": realized_pnl_usd,
+                    "unrealized_pnl": 0.0,
+                    "exit_reason": exit_code,
+                    "exit_plan": exit_plan,
+                    "updated_at": now_iso
+                }).eq("id", pid).execute()
+
+                # Enviar orden de cierre SELL a stocks_orders para ejecución en TWS si hay puente
+                exp_compact = expiry_str.replace("-", "")[:8] if expiry_str else "20261026"
+                opt_ticker_formatted = f"{symbol}:OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
+                try:
+                    sb.table("stocks_orders").insert({
+                        "ticker": opt_ticker_formatted,
+                        "group_name": "OPEN_GAP_RUNNER_OPT",
+                        "rule_code": exit_code,
+                        "order_type": "market",
+                        "direction": "sell",
+                        "shares": qty,
+                        "market_price": cur_opt_premium,
+                        "status": "pending",
+                        "created_at": now_iso
+                    }).execute()
+                except Exception as ord_err:
+                    log_warning(MODULE, f"Aviso enviando orden de cierre opciones {pid}: {ord_err}")
+
+                # Registrar en trades_journal
+                try:
+                    sb.table("trades_journal").insert({
+                        "ticker": opt_ticker_formatted,
+                        "shares": qty,
+                        "entry_price": entry_debit,
+                        "exit_price": cur_opt_premium,
+                        "entry_date": pos.get("entry_time") or now_iso,
+                        "exit_date": now_iso,
+                        "pnl_usd": realized_pnl_usd,
+                        "pnl_pct": realized_pnl_pct,
+                        "result": "win" if realized_pnl_usd >= 0 else "loss",
+                        "exit_reason": exit_code,
+                        "trade_type": "OPTIONS_GAP_RUNNER"
+                    }).execute()
+                except Exception as tj_err:
+                    log_warning(MODULE, f"Aviso registrando trades_journal para opción {pid}: {tj_err}")
+
+                log_info(MODULE, f"🎯 CIERRE OPCIÓN {symbol} ({pid}): {exit_code} | PnL=${realized_pnl_usd:+.2f} ({realized_pnl_pct:+.1f}%) | {exit_reason_txt}")
+
+                # Notificación Telegram
+                send_telegram_opt_alert(
+                    f"🎯 [OPTIONS GAP RUNNER EXIT] CIERRE EJECUTADO\n"
+                    f"Ticker: {symbol} ({strat.upper()})\n"
+                    f"Contrato: Strike ${strike} {'CALL' if is_call else 'PUT'} (Exp: {expiry_str})\n"
+                    f"Precio Salida: ${cur_opt_premium:.2f} (Entrada: ${entry_debit:.2f})\n"
+                    f"PnL Realizado: ${realized_pnl_usd:+.2f} ({realized_pnl_pct:+.1f}%)\n"
+                    f"Motivo: {exit_code}\n"
+                    f"Detalle: {exit_reason_txt}"
+                )
+
+            else:
+                # Monitoreo continuo: actualizar Stop Loss técnico si fue propuesto
+                new_sl = eval_res.get("new_stop_loss_underlying")
+                if new_sl:
+                    exit_plan["stop_loss_underlying"] = new_sl
+                    exit_plan["trailing_sl_type"] = eval_res.get("rule_code", "SL_DYNAMIC")
+
+                exit_plan["last_eval_at"] = now_iso
+                sb.table("opt_paper_trades").update({
+                    "last_mark_price": cur_opt_premium,
+                    "last_mark_at": now_iso,
+                    "unrealized_pnl": unrealized_pnl_usd,
+                    "exit_plan": exit_plan,
+                    "updated_at": now_iso
+                }).eq("id", pid).execute()
+
+    except Exception as e_def:
+        log_warning(MODULE, f"Error en ciclo defensivo de opciones: {e_def}")
+
+
 async def start_stocks_scheduler(force=False):
     """
     Start the stocks scheduler using APScheduler.
@@ -2212,12 +2642,22 @@ async def start_stocks_scheduler(force=False):
         replace_existing=True,
     )
 
-    # 1b. TP MANAGER: every 5 minutes during market hours
+        # 1b. TP MANAGER: every 5 minutes during market hours
     scheduler.add_job(
         run_stocks_tp_v2_cycle,
         trigger=IntervalTrigger(minutes=5),
         id="stocks_tp_cycle",
         name="Stocks TP Manager (3 Blocks, 5m)",
+        max_instances=1,
+        replace_existing=True,
+    )
+
+    # 1b-opt. OPTIONS DEFENSE & RATCHET MONITOR: cada 1 minuto
+    scheduler.add_job(
+        run_options_gap_defense_cycle,
+        trigger=IntervalTrigger(minutes=1),
+        id="options_gap_defense_cycle",
+        name="Options Gap Defense & Ratchet Monitor (1m)",
         max_instances=1,
         replace_existing=True,
     )
@@ -2308,6 +2748,7 @@ async def start_stocks_scheduler(force=False):
 
     # Run first cycles immediately
     asyncio.create_task(run_stocks_tp_v2_cycle())
+    asyncio.create_task(run_options_gap_defense_cycle())
     await run_stocks_cycle(force=force)
 
     # Keep running

@@ -209,3 +209,177 @@ def select_best_option_contract(
     best = candidates[0]
 
     return best, rejection_reasons
+
+
+def fetch_and_select_best_option_contract(
+    symbol: str,
+    underlying_price: float,
+    direction: str = "CALL",
+    budget_usd: float = 1000.0,
+    supabase: Any = None,
+    now_date: Optional[date] = None
+) -> Tuple[Optional[SelectedContract], List[str]]:
+    """
+    Selecciona de forma inteligente el mejor contrato de opción para Gap Runner:
+    1. Intenta primero desde la base de datos Supabase (opt_contracts + opt_quotes_latest).
+    2. Si no hay datos vigentes o bid/ask son nulos, consulta la cadena en vivo vía yfinance.
+    3. Retorna (SelectedContract o None, lista_de_motivos).
+    """
+    sym = symbol.strip().upper()
+    ref_date = now_date or datetime.now(timezone.utc).date()
+    rejection_reasons: List[str] = []
+
+    # ── PASO 1: INTENTO DESDE SUPABASE ──
+    if supabase is not None:
+        try:
+            u_res = supabase.table("opt_underlyings").select("id").eq("symbol", sym).limit(1).execute()
+            if u_res.data:
+                uid = u_res.data[0]["id"]
+                c_res = supabase.table("opt_contracts")\
+                    .select("*, opt_quotes_latest(*)")\
+                    .eq("underlying_id", uid)\
+                    .eq("active", True)\
+                    .execute()
+                db_contracts = c_res.data or []
+                if db_contracts:
+                    valid_db_contracts = []
+                    for c in db_contracts:
+                        c["symbol"] = sym
+                        ql = c.get("opt_quotes_latest")
+                        if isinstance(ql, list):
+                            ql = ql[0] if ql else {}
+                        if ql and float(ql.get("bid") or 0) > 0 and float(ql.get("ask") or 0) > 0:
+                            valid_db_contracts.append(c)
+
+                    if valid_db_contracts:
+                        best_db, rej_db = select_best_option_contract(
+                            valid_db_contracts,
+                            underlying_price=underlying_price,
+                            direction=direction,
+                            budget_usd=budget_usd,
+                            now_date=ref_date
+                        )
+                        if best_db is not None:
+                            log_info("OPT_PICKER", f"🎯 Contrato seleccionado desde Supabase DB: {best_db.symbol} Strike ${best_db.strike} {best_db.right} (Exp: {best_db.expiry})")
+                            return best_db, rej_db
+                        rejection_reasons.extend(rej_db)
+        except Exception as e_db:
+            log_warning("OPT_PICKER", f"Aviso consultando Supabase opt_contracts para {sym}: {e_db}")
+
+    # ── PASO 2: FALLBACK EN VIVO VÍA YFINANCE ──
+    try:
+        import yfinance as yf
+        from app.options.bs import bs_delta
+
+        t = yf.Ticker(sym)
+        all_exps = t.options
+        if not all_exps:
+            rejection_reasons.append(f"{sym}: No tiene opciones disponibles en mercado.")
+            return None, rejection_reasons
+
+        # Filtrar vencimientos: preferir entre 2 y 21 días (o entre 1 y 25 si es necesario)
+        valid_exps = [e for e in all_exps if 2 <= (date.fromisoformat(e) - ref_date).days <= 21]
+        if not valid_exps:
+            valid_exps = [e for e in all_exps if 1 <= (date.fromisoformat(e) - ref_date).days <= 30]
+
+        if not valid_exps:
+            rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango DTE (2-21d).")
+            return None, rejection_reasons
+
+        is_call = direction.upper() in ("CALL", "BULLISH")
+        target_right = "C" if is_call else "P"
+
+        all_candidates_rows = []
+        for exp_str in valid_exps[:3]: # Evaluar los primeros 3 vencimientos más cercanos
+            exp_d = date.fromisoformat(exp_str)
+            dte = (exp_d - ref_date).days
+
+            try:
+                chain = t.option_chain(exp_str)
+                df_opts = chain.calls if is_call else chain.puts
+                if df_opts is None or df_opts.empty:
+                    continue
+
+                for _, r in df_opts.iterrows():
+                    strike = float(r.get("strike") or 0.0)
+                    # Filtrar strikes dentro del +-10% del precio actual
+                    if underlying_price > 0 and abs(strike - underlying_price) / underlying_price > 0.10:
+                        continue
+
+                    bid = float(r.get("bid") or 0.0)
+                    ask = float(r.get("ask") or 0.0)
+                    if bid <= 0.0 or ask <= 0.0:
+                        continue
+
+                    iv = float(r.get("impliedVolatility") or 0.25)
+                    calc_delta = bs_delta(
+                        underlying_price,
+                        strike,
+                        max(1.0, float(dte)) / 365.0,
+                        0.045, # Risk-free rate
+                        max(0.10, iv),
+                        target_right
+                    )
+
+                    all_candidates_rows.append({
+                        "contract_id": None,
+                        "conid": None,
+                        "symbol": sym,
+                        "right": target_right,
+                        "strike": strike,
+                        "expiry": exp_str,
+                        "bid": bid,
+                        "ask": ask,
+                        "volume": float(r.get("volume") or 0.0),
+                        "open_interest": float(r.get("openInterest") or 0.0),
+                        "delta": calc_delta
+                    })
+            except Exception as e_chain:
+                log_warning("OPT_PICKER", f"Error obteniendo cadena {sym} para exp {exp_str}: {e_chain}")
+                continue
+
+        if not all_candidates_rows:
+            rejection_reasons.append(f"{sym}: No se encontraron cotizaciones de opciones válidas con bid/ask > 0.")
+            return None, rejection_reasons
+
+        best_live, rej_live = select_best_option_contract(
+            all_candidates_rows,
+            underlying_price=underlying_price,
+            direction=direction,
+            budget_usd=budget_usd,
+            now_date=ref_date
+        )
+
+        if best_live is not None:
+            log_info("OPT_PICKER", f"🚀 Contrato seleccionado en VIVO (yfinance): {best_live.symbol} Strike ${best_live.strike} {best_live.right} (Exp: {best_live.expiry}, DTE: {best_live.dte}, Bid/Ask: ${best_live.bid:.2f}/${best_live.ask:.2f}, Delta: {best_live.delta:+.3f})")
+
+            # Si Supabase está disponible, registrar o actualizar el contrato
+            if supabase is not None:
+                try:
+                    u_res = supabase.table("opt_underlyings").select("id").eq("symbol", sym).limit(1).execute()
+                    uid = u_res.data[0]["id"] if u_res.data else 1
+                    formatted_exp = best_live.expiry.isoformat()
+                    # Upsert contrato
+                    c_ins = supabase.table("opt_contracts").upsert({
+                        "underlying_id": uid,
+                        "right": best_live.right,
+                        "strike": best_live.strike,
+                        "expiry": formatted_exp,
+                        "multiplier": 100,
+                        "active": True
+                    }, on_conflict="underlying_id,strike,right,expiry").execute()
+                    if c_ins.data:
+                        best_live.contract_id = c_ins.data[0].get("id")
+                except Exception as e_up:
+                    log_warning("OPT_PICKER", f"Aviso guardando contrato en Supabase: {e_up}")
+
+            return best_live, rej_live
+
+        rejection_reasons.extend(rej_live)
+        return None, rejection_reasons
+
+    except Exception as e_live:
+        log_warning("OPT_PICKER", f"Error general en live option chain para {sym}: {e_live}")
+        rejection_reasons.append(str(e_live))
+        return None, rejection_reasons
+

@@ -1053,3 +1053,33 @@ def evaluate_options_gap_aduana_exit(
                 return res
 
     return res
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# REGLA 4: VERIFICACIÓN DE OPCIONABILIDAD Y SIMBOLOS AUTORIZADOS
+# ══════════════════════════════════════════════════════════════════════════
+
+KNOWN_OPTIONABLE_SYMBOLS = {
+    "SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "XLF", "XLI", "XLV", "XLU",
+    "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL", "GOOG", "NFLX",
+    "PLTR", "COIN", "AVGO", "INTC", "DIS", "BA", "BABA", "CRM", "UBER", "M", "AAL", "TLK"
+}
+
+
+def is_optionable(symbol: str, supabase: Any = None) -> bool:
+    """
+    Verifica si un ticker es apto para operar opciones en el sistema eTrade.
+    Prioriza ETFs de alta liquidez y Mega-Caps, o consulta la tabla opt_underlyings.
+    """
+    sym = str(symbol or "").strip().upper()
+    if sym in KNOWN_OPTIONABLE_SYMBOLS:
+        return True
+    if supabase is not None:
+        try:
+            r = supabase.table("opt_underlyings").select("optionable").eq("symbol", sym).limit(1).execute()
+            if r.data:
+                return bool(r.data[0].get("optionable", False))
+        except Exception:
+            pass
+    return False
+
