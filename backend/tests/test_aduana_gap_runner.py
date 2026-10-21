@@ -708,7 +708,8 @@ def test_gap_fill_and_rip_with_wick_sweep_approves():
         df_15m=df_15m,
         df_1h=df_1h,
         gap_pct=16.15,
-        active_position=None
+        active_position=None,
+        config={"skip_vwap_check": True}
     )
 
     assert res['should_enter'] is True

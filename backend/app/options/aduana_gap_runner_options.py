@@ -922,32 +922,45 @@ def evaluate_options_gap_aduana_exit(
             })
             return res
 
-    # MEJORA 4: BLINDAJE RÁPIDO BREAKEVEN PARA PUTS (+15% pico -> BE)
-    if not is_call:
-        if peak_pnl_pct >= 15.0 and peak_pnl_pct < 25.0:
-            if current_option_premium <= entry_premium * 1.01:
-                res.update({
-                    "should_exit": True,
-                    "exit_type": "trailing_stop",
-                    "contracts_ratio_to_exit": 1.0,
-                    "rule_code": "OPT_GAP_PUT_BREAKEVEN",
-                    "reason": f"Breakeven Shield PUT activado: Ganancia pico fue +{peak_pnl_pct:.1f}%, prima protege precio de compra (${entry_premium:.2f})"
-                })
-                return res
+    # PILAR 3 (OPCIONES): BLINDAJE RÁPIDO BREAKEVEN PARA CALLs Y PUTs (+1.0% subyacente o +15% prima -> BE)
+    und_entry_p = float(position.get("entry_underlying_price") or position.get("entry_price") or 0.0)
+    und_pnl_pct = 0.0
+    if und_entry_p > 0:
+        und_pnl_pct = ((current_underlying_price - und_entry_p) / und_entry_p * 100.0) if is_call else ((und_entry_p - current_underlying_price) / und_entry_p * 100.0)
 
-    # MEJORA 5: SALIDA DEFENSIVA ANTE RECUPERACIÓN DE VWAP EN SUBYACENTE (Solo PUTs)
-    if not is_call and df_5m is not None and len(df_5m) >= 3:
+    if (peak_pnl_pct >= 15.0 or und_pnl_pct >= 1.0) and peak_pnl_pct < 25.0:
+        if current_option_premium <= entry_premium * 1.01:
+            res.update({
+                "should_exit": True,
+                "exit_type": "trailing_stop",
+                "contracts_ratio_to_exit": 1.0,
+                "rule_code": "OPT_GAP_CALL_BREAKEVEN" if is_call else "OPT_GAP_PUT_BREAKEVEN",
+                "reason": f"Breakeven Shield {'CALL' if is_call else 'PUT'} activado: Ganancia pico prima +{peak_pnl_pct:.1f}% o subyacente +{und_pnl_pct:.2f}%. Prima protege costo (${entry_premium*1.01:.2f})"
+            })
+            return res
+
+    # SALIDAS DEFENSIVAS ANTE ROTURA DE VWAP EN SUBYACENTE (CALLs y PUTs)
+    if df_5m is not None and len(df_5m) >= 3:
         vwap_s = compute_vwap(df_5m)
         if len(vwap_s) > 0:
             cur_vwap = float(vwap_s.iloc[-1])
             cur_stock_p = float(_safe_col(df_5m, "close").iloc[-1])
-            if cur_stock_p > (cur_vwap * 1.003) and unrealized_pnl_pct <= -5.0:
+            if not is_call and cur_stock_p > (cur_vwap * 1.003) and unrealized_pnl_pct <= -5.0:
                 res.update({
                     "should_exit": True,
                     "exit_type": "vwap_breached",
                     "contracts_ratio_to_exit": 1.0,
                     "rule_code": "OPT_GAP_PUT_EXIT_VWAP",
                     "reason": f"Salida Defensiva PUT: Subyacente (${cur_stock_p:.2f}) recuperó su VWAP (${cur_vwap:.2f}) al alza. Riesgo de squeeze cortado anticipadamente."
+                })
+                return res
+            elif is_call and cur_stock_p < (cur_vwap * 0.996) and unrealized_pnl_pct <= -5.0:
+                res.update({
+                    "should_exit": True,
+                    "exit_type": "vwap_breached",
+                    "contracts_ratio_to_exit": 1.0,
+                    "rule_code": "OPT_GAP_CALL_EXIT_VWAP",
+                    "reason": f"Salida Defensiva CALL: Subyacente (${cur_stock_p:.2f}) perforó su VWAP (${cur_vwap:.2f}) a la baja (-0.4%). Riesgo cortado anticipadamente."
                 })
                 return res
 

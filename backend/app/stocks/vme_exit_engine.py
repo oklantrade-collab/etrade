@@ -144,14 +144,15 @@ def evaluate_vme_exit(
                 "reason": f"Hard Stop Loss Opciones activado: Prima ${current_option_premium:.2f} <= ${entry_debit*0.65:.2f} (-35%)"
             }
 
-        # 2. Breakeven Shield (+15% pico -> piso +1%)
-        if highest_p >= entry_debit * 1.15 and current_option_premium <= entry_debit * 1.01:
+        # 2. Breakeven Shield (+15% pico o subyacente +1.0% -> piso +1%)
+        und_gain_pct = ((price - entry_p) / entry_p * 100.0) if (is_bullish and entry_p > 0) else ((entry_p - price) / entry_p * 100.0) if entry_p > 0 else 0.0
+        if (highest_p >= entry_debit * 1.15 or und_gain_pct >= 1.0) and current_option_premium <= entry_debit * 1.01:
             return {
                 **res,
                 "should_exit": True,
                 "exit_type": "FULL",
                 "rule_code": "VME_EXIT_OPT_BREAKEVEN",
-                "reason": f"Breakeven Shield activado: Ganancia pico (+{(highest_p/entry_debit - 1)*100:.1f}%) protegida en costo ${entry_debit*1.01:.2f}"
+                "reason": f"Breakeven Shield activado: Ganancia pico (+{(highest_p/entry_debit - 1)*100:.1f}%) o subyacente (+{und_gain_pct:.2f}%) protegida en costo ${entry_debit*1.01:.2f}"
             }
 
         # 3. Trailing Ratchet Tier 2 (+30% pico -> asegura +15%)
@@ -175,17 +176,28 @@ def evaluate_vme_exit(
             }
 
     # ════════════════════════════════════════════════════════
-    # B. STOP LOSS DINÁMICO 15M (EMA9 RATCHET)
+    # B. STOP LOSS DINÁMICO 15M (EMA9 RATCHET & BREAKEVEN SHIELD A +1.0%)
     # ════════════════════════════════════════════════════════
     new_sl = current_sl
     if is_bullish:
         if ema9_15m > ema9_15m_prev:
             prop_sl = round(ema9_15m - delta, 2)
             new_sl = max(current_sl, prop_sl)
+        # Breakeven Lock para STOCKS a +1.0% de ganancia
+        und_gain_pct = ((price - entry_p) / entry_p * 100.0) if entry_p > 0 else 0.0
+        if und_gain_pct >= 1.0:
+            prop_be = round(entry_p + 0.02, 2)
+            if prop_be > new_sl and prop_be < price:
+                new_sl = prop_be
     else:
         if ema9_15m < ema9_15m_prev:
             prop_sl = round(ema9_15m + delta, 2)
             new_sl = min(current_sl, prop_sl) if current_sl > 0 else prop_sl
+        und_gain_pct = ((entry_p - price) / entry_p * 100.0) if entry_p > 0 else 0.0
+        if und_gain_pct >= 1.0:
+            prop_be = round(entry_p - 0.02, 2)
+            if (prop_be < new_sl or new_sl <= 0) and prop_be > price:
+                new_sl = prop_be
 
     res["new_stop_loss"] = new_sl
 

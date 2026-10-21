@@ -175,6 +175,25 @@ def calculate_gap_velocity_ranking(candidates: List[Dict[str, Any]]) -> List[Dic
     return ranked_list
 
 
+def _get_et_hour_min(df: pd.DataFrame) -> Optional[tuple]:
+    """Extrae la hora y minuto en horario Eastern Time (ET) del último timestamp del DataFrame."""
+    if df is None or df.empty:
+        return None
+    try:
+        last_ts = df.index[-1]
+        if hasattr(last_ts, "tzinfo") and last_ts.tzinfo is not None:
+            ts_et = last_ts.tz_convert("America/New_York")
+            return ts_et.hour, ts_et.minute
+        elif hasattr(last_ts, "hour"):
+            h, m = last_ts.hour, last_ts.minute
+            if h >= 13:
+                return h - 4, m
+            return h, m
+    except Exception:
+        pass
+    return None
+
+
 def evaluate_gap_runner_entry_tranches(
     ticker: str,
     df_5m: Optional[pd.DataFrame],
@@ -225,6 +244,27 @@ def evaluate_gap_runner_entry_tranches(
 
     cur_p = float(c5.iloc[-1])
     res["entry_price"] = cur_p
+
+    # ── PILAR 1: Ventana Horaria Estricta de Apertura (09:30 - 11:15 ET) ──
+    skip_window = bool(config and config.get("skip_time_window_check"))
+    if not skip_window:
+        et_time = _get_et_hour_min(df_5m)
+        if et_time:
+            et_h, et_m = et_time
+            is_late = (et_h > 11) or (et_h == 11 and et_m > 15)
+            is_early = (et_h < 9) or (et_h == 9 and et_m < 30)
+            if is_late or is_early:
+                res["reason"] = f"Fuera de ventana de apertura institucional ({et_h:02d}:{et_m:02d} ET no está en 09:30 - 11:15 ET). Entradas en Gaps bloqueadas."
+                return res
+
+    # ── PILAR 2: Filtro Maestro Sobre VWAP en Entrada (Compras estrictamente sobre VWAP) ──
+    skip_vwap = bool(config and config.get("skip_vwap_check"))
+    if not skip_vwap:
+        vwap_series_init = compute_vwap(df_5m)
+        cur_vwap_init = float(vwap_series_init.iloc[-1]) if len(vwap_series_init) > 0 else 0.0
+        if cur_vwap_init > 0 and cur_p < (cur_vwap_init * 0.999):
+            res["reason"] = f"Filtro Maestro VWAP: Precio actual (${cur_p:.2f}) cotiza por debajo del VWAP (${cur_vwap_init:.2f}). Compras en largo bloqueadas bajo VWAP."
+            return res
 
     # ─────────────────────────────────────────────────────────────
     # PASO 1: Validación Macro 1H (Regla 2.a)
@@ -665,6 +705,23 @@ def evaluate_gap_runner_aduana_exit(
         return res
 
     # ─────────────────────────────────────────────────────────────
+    # PILAR 4: Salida por Invalidación Rápida de Soporte VWAP (-0.4%)
+    # ─────────────────────────────────────────────────────────────
+    if df_5m is not None and len(df_5m) >= 3:
+        vwap_exit_s = compute_vwap(df_5m)
+        if len(vwap_exit_s) > 0:
+            c_vwap = float(vwap_exit_s.iloc[-1])
+            if c_vwap > 0 and current_price < (c_vwap * 0.996):
+                res.update({
+                    "should_exit": True,
+                    "exit_type": "full",
+                    "rule_code": "ADUANA_GAP_VWAP_INVALIDATION",
+                    "shares_to_exit": total_shares,
+                    "reason": f"Invalidación Técnica VWAP: Precio (${current_price:.2f}) perforó soporte de VWAP (${c_vwap:.2f}) por más del 0.4%."
+                })
+                return res
+
+    # ─────────────────────────────────────────────────────────────
     # VALIDACIÓN 2 (Regla 1.e): Clímax Absoluto 1H (RSI_1H > 85 -> CIERRE TOTAL)
     # ─────────────────────────────────────────────────────────────
     c1h = _safe_col(df_1h, "close") if df_1h is not None else pd.Series(dtype=float)
@@ -779,6 +836,14 @@ def evaluate_gap_runner_aduana_exit(
                 f"Trailing Escalonado Tier 2 (+{pnl_pct:.1f}%): Elevado a ${proposed_tier2:.2f} "
                 f"(Asegurando piso de +15% / EMA3 15m)"
             )
+
+    # PILAR 3: Escudo Breakeven Automático a +1.0% de ganancia en STOCKS
+    if pnl_pct >= 1.0 and best_trail_sl < (avg_price + 0.02):
+        proposed_be = round(avg_price + 0.02, 2)
+        if proposed_be < current_price:
+            best_trail_sl = proposed_be
+            best_trail_rule = "ADUANA_GAP_BREAKEVEN_LOCK_1PCT"
+            best_trail_reason = f"Escudo Breakeven Lock activado (+{pnl_pct:.2f}% ganancia): SL asegurado en precio de compra + $0.02 (${proposed_be:.2f})"
 
     # TIER 1 / FALLBACK RATCHET (+7.0% a +24.9% si no se asignó regla previa superior)
     elif pnl_pct >= 7.0 and not best_trail_rule:
