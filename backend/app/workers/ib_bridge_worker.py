@@ -395,6 +395,26 @@ class IBBridgeWorker:
                         log_info(MODULE, f"🎯 Contrato de OPCIÓN identificado vía target_band: {sym_p} {exp_p} Strike ${strike_p} Right={right_p}")
 
                     if not contract:
+                        # ── BLOQUEO ANTI-SHORT: eTrader opera exclusivamente LONG en Stocks ──
+                        if direction == "sell":
+                            broker_pos = self.ib._positions.get(ticker.upper())
+                            if not broker_pos:
+                                self.ib.request_broker_positions(timeout=3.0)
+                                broker_pos = self.ib._positions.get(ticker.upper())
+
+                            current_shares = float(broker_pos.get("shares", 0.0)) if broker_pos else 0.0
+
+                            if current_shares <= 0:
+                                msg = f"⛔ [ANTI-SHORT] Orden SELL para {ticker} cancelada: El broker no tiene acciones en largo (posicion actual: {current_shares}). Se previene venta en corto no autorizada."
+                                log_warning(MODULE, msg)
+                                sb.table("stocks_orders").update({"status": "cancelled", "notes": msg}).eq("id", order_id).execute()
+                                send_telegram_alert(msg)
+                                continue
+
+                            if shares > int(current_shares):
+                                log_warning(MODULE, f"⚠️ [CLAMP SHARES] Ajustando venta de {ticker} de {shares} a {int(current_shares)} para no entrar en corto.")
+                                shares = int(current_shares)
+
                         contract = self.ib.us_stock_contract(ticker)
 
                     ib_ord = Order()

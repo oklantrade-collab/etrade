@@ -346,7 +346,14 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
             q = q.eq("direction", direction)
         if min_score is not None:
             q = q.gte("score", min_score)
-        items = q.order("score", desc=True).limit(min(limit, 300)).execute().data or []
+        items = q.order("score", desc=True, nullsfirst=False).limit(min(limit, 300)).execute().data or []
+        # Ordenar: Seleccionadas primero, luego Elegibles, luego Rechazadas; priorizando rank_global y score
+        status_order = {"selected": 0, "eligible": 1, "rejected": 2}
+        items.sort(key=lambda x: (
+            status_order.get(x.get("eligibility_status"), 3),
+            int(x.get("rank_global") or 99999),
+            -float(x.get("score") or 0.0),
+        ))
     except Exception as e:
         return {"items": [], "error": str(e)[:200]}
 
