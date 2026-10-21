@@ -1045,6 +1045,124 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
 
         except Exception as e_opt_sched:
             log_warning(MODULE, f"Error en evaluación de Gap Runner Opciones para {ticker}: {e_opt_sched}")
+
+        # ── 1.4.C ESTRATEGIA VOLATILITY MOMENTUM EXPANSION (VME) (STOCKS & OPCIONES CALLs/PUTs) ──
+        vme_handled = False
+        try:
+            from app.stocks.vme_expansion_engine import evaluate_vme_expansion
+            vme_res = evaluate_vme_expansion(
+                ticker=ticker,
+                df_15m=df_15m,
+                df_1h=df_1h,
+                current_price=current_price,
+                direction="auto",
+                config=config
+            )
+
+            if vme_res.get("should_enter"):
+                vme_dir = vme_res.get("direction", "bullish")
+                vme_rank = float(vme_res.get("composite_rank", 99.6))
+
+                # 1. EJECUCIÓN STOCKS (Solo Bullish)
+                if vme_dir == "bullish":
+                    pos_res = sb.table("stocks_positions").select("id").eq("ticker", ticker).eq("status", "open").execute()
+                    if not pos_res.data:
+                        sb.table("stocks_priority_queue").upsert({
+                            'ticker': ticker,
+                            'group_name': 'VOLATILITY_EXPANSION',
+                            'price_at_rank': current_price,
+                            'apex_score_4h': 99.0,
+                            'apex_score_1d': 99.0,
+                            'return_expected': 25.0,
+                            'confidence': 'high',
+                            'composite_rank': vme_rank,
+                            'status': 'pending',
+                            'entry_reason': str(vme_res.get('reason', 'VME_EXPANSION'))[:50],
+                            'triggered_rule': 'VME_EXPANSION_STK',
+                            'is_overbought': False,
+                            'rsi_at_entry': float(vme_res.get("metrics", {}).get("rsi_1h", 50.0)),
+                            'fib_zone': 0,
+                            'last_updated': datetime.now(timezone.utc).isoformat()
+                        }, on_conflict='ticker').execute()
+                        log_info(MODULE, f"🚀 VME EXPANSION STOCKS {vme_rank}: {ticker} | VME_EXPANSION_STK | {vme_res['reason']}")
+                        vme_handled = True
+
+                # 2. EJECUCIÓN OPCIONES (CALL o PUT para activos opcionables)
+                if is_opt_eligible:
+                    from app.options.opt_contract_picker import fetch_and_select_best_option_contract
+                    is_call = (vme_dir == "bullish")
+                    opt_side = "CALL" if is_call else "PUT"
+                    vme_opt_rule = "VME_EXPANSION_CALL" if is_call else "VME_EXPANSION_PUT"
+
+                    # Verificar si ya tenemos posición abierta en este contrato
+                    open_opts = sb.table("opt_paper_trades").select("*").eq("symbol", ticker).eq("status", "open").execute().data or []
+                    has_same_vme_pos = any(vme_opt_rule in str(p.get("strategy_type", "")) or (is_call and "call" in str(p.get("strategy_type", "")).lower()) for p in open_opts)
+
+                    if not has_same_vme_pos:
+                        delta_range = (0.35, 0.60) if is_call else (-0.60, -0.35)
+                        selected_contract = await fetch_and_select_best_option_contract(
+                            underlying_symbol=ticker,
+                            contract_type=opt_side,
+                            target_delta_range=delta_range,
+                            min_dte=3,
+                            max_dte=14,
+                            min_open_interest=50,
+                            supabase=sb
+                        )
+
+                        if selected_contract:
+                            opt_price = float(selected_contract.ask or selected_contract.last_price or 1.0)
+                            opt_trade_cap = float(config.get("options_trade_capital_usd", 200.0))
+                            contracts_to_buy = max(1, int(opt_trade_cap // (opt_price * 100)))
+                            strike_str = f"{selected_contract.strike:.1f}".replace(".0", "")
+                            expiry_clean = (selected_contract.expiration or "").replace("-", "")[:8]
+                            opt_ticker_formatted = f"{ticker}:OPT:{expiry_clean}:{strike_str}:{'C' if is_call else 'P'}"
+
+                            now_iso = datetime.now(timezone.utc).isoformat()
+                            # Registrar en opt_paper_trades
+                            sb.table("opt_paper_trades").insert({
+                                "symbol": ticker,
+                                "strategy_type": vme_opt_rule,
+                                "direction": "bullish" if is_call else "bearish",
+                                "entry_debit": opt_price,
+                                "qty": contracts_to_buy,
+                                "status": "open",
+                                "entry_time": now_iso,
+                                "expiry": selected_contract.expiration,
+                                "exit_plan": {
+                                    "initial_sl": vme_res.get("initial_sl"),
+                                    "stop_loss_underlying": vme_res.get("initial_sl"),
+                                    "highest_premium_seen": opt_price,
+                                    "trailing_sl_underlying": 0.0,
+                                    "last_eval_at": now_iso
+                                },
+                                "entry_fills": [{
+                                    "symbol": opt_ticker_formatted,
+                                    "strike": selected_contract.strike,
+                                    "right": "C" if is_call else "P",
+                                    "expiry": selected_contract.expiration,
+                                    "price": opt_price,
+                                    "qty": contracts_to_buy
+                                }]
+                            }).execute()
+
+                            # Enviar orden a stocks_orders para sincronización con IBKR bridge / TWS
+                            sb.table("stocks_orders").insert({
+                                "ticker": opt_ticker_formatted,
+                                "group_name": "VOLATILITY_EXPANSION_OPT",
+                                "rule_code": vme_opt_rule,
+                                "order_type": "market",
+                                "direction": "buy",
+                                "shares": contracts_to_buy,
+                                "market_price": opt_price,
+                                "status": "pending",
+                                "created_at": now_iso
+                            }).execute()
+
+                            log_info(MODULE, f"🚀 VME OPCIONES {opt_side} COMPRADO: {opt_ticker_formatted} x{contracts_to_buy} @ ${opt_price:.2f} | Rank {vme_rank}")
+        except Exception as e_vme_sched:
+            log_warning(MODULE, f"Error en evaluación VME Expansion para {ticker}: {e_vme_sched}")
+
         # 1.5 Si es candidato FAST-TRACK IPO SUPER-RUNNER / ALPHA RUNNER: Máxima Prioridad Rank 99.5
         if not gap_runner_handled and (is_ipo_runner or is_alpha_runner_cat) and not trap_shield_res.get('is_toxic_dilution', False):
             try:
@@ -2515,16 +2633,28 @@ async def run_options_gap_defense_cycle():
             eval_pos["stop_loss_underlying"] = exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0
             eval_pos["reentry_count"] = exit_plan.get("reentry_count", 0)
 
-            eval_res = evaluate_options_gap_aduana_exit(
-                position=eval_pos,
-                current_underlying_price=cur_stock_p,
-                current_option_premium=cur_opt_premium,
-                df_5m=df_5m,
-                df_15m=df_15m,
-                df_1h=df_1h,
-                position_age_minutes=pos_age_min,
-                sipv_signal=None
-            )
+            if "vme" in str(strat).lower():
+                from app.stocks.vme_exit_engine import evaluate_vme_exit
+                eval_res = evaluate_vme_exit(
+                    position=eval_pos,
+                    df_15m=df_15m,
+                    df_1h=df_1h,
+                    current_price=cur_stock_p,
+                    current_option_premium=cur_opt_premium,
+                    sipv_signal_1h=None,
+                    position_age_minutes=pos_age_min
+                )
+            else:
+                eval_res = evaluate_options_gap_aduana_exit(
+                    position=eval_pos,
+                    current_underlying_price=cur_stock_p,
+                    current_option_premium=cur_opt_premium,
+                    df_5m=df_5m,
+                    df_15m=df_15m,
+                    df_1h=df_1h,
+                    position_age_minutes=pos_age_min,
+                    sipv_signal=None
+                )
 
             # PnL no realizado actual
             unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
@@ -2604,10 +2734,13 @@ async def run_options_gap_defense_cycle():
 
             else:
                 # Monitoreo continuo: actualizar Stop Loss técnico si fue propuesto
-                new_sl = eval_res.get("new_stop_loss_underlying")
+                new_sl = eval_res.get("new_stop_loss") or eval_res.get("new_stop_loss_underlying")
+                new_tsl = eval_res.get("new_trailing_sl")
                 if new_sl:
                     exit_plan["stop_loss_underlying"] = new_sl
                     exit_plan["trailing_sl_type"] = eval_res.get("rule_code", "SL_DYNAMIC")
+                if new_tsl:
+                    exit_plan["trailing_sl_underlying"] = new_tsl
 
                 exit_plan["last_eval_at"] = now_iso
                 sb.table("opt_paper_trades").update({

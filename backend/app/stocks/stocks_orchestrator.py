@@ -955,9 +955,9 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             log_warning(MODULE, f'{ticker}: {e}')
             continue
 
-    # Ordenar la cola (Prioriza: 1. No sobrecompradas, 2. Open Gap Runner (Prioridad 1 Institucional), 3. Señal activa, 4. Alta Fuerza Compradora BF >= 70, 5. Composite Rank descendente)
+    # Ordenar la cola (Prioriza: 1. No sobrecompradas, 2. Open Gap Runner / VME Expansion (Prioridad 1 Institucional), 3. Señal activa, 4. Alta Fuerza Compradora BF >= 70, 5. Composite Rank descendente)
     def sort_key(c):
-        is_runner      = bool(c.get('is_gap_runner'))
+        is_runner      = bool(c.get('is_gap_runner') or 'VME' in str(c.get('triggered_rule', '')) or 'VOLATILITY' in str(c.get('group_name', '')))
         has_signal     = bool(c.get('has_rule_signal') or c.get('is_pullback_b') or c.get('is_breakout_5m'))
         not_overbought = not bool(c.get('is_overbought'))
         bf             = float(c.get('buying_force_score') or 0.0)
@@ -1013,13 +1013,15 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             await _upsert_queue(supabase, candidate, status='blocked')
             continue
 
-        # En mercado BEARISH, SOLO se permite comprar si es un ALPHA_RUNNER / SUPER_RUNNER / EXPANSION_RUNNER / GAP_RUNNER
+        # En mercado BEARISH, SOLO se permite comprar si es un ALPHA_RUNNER / SUPER_RUNNER / EXPANSION_RUNNER / GAP_RUNNER / VME
         if is_macro_bearish:
             is_exempt_runner = bool(
                 candidate.get('is_gap_runner') or
                 candidate.get('is_expansion_runner') or
                 candidate.get('is_intraday_alpha') or
                 'ALPHA_RUNNER' in str(candidate.get('group_name', '')) or
+                'VOLATILITY' in str(candidate.get('group_name', '')) or
+                'VME' in str(candidate.get('triggered_rule', '')) or
                 candidate.get('composite_rank', 0) >= 98.0 or
                 float(candidate.get('buying_force_score') or 0.0) >= 70.0
             )
@@ -1031,11 +1033,14 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
-        # Prioridad 0: Regla Open Gap Runner (Tranche 1 directa o Dip & Rip)
+        # Prioridad 0: Regla Open Gap Runner o VME Expansion (Tranche 1 directa, Dip & Rip o VME)
         if candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('GAP_'):
             rule_code = candidate['triggered_rule']
             order_type = 'market'
         elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('FT_'):
+            rule_code = candidate['triggered_rule']
+            order_type = 'market'
+        elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('VME_'):
             rule_code = candidate['triggered_rule']
             order_type = 'market'
         # Prioridad 1: Gatillo Estructural Sección B (3a, 4a, 4b, 4c, 4d)
@@ -1086,7 +1091,7 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             'group_name':  candidate.get('group_name', ''),
             'close_all':   False,
             'dca_enabled': False,
-            'strategy':    'ADUANA_GAP_RUNNER' if str(rule_code).startswith('GAP_') else candidate.get('group_name', ''),
+            'strategy':    'ADUANA_GAP_RUNNER' if str(rule_code).startswith('GAP_') else ('VME_EXPANSION' if str(rule_code).startswith('VME_') else candidate.get('group_name', '')),
         }
 
         try:
@@ -1323,6 +1328,7 @@ async def process_priority_queue_buys(supabase=None, cfg=None) -> list:
             'rsi': float(item.get('rsi_at_entry') or 50.0),
             'fib_zone': int(item.get('fib_zone') or 0),
             'is_gap_runner': 'GAP' in str(item.get('group_name', '')) or 'GAP' in str(item.get('triggered_rule', '')),
+            'is_vme_runner': 'VME' in str(item.get('triggered_rule', '')) or 'VOLATILITY' in str(item.get('group_name', '')),
             'is_intraday_alpha': 'ALPHA' in str(item.get('group_name', '')) or 'ALPHA' in str(item.get('triggered_rule', '')),
             'rule_signal': {'has_signal': True, 'rule_code': item.get('triggered_rule')},
             'snap': {'price': price, 'close': price, 'rvol': 2.0}

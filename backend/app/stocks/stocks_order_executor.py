@@ -168,9 +168,13 @@ def execute_market_order(
             is_gap_strategy = (
                 str(rule_code).startswith('GAP_') or
                 str(rule_code).startswith('FT_') or
+                str(rule_code).startswith('VME_') or
                 'RUNNER' in str(rule_code) or
+                'EXPANSION' in str(rule_code) or
                 'GAP' in str(rule.get('group_name', '')) or
-                'GAP' in str(rule.get('strategy', ''))
+                'VOLATILITY' in str(rule.get('group_name', '')) or
+                'GAP' in str(rule.get('strategy', '')) or
+                'VME' in str(rule.get('strategy', ''))
             )
             if not is_gap_strategy:
                 if not live_1h.get("is_ema3_1h_ascending", True):
