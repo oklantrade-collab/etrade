@@ -774,6 +774,21 @@ class PositionMonitor:
                 else:
                     sell_rule = "EMERGENCY_EXIT"
 
+                # DEDUPLICACIÓN: Comprobar si ya existe una orden de venta pendiente para este ticker
+                try:
+                    existing_so = sb.table("stocks_orders")\
+                        .select("id")\
+                        .eq("ticker", ticker)\
+                        .eq("direction", "sell")\
+                        .in_("status", ["pending", "processing"])\
+                        .limit(1)\
+                        .execute()
+                    if existing_so.data:
+                        log_warning(MODULE, f"⛔ [DEDUPLICATE] Orden SELL para {ticker} ya encolada (ID #{existing_so.data[0]['id']}). Omitiendo duplicado.")
+                        return
+                except Exception:
+                    pass
+
                 sb.table("stocks_orders").insert({
                     "ticker": ticker,
                     "group_name": trade.get("group_name", "STOCKS"),

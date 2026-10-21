@@ -395,11 +395,23 @@ def execute_market_order(
         "created_at": now,
     }
 
-    sb.table("stocks_orders").insert(order_data).execute()
+    # DEDUPLICACIÓN: Evitar insertar órdenes de venta duplicadas
+    if direction.lower() == "sell":
+        try:
+            existing_so = sb.table("stocks_orders")\
+                .select("id")\
+                .eq("ticker", ticker)\
+                .eq("direction", "sell")\
+                .in_("status", ["pending", "processing"])\
+                .limit(1)\
+                .execute()
+            if existing_so.data:
+                log_warning(MODULE, f"⛔ [DEDUPLICATE] Orden SELL para {ticker} ya encolada (ID #{existing_so.data[0]['id']}). Omitiendo duplicado.")
+                return None
+        except Exception:
+            pass
 
-    # Si SELL + close_all: cerrar posición
-    if direction == "sell" and rule.get("close_all", False):
-        _close_all_positions(ticker, price)
+    sb.table("stocks_orders").insert(order_data).execute()
 
     # En STOCKS solo permitimos LONG (BUY).
     # Si la orden va hacia IBKR TWS (ib_live=True), el callback de TWS abrirá la posición al llenar la orden.
@@ -412,8 +424,12 @@ def execute_market_order(
         else:
             log_info(MODULE, f"📡 [IBKR BRIDGE APOLO] Orden BUY {ticker} x{shares} enviada a TWS Paper (puerto 7497).")
     else:
-        # Forzar que cualquier SELL sea un cierre total
-        _close_all_positions(ticker, price)
+        # Si fue SELL, marcar las posiciones abiertas como 'closing' para esperar la confirmación del broker.
+        # NUNCA insertar otra orden en stocks_orders aquí porque order_data ya fue insertada arriba!
+        sb.table("stocks_positions").update({
+            "status": "closing",
+            "updated_at": now
+        }).eq("ticker", ticker).eq("status", "open").execute()
 
     mode_str = "[IBKR PAPER]" if ib_live else ("[PAPER]" if paper else "[LIVE]")
     log_info(MODULE,
@@ -929,22 +945,6 @@ def _close_all_positions(ticker: str, price: float):
             f"PnL=${pnl:.2f} ({pnl_pct:.2f}%)"
         )
 
-        # Si el puente IBKR está activo en APOLO, despachar orden SELL a TWS Paper
-        if is_ib_bridge_alive() and shares > 0:
-            try:
-                sb.table("stocks_orders").insert({
-                    "ticker": ticker,
-                    "group_name": pos.get("group_name", "STOCKS"),
-                    "rule_code": "EMERGENCY_EXIT",
-                    "order_type": "market",
-                    "direction": "sell",
-                    "shares": int(shares),
-                    "market_price": price,
-                    "status": "pending",
-                    "created_at": now
-                }).execute()
-                log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper.")
-            except Exception as ib_err:
-                log_error(MODULE, f"Error despachando SELL a IB Bridge: {ib_err}")
+        # Nota: El despacho a IB Bridge se realiza en execute_market_order / _close_position para evitar duplicados.
         
     sm.on_position_closed(ticker, "close_all", all_closed=True)
