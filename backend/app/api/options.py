@@ -605,7 +605,7 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
 
 @router.post("/positions/{position_id}/simulate-exit")
 def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ceo_only):
-    """Simula la salida manual de una posicion paper."""
+    """Cierra la posición de opciones, transmite la orden de cierre al broker si aplica, y calcula el P&L con cotizaciones de mercado reales."""
     sb = get_supabase()
     stored, _, _ = _load_stored()
     eff = sd.effective_settings(stored)
@@ -621,7 +621,82 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
     from app.options import paper_execution as pe
 
     now_dt = datetime.now(timezone.utc)
-    exit_fill = pe.simulate_exit_fill(pos, None, eff, reason, adverse=False, now=now_dt)
+    now_iso = now_dt.isoformat()
+
+    # 1. Obtener cotizaciones de mercado para todas las patas del contrato
+    quotes_by_contract = {}
+    entry_fills = pos.get("entry_fills") or []
+    for ef in entry_fills:
+        cid = ef.get("contract_id")
+        conid = ef.get("conid")
+        q_row = None
+        if cid:
+            try:
+                res_q = sb.table("opt_quotes_latest").select("*").eq("contract_id", cid).limit(1).execute()
+                if res_q.data and (res_q.data[0].get("bid") or res_q.data[0].get("last")):
+                    q_row = res_q.data[0]
+            except Exception:
+                pass
+        if not q_row and conid:
+            try:
+                c_res = sb.table("opt_contracts").select("id").eq("conid", conid).limit(1).execute()
+                if c_res.data:
+                    res_q = sb.table("opt_quotes_latest").select("*").eq("contract_id", c_res.data[0]["id"]).limit(1).execute()
+                    if res_q.data and (res_q.data[0].get("bid") or res_q.data[0].get("last")):
+                        q_row = res_q.data[0]
+            except Exception:
+                pass
+
+        if q_row:
+            if conid:
+                quotes_by_contract[conid] = q_row
+            if cid:
+                quotes_by_contract[cid] = q_row
+        elif pos.get("last_mark_price") and float(pos.get("last_mark_price") or 0) > 0:
+            # Fallback al último mark_price visto (en vez del entry_debit)
+            mark_p = float(pos.get("last_mark_price"))
+            fake_q = {"bid": mark_p, "ask": mark_p, "last": mark_p, "market_data_type": "LAST_MARK"}
+            if conid:
+                quotes_by_contract[conid] = fake_q
+            if cid:
+                quotes_by_contract[cid] = fake_q
+
+    # 2. Transmitir orden de cierre al broker (vía stocks_orders para que el bridge local de APOLO la envíe a TWS)
+    sym = pos.get("symbol", "").upper()
+    qty = int(pos.get("qty") or 1)
+    exp = str(pos.get("expiry", "")).replace("-", "")
+    strike = None
+    right = "C" if pos.get("strategy_type", "").lower() == "long_call" else "P"
+    if entry_fills:
+        strike = entry_fills[0].get("strike")
+        right = entry_fills[0].get("right") or right
+
+    if sym and strike:
+        try:
+            target_band = f"OPT:{exp}:{strike}:{right}"
+            sb.table("stocks_orders").insert({
+                "ticker": sym,
+                "group_name": "OPTIONS",
+                "rule_code": "OPT_CALL" if right == "C" else "APEX_AUTO",
+                "direction": "sell",
+                "order_type": "market",
+                "shares": qty,
+                "target_band": target_band,
+                "status": "pending",
+                "created_at": now_iso
+            }).execute()
+            log_info("options_api", f"Orden SELL de cierre para opción {sym} {target_band} encolada para TWS en stocks_orders")
+        except Exception as o_err:
+            log_warning("options_api", f"Aviso al encolar orden de cierre en stocks_orders: {o_err}")
+
+    # 3. Calcular salida con cotizaciones de mercado
+    exit_fill = pe.simulate_exit_fill(pos, quotes_by_contract, eff, reason, adverse=False, now=now_dt)
+
+    realized_val = exit_fill.realized_pnl
+    # Asegurar que exit_reason sea válido según el constraint opt_paper_trades_exit_reason_check
+    db_reason = "take_profit" if realized_val >= 0 else "stop_loss"
+    if reason in ["take_profit", "stop_loss", "manual_simulated", "forced_close_time", "signal_invalidation", "bad_data_close"]:
+        db_reason = reason
 
     upd = {
         "status": "closed",
@@ -634,7 +709,7 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
         "unrealized_pnl": 0.0,
         "last_mark_price": exit_fill.exit_credit,
         "last_mark_at": now_dt.isoformat(),
-        "exit_reason": reason,
+        "exit_reason": db_reason,
         "updated_at": now_dt.isoformat(),
     }
     sb.table("opt_paper_trades").update(upd).eq("id", position_id).execute()

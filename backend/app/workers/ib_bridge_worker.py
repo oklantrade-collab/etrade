@@ -188,6 +188,46 @@ def on_ib_order_status(order_id: int, status_info: dict):
         # 3. Si fue SELL: Ejecutar cierre parcial o total confirmado con el broker
         elif direction == "sell":
             try:
+                # Si es opción, también cerrar en opt_paper_trades con datos reales del broker
+                target_b = str(order_ctx.get("target_band") or "")
+                if ":OPT:" in ticker or ":OPT:" in target_b or order_ctx.get("group_name") == "OPTIONS":
+                    try:
+                        und_sym = ticker.split(":")[0].replace("OPT", "").strip(":") if ":" in ticker else ticker
+                        opt_pos_res = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).eq("status", "open").execute()
+                        for opos in (opt_pos_res.data or []):
+                            entry_debit = float(opos.get("entry_debit") or 0.0)
+                            qty = int(opos.get("qty") or 1)
+                            total_inv = float(opos.get("entry_total_invested") or (entry_debit * 100 * qty))
+                            fee = 0.70 * qty
+                            recovered = round((exec_price * 100 * qty) - fee, 2)
+                            realized = round(recovered - total_inv, 2)
+
+                            sb.table("opt_paper_trades").update({
+                                "status": "closed",
+                                "exit_time": now_iso,
+                                "exit_credit": exec_price,
+                                "exit_costs": fee,
+                                "exit_total_recovered": recovered,
+                                "realized_pnl": realized,
+                                "unrealized_pnl": 0.0,
+                                "last_mark_price": exec_price,
+                                "last_mark_at": now_iso,
+                                "exit_reason": "take_profit" if realized >= 0 else "stop_loss",
+                                "updated_at": now_iso,
+                                "exit_fills": [{
+                                    "side": "buy",
+                                    "closing_side": "sell",
+                                    "fill_price": exec_price,
+                                    "bid": exec_price,
+                                    "ask": exec_price,
+                                    "fee_usd": fee,
+                                    "market_data_type": "LIVE"
+                                }]
+                            }).eq("id", opos["id"]).execute()
+                            log_info(MODULE, f"opt_paper_trades ID {opos['id']} ({und_sym}) cerrado confirmado por Broker a ${exec_price:.2f} (PnL: ${realized:.2f})")
+                    except Exception as opt_close_e:
+                        log_warning(MODULE, f"Error actualizando opt_paper_trades en SELL: {opt_close_e}")
+
                 pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).in_("status", ["open", "closing"]).execute()
                 for pos in (pos_res.data or []):
                     entry_p = float(pos.get("avg_price") or 0)
