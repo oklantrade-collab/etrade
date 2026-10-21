@@ -114,6 +114,146 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> float:
     atr_series = tr.rolling(window=min(period, len(tr)), min_periods=1).mean()
     return float(atr_series.iloc[-1])
 
+def compute_price_velocity_5m(df_5m: Optional[pd.DataFrame]) -> Dict[str, Any]:
+    """
+    Calcula la velocidad del cambio de precio cada 5 minutos y la clasifica en categorías:
+    - MUY_ALTO: V_5m > +1.50%
+    - ALTO:     +0.60% < V_5m <= +1.50%
+    - MEDIO:    +0.15% < V_5m <= +0.60%
+    - BAJO:     -0.15% <= V_5m <= +0.15%  (Estancamiento / Lateral)
+    - MUY_BAJO: V_5m < -0.15%             (Deceleración o caída)
+    """
+    default_res = {
+        "v_5m": 0.0,
+        "category": "MEDIO",
+        "consecutive_low": 0,
+        "is_stagnant": False,
+        "v_history": []
+    }
+    if df_5m is None or len(df_5m) < 2:
+        return default_res
+
+    c = _safe_col(df_5m, "close")
+    if len(c) < 2:
+        return default_res
+
+    v_history = []
+    max_lookback = min(5, len(c) - 1)
+    for i in range(len(c) - max_lookback, len(c)):
+        c_curr = float(c.iloc[i])
+        c_prev = float(c.iloc[i - 1])
+        if c_prev > 0:
+            pct = ((c_curr - c_prev) / c_prev) * 100.0
+        else:
+            pct = 0.0
+        v_history.append(pct)
+
+    last_v = v_history[-1] if v_history else 0.0
+
+    def categorize_velocity(val: float) -> str:
+        if val > 1.50:
+            return "MUY_ALTO"
+        elif val > 0.60:
+            return "ALTO"
+        elif val > 0.15:
+            return "MEDIO"
+        elif val >= -0.15:
+            return "BAJO"
+        else:
+            return "MUY_BAJO"
+
+    cat = categorize_velocity(last_v)
+
+    consecutive_low = 0
+    for val in reversed(v_history[-3:]):
+        if val <= 0.15:
+            consecutive_low += 1
+        else:
+            break
+
+    is_stagnant = consecutive_low >= 3
+
+    return {
+        "v_5m": round(last_v, 3),
+        "category": cat,
+        "consecutive_low": consecutive_low,
+        "is_stagnant": is_stagnant,
+        "v_history": [round(x, 3) for x in v_history]
+    }
+
+
+def _check_15m_rebuy_filters(
+    df_15m: Optional[pd.DataFrame],
+    cur_p: float
+) -> Optional[str]:
+    """
+    Evalúa filtros institucionales de 15m antes de permitir recompras (Tranches 2 y 3):
+    1. Agotamiento lateral en 15m (|Slope EMA3| <= 0.04% y Rango < 0.5 ATR).
+    2. Bollinger Superior 15m: si el precio está sobre la banda:
+       - Rechazar si el cuerpo de vela es comprimido (< 0.4 ATR).
+       - Si RSI 15m > 70, exigir RVOL >= 2.0x y cuerpo expansivo >= 0.8 ATR.
+    Retorna string con motivo de bloqueo, o None si pasa la validación.
+    """
+    if df_15m is None or len(df_15m) < 2:
+        return None
+
+    c15 = _safe_col(df_15m, "close")
+    o15 = _safe_col(df_15m, "open")
+    h15 = _safe_col(df_15m, "high")
+    l15 = _safe_col(df_15m, "low")
+    v15 = _safe_col(df_15m, "volume")
+
+    atr_15m = compute_atr(df_15m, 14)
+    if atr_15m <= 0:
+        atr_15m = max(0.01, cur_p * 0.015)
+
+    bb_15m = compute_bollinger_bands(c15, period=min(20, len(c15)), num_std=2.0)
+    bb_upper_15m = float(bb_15m["upper"].iloc[-1])
+
+    rsi_15m_series = compute_rsi(c15, period=min(14, len(c15) - 1))
+    rsi_15m_val = float(rsi_15m_series.iloc[-1]) if len(rsi_15m_series) > 0 else 50.0
+
+    ema3_15m_s = c15.ewm(span=3, adjust=False).mean()
+    ema3_15m_now = float(ema3_15m_s.iloc[-1])
+    ema3_15m_prev = float(ema3_15m_s.iloc[-2]) if len(ema3_15m_s) >= 2 else ema3_15m_now
+    ema3_slope_15m = ((ema3_15m_now - ema3_15m_prev) / max(0.01, ema3_15m_prev)) * 100.0
+
+    candle_body_15m = abs(float(c15.iloc[-1]) - float(o15.iloc[-1]))
+    candle_range_15m = float(h15.iloc[-1]) - float(l15.iloc[-1])
+
+    v15_now = float(v15.iloc[-1]) if len(v15) > 0 else 0.0
+    v15_avg = float(v15.rolling(10, min_periods=1).mean().iloc[-1]) if len(v15) > 0 else 1.0
+    rvol_15m = round(v15_now / max(1.0, v15_avg), 2)
+
+    # Filtro 1: Detección de Agotamiento Lateral en 15m ("El precio no quiere subir más")
+    price_change_15m = (abs(float(c15.iloc[-1]) - float(c15.iloc[-2])) / float(c15.iloc[-2])) * 100.0 if len(c15) >= 2 else 0.0
+    is_lateral_slope = (abs(ema3_slope_15m) <= 0.15) or (price_change_15m <= 0.10)
+    is_compressed_candle = candle_range_15m < (0.50 * atr_15m)
+    if is_lateral_slope and is_compressed_candle:
+        return (
+            f"Agotamiento Lateral 15m detectado: EMA3 slope ({ema3_slope_15m:+.3f}%) plano y "
+            f"rango vela (${candle_range_15m:.2f} < 0.5*ATR ${atr_15m:.2f}). Compras cortadas."
+        )
+
+    # Filtro 2: Bollinger Superior 15m en Recompras
+    if cur_p >= bb_upper_15m:
+        if candle_body_15m < (0.40 * atr_15m):
+            return (
+                f"Recompra bloqueada sobre Bollinger Superior 15m (${bb_upper_15m:.2f}): "
+                f"Vela comprimida (Cuerpo ${candle_body_15m:.2f} < 0.4*ATR ${atr_15m:.2f}). Agotamiento de momentum."
+            )
+
+        if rsi_15m_val > 70.0:
+            has_thrust = (rvol_15m >= 2.0) and (candle_body_15m >= 0.80 * atr_15m)
+            if not has_thrust:
+                return (
+                    f"Recompra bloqueada sobre Bollinger Superior con RSI 15m ({rsi_15m_val:.1f} > 70.0): "
+                    f"Exige RVOL >= 2.0x (actual {rvol_15m}x) y vela expansiva >= 0.8*ATR (actual {candle_body_15m:.2f}/{atr_15m:.2f})."
+                )
+
+    return None
+
+
 
 def calculate_gap_velocity_ranking(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -323,7 +463,7 @@ def evaluate_gap_runner_entry_tranches(
     # ─────────────────────────────────────────────────────────────
     # PASO 2: Determinar si ya tenemos posición activa y qué tranche toca
     # ─────────────────────────────────────────────────────────────
-    reentry_count = int(active_position.get("reentry_count") or 0) if active_position else 0
+    reentry_count = int(active_position.get("dca_count") or active_position.get("reentry_count") or 0) if active_position else 0
     is_open_pos = active_position is not None and active_position.get("status") == "open"
 
     # ─────────────────────────────────────────────────────────────
@@ -523,6 +663,11 @@ def evaluate_gap_runner_entry_tranches(
     # CASO B: TRANCHE 2 (Segundo 1/3 - 66.6% acumulado)
     # ─────────────────────────────────────────────────────────────
     elif is_open_pos and reentry_count == 0:
+        rebuy_err = _check_15m_rebuy_filters(df_15m, cur_p)
+        if rebuy_err:
+            res["reason"] = rebuy_err
+            return res
+
         is_15m_continuation = False
         o15_v2 = 0.0
         c15_v1 = 0.0
@@ -581,6 +726,11 @@ def evaluate_gap_runner_entry_tranches(
     # CASO C: TRANCHE 3 (Tercer 1/3 - Posición Completa 100%)
     # ─────────────────────────────────────────────────────────────
     elif is_open_pos and reentry_count == 1:
+        rebuy_err = _check_15m_rebuy_filters(df_15m, cur_p)
+        if rebuy_err:
+            res["reason"] = rebuy_err
+            return res
+
         is_15m_continuation = False
         low_v2_15m = cur_p * 0.95
         o15_v3 = 0.0
@@ -722,6 +872,33 @@ def evaluate_gap_runner_aduana_exit(
                 return res
 
     # ─────────────────────────────────────────────────────────────
+    # SALIDA DEFENSIVA POR ESTANCAMIENTO DE VELOCIDAD 5m (V5m)
+    # ─────────────────────────────────────────────────────────────
+    if df_5m is not None and len(df_5m) >= 3:
+        vel_res = compute_price_velocity_5m(df_5m)
+        res["velocity_5m"] = vel_res["v_5m"]
+        res["velocity_category"] = vel_res["category"]
+
+        highest_p = float(position.get("highest_price_reached") or current_price)
+        is_near_peak = (highest_p > 0) and (current_price >= highest_p * 0.98)
+        gap_pos = float(position.get("gap_pct") or 0.0)
+        atr_5 = compute_atr(df_5m, 14)
+        is_volatile = (gap_pos >= 10.0) or ((atr_5 / max(0.01, current_price)) >= 0.015)
+
+        if vel_res["is_stagnant"] and is_volatile and is_near_peak and total_shares > 0:
+            res.update({
+                "should_exit": True,
+                "exit_type": "full",
+                "rule_code": "ADUANA_VELOCITY_STAGNATION_EXIT",
+                "shares_to_exit": total_shares,
+                "reason": (
+                    f"Salida Defensiva por Estancamiento: 3 velas de 5m con velocidad '{vel_res['category']}' "
+                    f"({vel_res['v_5m']:+.2f}%) cerca de máximos (${highest_p:.2f}). Se cierra para rotar capital."
+                )
+            })
+            return res
+
+    # ─────────────────────────────────────────────────────────────
     # VALIDACIÓN 2 (Regla 1.e): Clímax Absoluto 1H (RSI_1H > 85 -> CIERRE TOTAL)
     # ─────────────────────────────────────────────────────────────
     c1h = _safe_col(df_1h, "close") if df_1h is not None else pd.Series(dtype=float)
@@ -790,6 +967,34 @@ def evaluate_gap_runner_aduana_exit(
                 best_trail_reason = (
                     f"Trailing SL 15m EMA9 ascendente: ${trail_ema9_15m:.2f} "
                     f"(EMA9=${ema9_now:.2f} > Prev=${ema9_prev:.2f}, Delta=${delta:.2f})"
+                )
+
+        # ── Trailing Stop Escalonado por Deltas en Lateralidad 15m ──
+        h15 = _safe_col(df_15m, "high")
+        l15 = _safe_col(df_15m, "low")
+        ema3_15_s = c15.ewm(span=3, adjust=False).mean()
+        ema3_15_now = float(ema3_15_s.iloc[-1])
+        ema3_15_prev = float(ema3_15_s.iloc[-2]) if len(ema3_15_s) >= 2 else ema3_15_now
+        slope_ema3_15 = ((ema3_15_now - ema3_15_prev) / max(0.01, ema3_15_prev)) * 100.0
+        range_15 = float(h15.iloc[-1]) - float(l15.iloc[-1])
+        atr_15_val = compute_atr(df_15m, 14)
+        if atr_15_val <= 0:
+            atr_15_val = max(0.01, current_price * 0.015)
+
+        price_change_15 = (abs(float(c15.iloc[-1]) - float(c15.iloc[-2])) / float(c15.iloc[-2])) * 100.0 if len(c15) >= 2 else 0.0
+        is_lateral_15 = ((abs(slope_ema3_15) <= 0.15) or (price_change_15 <= 0.10)) and (range_15 < 0.50 * atr_15_val)
+        if is_lateral_15 and current_price > avg_price:
+            delta_gain = max(0.012 * avg_price, 0.50 * atr_15_val)
+            highest_seen = float(position.get("highest_price_reached") or current_price)
+            steps = max(1, int((highest_seen - avg_price) / delta_gain))
+            raw_stepped_sl = avg_price + (steps * delta_gain)
+            stepped_sl = round(min(raw_stepped_sl, current_price - (delta_gain * 0.2)), 2)
+            if stepped_sl > best_trail_sl and stepped_sl < current_price:
+                best_trail_sl = stepped_sl
+                best_trail_rule = "ADUANA_GAP_TRAIL_LATERAL_DELTA"
+                best_trail_reason = (
+                    f"Trailing Escalonado Lateral 15m: SL elevado a Entrada + {steps}*Delta "
+                    f"(${stepped_sl:.2f}, Delta=${delta_gain:.2f}, High=${highest_seen:.2f})"
                 )
 
     # ── MEJORA 2: TRAILING STOP ESCALONADO DINÁMICO POR ZONAS DE GANANCIA (TIERED RATCHET) ──

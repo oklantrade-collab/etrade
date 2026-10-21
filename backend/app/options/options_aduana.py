@@ -20,7 +20,7 @@ PASSIVE_EXITS = {
 }
 ACTIVE_EXITS = {
     "take_profit", "signal_invalidation", "manual_simulated",
-    "tp_rsi_climax_1h", "tp_upper_6", "tp_lower_6", "sipv_trend_flip_1h"
+    "tp_rsi_climax_1h", "tp_upper_6", "tp_lower_6", "sipv_trend_flip_1h", "ema3_flat_near_bb_upper_15m", "ema3_flat_near_bb_lower_15m"
 }
 
 

@@ -60,7 +60,11 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
 
         ema3_15m_s = c15.ewm(span=3, adjust=False).mean()
         ema9_15m_s = c15.ewm(span=9, adjust=False).mean()
-        res["ema3_15m"] = float(ema3_15m_s.iloc[-1])
+        cur_ema3_15m = float(ema3_15m_s.iloc[-1])
+        prev_ema3_15m = float(ema3_15m_s.iloc[-2]) if len(ema3_15m_s) >= 2 else cur_ema3_15m
+        res["ema3_15m"] = cur_ema3_15m
+        res["prev_ema3_15m"] = prev_ema3_15m
+        res["ema3_slope_15m"] = (cur_ema3_15m - prev_ema3_15m) / (prev_ema3_15m + 1e-6) * 100.0
         res["ema9_15m"] = float(ema9_15m_s.iloc[-1])
         res["prev_ema9_15m"] = float(ema9_15m_s.iloc[-2]) if len(ema9_15m_s) >= 2 else res["ema9_15m"]
 
@@ -169,6 +173,8 @@ DB_EXIT_REASONS_MAP = {
     "ema_cross_15m": "stop_loss",
     "ema3_flat_descending_1h": "signal_invalidation",
     "ema3_flat_ascending_1h": "signal_invalidation",
+    "ema3_flat_near_bb_upper_15m": "take_profit",
+    "ema3_flat_near_bb_lower_15m": "take_profit",
     "sipv_trend_flip_1h": "signal_invalidation",
     "sipv_trend_flip_15m": "signal_invalidation",
 }
@@ -310,6 +316,15 @@ def evaluate_technical_rules_and_stops(
                 "exit_plan": exit_plan
             }
 
+        # Regla 4a: Ángulo de EMA3 en 15m lateral o descendente cerca o sobre Bollinger Superior
+        bb_u_15m = float(tech.get("bb_upper_15m") or 0.0)
+        ema3_slope_15m = float(tech.get("ema3_slope_15m") or 0.0)
+        if bb_u_15m > 0 and current_price >= (bb_u_15m * 0.995) and ema3_slope_15m <= 0.02:
+            return True, "ema3_flat_near_bb_upper_15m", {
+                "detail": f"Take Profit defensivo CALL 15m: EMA3 15m aplanada ({ema3_slope_15m:+.4f}%) junto a Bollinger Superior (${bb_u_15m:.2f})",
+                "exit_plan": exit_plan
+            }
+
         # Regla 4: Ángulo de EMA3 en 1H lateral o descendente (slope <= 0)
         if ema3_slope_1h <= 0.0:
             return True, "ema3_flat_descending_1h", {
@@ -349,6 +364,15 @@ def evaluate_technical_rules_and_stops(
             hit_level = lower_6_15m if current_price <= lower_6_15m else lower_6_1h
             return True, "tp_lower_6", {
                 "detail": f"Take Profit PUT: Subyacente (${current_price:.2f}) alcanzó LOWER_6 (${hit_level:.2f})",
+                "exit_plan": exit_plan
+            }
+
+        # Regla 4a (Inversa): Ángulo de EMA3 en 15m lateral o ascendente cerca o bajo Bollinger Inferior
+        bb_l_15m = float(tech.get("bb_lower_15m") or 0.0)
+        ema3_slope_15m = float(tech.get("ema3_slope_15m") or 0.0)
+        if bb_l_15m > 0 and current_price <= (bb_l_15m * 1.005) and ema3_slope_15m >= -0.02:
+            return True, "ema3_flat_near_bb_lower_15m", {
+                "detail": f"Take Profit defensivo PUT 15m: EMA3 15m aplanada ({ema3_slope_15m:+.4f}%) junto a Bollinger Inferior (${bb_l_15m:.2f})",
                 "exit_plan": exit_plan
             }
 

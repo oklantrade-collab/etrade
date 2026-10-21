@@ -839,31 +839,44 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         log_info(MODULE, f"🚀 ADUANA GAP RUNNER STOCKS 99.8: {ticker} | {rule_cd} | {gap_eval['reason']}")
                         gap_runner_handled = True
                     elif active_pos is not None and t_step in [2, 3]:
-                        cap_total = float(config.get("stock_capital_total", 1000.0))
-                        max_pct = float(config.get("stock_max_allocation_pct", 0.25))
-                        trade_cap = cap_total * max_pct
-                        tranche_shares = max(5, int((trade_cap * t_ratio // current_price) // 5) * 5)
+                        current_dca = int(active_pos.get('dca_count') or active_pos.get('reentry_count') or 0)
+                        if current_dca >= 2:
+                            log_info(MODULE, f"⏸️ Aduana Gap Runner {ticker}: límite de recompras alcanzado ({current_dca}/2).")
+                            gap_runner_handled = True
+                        else:
+                            from datetime import date
+                            today_str = date.today().isoformat()
+                            existing_orders = sb.table("stocks_orders").select("id, status, created_at").eq("ticker", ticker).eq("rule_code", rule_cd).gte("created_at", f"{today_str}T00:00:00").execute()
+                            in_flight = [o for o in (existing_orders.data or []) if o.get("status") in ("pending", "submitted", "filled")]
+                            if in_flight:
+                                log_info(MODULE, f"⏸️ Orden en vuelo o ya completada para {ticker} ({rule_cd}): {len(in_flight)} órdenes hoy. Omitiendo duplicado.")
+                                gap_runner_handled = True
+                            else:
+                                cap_total = float(config.get("stock_capital_total", 1000.0))
+                                max_pct = float(config.get("stock_max_allocation_pct", 0.25))
+                                trade_cap = cap_total * max_pct
+                                tranche_shares = max(5, int((trade_cap * t_ratio // current_price) // 5) * 5)
 
-                        sb.table("stocks_orders").insert({
-                            "ticker": ticker,
-                            "group_name": "OPEN_GAP_RUNNER",
-                            "rule_code": rule_cd,
-                            "order_type": "market",
-                            "direction": "buy",
-                            "shares": tranche_shares,
-                            "market_price": current_price,
-                            "status": "pending",
-                            "created_at": datetime.now(timezone.utc).isoformat()
-                        }).execute()
+                                sb.table("stocks_orders").insert({
+                                    "ticker": ticker,
+                                    "group_name": "OPEN_GAP_RUNNER",
+                                    "rule_code": rule_cd,
+                                    "order_type": "market",
+                                    "direction": "buy",
+                                    "shares": tranche_shares,
+                                    "market_price": current_price,
+                                    "status": "pending",
+                                    "created_at": datetime.now(timezone.utc).isoformat()
+                                }).execute()
 
-                        new_count = int(active_pos.get('reentry_count') or 0) + 1
-                        sb.table("stocks_positions").update({
-                            "stop_loss": init_sl,
-                            "reentry_count": new_count,
-                            "last_reentry_at": datetime.now(timezone.utc).isoformat()
-                        }).eq("id", active_pos["id"]).execute()
-                        log_info(MODULE, f"🔥 ADUANA GAP RUNNER STOCKS PYRAMID ({new_count}/2): {ticker} +{tranche_shares} sh @ ${current_price:.2f} (SL a ${init_sl:.2f})")
-                        gap_runner_handled = True
+                                new_count = current_dca + 1
+                                update_payload = {
+                                    "stop_loss": init_sl,
+                                    "dca_count": new_count
+                                }
+                                sb.table("stocks_positions").update(update_payload).eq("id", active_pos["id"]).execute()
+                                log_info(MODULE, f"🔥 ADUANA GAP RUNNER STOCKS PYRAMID ({new_count}/2): {ticker} +{tranche_shares} sh @ ${current_price:.2f} (SL a ${init_sl:.2f})")
+                                gap_runner_handled = True
             except Exception as e_gap_sched:
                 log_warning(MODULE, f"Error en Aduana Gap Runner Stocks para {ticker}: {e_gap_sched}")
 
@@ -1240,12 +1253,13 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             "created_at": datetime.now(timezone.utc).isoformat()
                         }).execute()
                         new_sl = ft_reentry_res.get('new_global_sl')
-                        new_count = int(active_pos.get('reentry_count') or 0) + 1
-                        sb.table("stocks_positions").update({
+                        current_dca = int(active_pos.get('dca_count') or active_pos.get('reentry_count') or 0)
+                        new_count = current_dca + 1
+                        update_payload = {
                             "stop_loss": new_sl,
-                            "reentry_count": new_count,
-                            "last_reentry_at": datetime.now(timezone.utc).isoformat()
-                        }).eq("id", active_pos["id"]).execute()
+                            "dca_count": new_count
+                        }
+                        sb.table("stocks_positions").update(update_payload).eq("id", active_pos["id"]).execute()
                         log_info(MODULE, f"🔥 RECOMPRA PYRAMIDING DISPARADA ({new_count}/2): {ticker} +{re_shares} sh @ ${current_price:.2f} (SL a ${new_sl:.2f})")
                     elif ft_reentry_res.get('is_range_compressed_exhaustion'):
                         log_warning(MODULE, f"⚠️ DESACELERACIÓN Y COMPRESIÓN DE RANGO 1H para {ticker}: Recompra cancelada. Ajustando Trailing Stop defensivo.")
