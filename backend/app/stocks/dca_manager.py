@@ -124,6 +124,7 @@ def update_position_after_buy(
     sb.table("stocks_positions") \
         .update({
             "shares": total_shares,
+            "shares_remaining": total_shares,
             "avg_price": round(new_avg, 4),
             "total_cost": round(total_shares * new_avg, 2),
             "dca_count": old_count + 1,

@@ -88,7 +88,7 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "dte_max": (30, 0, 60),
     "delta_min": (0.25, 0.10, 0.90),
     "delta_max": (0.65, 0.10, 0.90),
-    "spread_width_min": (1, 0.5, 10),
+    "spread_width_min": (0.5, 0.5, 10),
     "spread_width_max": (10, 0.5, 25),
     "max_leg_spread_pct": (10, 2, 25),
     "max_exec_overcost_pct": (10, 2, 25),
@@ -124,7 +124,7 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "w_risk": (15, 0, 100),
     "w_iv_greeks": (10, 0, 100),
     "w_context": (5, 0, 100),
-    "min_score": (60, 0, 100),
+    "min_score": (45, 0, 100),
     "ev_anchor": (0.30, 0.1, 1.0),
     # G. Salidas
     "long_tp_pct": (75, 10, 300),

@@ -744,71 +744,79 @@ class PositionMonitor:
         result = "win" if pnl_usd > 0 else "loss"
 
         try:
-            # 1. Insert into trades_journal
-            journal_entry = {
-                "ticker": ticker,
-                "shares": shares,
-                "entry_price": entry_price,
-                "exit_price": exit_price,
-                "entry_date": trade.get("entry_time") or trade.get("first_buy_at"),
-                "exit_date": now,
-                "pnl_usd": pnl_usd,
-                "pnl_pct": pnl_pct,
-                "result": result,
-                "exit_reason": str(exit_reason)[:50] if exit_reason else "closed",
-                "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
-            }
-            sb.table("trades_journal").insert(journal_entry).execute()
+            from app.stocks.stocks_order_executor import is_ib_bridge_alive
+            bridge_active = is_ib_bridge_alive()
 
-            # 2. Mark trade as closed
-            sb.table("stocks_positions").update({
-                "status": "closed",
-                "current_price": exit_price,
-                "unrealized_pnl": pnl_usd,
-                "unrealized_pnl_pct": pnl_pct,
-                "updated_at": now
-            }).eq("id", trade["id"]).execute()
-            
-            # 3. Registrar profit en capital acumulado
-            try:
-                from app.core.capital_manager import register_realized_pnl
-                register_realized_pnl('stocks', pnl_usd)
-            except Exception as cap_e:
-                log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
+            if bridge_active:
+                # Si el puente IBKR está activo: NO cerrar inmediatamente para evitar cierres ficticios.
+                # Se marca 'closing' y se envía la orden 'pending' a TWS. El cierre real en Supabase
+                # y en trades_journal se ejecutará cuando el Broker confirme la ejecución.
+                sb.table("stocks_positions").update({
+                    "status": "closing",
+                    "current_price": exit_price,
+                    "unrealized_pnl": pnl_usd,
+                    "unrealized_pnl_pct": pnl_pct,
+                    "sl_close_reason": str(exit_reason)[:50],
+                    "updated_at": now
+                }).eq("id", trade["id"]).execute()
 
-            # 3.5 Si el puente IBKR está activo en APOLO, despachar orden SELL a TWS Paper
-            try:
-                from app.stocks.stocks_order_executor import is_ib_bridge_alive
-                if is_ib_bridge_alive():
-                    # Mapear exit_reason a una regla válida en stocks_rules para respetar FK
-                    sell_rule = "ADUANA_TP_CLOSE" if pnl_usd > 0 else "STOP_LOSS_INITIAL"
-                    if exit_reason in [
-                        "STOP_LOSS_INITIAL", "ADUANA_TP_CLOSE", "EMERGENCY_EXIT",
-                        "PRO_CANDLE_SELL", "HOT_CANDLE_SELL", "ADUANA_STRUCTURAL_1H_BREAK_EXIT",
-                        "PULLBACK_ZOMBIE_TIME_EXIT", "BOLLINGER_EXPLOSION"
-                    ]:
-                        sell_rule = exit_reason
-                    elif "tp" in str(exit_reason).lower() or "profit" in str(exit_reason).lower():
-                        sell_rule = "ADUANA_TP_CLOSE"
-                    elif "sl" in str(exit_reason).lower() or "stop" in str(exit_reason).lower() or "loss" in str(exit_reason).lower():
-                        sell_rule = "STOP_LOSS_INITIAL"
-                    else:
-                        sell_rule = "EMERGENCY_EXIT"
+                sell_rule = "ADUANA_TP_CLOSE" if pnl_usd > 0 else "STOP_LOSS_INITIAL"
+                if exit_reason in [
+                    "STOP_LOSS_INITIAL", "ADUANA_TP_CLOSE", "EMERGENCY_EXIT",
+                    "PRO_CANDLE_SELL", "HOT_CANDLE_SELL", "ADUANA_STRUCTURAL_1H_BREAK_EXIT",
+                    "PULLBACK_ZOMBIE_TIME_EXIT", "BOLLINGER_EXPLOSION"
+                ]:
+                    sell_rule = exit_reason
+                elif "tp" in str(exit_reason).lower() or "profit" in str(exit_reason).lower():
+                    sell_rule = "ADUANA_TP_CLOSE"
+                elif "sl" in str(exit_reason).lower() or "stop" in str(exit_reason).lower() or "loss" in str(exit_reason).lower():
+                    sell_rule = "STOP_LOSS_INITIAL"
+                else:
+                    sell_rule = "EMERGENCY_EXIT"
 
-                    sb.table("stocks_orders").insert({
-                        "ticker": ticker,
-                        "group_name": trade.get("group_name", "STOCKS"),
-                        "rule_code": sell_rule,
-                        "order_type": "market",
-                        "direction": "sell",
-                        "shares": shares,
-                        "market_price": exit_price,
-                        "status": "pending",
-                        "created_at": now
-                    }).execute()
-                    log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper (regla: {sell_rule}).")
-            except Exception as ib_err:
-                log_error(MODULE, f"Error despachando SELL a IB Bridge: {ib_err}")
+                sb.table("stocks_orders").insert({
+                    "ticker": ticker,
+                    "group_name": trade.get("group_name", "STOCKS"),
+                    "rule_code": sell_rule,
+                    "order_type": "market",
+                    "direction": "sell",
+                    "shares": shares,
+                    "market_price": exit_price,
+                    "status": "pending",
+                    "created_at": now
+                }).execute()
+                log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper (regla: {sell_rule}). Posición en espera de confirmación broker.")
+
+            else:
+                # Modo simulación puro (sin puente activo)
+                journal_entry = {
+                    "ticker": ticker,
+                    "shares": shares,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "entry_date": trade.get("entry_time") or trade.get("first_buy_at"),
+                    "exit_date": now,
+                    "pnl_usd": pnl_usd,
+                    "pnl_pct": pnl_pct,
+                    "result": result,
+                    "exit_reason": str(exit_reason)[:50] if exit_reason else "closed",
+                    "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
+                }
+                sb.table("trades_journal").insert(journal_entry).execute()
+
+                sb.table("stocks_positions").update({
+                    "status": "closed",
+                    "current_price": exit_price,
+                    "unrealized_pnl": pnl_usd,
+                    "unrealized_pnl_pct": pnl_pct,
+                    "updated_at": now
+                }).eq("id", trade["id"]).execute()
+
+                try:
+                    from app.core.capital_manager import register_realized_pnl
+                    register_realized_pnl('stocks', pnl_usd)
+                except Exception as cap_e:
+                    log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
 
             emoji = "🟢" if result == "win" else "🔴"
             log_info(MODULE, f"{emoji} CLOSED: {ticker} | {exit_reason} | "

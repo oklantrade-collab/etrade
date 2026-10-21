@@ -1004,7 +1004,7 @@ export default function OpportunitiesPage() {
                             {(c.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
                           </td>
                           <td style={td}>
-                            {c.eligibility_status === 'rejected' ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
+                            {c.entry_debit == null ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
                           </td>
                           <td style={td}>{c.qty ?? '—'}</td>
                           <td style={td}>{c.max_loss_total != null ? `$${n(c.max_loss_total)}` : '—'}</td>
@@ -1061,7 +1061,7 @@ export default function OpportunitiesPage() {
                                 {(alt.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
                               </td>
                               <td style={td}>
-                                {alt.eligibility_status === 'rejected' ? '—' : (Number(alt.entry_debit) < 0 ? `+C $${n(Math.abs(alt.entry_debit))}` : `$${n(alt.entry_debit)}`)}
+                                {alt.entry_debit == null ? '—' : (Number(alt.entry_debit) < 0 ? `+C $${n(Math.abs(alt.entry_debit))}` : `$${n(alt.entry_debit)}`)}
                               </td>
                               <td style={td}>{alt.qty ?? '—'}</td>
                               <td style={td}>{alt.max_loss_total != null ? `$${n(alt.max_loss_total)}` : '—'}</td>
@@ -1274,7 +1274,7 @@ export default function OpportunitiesPage() {
                             {(c.legs || []).map((l: any) => l.desc ?? `${l.side === 'buy' ? '+' : '−'}${l.right}${l.strike}`).join(' / ')}
                           </td>
                           <td style={td}>
-                            {c.eligibility_status === 'rejected' ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
+                            {c.entry_debit == null ? '—' : (Number(c.entry_debit) < 0 ? `+C $${n(Math.abs(c.entry_debit))}` : `$${n(c.entry_debit)}`)}
                           </td>
                           <td style={td}>{c.qty ?? '—'}</td>
                           <td style={td}>{c.max_loss_total != null ? `$${n(c.max_loss_total)}` : '—'}</td>

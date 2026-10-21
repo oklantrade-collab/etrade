@@ -2376,7 +2376,14 @@ async def run_stocks_tp_v2_cycle():
         .eq('status', 'open')\
         .execute()
 
-    positions = pos_res.data or []
+    raw_positions = pos_res.data or []
+    # Filtrar rigurosamente opciones para que jamás se evalúen o cierren en el mercado de STOCKS
+    positions = []
+    for p in raw_positions:
+        t_sym = str(p.get('ticker', '')).upper()
+        if p.get('group_name') == 'OPTIONS' or ':OPT:' in t_sym or t_sym.startswith('OPT:'):
+            continue
+        positions.append(p)
 
     for pos in positions:
         ticker = pos['ticker']

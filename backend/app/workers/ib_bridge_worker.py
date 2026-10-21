@@ -185,43 +185,57 @@ def on_ib_order_status(order_id: int, status_info: dict):
             except Exception as pos_e:
                 log_error(MODULE, f"Error creando/actualizando posición para {ticker}: {pos_e}")
 
-        # 3. Si fue SELL: Cerrar la posición
+        # 3. Si fue SELL: Ejecutar cierre parcial o total confirmado con el broker
         elif direction == "sell":
             try:
-                pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+                pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).in_("status", ["open", "closing"]).execute()
                 for pos in (pos_res.data or []):
                     entry_p = float(pos.get("avg_price") or 0)
                     pos_sh = int(pos.get("shares") or 0)
-                    pnl_usd = round((exec_price - entry_p) * pos_sh, 2)
-                    pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                    rem_sh = pos_sh - shares
 
-                    # Mover a trades_journal
-                    sb.table("trades_journal").insert({
-                        "ticker": ticker,
-                        "shares": pos_sh,
-                        "entry_price": entry_p,
-                        "exit_price": exec_price,
-                        "entry_date": pos.get("first_buy_at") or now_iso,
-                        "exit_date": now_iso,
-                        "pnl_usd": pnl_usd,
-                        "pnl_pct": pnl_pct,
-                        "result": "win" if pnl_usd >= 0 else "loss",
-                        "exit_reason": "IB_SELL_ORDER",
-                        "trade_type": pos.get("group_name") or "STOCKS_IB"
-                    }).execute()
-
-                    # Cerrar en stocks_positions
-                    sb.table("stocks_positions").update({
-                        "status": "closed",
-                        "current_price": exec_price,
-                        "unrealized_pnl": pnl_usd,
-                        "unrealized_pnl_pct": pnl_pct,
-                        "updated_at": now_iso
-                    }).eq("id", pos["id"]).execute()
-
-                log_info(MODULE, f"✅ Posición cerrada para {ticker} en Supabase")
+                    if rem_sh > 0:
+                        # Venta PARCIAL confirmada por el broker
+                        pnl_usd = round((exec_price - entry_p) * shares, 2)
+                        pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                        sb.table("stocks_positions").update({
+                            "shares": rem_sh,
+                            "shares_remaining": rem_sh,
+                            "current_price": exec_price,
+                            "status": "open",
+                            "updated_at": now_iso
+                        }).eq("id", pos["id"]).execute()
+                        log_info(MODULE, f"✅ Venta PARCIAL confirmada por Broker para {ticker}: {shares} vendidas, quedan {rem_sh}")
+                    else:
+                        # Cierre TOTAL confirmado por el broker
+                        pnl_usd = round((exec_price - entry_p) * pos_sh, 2)
+                        pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                        sb.table("trades_journal").insert({
+                            "ticker": ticker,
+                            "shares": pos_sh,
+                            "entry_price": entry_p,
+                            "exit_price": exec_price,
+                            "entry_date": pos.get("first_buy_at") or now_iso,
+                            "exit_date": now_iso,
+                            "pnl_usd": pnl_usd,
+                            "pnl_pct": pnl_pct,
+                            "result": "win" if pnl_usd >= 0 else "loss",
+                            "exit_reason": "IB_BROKER_CONFIRMED_SELL",
+                            "trade_type": pos.get("group_name") or "STOCKS_IB"
+                        }).execute()
+                        sb.table("stocks_positions").update({
+                            "status": "closed",
+                            "shares": 0,
+                            "shares_remaining": 0,
+                            "current_price": exec_price,
+                            "unrealized_pnl": pnl_usd,
+                            "unrealized_pnl_pct": pnl_pct,
+                            "sl_close_reason": "broker_confirmed_sell",
+                            "updated_at": now_iso
+                        }).eq("id", pos["id"]).execute()
+                        log_info(MODULE, f"✅ Cierre TOTAL confirmado por Broker para {ticker} en Supabase")
             except Exception as close_e:
-                log_error(MODULE, f"Error cerrando posición {ticker} en Supabase: {close_e}")
+                log_error(MODULE, f"Error procesando SELL {ticker} en Supabase: {close_e}")
 
         # Notificar por Telegram
         send_telegram_alert(
@@ -441,27 +455,38 @@ class IBBridgeWorker:
             broker_stocks = {}
             broker_options = {}
             for sym, b_data in broker_positions.items():
-                qty = int(b_data.get("shares") or 0)
-                if qty <= 0:
+                qty = float(b_data.get("shares") or 0)
+                if qty == 0:
                     continue
-                if b_data.get("sec_type") == "OPT" or ":OPT:" in sym:
+                sec_type = str(b_data.get("sec_type") or "").upper()
+                if sec_type == "OPT" or ":OPT:" in sym or b_data.get("right") or b_data.get("strike"):
                     broker_options[sym] = b_data
                 else:
                     broker_stocks[sym] = b_data
 
-            # ── 2. RECONCILIAR STOCKS_POSITIONS (SÓLO ACCIONES) ──
-            sb_pos_res = sb.table("stocks_positions").select("*").eq("status", "open").execute()
+            # ── 2. RECONCILIAR STOCKS_POSITIONS (SÓLO ACCIONES REALES) ──
+            sb_pos_res = sb.table("stocks_positions").select("*").in_("status", ["open", "closing"]).execute()
             sb_open_stocks = {}
+            
+            # Identificar símbolos de opciones abiertas en el broker
+            broker_opt_symbols = {str(opt_b.get("underlying") or k.split(":")[0]).upper() for k, opt_b in broker_options.items()}
+
             for p in (sb_pos_res.data or []):
-                # Si una opción se coló en stocks_positions, cerrarla inmediatamente
-                if p.get("group_name") == "OPTIONS" or ":OPT:" in str(p.get("ticker", "")):
-                    sb.table("stocks_positions").update({"status": "closed", "updated_at": now_iso}).eq("id", p["id"]).execute()
-                    log_info(MODULE, f"🧹 [LIMPIEZA] Opción {p.get('ticker')} removida de stocks_positions.")
+                p_ticker = str(p.get("ticker", "")).upper()
+                # Si una opción se coló en stocks_positions (o su subyacente como SPY cuando solo es opción):
+                is_opt = p.get("group_name") == "OPTIONS" or ":OPT:" in p_ticker or p_ticker.startswith("OPT:")
+                is_opt_underlying_only = (p_ticker in broker_opt_symbols and p_ticker not in broker_stocks)
+
+                if is_opt or is_opt_underlying_only:
+                    sb.table("stocks_positions").delete().eq("id", p["id"]).execute()
+                    log_info(MODULE, f"🧹 [LIMPIEZA] Opción/Subyacente {p_ticker} eliminada de stocks_positions.")
                 else:
                     sb_open_stocks[p["ticker"]] = p
 
             for sym, b_data in broker_stocks.items():
                 qty = int(b_data["shares"])
+                if qty <= 0:
+                    continue
                 avg_cost = float(b_data["avg_cost"])
 
                 cur_p = self.ib._prices.get(sym, avg_cost) if hasattr(self.ib, '_prices') else avg_cost
@@ -478,9 +503,11 @@ class IBBridgeWorker:
                     existing_pos = sb_open_stocks[sym]
                     old_shares = int(existing_pos.get("shares") or 0)
                     old_avg = float(existing_pos.get("avg_price") or 0)
-                    if old_shares != qty or abs(old_avg - avg_cost) > 0.01:
+                    if old_shares != qty or abs(old_avg - avg_cost) > 0.01 or existing_pos.get("status") == "closing":
                         update_payload = {
+                            "status": "open",
                             "shares": qty,
+                            "shares_remaining": qty,
                             "avg_price": round(avg_cost, 4),
                             "total_cost": round(qty * avg_cost, 2),
                             "current_price": cur_p,
@@ -497,28 +524,62 @@ class IBBridgeWorker:
                         sb.table("stocks_positions").update(update_payload).eq("id", existing_pos["id"]).execute()
                         log_info(MODULE, f"🔄 [SYNC STOCKS] Posición ajustada para {sym}: {old_shares} -> {qty} acc @ ${avg_cost:.2f}")
                 else:
-                    new_pos = {
-                        "ticker": sym,
-                        "direction": "long",
-                        "shares": qty,
-                        "avg_price": round(avg_cost, 4),
-                        "total_cost": round(qty * avg_cost, 2),
-                        "current_price": cur_p,
-                        "unrealized_pnl": pnl_usd,
-                        "unrealized_pnl_pct": pnl_pct,
-                        "stop_loss": sl_calc,
-                        "trailing_sl_price": sl_calc,
-                        "highest_price_reached": max(avg_cost, cur_p),
-                        "take_profit": tp_calc,
-                        "group_name": "IB_PAPER",
-                        "first_buy_at": now_iso,
-                        "status": "open",
-                        "updated_at": now_iso
-                    }
-                    sb.table("stocks_positions").insert(new_pos).execute()
-                    log_info(MODULE, f"📥 [SYNC STOCKS] Acción del Broker agregada a Supabase: {sym} {qty} acc @ ${avg_cost:.2f}")
+                    # HEALING: Comprobar si existía una posición cerrada prematuramente por simulación local
+                    recent_closed = sb.table("stocks_positions")\
+                        .select("*")\
+                        .eq("ticker", sym)\
+                        .order("updated_at", desc=True)\
+                        .limit(1)\
+                        .execute()
+                    
+                    if recent_closed.data:
+                        # Reactivar la fila existente en lugar de duplicar y dejar basura en CLOSED HISTORY
+                        target_id = recent_closed.data[0]["id"]
+                        heal_payload = {
+                            "status": "open",
+                            "shares": qty,
+                            "shares_remaining": qty,
+                            "avg_price": round(avg_cost, 4),
+                            "total_cost": round(qty * avg_cost, 2),
+                            "current_price": cur_p,
+                            "unrealized_pnl": pnl_usd,
+                            "unrealized_pnl_pct": pnl_pct,
+                            "sl_close_reason": None,
+                            "exit_triggered_by": None,
+                            "updated_at": now_iso
+                        }
+                        sb.table("stocks_positions").update(heal_payload).eq("id", target_id).execute()
+                        
+                        # Eliminar entradas ficticias del trades_journal para este ticker
+                        try:
+                            sb.table("trades_journal").delete().eq("ticker", sym).execute()
+                        except Exception:
+                            pass
+                        log_info(MODULE, f"♻️ [HEALING] Posición {sym} reabierta en Supabase (validada con broker: {qty} acc @ ${avg_cost:.2f})")
+                    else:
+                        new_pos = {
+                            "ticker": sym,
+                            "direction": "long",
+                            "shares": qty,
+                            "shares_remaining": qty,
+                            "avg_price": round(avg_cost, 4),
+                            "total_cost": round(qty * avg_cost, 2),
+                            "current_price": cur_p,
+                            "unrealized_pnl": pnl_usd,
+                            "unrealized_pnl_pct": pnl_pct,
+                            "stop_loss": sl_calc,
+                            "trailing_sl_price": sl_calc,
+                            "highest_price_reached": max(avg_cost, cur_p),
+                            "take_profit": tp_calc,
+                            "group_name": "IB_PAPER",
+                            "first_buy_at": now_iso,
+                            "status": "open",
+                            "updated_at": now_iso
+                        }
+                        sb.table("stocks_positions").insert(new_pos).execute()
+                        log_info(MODULE, f"📥 [SYNC STOCKS] Acción del Broker agregada a Supabase: {sym} {qty} acc @ ${avg_cost:.2f}")
 
-            # Cerrar en stocks_positions cualquier acción que el broker ya no tenga
+            # CONFIRMACIÓN BROKER: Cerrar en stocks_positions cualquier acción que el broker confirme que ya NO existe
             for sym, p_data in sb_open_stocks.items():
                 if sym not in broker_stocks:
                     sb.table("stocks_positions").update({"status": "closed", "updated_at": now_iso}).eq("id", p_data["id"]).execute()

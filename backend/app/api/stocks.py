@@ -355,7 +355,21 @@ async def get_stocks_positions():
                 .order("first_buy_at", desc=True)\
                 .execute()
             
-            positions = [p for p in (res.data or []) if ":OPT:" not in str(p.get("ticker", "")) and p.get("group_name") != "OPTIONS"]
+            # Obtener símbolos con opciones abiertas (ej. SPY) para excluirlos de STOCKS
+            open_opt_symbols = set()
+            try:
+                opt_res = sb.table("opt_paper_trades").select("symbol").eq("status", "open").execute()
+                for o in (opt_res.data or []):
+                    open_opt_symbols.add(str(o.get("symbol", "")).upper())
+            except Exception:
+                pass
+
+            positions = [
+                p for p in (res.data or [])
+                if ":OPT:" not in str(p.get("ticker", ""))
+                and p.get("group_name") != "OPTIONS"
+                and str(p.get("ticker", "")).upper() not in open_opt_symbols
+            ]
             if not positions:
                 return {"positions": []}
 
@@ -502,9 +516,40 @@ async def get_stocks_journal(limit: int = 100):
             journal = res.data or []
             sanitized_journal = []
             
+            # ── VALIDACIÓN CON EL BROKER (ELIMINACIÓN DE CIERRES FICTICIOS) ──
+            # Obtenemos las posiciones reales del broker y opciones abiertas
+            broker_open_stocks = set()
+            try:
+                cfg_res = sb.table("stocks_config").select("value").eq("key", "ib_broker_portfolio").limit(1).execute()
+                if cfg_res.data:
+                    import ast
+                    b_dict = ast.literal_eval(cfg_res.data[0].get("value") or "{}")
+                    for k, v in b_dict.items():
+                        sh = float(v.get("shares") or 0)
+                        sec_t = str(v.get("sec_type") or "").upper()
+                        if sh > 0 and sec_t != "OPT" and ":OPT:" not in k:
+                            broker_open_stocks.add(str(v.get("symbol", k)).upper())
+            except Exception as b_err:
+                log_warning("stocks_api", f"Error reading broker_portfolio in journal: {b_err}")
+
+            open_opt_symbols = set()
+            try:
+                opt_res = sb.table("opt_paper_trades").select("symbol").eq("status", "open").execute()
+                for o in (opt_res.data or []):
+                    open_opt_symbols.add(str(o.get("symbol", "")).upper())
+            except Exception:
+                pass
+            
             for entry in journal:
                 try:
-                    if entry.get("group_name") == "OPTIONS" or ":OPT:" in str(entry.get("ticker", "")) or str(entry.get("strategy", "")).upper().startswith("OPT"):
+                    ticker_str = str(entry.get("ticker", "")).upper()
+                    # 1. Si es una opción o subyacente con opciones abiertas (ej. SPY CALL), NO debe aparecer en diario de STOCKS
+                    if entry.get("group_name") == "OPTIONS" or ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or ticker_str in open_opt_symbols:
+                        continue
+                    
+                    # 2. VALIDACIÓN CON EL BROKER: Si el broker todavía tiene acciones abiertas de este ticker (ej. ROIV),
+                    # el cierre fue ficticio/prematuro y NO está confirmado por el broker. Suprimir de CLOSED HISTORY.
+                    if ticker_str in broker_open_stocks:
                         continue
                     entry["strategy"] = entry.get("strategy") or entry.get("rule_code") or "V5_STOCKS"
                     entry["exit_strategy"] = entry.get("exit_triggered_by") or entry.get("sl_close_reason") or "CLOSED"

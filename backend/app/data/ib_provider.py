@@ -209,11 +209,11 @@ class IBConnection(EWrapper, EClient):
         symbol = getattr(contract, "symbol", "").upper()
         if not symbol:
             return
-        sec_type = getattr(contract, "secType", "STK")
+        sec_type = str(getattr(contract, "secType", "STK") or "STK").upper()
         if sec_type == "OPT":
-            right = getattr(contract, "right", "")
-            strike = getattr(contract, "strike", 0.0)
-            expiry = getattr(contract, "lastTradeDateOrContractMonth", "")
+            right = str(getattr(contract, "right", "") or "").upper()
+            strike = float(getattr(contract, "strike", 0.0) or 0.0)
+            expiry = str(getattr(contract, "lastTradeDateOrContractMonth", "") or "")
             pos_key = f"{symbol}:OPT:{expiry}:{strike}:{right}"
         else:
             pos_key = symbol
@@ -226,6 +226,10 @@ class IBConnection(EWrapper, EClient):
             "underlying": symbol,
             "shares": float(position),
             "avg_cost": float(avgCost),
+            "strike": float(getattr(contract, "strike", 0.0) or 0.0) if sec_type == "OPT" else None,
+            "right": str(getattr(contract, "right", "") or "").upper() if sec_type == "OPT" else None,
+            "expiry": str(getattr(contract, "lastTradeDateOrContractMonth", "") or "") if sec_type == "OPT" else None,
+            "conid": getattr(contract, "conId", None),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 

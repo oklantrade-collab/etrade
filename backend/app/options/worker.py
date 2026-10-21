@@ -144,7 +144,9 @@ def main():
                 continue
 
             freq = int(eff["snapshot_freq_min"]) * 60
-            if now - last_snap >= freq and is_market_open():
+            isOpen = is_market_open()
+            market_open = isOpen[0] if isinstance(isOpen, tuple) else bool(isOpen)
+            if now - last_snap >= freq and market_open:
                 last_snap = now
                 if ib.ensure_connected():
                     res = record_snapshots(ib, sb, eff)

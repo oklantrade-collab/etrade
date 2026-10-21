@@ -491,11 +491,23 @@ async def execute_partial_sell(
         update_data['sl_dynamic_price'] = new_sl
         update_data['stop_loss'] = new_sl
 
-    # Si se vendieron todas las shares → cerrar
-    if new_shares_rem <= 0:
-        update_data['status'] = 'closed'
-        update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
-        update_data['sl_close_reason'] = f'tp_{b_str}_full'
+    from app.stocks.stocks_order_executor import is_ib_bridge_alive
+    bridge_active = is_ib_bridge_alive()
+
+    # Si el puente IBKR está activo, la venta debe confirmarse primero con el Broker TWS.
+    # No se marca 'closed' localmente para evitar cierres ficticios.
+    if bridge_active:
+        order_status = 'pending'
+        if new_shares_rem <= 0:
+            update_data['status'] = 'closing'
+            update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+            update_data['sl_close_reason'] = f'tp_{b_str}_pending_broker'
+    else:
+        order_status = 'filled'
+        if new_shares_rem <= 0:
+            update_data['status'] = 'closed'
+            update_data['updated_at'] = datetime.now(timezone.utc).isoformat()
+            update_data['sl_close_reason'] = f'tp_{b_str}_full'
 
     try:
         supabase.table('stocks_positions') \
@@ -505,41 +517,45 @@ async def execute_partial_sell(
     except Exception as e:
         log_error(MODULE, f'Error actualizando posición: {e}')
 
-    # Registrar en stocks_orders
+    # Registrar orden SELL (status='pending' si el puente está activo para que TWS la ejecute)
     try:
+        order_rule = position.get('rule_code') or 'ADUANA_TP_CLOSE'
         supabase.table('stocks_orders').insert({
             'ticker': ticker,
             'order_type': 'market',
             'direction': 'sell',
-            'shares': shares,
+            'shares': int(shares),
             'market_price': price,
-            'rule_code': position.get('rule_code') or 'S07',
-            'status': 'filled',
-            'filled_price': price,
-            'filled_at': datetime.now(timezone.utc).isoformat(),
+            'rule_code': order_rule,
+            'status': order_status,
+            'filled_price': price if order_status == 'filled' else None,
+            'filled_at': datetime.now(timezone.utc).isoformat() if order_status == 'filled' else None,
         }).execute()
+        log_info(MODULE, f'📡 Orden SELL despachada para {ticker} ({shares} sh, status={order_status}, rule={order_rule})')
     except Exception as e:
         log_error(MODULE, f'Error registrando orden: {e}')
 
-    # Registrar en trades_journal para que aparezca en "Closed History"
-    try:
-        journal_entry = {
-            'ticker': ticker,
-            'shares': shares,
-            'entry_price': entry_price,
-            'exit_price': price,
-            'entry_date': position.get('first_buy_at') or position.get('entry_time'),
-            'exit_date': datetime.now(timezone.utc).isoformat(),
-            'pnl_usd': round(pnl_total, 2),
-            'pnl_pct': round(pnl_pct, 2),
-            'result': 'win' if pnl_total > 0 else 'loss',
-            'exit_reason': f'TP_B{block}_{action}'[:50],
-            'trade_type': str(position.get('strategy') or position.get('rule_code') or 'V5_INDUSTRIAL')[:20],
-        }
-        supabase.table('trades_journal').insert(journal_entry).execute()
-        log_info(MODULE, f'📝 Journal recorded: {ticker} TP_B{block} P&L=${pnl_total:.2f}')
-    except Exception as e:
-        log_error(MODULE, f'Error registrando en trades_journal: {e}')
+    # Si NO hay puente activo (modo simulación puro), registrar en trades_journal
+    # Si hay puente activo, el journal se escribe al confirmar la ejecución real en TWS.
+    if not bridge_active:
+        try:
+            journal_entry = {
+                'ticker': ticker,
+                'shares': shares,
+                'entry_price': entry_price,
+                'exit_price': price,
+                'entry_date': position.get('first_buy_at') or position.get('entry_time'),
+                'exit_date': datetime.now(timezone.utc).isoformat(),
+                'pnl_usd': round(pnl_total, 2),
+                'pnl_pct': round(pnl_pct, 2),
+                'result': 'win' if pnl_total > 0 else 'loss',
+                'exit_reason': f'TP_B{block}_{action}'[:50],
+                'trade_type': str(position.get('strategy') or position.get('rule_code') or 'V5_INDUSTRIAL')[:20],
+            }
+            supabase.table('trades_journal').insert(journal_entry).execute()
+            log_info(MODULE, f'📝 Journal recorded (simulated): {ticker} TP_B{block} P&L=${pnl_total:.2f}')
+        except Exception as e:
+            log_error(MODULE, f'Error registrando en trades_journal: {e}')
 
     # Telegram notification
     try:

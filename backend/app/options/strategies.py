@@ -133,14 +133,22 @@ def leg_issues(q: Q, eff: dict[str, Any]) -> list[str]:
     sp = (q.ask - q.bid) / q.ask * 100
     if sp > eff["max_leg_spread_pct"] + 1e-9:   # tolerancia: 0.02/0.20 == 10.000000000000002
         out.append(f"spread de pierna {sp:.1f}% > {eff['max_leg_spread_pct']}%")
-    if q.open_interest is None:
-        out.append("dato no disponible: open_interest")
-    elif q.open_interest < eff["min_contract_oi"]:
-        out.append(f"OI {q.open_interest:.0f} < {eff['min_contract_oi']}")
-    if q.volume is None:
-        out.append("dato no disponible: volume")
-    elif q.volume < eff["min_contract_volume"]:
-        out.append(f"volumen {q.volume:.0f} < {eff['min_contract_volume']}")
+    allow_delayed = bool(eff.get("allow_delayed_data"))
+    min_oi = eff.get("min_contract_oi", 0)
+    if min_oi > 0:
+        if q.open_interest is None:
+            if not allow_delayed:
+                out.append("dato no disponible: open_interest")
+        elif q.open_interest < min_oi:
+            out.append(f"OI {q.open_interest:.0f} < {min_oi}")
+
+    min_vol = eff.get("min_contract_volume", 0)
+    if min_vol > 0:
+        if q.volume is None:
+            if not allow_delayed:
+                out.append("dato no disponible: volume")
+        elif q.volume < min_vol:
+            out.append(f"volumen {q.volume:.0f} < {min_vol}")
     return out
 
 
