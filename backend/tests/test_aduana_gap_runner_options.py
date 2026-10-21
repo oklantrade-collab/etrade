@@ -772,3 +772,155 @@ def test_put_vwap_rejection_approves():
     assert res['rule_code'] in ('OPT_GAP_VWAP_PUT', 'OPT_GAP_POP_AND_DROP_PUT')
 
 
+def test_put_market_gate_blocks_when_spy_bullish_above_vwap():
+    """Valida que el Market Gate bloquee PUTs cuando SPY cotiza alcista sobre su VWAP."""
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 98.0, 'close': 98.5, 'volume': 50000},
+        {'open': 98.5, 'high': 98.6, 'low': 96.5, 'close': 97.0, 'volume': 60000}
+    ])
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    # SPY 5m cotizando en 505.0 claramente sobre su VWAP (~501.0)
+    df_spy = _make_df([
+        {'open': 500.0, 'high': 502.0, 'low': 499.5, 'close': 501.5, 'volume': 1000000},
+        {'open': 501.5, 'high': 505.5, 'low': 501.2, 'close': 505.0, 'volume': 1200000}
+    ])
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-3.80,
+        direction="PUT",
+        sipv_signal="SELL",
+        df_market_ref=df_spy,
+        market_ref_symbol="SPY"
+    )
+
+    assert res['should_enter'] is False
+    assert "Market Gate" in res['reason']
+    assert "cotiza sobre su VWAP" in res['reason']
+
+
+def test_put_blocked_when_underlying_trades_above_vwap():
+    """Valida bloqueo de PUT cuando el propio subyacente cotiza sobre su VWAP (absorción compradora)."""
+    # Vela 1 cae de 100 a 96 con volumen 50k (VWAP ~96.5)
+    # Vela 2 y 3 rebotan hasta 98 con volumen 150k (VWAP sube a ~97.3, precio actual 98.0 > VWAP)
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 95.8, 'close': 96.0, 'volume': 50000},
+        {'open': 96.0, 'high': 97.5, 'low': 95.9, 'close': 97.2, 'volume': 60000},
+        {'open': 97.2, 'high': 98.5, 'low': 97.0, 'close': 98.0, 'volume': 90000}
+    ])
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-4.0,
+        direction="PUT",
+        sipv_signal="SELL"
+    )
+
+    assert res['should_enter'] is False
+    assert "cotiza sobre su VWAP" in res['reason']
+
+
+def test_put_blocked_in_opening_when_candle_2_fails_to_break_low():
+    """Valida bloqueo en apertura directa cuando vela 2 se estanca y no quebra el mínimo de vela 1."""
+    # Vela 1 Low = 98.0. Vela 2 Close = 98.4 (no perfora 98.0)
+    df_5m = _make_df([
+        {'open': 100.0, 'high': 100.2, 'low': 98.0, 'close': 98.2, 'volume': 50000},
+        {'open': 98.2, 'high': 98.6, 'low': 98.1, 'close': 98.4, 'volume': 40000}
+    ])
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
+    df_1h = _make_df(h1_candles)
+
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
+
+    res = evaluate_options_gap_entry_tranches(
+        ticker="COIN",
+        df_5m=df_5m,
+        df_1h=df_1h,
+        gap_pct=-4.0,
+        direction="PUT",
+        sipv_signal="SELL"
+    )
+
+    assert res['should_enter'] is False
+    assert "no perforó el mínimo de Vela 1" in res['reason']
+
+
+def test_put_exit_defense_when_underlying_reclaims_vwap():
+    """Valida salida defensiva anticipada cuando el subyacente recupera su VWAP al alza."""
+    # 5m: vela 1 y 2 bajistas, vela 3 rompe con fuerza sobre VWAP ($102.50 vs VWAP $101.00)
+    df_5m = _make_df([
+        {'open': 102.0, 'high': 102.2, 'low': 99.8, 'close': 100.0, 'volume': 50000},
+        {'open': 100.0, 'high': 100.5, 'low': 99.5, 'close': 100.2, 'volume': 40000},
+        {'open': 100.2, 'high': 102.8, 'low': 100.0, 'close': 102.5, 'volume': 90000}
+    ])
+    pos = {
+        'id': 'pos-put-1',
+        'avg_price': 3.00,
+        'highest_premium_seen': 3.10,
+        'direction': 'PUT'
+    }
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_aduana_exit
+
+    # Prima cae a $2.70 (-10.0%, no es -35% aún, pero subyacente recuperó VWAP)
+    res = evaluate_options_gap_aduana_exit(
+        position=pos,
+        current_underlying_price=102.50,
+        current_option_premium=2.70,
+        df_5m=df_5m
+    )
+
+    assert res['should_exit'] is True
+    assert res['rule_code'] == 'OPT_GAP_PUT_EXIT_VWAP'
+    assert "recuperó su VWAP" in res['reason']
+
+
+def test_put_exit_breakeven_shield():
+    """Valida que un PUT que ganó >= +15% blinde el precio de entrada (Breakeven)."""
+    pos = {
+        'id': 'pos-put-be',
+        'avg_price': 2.00,
+        'highest_premium_seen': 2.36, # Ganó +18% pico
+        'direction': 'PUT'
+    }
+    from app.options.aduana_gap_runner_options import evaluate_options_gap_aduana_exit
+
+    # Prima retrocede a $2.01 (en el umbral de entrada)
+    res = evaluate_options_gap_aduana_exit(
+        position=pos,
+        current_underlying_price=98.0,
+        current_option_premium=2.01
+    )
+
+    assert res['should_exit'] is True
+    assert res['rule_code'] == 'OPT_GAP_PUT_BREAKEVEN'
+    assert "Breakeven Shield PUT activado" in res['reason']
+
+
+

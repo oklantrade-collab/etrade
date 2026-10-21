@@ -234,7 +234,9 @@ def evaluate_options_gap_entry_tranches(
     sipv_signal: Optional[str] = None,
     contract_price: float = 1.0,
     account_budget: float = 1000.0,
-    direction: str = "CALL"
+    direction: str = "CALL",
+    df_market_ref: Optional[pd.DataFrame] = None,
+    market_ref_symbol: str = "SPY"
 ) -> Dict[str, Any]:
     """
     Evalúa si un subyacente califica para entrar o escalar en contratos de opciones:
@@ -495,6 +497,19 @@ def evaluate_options_gap_entry_tranches(
                 res["reason"] = f"PUT bloqueado: SIPV indica '{sipv_signal}' en vez de SELL"
                 return res
 
+            # MEJORA 1: MARKET DIRECTIONAL GATE (SPY / QQQ)
+            if df_market_ref is not None and len(df_market_ref) >= 2:
+                market_vwap_series = compute_vwap(df_market_ref)
+                if len(market_vwap_series) > 0:
+                    cur_m_vwap = float(market_vwap_series.iloc[-1])
+                    cur_m_p = float(_safe_col(df_market_ref, "close").iloc[-1])
+                    if cur_m_p > (cur_m_vwap * 1.0005):
+                        res["reason"] = (
+                            f"PUT bloqueado por Market Gate: Mercado rector ({market_ref_symbol} ${cur_m_p:.2f}) "
+                            f"cotiza sobre su VWAP (${cur_m_vwap:.2f}) en tendencia alcista. Riesgo extremo de squeeze."
+                        )
+                        return res
+
             if len(df_5m) == 2:
                 # Ruta A: Apertura directa bajista
                 if c1 >= o1:
@@ -503,6 +518,20 @@ def evaluate_options_gap_entry_tranches(
                 if o2 > (c1 * 1.002):
                     res["reason"] = f"PUT bloqueado: Vela 2 de 5m abrió por encima del cierre previo (Open ${o2:.2f} > Close ${c1:.2f})"
                     return res
+                if c2 >= l1:
+                    res["reason"] = f"PUT bloqueado en apertura: Vela 2 (${c2:.2f}) no perforó el mínimo de Vela 1 (${l1:.2f}). Sin expansión bajista."
+                    return res
+
+                # MEJORA 2: FILTRO DE VWAP INTRADÍA DEL SUBYACENTE PARA PUTS
+                und_vwap_s = compute_vwap(df_5m)
+                if len(und_vwap_s) > 0:
+                    cur_und_vwap = float(und_vwap_s.iloc[-1])
+                    if cur_p > (cur_und_vwap * 1.001):
+                        res["reason"] = (
+                            f"PUT bloqueado: Subyacente (${cur_p:.2f}) cotiza sobre su VWAP (${cur_und_vwap:.2f}). "
+                            f"Absorción compradora activa, prohibido comprar PUTs."
+                        )
+                        return res
 
                 initial_sl = round(max(h1, o1 * 1.005), 2)
                 rule_code = "OPT_GAP_TRANCHE_1_PUT"
@@ -517,6 +546,17 @@ def evaluate_options_gap_entry_tranches(
                 })
                 return res
             else:
+                # MEJORA 2: FILTRO DE VWAP INTRADÍA DEL SUBYACENTE PARA PUTS (>= 3 velas)
+                und_vwap_s = compute_vwap(df_5m)
+                if len(und_vwap_s) > 0:
+                    cur_und_vwap = float(und_vwap_s.iloc[-1])
+                    if cur_p > (cur_und_vwap * 1.001):
+                        res["reason"] = (
+                            f"PUT bloqueado: Subyacente (${cur_p:.2f}) cotiza sobre su VWAP (${cur_und_vwap:.2f}). "
+                            f"Absorción compradora activa, prohibido comprar PUTs."
+                        )
+                        return res
+
                 # len(df_5m) >= 3: Verificar si hubo rebote matutino (velas verdes)
                 had_green = bool(np.any(c5m.iloc[:-2].to_numpy() >= o5m.iloc[:-2].to_numpy()))
                 if had_green:
@@ -538,6 +578,23 @@ def evaluate_options_gap_entry_tranches(
 
                         if high_pop > est_prev_close and cur_p > est_prev_close:
                             res["reason"] = f"PUT Gap Fill en curso: esperando que caiga bajo el cierre previo (${est_prev_close:.2f}, actual ${cur_p:.2f})"
+                            return res
+
+                        if not is_gap_fill_sweep:
+                            initial_gap_pts = est_prev_close - open_day
+                            if initial_gap_pts > 0:
+                                max_bounce = open_day + (0.80 * initial_gap_pts)
+                                if high_pop > max_bounce:
+                                    res["reason"] = f"PUT Pop & Drop bloqueado: rebote borró más del 80% del Gap inicial bajista (High ${high_pop:.2f} > ${max_bounce:.2f})"
+                                    return res
+
+                        # MEJORA 3: FILTRO ANTI-DOBLE SUELO EN POP & DROP
+                        min_day_low = float(np.min(l5m.iloc[:-1].to_numpy()))
+                        if cur_p > (min_day_low * 1.008):
+                            res["reason"] = (
+                                f"PUT Pop & Drop bloqueado: Precio (${cur_p:.2f}) flota sobre mínimo previo (${min_day_low:.2f}) "
+                                f"sin quiebre bajista (Riesgo de Doble Suelo)."
+                            )
                             return res
 
                         if not is_gap_fill_sweep:
@@ -864,6 +921,35 @@ def evaluate_options_gap_aduana_exit(
                 "reason": f"Tier 2 Ratchet activado: Prima (${current_option_premium:.2f}) perfora piso garantizado de +15% (${guaranteed_premium:.2f})"
             })
             return res
+
+    # MEJORA 4: BLINDAJE RÁPIDO BREAKEVEN PARA PUTS (+15% pico -> BE)
+    if not is_call:
+        if peak_pnl_pct >= 15.0 and peak_pnl_pct < 25.0:
+            if current_option_premium <= entry_premium * 1.01:
+                res.update({
+                    "should_exit": True,
+                    "exit_type": "trailing_stop",
+                    "contracts_ratio_to_exit": 1.0,
+                    "rule_code": "OPT_GAP_PUT_BREAKEVEN",
+                    "reason": f"Breakeven Shield PUT activado: Ganancia pico fue +{peak_pnl_pct:.1f}%, prima protege precio de compra (${entry_premium:.2f})"
+                })
+                return res
+
+    # MEJORA 5: SALIDA DEFENSIVA ANTE RECUPERACIÓN DE VWAP EN SUBYACENTE (Solo PUTs)
+    if not is_call and df_5m is not None and len(df_5m) >= 3:
+        vwap_s = compute_vwap(df_5m)
+        if len(vwap_s) > 0:
+            cur_vwap = float(vwap_s.iloc[-1])
+            cur_stock_p = float(_safe_col(df_5m, "close").iloc[-1])
+            if cur_stock_p > (cur_vwap * 1.003) and unrealized_pnl_pct <= -5.0:
+                res.update({
+                    "should_exit": True,
+                    "exit_type": "vwap_breached",
+                    "contracts_ratio_to_exit": 1.0,
+                    "rule_code": "OPT_GAP_PUT_EXIT_VWAP",
+                    "reason": f"Salida Defensiva PUT: Subyacente (${cur_stock_p:.2f}) recuperó su VWAP (${cur_vwap:.2f}) al alza. Riesgo de squeeze cortado anticipadamente."
+                })
+                return res
 
     # 4. CLÍMAX TOTAL RSI 1H (> 85 en CALLs / < 15 en PUTs)
     if df_1h is not None and len(df_1h) >= 15:
