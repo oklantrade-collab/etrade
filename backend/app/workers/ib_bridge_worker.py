@@ -62,6 +62,15 @@ def on_ib_order_status(order_id: int, status_info: dict):
     direction = order_ctx.get("direction", "buy").lower()
     shares = int(order_ctx.get("shares", filled or 1))
 
+    target_b = str(order_ctx.get("target_band") or "").strip().upper()
+    ticker_u = str(ticker or "").strip().upper()
+    group_u = str(order_ctx.get("group_name") or "").strip().upper()
+    is_opt_order = (
+        ":OPT:" in ticker_u or ticker_u.startswith("OPT:") or
+        ":OPT:" in target_b or target_b.startswith("OPT:") or "OPT:" in target_b or
+        group_u in ("OPTIONS", "OPEN_GAP_RUNNER_OPT", "OPTIONS_AUTONOMOUS")
+    )
+
     # Si la orden fue completada (FILLED)
     if status == "filled":
         exec_price = avg_price if avg_price > 0 else float(order_ctx.get("market_price") or 0)
@@ -76,63 +85,37 @@ def on_ib_order_status(order_id: int, status_info: dict):
         except Exception as e:
             log_error(MODULE, f"Error actualizando orden {order_ctx['id']} en Supabase: {e}")
 
-        # 2. Si fue BUY: Crear o actualizar posición en stocks_positions
+        # 2. Si fue BUY: Crear o actualizar posición en stocks_positions (o opt_paper_trades si es opción)
         if direction == "buy":
             try:
-                # Verificar si ya existe posición abierta
-                pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
-                if pos_res.data:
-                    # DCA: Promediar
-                    pos = pos_res.data[0]
-                    old_shares = int(pos.get("shares") or 0)
-                    old_avg = float(pos.get("avg_price") or 0)
-                    total_shares = old_shares + shares
-                    new_avg = ((old_avg * old_shares) + (exec_price * shares)) / total_shares if total_shares > 0 else exec_price
+                if is_opt_order:
+                    try:
+                        und_sym = ticker_u.split(":")[0].replace("OPT", "").strip(":")
+                        exp_d = "20261026"
+                        strike_num = 0.0
+                        is_call = True
+                        if "OPT:" in target_b:
+                            parts = target_b.split(":")
+                            if len(parts) == 4 and parts[0] == "OPT":
+                                exp_d = parts[1]
+                                strike_num = float(parts[2])
+                                is_call = parts[3].upper() == "C"
+                            elif len(parts) >= 5:
+                                und_sym = parts[0] if parts[0] != "OPT" else parts[1]
+                                exp_d = parts[2]
+                                strike_num = float(parts[3])
+                                is_call = parts[4].upper() == "C"
+                        elif ":OPT:" in ticker_u or ticker_u.startswith("OPT:"):
+                            parts = ticker_u.split(":")
+                            if len(parts) >= 5:
+                                und_sym = parts[0] if parts[0] != "OPT" else parts[1]
+                                exp_d = parts[2]
+                                strike_num = float(parts[3])
+                                is_call = parts[-1].upper() == "C"
 
-                    sb.table("stocks_positions").update({
-                        "shares": total_shares,
-                        "avg_price": round(new_avg, 4),
-                        "total_cost": round(total_shares * new_avg, 2),
-                        "current_price": exec_price,
-                        "updated_at": now_iso
-                    }).eq("id", pos["id"]).execute()
-                    log_info(MODULE, f"✅ Posición DCA actualizada para {ticker}: {total_shares} acc @ ${new_avg:.2f}")
-                else:
-                    # Nueva posición
-                    atr_fb = exec_price * 0.02
-                    sl_p = round(exec_price - (atr_fb * 2.0), 2)
-                    tp_p = round(exec_price + (atr_fb * 5.0), 2)
-
-                    multiplier = 100 if ":OPT:" in ticker else 1
-                    sb.table("stocks_positions").insert({
-                        "ticker": ticker,
-                        "direction": "long",
-                        "shares": shares,
-                        "avg_price": exec_price,
-                        "total_cost": round(shares * exec_price * multiplier, 2),
-                        "current_price": exec_price,
-                        "stop_loss": sl_p,
-                        "trailing_sl_price": sl_p,
-                        "highest_price_reached": exec_price,
-                        "take_profit": tp_p,
-                        "group_name": order_ctx.get("group_name", "IB_PAPER"),
-                        "first_buy_at": now_iso,
-                        "status": "open",
-                        "updated_at": now_iso
-                    }).execute()
-                    log_info(MODULE, f"✅ Nueva posición creada en Supabase para {ticker}: {shares} {'contratos' if multiplier == 100 else 'acc'} @ ${exec_price:.2f} (SL: ${sl_p:.2f}, TP: ${tp_p:.2f})")
-
-                    # Si es opción, también registrar en opt_paper_trades
-                    if ":OPT:" in ticker:
-                        try:
-                            parts = ticker.split(":")
-                            und_sym = parts[0] if parts[0] != "OPT" else parts[1]
-                            exp_d = parts[2]
-                            formatted_exp = f"{exp_d[:4]}-{exp_d[4:6]}-{exp_d[6:8]}" if len(exp_d) == 8 else exp_d
-                            strike_num = float(parts[3])
-                            is_call = parts[-1].upper() == "C"
-
-                            # Buscar contrato en opt_contracts para vincular conid/contract_id
+                        formatted_exp = f"{exp_d[:4]}-{exp_d[4:6]}-{exp_d[6:8]}" if len(exp_d) == 8 else exp_d
+                        existing_opt = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).eq("status", "open").execute().data
+                        if not existing_opt:
                             cid = None
                             conid = None
                             try:
@@ -179,8 +162,48 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 "updated_at": now_iso
                             }).execute()
                             log_info(MODULE, f"✅ Trade de opción registrado en opt_paper_trades para {und_sym}")
-                        except Exception as opt_err:
-                            log_warning(MODULE, f"No se pudo guardar en opt_paper_trades: {opt_err}")
+                    except Exception as opt_err:
+                        log_warning(MODULE, f"No se pudo guardar en opt_paper_trades: {opt_err}")
+                else:
+                    # Verificar si ya existe posición abierta para acciones
+                    pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+                    if pos_res.data:
+                        pos = pos_res.data[0]
+                        old_shares = int(pos.get("shares") or 0)
+                        old_avg = float(pos.get("avg_price") or 0)
+                        total_shares = old_shares + shares
+                        new_avg = ((old_avg * old_shares) + (exec_price * shares)) / total_shares if total_shares > 0 else exec_price
+
+                        sb.table("stocks_positions").update({
+                            "shares": total_shares,
+                            "avg_price": round(new_avg, 4),
+                            "total_cost": round(total_shares * new_avg, 2),
+                            "current_price": exec_price,
+                            "updated_at": now_iso
+                        }).eq("id", pos["id"]).execute()
+                        log_info(MODULE, f"✅ Posición DCA actualizada para {ticker}: {total_shares} acc @ ${new_avg:.2f}")
+                    else:
+                        atr_fb = exec_price * 0.02
+                        sl_p = round(exec_price - (atr_fb * 2.0), 2)
+                        tp_p = round(exec_price + (atr_fb * 5.0), 2)
+
+                        sb.table("stocks_positions").insert({
+                            "ticker": ticker,
+                            "direction": "long",
+                            "shares": shares,
+                            "avg_price": exec_price,
+                            "total_cost": round(shares * exec_price, 2),
+                            "current_price": exec_price,
+                            "stop_loss": sl_p,
+                            "trailing_sl_price": sl_p,
+                            "highest_price_reached": exec_price,
+                            "take_profit": tp_p,
+                            "group_name": order_ctx.get("group_name", "IB_PAPER"),
+                            "first_buy_at": now_iso,
+                            "status": "open",
+                            "updated_at": now_iso
+                        }).execute()
+                        log_info(MODULE, f"✅ Nueva posición creada en Supabase para {ticker}: {shares} acc @ ${exec_price:.2f} (SL: ${sl_p:.2f}, TP: ${tp_p:.2f})")
 
             except Exception as pos_e:
                 log_error(MODULE, f"Error creando/actualizando posición para {ticker}: {pos_e}")
@@ -188,11 +211,10 @@ def on_ib_order_status(order_id: int, status_info: dict):
         # 3. Si fue SELL: Ejecutar cierre parcial o total confirmado con el broker
         elif direction == "sell":
             try:
-                # Si es opción, también cerrar en opt_paper_trades con datos reales del broker
-                target_b = str(order_ctx.get("target_band") or "")
-                if ":OPT:" in ticker or ":OPT:" in target_b or order_ctx.get("group_name") == "OPTIONS":
+                if is_opt_order:
+                    # Cierre de opción confirmado con datos reales del broker
                     try:
-                        und_sym = ticker.split(":")[0].replace("OPT", "").strip(":") if ":" in ticker else ticker
+                        und_sym = ticker_u.split(":")[0].replace("OPT", "").strip(":")
                         opt_pos_res = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).eq("status", "open").execute()
                         for opos in (opt_pos_res.data or []):
                             entry_debit = float(opos.get("entry_debit") or 0.0)
@@ -227,8 +249,8 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             log_info(MODULE, f"opt_paper_trades ID {opos['id']} ({und_sym}) cerrado confirmado por Broker a ${exec_price:.2f} (PnL: ${realized:.2f})")
                     except Exception as opt_close_e:
                         log_warning(MODULE, f"Error actualizando opt_paper_trades en SELL: {opt_close_e}")
-
-                pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).in_("status", ["open", "closing"]).execute()
+                else:
+                    pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).in_("status", ["open", "closing"]).execute()
                 for pos in (pos_res.data or []):
                     entry_p = float(pos.get("avg_price") or 0)
                     pos_sh = int(pos.get("shares") or 0)
@@ -417,27 +439,52 @@ class IBBridgeWorker:
                     # Reconocer si es un contrato de opción (CALL/PUT) o acción
                     contract = None
                     is_option = False
-                    if ":OPT:" in ticker.upper() or ticker.upper().startswith("OPT:"):
-                        parts = ticker.upper().split(":")
-                        # Formato: "SPY:OPT:20261120:580:C" -> [SPY, OPT, 20261120, 580, C]
-                        # o "OPT:SPY:20261120:580:C" -> [OPT, SPY, 20261120, 580, C]
-                        if len(parts) >= 5:
-                            sym_p = parts[0] if parts[0] != "OPT" else parts[1]
-                            exp_p = parts[2]
-                            strike_p = float(parts[3])
-                            right_p = parts[4]
-                            contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
-                            is_option = True
-                            log_info(MODULE, f"🎯 Contrato de OPCIÓN identificado: {sym_p} {exp_p} Strike ${strike_p} Right={right_p}")
-                    elif order.get("target_band") and ":OPT:" in str(order.get("target_band")).upper():
-                        parts = str(order.get("target_band")).upper().split(":")
-                        sym_p = ticker.upper()
-                        exp_p = parts[1]
-                        strike_p = float(parts[2])
-                        right_p = parts[3]
-                        contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
-                        is_option = True
-                        log_info(MODULE, f"🎯 Contrato de OPCIÓN identificado vía target_band: {sym_p} {exp_p} Strike ${strike_p} Right={right_p}")
+                    target_b = str(order.get("target_band") or "").strip().upper()
+                    ticker_u = str(ticker or "").strip().upper()
+                    group_u = str(order.get("group_name") or "").strip().upper()
+
+                    is_option_candidate = (
+                        ":OPT:" in ticker_u or ticker_u.startswith("OPT:") or
+                        ":OPT:" in target_b or target_b.startswith("OPT:") or "OPT:" in target_b or
+                        group_u in ("OPTIONS", "OPEN_GAP_RUNNER_OPT", "OPTIONS_AUTONOMOUS")
+                    )
+
+                    if is_option_candidate:
+                        try:
+                            # 1. Intentar target_band si contiene OPT
+                            if "OPT:" in target_b:
+                                parts = target_b.split(":")
+                                if len(parts) == 4 and parts[0] == "OPT":
+                                    # Formato: OPT:YYYYMMDD:STRIKE:RIGHT
+                                    sym_p = ticker_u.split(":")[0]
+                                    exp_p = parts[1]
+                                    strike_p = float(parts[2])
+                                    right_p = parts[3]
+                                    contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
+                                    is_option = True
+                                elif len(parts) >= 5:
+                                    sym_p = parts[0] if parts[0] != "OPT" else parts[1]
+                                    exp_p = parts[2]
+                                    strike_p = float(parts[3])
+                                    right_p = parts[4]
+                                    contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
+                                    is_option = True
+
+                            # 2. Si no se obtuvo de target_band, intentar ticker
+                            if not contract and ("OPT:" in ticker_u or ":OPT:" in ticker_u):
+                                parts = ticker_u.split(":")
+                                if len(parts) >= 5:
+                                    sym_p = parts[0] if parts[0] != "OPT" else parts[1]
+                                    exp_p = parts[2]
+                                    strike_p = float(parts[3])
+                                    right_p = parts[4]
+                                    contract = self.ib.us_option_contract(sym_p, exp_p, strike_p, right_p)
+                                    is_option = True
+
+                            if contract:
+                                log_info(MODULE, f"🎯 Contrato de OPCIÓN identificado: {contract.symbol} {contract.lastTradeDateOrContractMonth} Strike ${contract.strike} Right={contract.right}")
+                        except Exception as opt_parse_err:
+                            log_warning(MODULE, f"Aviso al parsear contrato de opción ({ticker_u}, target={target_b}): {opt_parse_err}")
 
                     if not contract:
                         # ── BLOQUEO ANTI-SHORT BLINDADO: eTrader opera exclusivamente LONG en Stocks ──
@@ -455,7 +502,7 @@ class IBBridgeWorker:
                             if available_shares <= 0:
                                 msg = f"⛔ [ANTI-SHORT SHIELD] Orden SELL para {ticker} ({shares} acc) CANCELADA: Broker tiene {confirmed_shares} acc y ya hay {already_in_flight} en proceso de venta. Cero acciones disponibles."
                                 log_warning(MODULE, msg)
-                                sb.table("stocks_orders").update({"status": "cancelled", "notes": msg}).eq("id", order_id).execute()
+                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
                                 send_telegram_alert(msg)
                                 continue
 
@@ -545,7 +592,7 @@ class IBBridgeWorker:
             for p in (sb_pos_res.data or []):
                 p_ticker = str(p.get("ticker", "")).upper()
                 # Si una opción se coló en stocks_positions (o su subyacente como SPY cuando solo es opción):
-                is_opt = p.get("group_name") == "OPTIONS" or ":OPT:" in p_ticker or p_ticker.startswith("OPT:")
+                is_opt = p.get("group_name") in ("OPTIONS", "OPEN_GAP_RUNNER_OPT", "OPTIONS_AUTONOMOUS") or ":OPT:" in p_ticker or p_ticker.startswith("OPT:") or "OPT:" in str(p.get("target_band") or "")
                 is_opt_underlying_only = (p_ticker in broker_opt_symbols and p_ticker not in broker_stocks)
 
                 if is_opt or is_opt_underlying_only:
@@ -653,8 +700,30 @@ class IBBridgeWorker:
             # CONFIRMACIÓN BROKER: Cerrar en stocks_positions cualquier acción que el broker confirme que ya NO existe
             for sym, p_data in sb_open_stocks.items():
                 if sym not in broker_stocks:
-                    sb.table("stocks_positions").update({"status": "closed", "updated_at": now_iso}).eq("id", p_data["id"]).execute()
-                    log_info(MODULE, f"📤 [SYNC STOCKS] Acción cerrada en Supabase porque ya no existe en el Broker: {sym}")
+                    real_exit_time = now_iso
+                    real_exit_price = p_data.get("current_price") or p_data.get("avg_price")
+                    try:
+                        sell_ord = sb.table("stocks_orders")\
+                            .select("filled_at, filled_price")\
+                            .eq("ticker", sym)\
+                            .eq("direction", "sell")\
+                            .eq("status", "filled")\
+                            .order("filled_at", desc=True)\
+                            .limit(1)\
+                            .execute()
+                        if sell_ord.data and sell_ord.data[0].get("filled_at"):
+                            real_exit_time = sell_ord.data[0]["filled_at"]
+                            if sell_ord.data[0].get("filled_price"):
+                                real_exit_price = float(sell_ord.data[0]["filled_price"])
+                    except Exception as ord_e:
+                        log_warning(MODULE, f"No se pudo consultar orden sell para {sym}: {ord_e}")
+
+                    sb.table("stocks_positions").update({
+                        "status": "closed",
+                        "current_price": real_exit_price,
+                        "updated_at": real_exit_time
+                    }).eq("id", p_data["id"]).execute()
+                    log_info(MODULE, f"📤 [SYNC STOCKS] Acción cerrada en Supabase sincronizada con orden real ({real_exit_time}): {sym}")
 
             # ── 3. RECONCILIAR OPT_PAPER_TRADES (SÓLO OPCIONES) ──
             try:
@@ -670,13 +739,27 @@ class IBBridgeWorker:
                 # Cerrar en opt_paper_trades cualquier posición que NO esté en el broker
                 for sym, opt_t in sb_open_opts.items():
                     if sym.upper() not in broker_opt_symbols:
+                        real_exit_time = now_iso
+                        try:
+                            sell_opt = sb.table("stocks_orders")\
+                                .select("filled_at")\
+                                .eq("ticker", sym)\
+                                .eq("direction", "sell")\
+                                .eq("status", "filled")\
+                                .order("filled_at", desc=True)\
+                                .limit(1)\
+                                .execute()
+                            if sell_opt.data and sell_opt.data[0].get("filled_at"):
+                                real_exit_time = sell_opt.data[0]["filled_at"]
+                        except Exception:
+                            pass
                         sb.table("opt_paper_trades").update({
                             "status": "closed",
-                            "exit_reason": "manual_simulated",
-                            "exit_time": now_iso,
-                            "updated_at": now_iso
+                            "exit_reason": "broker_reconciliation",
+                            "exit_time": real_exit_time,
+                            "updated_at": real_exit_time
                         }).eq("id", opt_t["id"]).execute()
-                        log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada en opt_paper_trades por no existir en TWS.")
+                        log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada en opt_paper_trades ({real_exit_time}) por no existir en TWS.")
             except Exception as opt_sync_e:
                 log_warning(MODULE, f"Error reconciliando opt_paper_trades: {opt_sync_e}")
 

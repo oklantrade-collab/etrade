@@ -442,8 +442,8 @@ def evaluate_gap_runner_entry_tranches(
         ema9_1h = float(c1h.ewm(span=9, adjust=False).mean().iloc[-1])
         ema3_above_ema9 = bool(ema3_1h > ema9_1h)
 
-        # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) o (RSI <= 70.0)
-        meets_1h_req = ema3_above_ema9 or (rsi_1h_val <= 70.0)
+        # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) Y (RSI <= 70.0)
+        meets_1h_req = ema3_above_ema9 and (rsi_1h_val <= 70.0)
         has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9
 
         macro_1h_ok = meets_1h_req
@@ -452,7 +452,7 @@ def evaluate_gap_runner_entry_tranches(
         res["room_to_bb_upper_1h"] = round(room_to_bb_upper_pct, 1)
 
         if not macro_1h_ok:
-            res["reason"] = f"Filtro mínimo 1H no cumplido: EMA3 (${ema3_1h:.2f}) <= EMA9 (${ema9_1h:.2f}) Y RSI 1H ({rsi_1h_val:.1f} > 70.0)"
+            res["reason"] = f"Filtro mínimo 1H no cumplido: Requiere tendencia 1H alcista (EMA3 ${ema3_1h:.2f} > EMA9 ${ema9_1h:.2f}) y RSI <= 70 (actual: {rsi_1h_val:.1f})"
             return res
     else:
         # Fallback para IPOs con historial joven en 1H

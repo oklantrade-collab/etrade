@@ -78,7 +78,7 @@ def select_best_option_contract(
     underlying_price: float,
     direction: str = "CALL",
     budget_usd: float = 1000.0,
-    max_spread_pct: float = 10.0,
+    max_spread_pct: float = 8.0,
     min_open_interest: float = 50.0,
     min_volume: float = 20.0,
     now_date: Optional[date] = None
@@ -160,10 +160,10 @@ def select_best_option_contract(
 
         # Filtro de Delta: entre 0.38 y 0.68
         if is_call:
-            if delta < 0.38 or delta > 0.68:
+            if delta < 0.45 or delta > 0.65:
                 continue
         else:
-            if delta > -0.38 or delta < -0.68:
+            if delta > -0.45 or delta < -0.65:
                 continue
 
         cost_per_contract = mid * 100.0
@@ -383,3 +383,14 @@ def fetch_and_select_best_option_contract(
         rejection_reasons.append(str(e_live))
         return None, rejection_reasons
 
+
+
+def route_optimal_option_strategy(iv: float, budget_available: float = 1000.0, setup_name: str = "") -> str:
+    """
+    Enrutamiento inteligente de estrategia:
+    - IV < 40% (0.40): Outright LONG CALL / LONG PUT (ganancia ilimitada, vega favorable).
+    - IV >= 40% (0.40) o Reversion 1H: VERTICAL SPREAD (mitiga IV crush y financia compra con pata OTM).
+    """
+    if iv >= 0.40 or setup_name == "MEAN_REVERSION_1H" or budget_available < 350.0:
+        return "vertical_spread"
+    return "outright"

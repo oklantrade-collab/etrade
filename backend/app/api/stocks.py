@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 import asyncio
+import time
 import os
 import json
 from pydantic import BaseModel
@@ -20,7 +21,7 @@ _ib = IBProvider() # Shared IB connection for the API process
 # CACHE LOCAL PARA REDUCIR EGRESS
 METADATA_CACHE = {}
 LAST_DATA_CACHE = {"data": None, "timestamp": 0}
-CACHE_TTL = 5  # 5 segundos de gracia para el Dashboard
+CACHE_TTL = 45  # 5 segundos de gracia para el Dashboard
 
 @router.get("/opportunities")
 async def get_stocks_opportunities(gap_runner_only: bool = False):
@@ -29,6 +30,10 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
     Aggregates watchlist_daily + technical_scores + trade_opportunities.
     Includes retry logic for Supabase connection issues.
     """
+    global LAST_DATA_CACHE
+    now_ts = time.time()
+    if not gap_runner_only and LAST_DATA_CACHE.get("data") is not None and (now_ts - LAST_DATA_CACHE.get("timestamp", 0) < CACHE_TTL):
+        return LAST_DATA_CACHE["data"]
     max_retries = 2
     for attempt in range(max_retries):
         try:
@@ -224,7 +229,7 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
             # ── 4. INTEGRACIÓN DE LIVE ALPHA RUNNERS (TOP GAINERS) & FUERZA COMPRADORA ──
             try:
                 from app.stocks.alpha_runner_scanner import scan_top_gainers_live
-                live_gainers = scan_top_gainers_live(limit=25)
+                live_gainers = await asyncio.to_thread(scan_top_gainers_live, 25)
                 existing_map = {item.get("ticker"): item for item in flattened if item.get("ticker")}
 
                 for g in live_gainers:
@@ -277,6 +282,20 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 opp["asset_class"] = get_asset_class(t)
                 opp["min_gap_required"] = min_thresh
 
+                # Enriquecimiento con STRUCTURAL_REGIME_ENGINE (EMA 3/9/20/50/200 + VWAP + ATR)
+                try:
+                    from app.core.structural_regime_engine import evaluate_structural_regime
+                    st_reg = evaluate_structural_regime(t, float(opp.get("price") or 0.0))
+                    opp["structural_regime"] = st_reg
+                    opp["regime_code"] = st_reg.get("regime_code")
+                    opp["regime_label"] = st_reg.get("regime_label")
+                    opp["is_deep_bear_excluded"] = st_reg.get("is_deep_bear_excluded", False)
+                except Exception:
+                    opp["structural_regime"] = {}
+                    opp["regime_code"] = "NEUTRAL"
+                    opp["regime_label"] = "⚪ NEUTRAL"
+                    opp["is_deep_bear_excluded"] = False
+
                 if is_runner:
                     # Score Boost institucional de +25 puntos para liderar la cola de compras
                     base_rank = float(opp.get("rank_score") or opp.get("buying_force_5m") or 50.0)
@@ -285,6 +304,11 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                     opp["is_high_priority"] = True
                 else:
                     opp["gap_runner_boost"] = 0.0
+                    opp["is_high_priority"] = False
+
+                # Si está en DEEP BEAR WINTER, castigar ranking para evitar compras de acciones atrapadas
+                if opp.get("is_deep_bear_excluded"):
+                    opp["rank_score"] = max(0.0, float(opp.get("rank_score") or 50.0) - 40.0)
                     opp["is_high_priority"] = False
 
             if gap_runner_only:
@@ -301,13 +325,17 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
 
             gap_runners = [i for i in flattened if i.get("is_gap_runner")]
 
-            return {
+            res_obj = {
                 "opportunities": flattened,
                 "total": len(flattened),
                 "total_gap_runners": len(gap_runners),
                 "has_gap_runners": len(gap_runners) > 0,
                 "market_status": market_status
             }
+            if not gap_runner_only:
+                LAST_DATA_CACHE["data"] = res_obj
+                LAST_DATA_CACHE["timestamp"] = time.time()
+            return res_obj
         except Exception as e:
             if attempt < max_retries - 1 and ("10061" in str(e) or "disconnected" in str(e)):
                 reset_supabase()
@@ -927,7 +955,7 @@ async def get_priority_queue():
                 from app.stocks.alpha_runner_scanner import scan_top_gainers_live
                 from app.stocks.stocks_orchestrator import load_orchestrator_config, calculate_composite_rank
                 cfg = await load_orchestrator_config(sb)
-                live_gainers = scan_top_gainers_live(limit=25)
+                live_gainers = await asyncio.to_thread(scan_top_gainers_live, 25)
 
                 for g in (live_gainers or []):
                     ticker = g.get("ticker")

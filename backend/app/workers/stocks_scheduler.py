@@ -1916,9 +1916,11 @@ async def run_stocks_cycle(force=False):
                 has_news = bool(g.get("has_news", False))
                 is_ema3_asc = bool(g.get("is_ema3_1h_ascending", True))
 
-                # TAREA 1 & 2: Filtro Calificado Estándar o Low-Float Explosivo (Vol >= 300k, RVOL >= 2.5x, Chg >= +5%):
-                is_standard_runner = (vol >= 1_000_000 and mcap >= 15_000_000 and bf >= 65.0)
-                is_low_float_runner = (vol >= 300_000 and rvol_val >= 2.5 and chg >= 5.0 and mcap >= 15_000_000 and bf >= 65.0)
+                # TAREA 1 & 2: Filtro Calificado Estándar o Low-Float Explosivo:
+                # Estándar: Vol >= 1M, MCap >= $25M, BF >= 65, EMA3 1H ascendente
+                is_standard_runner = (vol >= 1_000_000 and mcap >= 25_000_000 and bf >= 65.0 and is_ema3_asc)
+                # Low-float: Requiere mínimo 500k volumen, RVOL >= 3.0x, Chg >= +6%, BF >= 70 y EMA3 1H ascendente
+                is_low_float_runner = (vol >= 500_000 and rvol_val >= 3.0 and chg >= 6.0 and mcap >= 25_000_000 and bf >= 70.0 and is_ema3_asc)
                 if not (sym and (is_standard_runner or is_low_float_runner)):
                     continue
 
@@ -2810,6 +2812,13 @@ async def run_options_auto_execution_cycle():
         rows = sb.table("opt_settings").select("key,value").execute().data or []
         stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}
         eff = sd.effective_settings(stored)
+
+        # 1. Ejecutar selección de cartera greedy para promover elegibles (score >= min_score) a 'selected'
+        try:
+            from app.options.candidates import run_portfolio_selection
+            run_portfolio_selection(sb, eff, 0)
+        except Exception as sel_err:
+            log_warning(MODULE, f"Aviso en run_portfolio_selection automático: {sel_err}")
 
         sel_cands = (
             sb.table("opt_candidates")

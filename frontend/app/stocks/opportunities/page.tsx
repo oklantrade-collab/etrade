@@ -45,6 +45,67 @@ function GapRunnerStocksBadge({ isRunner, gapPct }: { isRunner?: boolean; gapPct
   );
 }
 
+function StructuralRegimeStocksBadge({ regime, regimeCode, regimeLabel }: { regime?: any; regimeCode?: string; regimeLabel?: string }) {
+  const code = regimeCode || regime?.regime_code;
+  const label = regimeLabel || regime?.regime_label;
+  if (!code && !label) return null;
+
+  let bg = 'rgba(148, 163, 184, 0.15)';
+  let color = '#94A3B8';
+  let border = 'rgba(148, 163, 184, 0.3)';
+  let icon = '⚪';
+  let displayTxt = label || code;
+
+  if (code === 'BULL_TREND_EXPANSION') {
+    bg = 'rgba(34, 197, 94, 0.18)';
+    color = '#22C55E';
+    border = 'rgba(34, 197, 94, 0.45)';
+    icon = '🟢';
+    displayTxt = 'BULL EXPANSION';
+  } else if (code === 'COUNTER_TREND_BOUNCE') {
+    bg = 'rgba(251, 191, 36, 0.18)';
+    color = '#FBBF24';
+    border = 'rgba(251, 191, 36, 0.45)';
+    icon = '🟡';
+    displayTxt = 'REBOTE TÁCTICO';
+  } else if (code === 'DEEP_BEAR_WINTER') {
+    bg = 'rgba(239, 68, 68, 0.18)';
+    color = '#EF4444';
+    border = 'rgba(239, 68, 68, 0.45)';
+    icon = '⛔';
+    displayTxt = 'DEEP BEAR';
+  } else if (code === 'COMPRESSION_CHOP') {
+    bg = 'rgba(168, 85, 247, 0.18)';
+    color = '#C084FC';
+    border = 'rgba(168, 85, 247, 0.45)';
+    icon = '🟣';
+    displayTxt = 'SQUEEZE';
+  }
+
+  return (
+    <span
+      title={regime?.action_note || label}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 3,
+        padding: '2px 6px',
+        borderRadius: 4,
+        background: bg,
+        color,
+        fontWeight: 900,
+        fontSize: '8px',
+        border: `1px solid ${border}`,
+        letterSpacing: '0.2px',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span>{icon}</span>
+      <span>{displayTxt}</span>
+    </span>
+  );
+}
+
 function StatusBadge({ status, isOB }: { status: string, isOB: boolean }) {
   const configs: any = {
     'pending':    { label: 'PENDING',    color: '#F59E0B', bg: 'rgba(245,158,11,0.12)', icon: '⏳' },
@@ -197,6 +258,7 @@ function PriorityQueuePanel({
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                       <span style={{ fontWeight: 900, fontSize: '15px', color: isOB ? '#EF4444' : '#FFF' }}>{item.ticker}</span>
                       <GapRunnerStocksBadge isRunner={item.is_gap_runner} gapPct={item.gap_pct} />
+                      <StructuralRegimeStocksBadge regime={item.structural_regime} regimeCode={item.regime_code} regimeLabel={item.regime_label} />
                       {item.entry_reason?.includes('high_growth') && (
                         <span style={{ fontSize: '7px', background: 'linear-gradient(90deg, #F59E0B, #EF4444)', color: '#FFF', padding: '1px 3px', borderRadius: '3px', fontWeight: 950 }}>🔥 ALTA</span>
                       )}
@@ -770,6 +832,53 @@ function AnalysisModal({ stock, onClose }: any) {
                         <RuleBox id="T04" name="RSI Momentum (40-70)" val={stock.t04_confirmed ? 'Momentum OK' : 'FAIL'} pts="+10 PTS" pass={stock.t04_confirmed} c="#F59E0B" />
                     </div>
                 </div>
+
+                {/* Régimen Estructural 1D (EMA 3/9/20/50/200 & Bollinger) */}
+                {(stock.structural_regime?.regime_code || stock.regime_code) && (
+                  <div style={{ background: '#0D0E14', padding: '14px', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap', gap: '6px' }}>
+                      <span style={{ fontSize: '9px', fontWeight: 950, color: '#38BDF8', letterSpacing: '0.5px' }}>
+                        📐 RÉGIMEN ESTRUCTURAL 1D
+                      </span>
+                      <StructuralRegimeStocksBadge regime={stock.structural_regime} regimeCode={stock.regime_code} regimeLabel={stock.regime_label} />
+                    </div>
+                    {stock.structural_regime?.action_note && (
+                      <div style={{ fontSize: '10px', color: '#BBB', marginBottom: '8px', fontStyle: 'italic', background: 'rgba(255,255,255,0.02)', padding: '5px 8px', borderRadius: '4px' }}>
+                        {stock.structural_regime.action_note}
+                      </div>
+                    )}
+                    {stock.structural_regime?.emas && (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '4px', textAlign: 'center' }}>
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px', borderRadius: '4px' }}>
+                          <span style={{ fontSize: '7.5px', color: '#777', display: 'block' }}>EMA 3</span>
+                          <b style={{ color: '#FFF', fontSize: '9.5px' }}>${stock.structural_regime.emas.ema3}</b>
+                        </div>
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px', borderRadius: '4px' }}>
+                          <span style={{ fontSize: '7.5px', color: '#777', display: 'block' }}>EMA 9</span>
+                          <b style={{ color: '#FFF', fontSize: '9.5px' }}>${stock.structural_regime.emas.ema9}</b>
+                        </div>
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px', borderRadius: '4px' }}>
+                          <span style={{ fontSize: '7.5px', color: '#777', display: 'block' }}>EMA 20</span>
+                          <b style={{ color: '#FBBF24', fontSize: '9.5px' }}>${stock.structural_regime.emas.ema20}</b>
+                        </div>
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px', borderRadius: '4px' }}>
+                          <span style={{ fontSize: '7.5px', color: '#777', display: 'block' }}>EMA 50</span>
+                          <b style={{ color: '#38BDF8', fontSize: '9.5px' }}>${stock.structural_regime.emas.ema50}</b>
+                        </div>
+                        <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px', borderRadius: '4px' }}>
+                          <span style={{ fontSize: '7.5px', color: '#777', display: 'block' }}>EMA 200</span>
+                          <b style={{ color: '#EF4444', fontSize: '9.5px' }}>${stock.structural_regime.emas.ema200}</b>
+                        </div>
+                      </div>
+                    )}
+                    {stock.structural_regime?.target_ceiling && (
+                      <div style={{ marginTop: '6px', fontSize: '9.5px', color: '#888', display: 'flex', justifyContent: 'space-between', borderTop: '1px solid rgba(255,255,255,0.04)', paddingTop: '4px' }}>
+                        <span>Techo Técnico (Muro):</span>
+                        <b style={{ color: '#FFD700' }}>${stock.structural_regime.target_ceiling}</b>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div style={{ background: '#0D0E14', padding: '20px', borderRadius: '16px', border:'1px solid rgba(255,255,255,0.05)', display:'flex', gap:'20px', alignItems:'center' }}>
                     <div style={{ textAlign:'center' }}>
                         <div style={{ fontSize: '10px', color: '#F59E0B', fontWeight: 950, marginBottom:'4px' }}>RESUMEN TÉCNICO</div>
@@ -1129,6 +1238,7 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
         <div style={{ display:'flex', alignItems:'center', gap: '4px', flexWrap: 'wrap' }}>
           <span style={{ fontWeight: 950, color: '#FFF', fontSize: '14px', letterSpacing: '-0.5px' }}>{opp.ticker}</span>
           <GapRunnerStocksBadge isRunner={opp.is_gap_runner} gapPct={opp.gap_pct} />
+          <StructuralRegimeStocksBadge regime={opp.structural_regime} regimeCode={opp.regime_code} regimeLabel={opp.regime_label} />
           {opp.queue_rank && (
             <span style={{ fontSize: '8px', background: 'rgba(56,189,248,0.2)', border: '1px solid #38BDF8', color: '#38BDF8', padding: '1px 5px', borderRadius: '4px', fontWeight: 950 }}>🎯 COLA #{opp.queue_rank}</span>
           )}

@@ -60,6 +60,7 @@ files_to_sync = [
     "app/rebote_aduana/scoring/signal_rebote_cascada_multitf.py",
     "app/rebote_aduana/scoring/regime_local.py",
     "app/core/breakpoint_detector.py",
+    "app/core/structural_regime_engine.py",
     "tests/test_rebote_engine.py",
     "tests/test_aduana_validator.py",
     "tests/test_rebote_climax_exit.py",

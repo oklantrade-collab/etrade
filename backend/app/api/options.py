@@ -321,7 +321,18 @@ def get_candidate(candidate_id: int):
     sb = get_supabase()
     sim = sb.table("opt_simulations").select("scenario_config,scenario_results,cost_assumptions,pricing_model_version").eq("candidate_id", candidate_id).order("created_at", desc=True).limit(1).execute().data
     dec = sb.table("opt_aduana_decisions").select("kind,approved,rules,warnings,created_at").eq("candidate_id", candidate_id).order("created_at", desc=True).limit(1).execute().data
-    return {**rows[0], "payoff": payoff_curve(rows[0]), "simulation": sim[0] if sim else None, "aduana": dec[0] if dec else None}
+    row = rows[0]
+    bd = row.get("score_breakdown") or {}
+    st_reg = bd.get("structural_regime") or {}
+    return {
+        **row,
+        "structural_regime": st_reg,
+        "setup_name": bd.get("setup_name"),
+        "setup_label": bd.get("setup_label"),
+        "payoff": payoff_curve(row),
+        "simulation": sim[0] if sim else None,
+        "aduana": dec[0] if dec else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -388,10 +399,14 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
                 g_type = "OPEN_GAP_DOWN"
                 g_pct = u_gap
 
+        bd = item.get("score_breakdown") or {}
         item["is_gap_runner"] = is_runner
         item["gap_type"] = g_type
         item["gap_pct"] = g_pct
         item["catalyst_state"] = exit_plan.get("catalyst_state")
+        item["structural_regime"] = bd.get("structural_regime") or {}
+        item["setup_name"] = bd.get("setup_name")
+        item["setup_label"] = bd.get("setup_label")
 
     if gap_runner_only:
         items = [i for i in items if i.get("is_gap_runner")]
@@ -406,8 +421,22 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     selected = [i for i in items if i.get("eligibility_status") == "selected"]
     eligible = [i for i in items if i.get("eligibility_status") == "eligible"]
     rejected = [i for i in items if i.get("eligibility_status") == "rejected"]
-    calls = [i for i in items if i.get("direction") in ("CALL", "bullish")]
-    puts = [i for i in items if i.get("direction") in ("PUT", "bearish")]
+    # FILTRO ESTRICTO: En el TOP RANKING de Opciones, SOLO candidatas potencialmente ELEGIBLES o SELECCIONADAS
+    # Las descartadas por Aduana o reglas NUNCA deben mostrarse en el Top 3
+    calls = [
+        i for i in items
+        if i.get("direction") in ("CALL", "bullish")
+        and i.get("eligibility_status") in ("eligible", "selected")
+        and float(i.get("score") or 0.0) > 0.0
+        and not (i.get("score_breakdown") or {}).get("is_dead_stock", False)
+    ]
+    puts = [
+        i for i in items
+        if i.get("direction") in ("PUT", "bearish")
+        and i.get("eligibility_status") in ("eligible", "selected")
+        and float(i.get("score") or 0.0) > 0.0
+        and not (i.get("score_breakdown") or {}).get("is_dead_stock", False)
+    ]
     gap_runners = [i for i in items if i.get("is_gap_runner")]
     gap_up_runners = [i for i in gap_runners if i.get("gap_type") == "OPEN_GAP_UP"]
     gap_down_runners = [i for i in gap_runners if i.get("gap_type") == "OPEN_GAP_DOWN"]
@@ -433,7 +462,14 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     top_calls = _distinct_by_symbol(calls, 3)
     top_puts = _distinct_by_symbol(puts, 3)
 
-    allocated_risk = sum(float(s.get("max_loss_total") or 0.0) for s in selected)
+    # Considerar riesgo de seleccionadas y también de trades de opciones ya abiertos en opt_paper_trades
+    try:
+        open_opt_trades = sb.table("opt_paper_trades").select("max_loss_total").eq("status", "open").execute().data or []
+        open_trades_risk = sum(float(p.get("max_loss_total") or 0.0) for p in open_opt_trades)
+    except Exception:
+        open_trades_risk = 0.0
+    selected_risk = sum(float(s.get("max_loss_total") or 0.0) for s in selected)
+    allocated_risk = open_trades_risk + selected_risk
     max_open_risk = float(eff.get("max_open_risk_usd") or 100.0)
     remaining_budget = max(0.0, max_open_risk - allocated_risk)
 

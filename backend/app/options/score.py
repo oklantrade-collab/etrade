@@ -56,6 +56,195 @@ def is_gap_runner_opportunity(cand: dict[str, Any], underlying: dict[str, Any] |
     return False, None, gap_pct
 
 
+
+
+def classify_options_opportunity_setup(cand: dict[str, Any], underlying: dict[str, Any] | None = None) -> dict[str, Any]:
+    """
+    Clasifica la oportunidad en uno de los 3 arquetipos institucionales de alta probabilidad:
+    1. Setup 1: CATALYST_GAP (Gap >= 1.2% / <= -1.2%, noticia/catalizador activo, RVOL >= 1.8x).
+    2. Setup 2: VOLUME_IGNITION (RVOL >= 2.5x, Buying Force >= 65 para CALL o <= 35 para PUT).
+    3. Setup 3: MEAN_REVERSION_1H (RSI 1H <= 28 para CALL o >= 72 para PUT / giro en extremo).
+    
+    Aplica el Dead Stock Shield:
+    - Si no cumple ninguno de los 3 setups y RVOL < 1.8x, |Gap| < 1.2% y sin noticias -> IS_DEAD_STOCK = True
+    """
+    if underlying is None:
+        underlying = {}
+
+    sym = (cand.get("symbol") or underlying.get("symbol") or "").upper()
+    cand_dir = (cand.get("direction") or underlying.get("direction") or "").lower()
+    is_bull = cand_dir in ("call", "bullish")
+    is_bear = cand_dir in ("put", "bearish")
+
+    # Gap %
+    cat_meta = underlying.get("catalyst_meta") or {}
+    c1 = cat_meta.get("c1_gap") or {}
+    gap_pct = float(
+        cand.get("gap_pct")
+        or (cand.get("exit_plan") or {}).get("gap_pct")
+        or (cand.get("score_breakdown") or {}).get("gap_pct")
+        or c1.get("gap_pct")
+        or underlying.get("gap_pct")
+        or underlying.get("change_pct")
+        or 0.0
+    )
+
+    # News catalyst
+    has_news = bool(
+        underlying.get("has_news")
+        or cand.get("has_news")
+        or underlying.get("news_catalyst")
+        or (float(underlying.get("catalyst_score") or 0) >= 60)
+        or (cand.get("direction_source") == "catalyst")
+    )
+
+    # RVOL (Volumen Relativo)
+    rvol = float(
+        underlying.get("rvol")
+        or cand.get("rvol")
+        or (underlying.get("atm_volume", 0) / max(1, underlying.get("atm_oi", 1)))
+        or 1.0
+    )
+
+    # Buying Force / APEX Signal
+    apex_score = float(underlying.get("apex_score") or cand.get("apex_score") or 50.0)
+    bf = float(underlying.get("buying_force_5m") or apex_score)
+
+    # 1H RSI
+    rsi_1h = float(underlying.get("rsi_1h") or underlying.get("rsi_14") or 50.0)
+
+    # ── EVALUACIÓN DE RÉGIMEN ESTRUCTURAL 1D (EMA 3/9/20/50/200 + VWAP + ATR) ──
+    try:
+        from app.core.structural_regime_engine import evaluate_structural_regime
+        p_val = float(cand.get("price") or underlying.get("price") or 0.0)
+        regime = evaluate_structural_regime(sym, p_val)
+    except Exception as e_reg:
+        regime = {"regime_code": "NEUTRAL", "regime_label": "⚪ NEUTRAL", "is_deep_bear_excluded": False, "key_levels_1d": {}}
+
+    # 1. CANDADO MACRO SECULAR: DEEP BEAR WINTER (Bajo EMA50/200)
+    # Evita atrapar capital durante meses en activos en invierno bajista
+    if is_bull and regime.get("is_deep_bear_excluded"):
+        return {
+            "setup_name": "DEEP_BEAR_WINTER",
+            "setup_label": regime.get("regime_label") or "⛔ DEEP BEAR WINTER",
+            "setup_bonus": -50.0,
+            "is_dead_stock": True,
+            "is_eligible": False,
+            "rejection_reason": "deep_bear_winter: subyacente bajo EMA50/200, riesgo de meses atrapado",
+            "structural_regime": regime,
+        }
+
+    # 2. SETUP ALCISTA INSTITUCIONAL: BULL_TREND_EXPANSION (Caso DIS)
+    if is_bull and regime.get("regime_code") == "BULL_TREND_EXPANSION":
+        return {
+            "setup_name": "BULL_TREND_EXPANSION",
+            "setup_label": regime.get("regime_label") or "🟢 BULL EXPANSION (EMA 3>9>20>50>200)",
+            "setup_bonus": 35.0,
+            "is_dead_stock": False,
+            "is_eligible": True,
+            "rejection_reason": None,
+            "structural_regime": regime,
+        }
+
+    # 3. REBOTE TÁCTICO CONTRATENDENCIA (Caso AAL)
+    if regime.get("regime_code") == "COUNTER_TREND_BOUNCE":
+        wall = regime.get("target_resistance_wall", 0.0)
+        # Si está rozando la EMA20 diaria (< 1.2% de distancia)
+        if abs(regime.get("room_to_resistance_pct", 0.0)) <= 1.2:
+            if is_bear:
+                return {
+                    "setup_name": "REJECTION_PUT_EMA20",
+                    "setup_label": f"🎯 RECHAZO EN RESISTENCIA EMA20 (${wall:.2f})",
+                    "setup_bonus": 30.0,
+                    "is_dead_stock": False,
+                    "is_eligible": True,
+                    "rejection_reason": None,
+                    "structural_regime": regime,
+                }
+            else:
+                return {
+                    "setup_name": "ROOF_RESISTANCE_BLOCKED",
+                    "setup_label": f"⛔ TECHO EN RESISTENCIA EMA20 (${wall:.2f})",
+                    "setup_bonus": -35.0,
+                    "is_dead_stock": True,
+                    "is_eligible": False,
+                    "rejection_reason": f"techo_ema20: el subyacente choca contra la EMA20 diaria (${wall:.2f})",
+                    "structural_regime": regime,
+                }
+        else:
+            if is_bull and rvol >= 1.8:
+                return {
+                    "setup_name": "TACTICAL_SCALP_INTRADAY",
+                    "setup_label": f"🟡 REBOTE TÁCTICO INTRADÍA (Target EMA20: ${wall:.2f})",
+                    "setup_bonus": 20.0,
+                    "is_dead_stock": False,
+                    "is_eligible": True,
+                    "rejection_reason": None,
+                    "structural_regime": regime,
+                }
+
+    # SETUP 1: CATALYST GAP
+    min_gap = get_min_gap_threshold(sym) if sym else 1.2
+    is_gap_valid = (is_bull and gap_pct >= min_gap) or (is_bear and gap_pct <= -min_gap)
+    if is_gap_valid and has_news and rvol >= 1.8:
+        return {
+            "setup_name": "CATALYST_GAP",
+            "setup_label": f"🚀 SETUP 1: CATALYST GAP ({gap_pct:+.1f}% RVOL {rvol:.1f}x)",
+            "setup_bonus": 30.0,
+            "is_dead_stock": False,
+            "is_eligible": True,
+            "rejection_reason": None,
+            "structural_regime": regime,
+        }
+
+    # SETUP 2: INSTITUTIONAL VOLUME IGNITION
+    if rvol >= 2.5:
+        if (is_bull and bf >= 65.0) or (is_bear and bf <= 35.0):
+            return {
+                "setup_name": "VOLUME_IGNITION",
+                "setup_label": f"🔥 SETUP 2: IGNICIÓN INSTITUCIONAL (RVOL {rvol:.1f}x)",
+                "setup_bonus": 25.0,
+                "is_dead_stock": False,
+                "is_eligible": True,
+                "rejection_reason": None,
+            }
+
+    # SETUP 3: 1-HOUR MEAN REVERSION
+    if (is_bull and rsi_1h <= 28.0) or (is_bear and rsi_1h >= 72.0):
+        return {
+            "setup_name": "MEAN_REVERSION_1H",
+            "setup_label": f"🎯 SETUP 3: REVERSIÓN 1H (RSI {rsi_1h:.1f})",
+            "setup_bonus": 20.0,
+            "is_dead_stock": False,
+            "is_eligible": True,
+            "rejection_reason": None,
+            "structural_regime": regime,
+        }
+
+    # DEAD STOCK SHIELD
+    # Si la acción está dormida sin catalizador ni volumen anormal (ej. AAL)
+    is_dead = (rvol < 1.8) and (abs(gap_pct) < 1.2) and (not has_news)
+    if is_dead:
+        return {
+            "setup_name": "DEAD_STOCK",
+            "setup_label": "⛔ ACCIÓN DORMIDA / SIN SETUP (DEAD STOCK SHIELD)",
+            "setup_bonus": -40.0,
+            "is_dead_stock": True,
+            "is_eligible": False,
+            "rejection_reason": "dead_stock_shield: subyacente sin catalizador de noticias, sin volumen anormal ni reversión 1H",
+        }
+
+    # Setup estándar
+    return {
+        "setup_name": "STANDARD",
+        "setup_label": "⚪ SETUP ESTÁNDAR (MONITOREANDO)",
+        "setup_bonus": 0.0,
+        "is_dead_stock": False,
+        "is_eligible": True,
+        "rejection_reason": None,
+    }
+
+
 def _clip(val: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, float(val)))
 
@@ -404,13 +593,22 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
     )
     raw_base_score = round(_clip(weighted_sum / total_w), 1)
 
-    # Detección y Priorización Institucional ADUANA GAP RUNNER (+25 puntos)
+    # Detección y Clasificación Institucional de Setups & Dead Stock Shield
+    setup_info = classify_options_opportunity_setup(cand, underlying)
+    setup_bonus = setup_info["setup_bonus"]
+    is_dead_stock = setup_info["is_dead_stock"]
+
     is_runner, gap_type, gap_pct = is_gap_runner_opportunity(cand, underlying)
     gap_runner_boost = 25.0 if is_runner else 0.0
-    final_score = round(min(100.0, raw_base_score + gap_runner_boost), 1)
 
     min_score = float(eff.get("min_score", 60))
-    eligible_by_score = final_score >= min_score
+    if is_dead_stock:
+        final_score = 0.0
+        eligible_by_score = False
+    else:
+        effective_boost = max(setup_bonus, gap_runner_boost)
+        final_score = round(max(0.0, min(100.0, raw_base_score + effective_boost)), 1)
+        eligible_by_score = final_score >= min_score and setup_info["is_eligible"]
 
     # Check missing components and calculate coverage (§5, §9.1)
     missing_components = []
@@ -510,6 +708,12 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
         "score_total": final_score,
         "final_score": final_score,
         "raw_base_score": raw_base_score,
+        "setup_name": setup_info["setup_name"],
+        "setup_label": setup_info["setup_label"],
+        "setup_bonus": setup_info["setup_bonus"],
+        "is_dead_stock": is_dead_stock,
+        "dead_stock_shield_reason": setup_info["rejection_reason"],
+        "structural_regime": setup_info.get("structural_regime") or {},
         "is_gap_runner": is_runner,
         "gap_runner_boost": gap_runner_boost,
         "gap_type": gap_type,
@@ -589,16 +793,22 @@ def rank_and_score_candidates(candidates: list[dict[str, Any]],
     # Prioridad 6: ev_ratio descendente
     # Prioridad 7: id ascendente
     def sort_key(item: dict[str, Any]):
+        bd = item.get("score_breakdown") or {}
+        is_dead = bd.get("is_dead_stock", False)
+        setup_name = bd.get("setup_name", "")
+        has_prime_setup = setup_name in ("CATALYST_GAP", "VOLUME_IGNITION", "MEAN_REVERSION_1H")
         is_runner = bool(
-            item.get("is_gap_runner")
+            has_prime_setup
+            or item.get("is_gap_runner")
             or (item.get("exit_plan") or {}).get("is_gap_runner")
-            or (item.get("score_breakdown") or {}).get("is_gap_runner")
+            or bd.get("is_gap_runner")
             or item.get("direction_source") == "gap_runner"
             or item.get("strategy_type") in ("gap_runner_call", "gap_runner_put")
         )
         met = compute_potential_benefit_metrics(item, eff)
         return (
-            0 if is_runner else 1,
+            1 if is_dead else 0,             # Dead stocks van al final absoluto
+            0 if is_runner else 1,           # Opciones con setup confirmado van primero
             -round(met["benefit_index"], 2),
             -round(met["pot_profit_total"], 2),
             -round(met["ev_total_usd"], 2),

@@ -159,6 +159,12 @@ def value_underlying_candidates(sb, und: dict[str, Any], eff: dict[str, Any], se
                 worst_adverse_scenario_pnl=val.get("worst_adverse_scenario_pnl"),
             )
         score_res = sc.score_candidate(cand_for_score, und, eff)
+        is_dead = score_res.get("score_breakdown", {}).get("is_dead_stock", False)
+        if is_dead:
+            approved = False
+            dead_reason = score_res.get("score_breakdown", {}).get("dead_stock_shield_reason") or "dead_stock_shield"
+            if dead_reason not in reasons:
+                reasons.append(dead_reason)
 
         upd = {
             "eligibility_status": "eligible" if approved else "rejected",

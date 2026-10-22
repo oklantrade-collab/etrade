@@ -843,11 +843,11 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             eff_gap = gap_val if gap_val != 0.0 else chg_val
             is_trap = bool(snap.get('is_trap', False))
 
-            # Requisito Mínimo en 1H: (EMA3 > EMA9) o (RSI <= 70)
+            # Requisito Mínimo en 1H: (EMA3 > EMA9) Y (EMA3 ascendente) Y (RSI <= 70)
             h1_snap = get_live_1h_candle_and_sipv(ticker, float(snap.get('price') or 0.0))
             is_ema3_above_ema9 = bool(h1_snap.get('is_ema3_above_ema9', False))
             rsi_1h_snap = float(h1_snap.get('rsi_1h') or snap.get('rsi') or 50.0)
-            meets_1h_req = is_ema3_above_ema9 or (rsi_1h_snap <= 70.0)
+            meets_1h_req = is_ema3_above_ema9 and is_ema3_asc and (rsi_1h_snap <= 70.0)
 
             is_open_gap_runner = (eff_gap >= min_thresh) and (not is_trap) and meets_1h_req
 
@@ -1013,20 +1013,35 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             await _upsert_queue(supabase, candidate, status='blocked')
             continue
 
-        # En mercado BEARISH, SOLO se permite comprar si es un ALPHA_RUNNER / SUPER_RUNNER / EXPANSION_RUNNER / GAP_RUNNER / VME
+        # En mercado BEARISH (SP500/Nasdaq en caída y VIX alto), BLOQUEO ESTRICTO:
+        # SOLO se permite comprar si tiene catalizador genuino institucional (Noticia confirmada) O es Super-Runner de expansión con RVOL >= 3.0x y tendencia 1H confirmada
+        # ── EVALUACIÓN DE RÉGIMEN ESTRUCTURAL 1D (EMA 3/9/20/50/200 + VWAP + ATR) ──
+        try:
+            from app.core.structural_regime_engine import evaluate_structural_regime
+            st_regime = evaluate_structural_regime(ticker, price)
+        except Exception as e_reg_orch:
+            st_regime = {}
+
+        # 1. CANDADO MACRO SECULAR: DEEP BEAR WINTER (Bajo EMA50/200)
+        # Evita atrapar capital durante meses en activos en invierno bajista
+        if st_regime.get("is_deep_bear_excluded"):
+            log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por DEEP BEAR WINTER (Precio muy por debajo de EMA50/200, riesgo de meses atrapado).")
+            await _upsert_queue(supabase, candidate, status='blocked')
+            continue
+
+        # 2. ADAPTACIÓN DE TAKE PROFIT PARA COUNTER_TREND_BOUNCE (Caso AAL)
+        # Si la acción está rebotando en contratendencia, el TP se fija estrictamente en la EMA20 diaria
+        if st_regime.get("regime_code") == "COUNTER_TREND_BOUNCE":
+            candidate["tactical_target_ceiling"] = st_regime.get("target_ceiling", price * 1.03)
+            log_info(MODULE, f"🟡 {ticker}: COUNTER TREND BOUNCE detectado. Techo dinámico fijado en EMA20 (${st_regime.get('target_ceiling'):.2f}).")
+
         if is_macro_bearish:
-            is_exempt_runner = bool(
-                candidate.get('is_gap_runner') or
-                candidate.get('is_expansion_runner') or
-                candidate.get('is_intraday_alpha') or
-                'ALPHA_RUNNER' in str(candidate.get('group_name', '')) or
-                'VOLATILITY' in str(candidate.get('group_name', '')) or
-                'VME' in str(candidate.get('triggered_rule', '')) or
-                candidate.get('composite_rank', 0) >= 98.0 or
-                float(candidate.get('buying_force_score') or 0.0) >= 70.0
-            )
+            has_catalyst = bool(candidate.get('has_news') or candidate.get('snap', {}).get('has_news', False))
+            rvol_val = float(candidate.get('snap', {}).get('rvol', 1.0) or 1.0)
+            is_strong_expansion = bool(candidate.get('is_expansion_runner') and rvol_val >= 3.0 and candidate.get('snap', {}).get('is_ema3_1h_ascending', True))
+            is_exempt_runner = has_catalyst or is_strong_expansion
             if not is_exempt_runner:
-                log_info(MODULE, f"⏸️ {ticker}: Omitida por Filtro Macro Bearish (no es Alpha Runner ni Super-Runner).")
+                log_info(MODULE, f"⏸️ {ticker}: BLOQUEADA por Filtro Macro Bearish (SP500/Nasdaq cayendo y VIX elevado sin noticia/catalizador institucional).")
                 continue
 
         rule_sig   = candidate.get('rule_signal', {})

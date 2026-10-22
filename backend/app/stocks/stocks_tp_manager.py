@@ -433,6 +433,22 @@ async def execute_partial_sell(
 ) -> dict:
     """Ejecuta la venta parcial de un bloque y actualiza la posición en Supabase."""
     pos_id = position.get('id')
+
+    # DEDUPLICACIÓN ESTRICTA: Comprobar si ya existe una orden de venta en curso para este ticker
+    try:
+        if supabase:
+            existing_so = supabase.table('stocks_orders') \
+                .select('id') \
+                .eq('ticker', ticker) \
+                .eq('direction', 'sell') \
+                .in_('status', ['pending', 'processing']) \
+                .limit(1) \
+                .execute()
+            if existing_so.data:
+                log_warning(MODULE, f'⛔ [DEDUPLICATE] Orden SELL para {ticker} ya encolada (ID #{existing_so.data[0]["id"]}). Omitiendo duplicado en TP Manager.')
+                return {'success': False, 'reason': 'already_pending'}
+    except Exception as e_dedup:
+        log_warning(MODULE, f'Aviso en deduplicación TP Manager: {e_dedup}')
     entry_price = float(position.get('avg_price') or position.get('entry_price') or 0)
     shares_rem = float(position.get('shares_remaining') or position.get('shares') or 0)
 

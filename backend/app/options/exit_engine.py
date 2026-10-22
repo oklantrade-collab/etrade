@@ -609,6 +609,30 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
             }
             sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
 
+            # Despachar orden de salida a stocks_orders para ejecución en TWS / IB Bridge
+            try:
+                exp_compact = (pos.get("expiry") or "20261026").replace("-", "")[:8]
+                for f in (exit_fill_res.exit_fills or []):
+                    stk = f.get("strike")
+                    rgt = f.get("right")
+                    side = f.get("closing_side") or "sell"
+                    px = f.get("fill_price") or exit_fill_res.exit_credit
+                    opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
+                    sb.table("stocks_orders").insert({
+                        "ticker": pos["symbol"][:10],
+                        "target_band": opt_target_band,
+                        "group_name": "OPTIONS_AUTONOMOUS",
+                        "rule_code": "APEX_AUTO",
+                        "order_type": "market",
+                        "direction": side,
+                        "shares": pos.get("qty") or 1,
+                        "market_price": px,
+                        "status": "pending",
+                        "created_at": exit_fill_res.exit_time,
+                    }).execute()
+            except Exception as ord_e:
+                log_warning(MODULE, f"Aviso al despachar orden de salida a stocks_orders: {ord_e}")
+
             # Registrar evento de riesgo
             event_type = "forced_close" if reason == "forced_close_time" else ("signal_flip" if reason == "signal_invalidation" else "stop_approaching")
             try:

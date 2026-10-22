@@ -188,6 +188,126 @@ function CatalystSemaphores({ meta }: { meta?: any }) {
   )
 }
 
+function StructuralRegimeBadge({ regime, compact = false }: { regime?: any; compact?: boolean }) {
+  if (!regime || !regime.regime_code) return null
+  const code = regime.regime_code
+  let bg = 'rgba(148, 163, 184, 0.15)'
+  let color = '#94A3B8'
+  let border = 'rgba(148, 163, 184, 0.3)'
+  let icon = '⚪'
+  let text = regime.regime_label || code
+
+  if (code === 'BULL_TREND_EXPANSION') {
+    bg = 'rgba(34, 197, 94, 0.18)'
+    color = '#22C55E'
+    border = 'rgba(34, 197, 94, 0.45)'
+    icon = '🟢'
+    text = compact ? 'BULL EXPANSION' : (regime.regime_label || 'BULL EXPANSION')
+  } else if (code === 'COUNTER_TREND_BOUNCE') {
+    bg = 'rgba(251, 191, 36, 0.18)'
+    color = '#FBBF24'
+    border = 'rgba(251, 191, 36, 0.45)'
+    icon = '🟡'
+    text = compact ? 'REBOTE TÁCTICO' : (regime.regime_label || 'REBOTE TÁCTICO')
+  } else if (code === 'DEEP_BEAR_WINTER') {
+    bg = 'rgba(239, 68, 68, 0.18)'
+    color = '#EF4444'
+    border = 'rgba(239, 68, 68, 0.45)'
+    icon = '⛔'
+    text = compact ? 'DEEP BEAR' : (regime.regime_label || 'DEEP BEAR WINTER')
+  } else if (code === 'COMPRESSION_CHOP') {
+    bg = 'rgba(168, 85, 247, 0.18)'
+    color = '#C084FC'
+    border = 'rgba(168, 85, 247, 0.45)'
+    icon = '🟣'
+    text = compact ? 'SQUEEZE' : (regime.regime_label || 'COMPRESSION')
+  }
+
+  return (
+    <span
+      title={regime.action_note || text}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '2px 7px',
+        borderRadius: 5,
+        background: bg,
+        color,
+        fontWeight: 800,
+        fontSize: 10,
+        border: `1px solid ${border}`,
+        letterSpacing: '0.2px',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span style={{ fontSize: 9 }}>{icon}</span>
+      <span>{text}</span>
+    </span>
+  )
+}
+
+function StructuralRegimeDetailBlock({ regime }: { regime?: any }) {
+  if (!regime || !regime.regime_code) return null
+  return (
+    <div style={{ marginTop: 12, background: 'rgba(0,0,0,0.3)', padding: 12, borderRadius: 8, border: '1px solid rgba(255,255,255,0.06)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
+        <span style={{ fontSize: 10, color: '#38BDF8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          📐 Régimen Estructural 1D & Niveles Técnicos
+        </span>
+        <StructuralRegimeBadge regime={regime} />
+      </div>
+      {regime.action_note && (
+        <div style={{ fontSize: 11, color: '#DDD', marginBottom: 8, fontStyle: 'italic', background: 'rgba(255,255,255,0.02)', padding: '6px 8px', borderRadius: 4 }}>
+          {regime.action_note}
+        </div>
+      )}
+      {regime.emas && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(80px, 1fr))', gap: 6, fontSize: 11 }}>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+            <span style={{ fontSize: 9, color: '#888', display: 'block' }}>EMA 3</span>
+            <b style={{ color: '#FFF' }}>${regime.emas.ema3}</b>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+            <span style={{ fontSize: 9, color: '#888', display: 'block' }}>EMA 9</span>
+            <b style={{ color: '#FFF' }}>${regime.emas.ema9}</b>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+            <span style={{ fontSize: 9, color: '#888', display: 'block' }}>EMA 20</span>
+            <b style={{ color: '#FBBF24' }}>${regime.emas.ema20}</b>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+            <span style={{ fontSize: 9, color: '#888', display: 'block' }}>EMA 50</span>
+            <b style={{ color: '#38BDF8' }}>${regime.emas.ema50}</b>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+            <span style={{ fontSize: 9, color: '#888', display: 'block' }}>EMA 200</span>
+            <b style={{ color: '#EF4444' }}>${regime.emas.ema200}</b>
+          </div>
+          {regime.bb?.upper && (
+            <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+              <span style={{ fontSize: 9, color: '#888', display: 'block' }}>BB SUPERIOR</span>
+              <b style={{ color: '#22C55E' }}>${regime.bb.upper}</b>
+            </div>
+          )}
+          {regime.target_ceiling && (
+            <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+              <span style={{ fontSize: 9, color: '#888', display: 'block' }}>TECHO/MURO</span>
+              <b style={{ color: '#FFD700' }}>${regime.target_ceiling}</b>
+            </div>
+          )}
+          {regime.atr_1d && (
+            <div style={{ background: 'rgba(255,255,255,0.02)', padding: '4px 6px', borderRadius: 4 }}>
+              <span style={{ fontSize: 9, color: '#888', display: 'block' }}>ATR (1D)</span>
+              <b style={{ color: '#AB47BC' }}>${regime.atr_1d}</b>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function Payoff({ data, be }: { data: { price: number; pnl: number }[]; be: number | null }) {
   if (!data?.length) return <div style={{ color: '#666', fontSize: 12 }}>Sin curva (faltan datos).</div>
   const W = 420, H = 140, P = 24
@@ -614,6 +734,7 @@ export default function OpportunitiesPage() {
                         {c.opt_underlyings?.symbol}
                       </span>
                       <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
+                      <StructuralRegimeBadge regime={c.structural_regime} />
                       <span style={{ fontSize: 11, color: '#22C55E', fontWeight: 700 }}>
                         {STRAT[c.strategy_type] || c.strategy_type}
                       </span>
@@ -698,6 +819,7 @@ export default function OpportunitiesPage() {
                         {c.opt_underlyings?.symbol}
                       </span>
                       <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
+                      <StructuralRegimeBadge regime={c.structural_regime} />
                       <span style={{ fontSize: 11, color: '#AB47BC', fontWeight: 700 }}>
                         {STRAT[c.strategy_type] || c.strategy_type}
                       </span>
@@ -963,6 +1085,7 @@ export default function OpportunitiesPage() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                               <span>{group.symbol}</span>
                               <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
+                              <StructuralRegimeBadge regime={c.structural_regime} compact />
                               {group.rest.length > 0 && (
                                 <button
                                   onClick={(e) => {
@@ -1040,6 +1163,7 @@ export default function OpportunitiesPage() {
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                   <span>{alt.opt_underlyings?.symbol}</span>
                                   <GapRunnerBadge isRunner={alt.is_gap_runner} gapType={alt.gap_type} gapPct={alt.gap_pct} />
+                                  <StructuralRegimeBadge regime={alt.structural_regime} compact />
                                 </div>
                               </td>
                               <td style={{ ...td, color: '#999', fontSize: 11 }}>
@@ -1173,6 +1297,8 @@ export default function OpportunitiesPage() {
                                             </div>
                                           </div>
                                         )}
+
+                                        <StructuralRegimeDetailBlock regime={detail.structural_regime || c.structural_regime} />
                                       </>
                                     )}
                                   </div>
@@ -1254,6 +1380,7 @@ export default function OpportunitiesPage() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                               <span>{c.opt_underlyings?.symbol}</span>
                               <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
+                              <StructuralRegimeBadge regime={c.structural_regime} compact />
                             </div>
                           </td>
                           <td style={td}>{STRAT[c.strategy_type] || c.strategy_type}</td>
@@ -1384,6 +1511,8 @@ export default function OpportunitiesPage() {
                                             </div>
                                           </div>
                                         )}
+
+                                        <StructuralRegimeDetailBlock regime={detail.structural_regime || c.structural_regime} />
                                       </>
                                     )}
                                   </div>
