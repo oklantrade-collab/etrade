@@ -1916,8 +1916,10 @@ async def run_stocks_cycle(force=False):
                 has_news = bool(g.get("has_news", False))
                 is_ema3_asc = bool(g.get("is_ema3_1h_ascending", True))
 
-                # Filtro estricto: Volumen >= 1M, Market Cap >= $15M y Fuerza Compradora activa >= 65
-                if not (sym and vol >= 1_000_000 and mcap >= 15_000_000 and bf >= 65.0):
+                # TAREA 1 & 2: Filtro Calificado Estándar o Low-Float Explosivo (Vol >= 300k, RVOL >= 2.5x, Chg >= +5%):
+                is_standard_runner = (vol >= 1_000_000 and mcap >= 15_000_000 and bf >= 65.0)
+                is_low_float_runner = (vol >= 300_000 and rvol_val >= 2.5 and chg >= 5.0 and mcap >= 15_000_000 and bf >= 65.0)
+                if not (sym and (is_standard_runner or is_low_float_runner)):
                     continue
 
                 # ── FILTRO HORARIO INTELIGENTE (CICLO DE VIDA DEL MOMENTUM) ──

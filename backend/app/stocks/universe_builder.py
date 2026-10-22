@@ -248,14 +248,23 @@ class UniverseBuilder:
                 EquityQuery('GT', ['intradayprice', min_price]),
             ])
 
-            # Track 3: Special Hyper-Liquid Micro-Cap Track ($15M - $50M, Vol >= 3M, Price >= $1.20)
+            # TAREA 1: Track Top Gainers con soporte Low-Float (Vol >= 300k, sort by percentchange)
+            query_gainers = EquityQuery('AND', [
+                EquityQuery('EQ', ['region', 'us']),
+                EquityQuery('GT', ['intradaymarketcap', effective_mcap]),
+                EquityQuery('GT', ['dayvolume', 300_000]),
+                EquityQuery('LT', ['intradayprice', max_price]),
+                EquityQuery('GT', ['intradayprice', min_price]),
+            ])
+
+            # TAREA 2: Track Micro-Cap ($15M - $50M, Vol >= 1M, Price >= $1.00)
             query_hyper_micro = EquityQuery('AND', [
                 EquityQuery('EQ', ['region', 'us']),
                 EquityQuery('GT', ['intradaymarketcap', 15_000_000]),
                 EquityQuery('LT', ['intradaymarketcap', 50_000_000]),
-                EquityQuery('GT', ['dayvolume', 3_000_000]),
+                EquityQuery('GT', ['dayvolume', 1_000_000]),
                 EquityQuery('LT', ['intradayprice', max_price]),
-                EquityQuery('GT', ['intradayprice', max(min_price, 1.20)]),
+                EquityQuery('GT', ['intradayprice', max(min_price, 1.00)]),
             ])
 
             fetch_size = min(250, max(max_results * 3, 120))
@@ -274,9 +283,9 @@ class UniverseBuilder:
             except Exception as e_vol:
                 log_warning(MODULE, f"Yahoo Screener (dayvolume) warning: {e_vol}")
 
-            # 2) Fetch by percentchange (Top Gainers — catches SKYA, BMBL, LNKS, etc.)
+            # 2) Fetch by percentchange (Top Gainers con soporte Low-Float — catches SKYA, BMBL, LNKS, CSTE, etc.)
             try:
-                res_gain = screen(query_main, size=fetch_size, sortField='percentchange', sortAsc=False)
+                res_gain = screen(query_gainers, size=fetch_size, sortField='percentchange', sortAsc=False)
                 if res_gain and res_gain.get('quotes'):
                     added_gain = 0
                     for q in res_gain['quotes']:
@@ -328,9 +337,17 @@ class UniverseBuilder:
                 # Compute RVOL (today's volume / 3-month average)
                 rvol = vol / avg_vol if avg_vol > 0 else 0.0
 
-                # Strict gate for Hyper-Micro ($15M - $50M): require RVOL >= 5.0 and Vol >= 3M and Price >= $1.20
+                # TAREA 1: Low-Float con volumen entre 300k y 1M:
+                # Solo se admite si tiene volumen relativo explosivo RVOL >= 2.5x y Change >= +5.0%
+                if vol < 1_000_000:
+                    if not (vol >= 300_000 and rvol >= 2.5 and chg_pct >= 5.0):
+                        continue
+
+                # TAREA 2: Gate para Micro-Caps ($15M - $50M):
+                # Requiere Vol >= 1M con RVOL >= 3.0x, O Vol >= 3M con RVOL >= 2.0x (Caso SNAL / SPHL)
                 if q.get('_from_hyper_micro') or (0 < mcap < 50_000_000):
-                    if vol < 3_000_000 or rvol < 5.0 or price < 1.20:
+                    is_valid_micro = (vol >= 1_000_000 and rvol >= 3.0) or (vol >= 3_000_000 and rvol >= 2.0)
+                    if not is_valid_micro or price < 1.00:
                         continue
 
                 # Volatilidad intradía estimada
@@ -344,9 +361,11 @@ class UniverseBuilder:
 
                 # Clasificación ALPHA_RUNNER:
                 # 1) Small/Mid-Cap Runner ($15M - $500M MCap) con RVOL >= 1.8 o Change >= +4.0%
-                # 2) Cualquier activo explosivo con Change >= +6.0% y RVOL >= 2.5
+                # 2) Low-Float Runner con Vol >= 300k, RVOL >= 2.5x y Change >= +5.0%
+                # 3) Cualquier activo explosivo con Change >= +6.0% y RVOL >= 2.5
                 is_alpha_runner = (
                     (15_000_000 <= mcap <= 500_000_000 and (rvol >= 1.8 or chg_pct >= 4.0 or today_range_pct >= 5.0))
+                    or (vol >= 300_000 and rvol >= 2.5 and chg_pct >= 5.0)
                     or (chg_pct >= 6.0 and rvol >= 2.5)
                 )
 

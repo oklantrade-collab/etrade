@@ -144,8 +144,13 @@ def calculate_semaphore_and_buying_force(
     if not is_ema3_1h_ascending:
         raw_buying_force = min(raw_buying_force * 0.5, 30.0)
     elif not is_ema3_above_ema9:
-        # Tope de fuerza si aún no ha roto por encima de EMA9 en 1H
-        raw_buying_force = min(raw_buying_force, 45.0)
+        # TAREA 3: Si hay ignición institucional explosiva (RVOL >= 3.0x) con EMA3 de 1H subiendo activamente,
+        # NO topar a 45 pts; añadir bonus institucional y permitir que la fuerza compradora refleje el rally de reversión Día 1:
+        if rvol >= 3.0 and is_ema3_1h_ascending and (ema3_slope_1h > 0.02 or change_pct >= 5.0):
+            raw_buying_force += min(15.0, rvol * 2.5)
+            raw_buying_force = min(raw_buying_force, 85.0)
+        else:
+            raw_buying_force = min(raw_buying_force, 45.0)
     has_room_to_bb = (room_to_bb_upper_1d is not None and room_to_bb_upper_1d >= 20.0)
     is_super_runner_expansion = (
         gap_pct is not None and gap_pct >= 5.0 and has_room_to_bb and rvol >= 1.5 and plus_di_5m >= minus_di_5m
@@ -169,13 +174,20 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#EF4444"
         sem_tip = f"EMA3 de 1H cayendo ({ema3_slope_1h:+.4f}). Fase de distribución. PROHIBIDO COMPRAR."
         setup_bonus = -45.0
-    # CASO A.2: EMA3 1H <= EMA9 1H (SIN CONFIRMACIÓN ALCISTA EN 1H)
+    # CASO A.2: EMA3 1H <= EMA9 1H (SIN CONFIRMACIÓN ALCISTA EN 1H O REVERSIÓN DÍA 1)
     elif not is_ema3_above_ema9:
-        semaphore = "BELOW_EMA9"
-        sem_label = "⚪ BAJO EMA9 1H (SIN CRUCE)"
-        sem_color = "#94A3B8"
-        sem_tip = "EMA3 <= EMA9 en 1H. Falta cruce alcista y confirmación de tendencia en 1 hora. Entrada no permitida."
-        setup_bonus = -10.0
+        if rvol >= 3.0 and is_ema3_1h_ascending and (ema3_slope_1h > 0.02 or change_pct >= 5.0):
+            semaphore = "REVERSAL_EXPANSION"
+            sem_label = f"🟢 REVERSIÓN EXPLOSIVA DÍA 1 (RVOL {rvol:.1f}x)"
+            sem_color = "#10B981"
+            sem_tip = f"Volumen institucional explosivo (RVOL {rvol:.1f}x) con EMA3 1H en fuerte ascenso ({ema3_slope_1h:+.4f}). Impulso Día 1 de reversión confirmado sin esperar cruce lento EMA9."
+            setup_bonus = 25.0
+        else:
+            semaphore = "BELOW_EMA9"
+            sem_label = "⚪ BAJO EMA9 1H (SIN CRUCE)"
+            sem_color = "#94A3B8"
+            sem_tip = "EMA3 <= EMA9 en 1H. Falta cruce alcista y confirmación de tendencia en 1 hora. Entrada no permitida."
+            setup_bonus = -10.0
     # CASO A.2.5: SUPER-RUNNER EXPANSION (OPEN GAP UP CON ESPACIO LIBRE A BOLLINGER SUPERIOR 1D)
     elif is_super_runner_expansion and candle_1_green:
         semaphore = "EXPANSION_RUNNER"
@@ -263,7 +275,7 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
 
         query = EquityQuery('AND', [
             EquityQuery('EQ', ['region', 'us']),
-            EquityQuery('GT', ['dayvolume', 1_000_000]),
+            EquityQuery('GT', ['dayvolume', 300_000]),
             EquityQuery('GT', ['intradayprice', 1.0]),
             EquityQuery('LT', ['intradayprice', 100.0]),
             EquityQuery('GT', ['intradaymarketcap', 15_000_000]),
@@ -293,10 +305,23 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             avg_vol = int(item.get('averageDailyVolume3Month') or max(1, vol // 2))
             mcap = float(item.get('marketCap') or item.get('intradaymarketcap') or 0.0)
 
-            # Filtro estricto anti-microcap / anti-zombi (Caso JAGX / CCEL / POAS):
-            # Excluye cascarones < $15M o acciones con volumen histórico muerto sin respaldo corporativo
-            if mcap < 15_000_000 or (mcap < 50_000_000 and avg_vol < 300_000 and vol < 1_500_000):
+            # RVOL preliminar para filtros tempranos
+            rvol_prelim = (vol / max(1, avg_vol)) if avg_vol > 0 else 1.0
+
+            # 1. TAREA 1: Filtro Low-Float con volumen entre 300k y 1M:
+            # Solo se admite si tiene volumen relativo explosivo RVOL >= 2.5x y Change >= +5.0%
+            if vol < 1_000_000:
+                if not (vol >= 300_000 and rvol_prelim >= 2.5 and chg_pct >= 5.0):
+                    continue
+
+            # 2. TAREA 2: Filtro Micro-Cap ($15M a $50M) y Anti-Cascarón:
+            # Excluye cascarones < $15M. Si está entre $15M y $50M, flexibiliza a Vol >= 1M con RVOL >= 3.0x
+            if mcap < 15_000_000:
                 continue
+            if mcap < 50_000_000:
+                is_qualified_micro = (vol >= 1_000_000 and rvol_prelim >= 3.0) or (vol >= 1_500_000 and avg_vol >= 200_000)
+                if not is_qualified_micro:
+                    continue
 
             high = float(item.get('regularMarketDayHigh') or price)
             low = float(item.get('regularMarketDayLow') or price)
