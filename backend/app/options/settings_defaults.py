@@ -20,8 +20,8 @@ def _env_float(name: str, default: float) -> float:
 
 def hard_caps() -> dict[str, float]:
     return {
-        "max_risk_per_trade_usd": _env_float("OPTIONS_HARD_MAX_RISK_PER_TRADE_USD", 1000),
-        "max_open_risk_usd": _env_float("OPTIONS_HARD_MAX_OPEN_RISK_USD", 3000),
+        "max_risk_per_trade_usd": _env_float("OPTIONS_HARD_MAX_RISK_PER_TRADE_USD", 2000),
+        "max_open_risk_usd": _env_float("OPTIONS_HARD_MAX_OPEN_RISK_USD", 5000),
         "max_daily_selections": _env_float("OPTIONS_HARD_MAX_DAILY_SELECTIONS", 10),
     }
 
@@ -38,8 +38,11 @@ def execution_mode_ok() -> bool:
 PARAMS: dict[str, tuple[Any, Any, Any]] = {
     # A. Cuenta y riesgo
     "capital_usd": (5000, 100, 50000),
-    "max_risk_per_trade_usd": (350, 5, 2000),
-    "max_open_risk_usd": (1000, 5, 5000),
+    "max_risk_per_trade_usd": (800, 5, 2500),
+    "max_risk_megacap_usd": (1000, 100, 2500),
+    "max_open_risk_usd": (2500, 5, 6000),
+    "min_potential_profit_usd": (40, 0, 1000),
+    "min_ev_total_usd": (12, 0, 500),
     "daily_stop_usd": (500, 5, 2000),
     "max_daily_selections": (3, 0, 5),
     "max_open_positions": (3, 1, 5),

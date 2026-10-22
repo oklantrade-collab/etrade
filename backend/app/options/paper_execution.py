@@ -272,3 +272,101 @@ def mark_position_to_market(position: dict[str, Any],
         "last_mark_price": round(net_proceeds, 4),
         "valid": True,
     }
+
+
+def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str, Any],
+                                        und: dict[str, Any] | None = None,
+                                        now_dt: datetime | None = None) -> dict[str, Any] | None:
+    """
+    Ejecuta una candidata seleccionada creando la posición en opt_paper_trades
+    y despachando las piernas de la orden a stocks_orders para que el puente
+    de Interactive Brokers (ib_bridge_worker / TWS) las ejecute en el broker.
+    """
+    now_dt = now_dt or datetime.now(timezone.utc)
+    cid = cand["id"]
+    uid = cand.get("underlying_id")
+
+    # 1. Comprobar si ya existe posición abierta para esta candidata
+    try:
+        existing = sb.table("opt_paper_trades").select("*").eq("candidate_id", cid).eq("status", "open").execute().data
+        if existing:
+            return existing[0]
+    except Exception:
+        pass
+
+    if und is None and uid:
+        try:
+            u_rows = sb.table("opt_underlyings").select("*").eq("id", uid).execute().data
+            if u_rows:
+                und = u_rows[0]
+        except Exception:
+            und = {}
+    und = und or {}
+
+    from app.options import options_aduana as aduana
+    event_flags = und.get("event_flags")
+    ctx = aduana.static_context(uid, event_flags, underlying=und)
+    ctx.now = now_dt
+    aduana_res = aduana.validate_entry(cand, ctx, eff)
+    if not aduana_res.approved:
+        return None
+
+    fill_res = simulate_entry_fill(cand, None, eff, now_dt)
+    sym = und.get("symbol") or cand.get("symbol") or "UNKNOWN"
+    qty = cand.get("qty") or 1
+
+    pos_data = {
+        "candidate_id": cid,
+        "underlying_id": uid,
+        "symbol": sym,
+        "strategy_type": cand["strategy_type"],
+        "direction": cand["direction"],
+        "status": "open",
+        "qty": qty,
+        "expiry": cand["expiry"],
+        "entry_time": fill_res.entry_time,
+        "entry_debit": fill_res.entry_debit,
+        "entry_fills": fill_res.entry_fills,
+        "entry_costs": fill_res.entry_costs,
+        "entry_total_invested": fill_res.entry_total_invested,
+        "max_loss_total": float(cand.get("max_loss_total") or fill_res.entry_total_invested),
+        "max_profit_total": (float(cand["max_profit_contract"]) * qty) if cand.get("max_profit_contract") else None,
+        "breakeven": cand.get("breakeven"),
+        "unrealized_pnl": 0.0,
+        "last_mark_price": fill_res.entry_debit,
+        "last_mark_at": fill_res.entry_time,
+        "exit_plan": cand.get("exit_plan") or {},
+        "model_version": MODEL_VERSION,
+        "settings_version": int(eff.get("config_version") or 1),
+    }
+
+    try:
+        inserted = sb.table("opt_paper_trades").insert(pos_data).execute().data[0]
+    except Exception:
+        return None
+
+    # Despachar las piernas de la orden a stocks_orders para ejecución en TWS / IB Bridge
+    exp_compact = (cand.get("expiry") or "20261026").replace("-", "")[:8]
+    for f in fill_res.entry_fills:
+        stk = f.get("strike")
+        rgt = f.get("right")
+        side = f.get("side") or "buy"
+        px = f.get("fill_price") or 0.0
+        opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
+        try:
+            sb.table("stocks_orders").insert({
+                "ticker": sym[:10],
+                "target_band": opt_target_band,
+                "group_name": "OPTIONS_AUTONOMOUS",
+                "rule_code": "APEX_AUTO",
+                "order_type": "market",
+                "direction": side,
+                "shares": qty,
+                "market_price": px,
+                "status": "pending",
+                "created_at": fill_res.entry_time,
+            }).execute()
+        except Exception:
+            pass
+
+    return inserted

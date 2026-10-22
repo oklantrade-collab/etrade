@@ -325,6 +325,47 @@ def compute_context_score(cand: dict[str, Any], underlying: dict[str, Any], eff:
     return _clip(score), {"event_flags": event_flags or [], "note": note}
 
 
+def compute_potential_benefit_metrics(cand: dict[str, Any], eff: dict[str, Any] | None = None) -> dict[str, float]:
+    """Calcula las métricas de beneficio potencial real y ponderado en dólares ($ USD)."""
+    eff = eff or {}
+    qty = max(1, int(cand.get("qty") or 1))
+    loss_tot = float(cand.get("max_loss_total") or 0.0)
+    if loss_tot <= 0:
+        loss_tot = float(cand.get("max_loss_contract") or 0.0) * qty
+
+    mpc = cand.get("max_profit_contract")
+    debit = float(cand.get("entry_debit") or 0.0)
+    exit_plan = cand.get("exit_plan") or {}
+
+    if mpc is not None and float(mpc) > 0:
+        pot_profit_contract = float(mpc)
+    else:
+        # Outright Call / Put
+        tp_px = float(exit_plan.get("take_profit_premium") or 0.0)
+        if tp_px > debit:
+            pot_profit_contract = (tp_px - debit) * 100.0
+        else:
+            tp_pct = float(eff.get("long_tp_pct", 50.0)) / 100.0
+            pot_profit_contract = debit * 100.0 * tp_pct
+
+    pot_profit_total = pot_profit_contract * qty
+    ev_net = float(cand.get("ev_view_net") or 0.0)
+    ev_total = ev_net * qty
+    r2r = (pot_profit_total / loss_tot) if loss_tot > 0 else 0.0
+    score = float(cand.get("score") or 0.0)
+
+    # Benefit Index: Prioriza beneficio neto esperado en dólares, ganancia potencial máxima y calidad técnica
+    benefit_index = (ev_total * 0.40) + (pot_profit_total * 0.30) + (score * 2.0)
+
+    return {
+        "pot_profit_total": round(pot_profit_total, 2),
+        "ev_total_usd": round(ev_total, 2),
+        "reward_to_risk": round(r2r, 2),
+        "benefit_index": round(benefit_index, 2),
+        "loss_total": round(loss_tot, 2),
+    }
+
+
 def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[str, Any]) -> dict[str, Any]:
     """Calcula el Options Score total (0-100) y su desglose completo por componentes.
     Pesos configurables en Settings:
@@ -477,6 +518,7 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
         "missing_components": missing_components,
         "min_score_required": min_score,
         "eligible_by_score": eligible_by_score,
+        "potential_benefit": compute_potential_benefit_metrics(cand, eff),
         "weights": {
             "w_expectancy": w_exp, "w_apex_signal": w_apex, "w_liquidity": w_liq,
             "w_risk": w_risk, "w_iv_greeks": w_iv, "w_context": w_ctx,
@@ -538,7 +580,14 @@ def rank_and_score_candidates(candidates: list[dict[str, Any]],
         row["gap_pct"] = res["score_breakdown"].get("gap_pct")
         scored.append(row)
 
-    # Ordenamiento: Prioridad 1 a Gap Runners, score desc, ev_ratio desc, max_loss_total asc, id asc
+    # Ordenamiento por Máximo Beneficio Potencial ($ USD) y Calidad Técnica:
+    # Prioridad 1: Gap Runners
+    # Prioridad 2: Benefit Index descendente (pondera $ ganancia neta, $ ganancia potencial y calidad)
+    # Prioridad 3: Beneficio Potencial Total en USD descendente
+    # Prioridad 4: Valor Esperado Total en USD descendente
+    # Prioridad 5: Options Score descendente
+    # Prioridad 6: ev_ratio descendente
+    # Prioridad 7: id ascendente
     def sort_key(item: dict[str, Any]):
         is_runner = bool(
             item.get("is_gap_runner")
@@ -547,11 +596,14 @@ def rank_and_score_candidates(candidates: list[dict[str, Any]],
             or item.get("direction_source") == "gap_runner"
             or item.get("strategy_type") in ("gap_runner_call", "gap_runner_put")
         )
+        met = compute_potential_benefit_metrics(item, eff)
         return (
             0 if is_runner else 1,
+            -round(met["benefit_index"], 2),
+            -round(met["pot_profit_total"], 2),
+            -round(met["ev_total_usd"], 2),
             -float(item.get("score") or 0.0),
             -float(item.get("ev_ratio") or 0.0),
-            float(item.get("max_loss_total") or 999999.0),
             int(item.get("id") or 0),
         )
 

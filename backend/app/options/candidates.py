@@ -69,7 +69,7 @@ def generate_for_underlying(sb, und: dict[str, Any], eff: dict[str, Any], settin
     norm_dir = "bullish" if raw_dir in ("CALL", "bullish") else ("bearish" if raw_dir in ("PUT", "bearish") else None)
     directions = (norm_dir,) if norm_dir else ("bullish", "bearish")
     dir_source = und.get("direction_source") or ("apex" if norm_dir else "unverified")
-    valid, rejected = st.generate(quotes, price, datetime.now(timezone.utc).date(), eff, directions)
+    valid, rejected = st.generate(quotes, price, datetime.now(timezone.utc).date(), eff, directions, symbol=und.get("symbol", ""))
 
     states = Counter(q.market_data_type or "UNKNOWN" for q in quotes)
     dq = {"quote_states": dict(states), "usable_quotes": sum(1 for q in quotes if q.usable), "total_quotes": len(quotes)}
@@ -222,7 +222,7 @@ def run_portfolio_selection(sb, eff: dict[str, Any], settings_version: int = 0) 
         return {"selected": [], "total_risk_allocated": 0.0, "status": "no eligible candidates"}
 
     try:
-        pos_rows = sb.table("opt_positions").select("*").eq("status", "open").execute().data or []
+        pos_rows = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
     except Exception:
         pos_rows = []
 
@@ -245,6 +245,14 @@ def run_portfolio_selection(sb, eff: dict[str, Any], settings_version: int = 0) 
             upd["qty"] = matching["qty"]
             upd["max_loss_total"] = matching["max_loss_total"]
         sb.table("opt_candidates").update(upd).eq("id", cid).execute()
+
+    # Auto-ejecución inmediata de candidatas seleccionadas a opt_paper_trades y stocks_orders
+    from app.options.paper_execution import execute_selected_candidate_to_trade
+    for sel_c in sel_res.selected:
+        try:
+            execute_selected_candidate_to_trade(sb, sel_c, eff, und=und_map.get(sel_c.get("underlying_id")))
+        except Exception as exec_err:
+            log_info(MODULE, f"Aviso al auto-ejecutar candidata {sel_c.get('id')}: {exec_err}")
 
     try:
         sb.table("opt_selections").insert({

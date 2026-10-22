@@ -203,6 +203,7 @@ def test_trailing_stop_15m_midpoint_call():
         "candle_closed_close_15m": 771.50,  # Close > Open (Vela verde)
         "ema3_15m": 771.0,
         "ema9_15m": 770.2,
+        "ema3_slope_15m": 0.08,
         "ema3_slope_1h": 0.08,
         "rsi_1h": 64.0
     }
@@ -231,6 +232,7 @@ def test_trailing_stop_15m_midpoint_put():
         "candle_closed_close_15m": 757.00,  # Close < Open (Vela roja)
         "ema3_15m": 757.5,
         "ema9_15m": 758.8,
+        "ema3_slope_15m": -0.08,
         "ema3_slope_1h": -0.08,
         "rsi_1h": 34.0
     }

@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.options import options_aduana as aduana
+from app.options.score import compute_potential_benefit_metrics
 
 MODEL_VERSION = "v1.0-s5"
 
@@ -108,14 +109,17 @@ def select_portfolio(candidates: list[dict[str, Any]],
     # 4. Filtrar y ordenar candidatas elegibles
     # Solo entran candidatas aprobadas por ADUANA/valoracion ('eligible') y con score >= min_score
     eligible = [c for c in candidates if c.get("eligibility_status") in ("eligible", "pending")]
-    # Ordenamiento greedy: Prioridad 1 a Gap Runners, score descendente, ev_ratio desc, max_loss_total asc, id asc
+    # Ordenamiento greedy orientado a MAXIMO BENEFICIO POTENCIAL:
+    # Prioridad 1 a Gap Runners, Benefit Index desc, Beneficio Potencial ($) desc, EV ($) desc, Score desc
     sorted_candidates = sorted(
         eligible,
         key=lambda x: (
             0 if is_gap_runner_candidate(x) else 1,
+            -round(compute_potential_benefit_metrics(x, eff)["benefit_index"], 2),
+            -round(compute_potential_benefit_metrics(x, eff)["pot_profit_total"], 2),
+            -round(compute_potential_benefit_metrics(x, eff)["ev_total_usd"], 2),
             -float(x.get("score") or 0.0),
             -float(x.get("ev_ratio") or 0.0),
-            float(x.get("max_loss_total") or 999999.0),
             int(x.get("id") or 0),
         ),
     )
@@ -134,13 +138,32 @@ def select_portfolio(candidates: list[dict[str, Any]],
         contract_loss = float(cand.get("max_loss_contract") or loss_total)
         qty = int(cand.get("qty") or 1)
 
-        # Regla 0: Score minimo
+        # Regla 0a: Score minimo
         if score < min_score:
             skipped.append({
                 "candidate_id": cid, "underlying_id": uid, "score": score,
                 "reason": f"Options Score ({score:.1f}) inferior al minimo requerido ({min_score:.1f})",
             })
             continue
+
+        # Regla 0b: Umbral de Beneficio Potencial y Valor Esperado en USD (para candidatas ordinarias valoradas)
+        is_runner = is_gap_runner_candidate(cand)
+        met = compute_potential_benefit_metrics(cand, eff)
+        if not is_runner:
+            min_pot_profit = float(eff.get("min_potential_profit_usd") or 40.0)
+            min_ev_tot = float(eff.get("min_ev_total_usd") or 12.0)
+            if cand.get("max_profit_contract") is not None and met["pot_profit_total"] < min_pot_profit:
+                skipped.append({
+                    "candidate_id": cid, "underlying_id": uid, "score": score,
+                    "reason": f"Beneficio potencial total (${met['pot_profit_total']:.2f}) inferior al umbral minimo (${min_pot_profit:.2f})",
+                })
+                continue
+            if cand.get("ev_view_net") is not None and met["ev_total_usd"] < min_ev_tot:
+                skipped.append({
+                    "candidate_id": cid, "underlying_id": uid, "score": score,
+                    "reason": f"Valor Esperado neto total (${met['ev_total_usd']:.2f}) inferior al umbral minimo (${min_ev_tot:.2f})",
+                })
+                continue
 
         # Regla 1: Maximo de selecciones diarias
         if len(selected) >= max_daily_sel:
@@ -233,6 +256,9 @@ def select_portfolio(candidates: list[dict[str, Any]],
         sel_cand["max_loss_total"] = loss_total
         sel_cand["selected_order"] = len(selected) + 1
         sel_cand["is_gap_runner"] = is_gap_runner_candidate(cand)
+        sel_cand["benefit_index"] = met["benefit_index"]
+        sel_cand["potential_profit_total"] = met["pot_profit_total"]
+        sel_cand["ev_total_usd"] = met["ev_total_usd"]
 
         selected.append(sel_cand)
         used_underlyings.add(uid)

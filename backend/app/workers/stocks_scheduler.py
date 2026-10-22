@@ -2711,9 +2711,10 @@ async def run_options_gap_defense_cycle():
                 opt_ticker_formatted = f"{symbol}:OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
                 try:
                     sb.table("stocks_orders").insert({
-                        "ticker": opt_ticker_formatted,
+                        "ticker": symbol[:10],
+                        "target_band": f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}",
                         "group_name": "OPEN_GAP_RUNNER_OPT",
-                        "rule_code": exit_code,
+                        "rule_code": "APEX_AUTO",
                         "order_type": "market",
                         "direction": "sell",
                         "shares": qty,
@@ -2778,6 +2779,65 @@ async def run_options_gap_defense_cycle():
         log_warning(MODULE, f"Error en ciclo defensivo de opciones: {e_def}")
 
 
+async def run_options_auto_execution_cycle():
+    """
+    Supervisión y ejecución autónoma de candidatas de opciones seleccionadas:
+    1. Carga candidatas con status 'selected' en opt_candidates.
+    2. Comprueba si ya tienen posición abierta en opt_paper_trades.
+    3. Si no están abiertas, las ejecuta inmediatamente:
+       - Simula fill conservador en opt_paper_trades.
+       - Despacha las órdenes de piernas a stocks_orders para ejecución TWS por ib_bridge_worker.
+       - Emite alerta Telegram institucional.
+    """
+    sb = get_supabase()
+    try:
+        from app.options import settings_defaults as sd
+        from app.options.paper_execution import execute_selected_candidate_to_trade
+
+        rows = sb.table("opt_settings").select("key,value").execute().data or []
+        stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}
+        eff = sd.effective_settings(stored)
+
+        sel_cands = (
+            sb.table("opt_candidates")
+            .select("*, opt_underlyings(*)")
+            .eq("eligibility_status", "selected")
+            .order("id", desc=True)
+            .limit(5)
+            .execute()
+            .data or []
+        )
+        if not sel_cands:
+            return
+
+        for cand in sel_cands:
+            cid = cand["id"]
+            already_open = sb.table("opt_paper_trades").select("id").eq("candidate_id", cid).eq("status", "open").execute().data
+            if already_open:
+                continue
+
+            und = cand.get("opt_underlyings") or {}
+            pos = execute_selected_candidate_to_trade(sb, cand, eff, und=und)
+            if pos:
+                sym = pos.get("symbol")
+                strat = pos.get("strategy_type", "").upper()
+                debit = float(pos.get("entry_debit") or 0.0)
+                qty = int(pos.get("qty") or 1)
+                pot_prof = float(pos.get("max_profit_total") or 0.0)
+                max_l = float(pos.get("max_loss_total") or 0.0)
+                log_info(MODULE, f"🎯 AUTO-EJECUCIÓN OPCIONES: {sym} {strat} | {qty}x @ ${debit:.2f} | Beneficio Potencial: ${pot_prof:.2f} | Riesgo: ${max_l:.2f}")
+                send_telegram_opt_alert(
+                    f"🎯 [OPTIONS AUTO-EXECUTION] Orden Ejecutada\n"
+                    f"Ticker: {sym} ({strat})\n"
+                    f"Cantidad: {qty} contratos @ ${debit:.2f}\n"
+                    f"Beneficio Potencial: ${pot_prof:.2f}\n"
+                    f"Riesgo Máximo: ${max_l:.2f}\n"
+                    f"Estado: OPEN en Paper & Despachado a TWS"
+                )
+    except Exception as e_opt_exec:
+        log_warning(MODULE, f"Aviso en ciclo de auto-ejecución de opciones: {e_opt_exec}")
+
+
 async def start_stocks_scheduler(force=False):
     """
     Start the stocks scheduler using APScheduler.
@@ -2827,6 +2887,18 @@ async def start_stocks_scheduler(force=False):
         trigger=IntervalTrigger(minutes=1),
         id="options_gap_defense_cycle",
         name="Options Gap Defense & Ratchet Monitor (1m)",
+        max_instances=1,
+        replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
+    )
+
+    # 1b-opt-exec. OPTIONS AUTO-EXECUTION FOR SELECTED CANDIDATES: cada 1 minuto
+    scheduler.add_job(
+        run_options_auto_execution_cycle,
+        trigger=IntervalTrigger(minutes=1),
+        id="options_auto_execution_cycle",
+        name="Options Auto-Execution for Selected Candidates (1m)",
         max_instances=1,
         replace_existing=True,
         misfire_grace_time=300,
@@ -2930,6 +3002,7 @@ async def start_stocks_scheduler(force=False):
     # Run first cycles immediately
     asyncio.create_task(run_stocks_tp_v2_cycle())
     asyncio.create_task(run_options_gap_defense_cycle())
+    asyncio.create_task(run_options_auto_execution_cycle())
     await run_stocks_cycle(force=force)
 
     # Keep running

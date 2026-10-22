@@ -109,15 +109,23 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
     sells = [l for l in legs if l.get("side") == "sell"]
     buys = [l for l in legs if l.get("side") == "buy"]
     covered = True
+    cand_exp = cand.get("expiry")
     for s in sells:
-        covered &= any(b["right"] == s["right"] and b["expiry"] == s["expiry"] and
-                       ((s["right"] == "C" and b["strike"] < s["strike"]) or (s["right"] == "P" and b["strike"] > s["strike"]))
-                       for b in buys)
+        covered &= any(
+            b.get("right") == s.get("right") and
+            (b.get("expiry") or cand_exp) == (s.get("expiry") or cand_exp) and
+            ((s.get("right") == "C" and float(b.get("strike", 0)) < float(s.get("strike", 0))) or
+             (s.get("right") == "P" and float(b.get("strike", 0)) > float(s.get("strike", 0))))
+            for b in buys
+        )
     add("O-2", bool(legs) and covered and max_loss_c is not None and max_loss_c > 0,
         "riesgo definido" if covered and max_loss_c else "pierna vendida sin cobertura o max_loss no calculable")
 
     # O-3 max_loss <= riesgo por operacion (techo duro incluido)
-    cap = min(float(eff["max_risk_per_trade_usd"]), sd.hard_caps()["max_risk_per_trade_usd"])
+    sym = str(cand.get("symbol") or (ctx.underlying or {}).get("symbol") or "").upper()
+    is_megacap = sym in ("SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL")
+    base_cap = float(eff.get("max_risk_megacap_usd", 1000.0)) if is_megacap else float(eff["max_risk_per_trade_usd"])
+    cap = min(base_cap, sd.hard_caps()["max_risk_per_trade_usd"])
     tot = cand.get("max_loss_total")
     add("O-3", tot is not None and qty and tot <= cap + 1e-9, f"max_loss_total={tot} cap={cap}")
 

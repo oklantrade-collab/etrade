@@ -183,8 +183,22 @@ def _exit_plan(strategy: str, entry_debit: float, max_profit: float | None, eff:
     return plan
 
 
-def _qty(max_loss_contract: float, eff: dict[str, Any]) -> int:
-    return int(math.floor(float(eff["max_risk_per_trade_usd"]) / max_loss_contract)) if max_loss_contract > 0 else 0
+def _qty(max_loss_contract: float, eff: dict[str, Any], symbol: str = "") -> int:
+    if max_loss_contract <= 0:
+        return 0
+    max_risk = float(eff.get("max_risk_per_trade_usd") or 800.0)
+    mega_caps_and_etfs = {"SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL"}
+    is_megacap = symbol and symbol.upper() in mega_caps_and_etfs
+    if is_megacap:
+        max_risk = max(max_risk, min(float(eff.get("max_risk_megacap_usd", 1000.0)), max_risk * 1.5))
+        if max_loss_contract <= max_risk:
+            return int(math.floor(max_risk / max_loss_contract))
+        elif max_loss_contract <= min(max_risk * 1.25, float(eff.get("max_risk_megacap_usd", 1000.0))):
+            return 1
+    else:
+        if max_loss_contract <= max_risk:
+            return int(math.floor(max_risk / max_loss_contract))
+    return 0
 
 
 def _leg(q: Q, side: str) -> dict[str, Any]:
@@ -195,7 +209,7 @@ def _leg(q: Q, side: str) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ constructores
-def build_long(strategy: str, q: Q, S: float, today: date, eff: dict[str, Any]) -> tuple[Candidate | None, list[str]]:
+def build_long(strategy: str, q: Q, S: float, today: date, eff: dict[str, Any], symbol: str = "") -> tuple[Candidate | None, list[str]]:
     reasons = leg_issues(q, eff)
     d, src = abs_delta(q, S, today, eff)
     if d is None:
@@ -214,9 +228,9 @@ def build_long(strategy: str, q: Q, S: float, today: date, eff: dict[str, Any]) 
     if c2r > max_c2r:
         return None, [f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%"]
 
-    qty = _qty(ml, eff)
+    qty = _qty(ml, eff, symbol=symbol)
     if qty < 1:
-        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff['max_risk_per_trade_usd']}"]
+        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff.get('max_risk_per_trade_usd', 800)}"]
     be = q.strike + ml / 100 if q.right == "C" else q.strike - ml / 100
     cand = Candidate(
         strategy=strategy,
@@ -243,7 +257,7 @@ def build_long(strategy: str, q: Q, S: float, today: date, eff: dict[str, Any]) 
 
 
 def build_spread(strategy: str, long_q: Q, short_q: Q, S: float, today: date,
-                 eff: dict[str, Any]) -> tuple[Candidate | None, list[str]]:
+                 eff: dict[str, Any], symbol: str = "") -> tuple[Candidate | None, list[str]]:
     reasons: list[str] = []
     if long_q.expiry != short_q.expiry or long_q.right != short_q.right:
         return None, ["piernas con distinto vencimiento o tipo"]
@@ -287,9 +301,9 @@ def build_spread(strategy: str, long_q: Q, short_q: Q, S: float, today: date,
     if c2r > max_c2r:
         return None, [f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%"]
 
-    qty = _qty(ml, eff)
+    qty = _qty(ml, eff, symbol=symbol)
     if qty < 1:
-        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff['max_risk_per_trade_usd']}"]
+        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff.get('max_risk_per_trade_usd', 800)}"]
     be = long_q.strike + ml / 100 if long_q.right == "C" else long_q.strike - ml / 100
     cand = Candidate(
         strategy=strategy,
@@ -316,7 +330,7 @@ def build_spread(strategy: str, long_q: Q, short_q: Q, S: float, today: date,
 
 
 def build_vertical_credit(strategy: str, short_q: Q, long_q: Q, S: float, today: date,
-                         eff: dict[str, Any]) -> tuple[Candidate | None, list[str]]:
+                         eff: dict[str, Any], symbol: str = "") -> tuple[Candidate | None, list[str]]:
     """Construye un spread vertical de credito (Bull Put o Bear Call).
     - Bull Put Spread: Vende Put K_alto (short_q), compra Put K_bajo (long_q).
     - Bear Call Spread: Vende Call K_bajo (short_q), compra Call K_alto (long_q).
@@ -383,9 +397,9 @@ def build_vertical_credit(strategy: str, short_q: Q, long_q: Q, S: float, today:
     if c2r > max_c2r:
         return None, [f"ratio costes/riesgo {c2r:.1f}% > {max_c2r}%"]
 
-    qty = _qty(ml, eff)
+    qty = _qty(ml, eff, symbol=symbol)
     if qty < 1:
-        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff['max_risk_per_trade_usd']}"]
+        return None, [f"perdida maxima ${ml:.2f}/contrato > riesgo por operacion ${eff.get('max_risk_per_trade_usd', 800)}"]
 
     # Break-even
     # Bull Put: K_short - credit + costs/100
@@ -427,7 +441,8 @@ def build_vertical_credit(strategy: str, short_q: Q, long_q: Q, S: float, today:
 
 # ------------------------------------------------------------------ generador
 def generate(quotes: list[Q], price: float, today: date, eff: dict[str, Any],
-             directions: tuple[str, ...] = ("bullish", "bearish")) -> tuple[list[Candidate], list[dict[str, Any]]]:
+             directions: tuple[str, ...] = ("bullish", "bearish"),
+             symbol: str = "") -> tuple[list[Candidate], list[dict[str, Any]]]:
     """Genera candidatas y descartes (con motivo) para un subyacente. Sin forzar resultados."""
     valid: list[Candidate] = []
     rejected: list[dict[str, Any]] = []
@@ -452,7 +467,7 @@ def generate(quotes: list[Q], price: float, today: date, eff: dict[str, Any],
             for exp, qs in by_exp.items():
                 side = sorted([q for q in qs if q.right == right], key=lambda q: q.strike)
                 for lq in side:
-                    c, why = build_long(strat, lq, price, today, eff)
+                    c, why = build_long(strat, lq, price, today, eff, symbol=symbol)
                     (valid.append(c) if c else rej(strat, [lq], why))
 
         elif strat in ("bull_call_spread", "bear_put_spread"):
@@ -463,7 +478,7 @@ def generate(quotes: list[Q], price: float, today: date, eff: dict[str, Any],
                     for sq in side:
                         if sq.strike == lq.strike:
                             continue
-                        c, why = build_spread(strat, lq, sq, price, today, eff)
+                        c, why = build_spread(strat, lq, sq, price, today, eff, symbol=symbol)
                         if c:
                             valid.append(c)
                         elif not (why and ("mal construido" in why[0])):
@@ -477,7 +492,7 @@ def generate(quotes: list[Q], price: float, today: date, eff: dict[str, Any],
                     for lq in side:
                         if sq.strike == lq.strike:
                             continue
-                        c, why = build_vertical_credit(strat, sq, lq, price, today, eff)
+                        c, why = build_vertical_credit(strat, sq, lq, price, today, eff, symbol=symbol)
                         if c:
                             valid.append(c)
                         elif not (why and ("mal construido" in why[0])):

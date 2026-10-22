@@ -600,6 +600,32 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
     inserted = sb.table("opt_paper_trades").insert(pos_data).execute().data[0]
     sb.table("opt_candidates").update({"eligibility_status": "selected"}).eq("id", cand["id"]).execute()
 
+    # Despachar legs a stocks_orders para ejecución por ib_bridge_worker (TWS)
+    sym = und.get("symbol") or "UNKNOWN"
+    exp_compact = (cand.get("expiry") or "20261026").replace("-", "")[:8]
+    qty = cand.get("qty") or 1
+    for f in fill_res.entry_fills:
+        stk = f.get("strike")
+        rgt = f.get("right")
+        side = f.get("side") or "buy"
+        px = f.get("fill_price") or 0.0
+        opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
+        try:
+            sb.table("stocks_orders").insert({
+                "ticker": sym[:10],
+                "target_band": opt_target_band,
+                "group_name": "OPTIONS_AUTONOMOUS",
+                "rule_code": "APEX_AUTO",
+                "order_type": "market",
+                "direction": side,
+                "shares": qty,
+                "market_price": px,
+                "status": "pending",
+                "created_at": fill_res.entry_time,
+            }).execute()
+        except Exception:
+            pass
+
     return {"ok": True, "position": inserted}
 
 
