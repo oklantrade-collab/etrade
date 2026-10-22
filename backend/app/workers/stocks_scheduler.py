@@ -2741,7 +2741,7 @@ async def run_options_gap_defense_cycle():
                 # Registrar en trades_journal
                 try:
                     sb.table("trades_journal").insert({
-                        "ticker": opt_ticker_formatted,
+                        "ticker": symbol[:10],
                         "shares": qty,
                         "entry_price": entry_debit,
                         "exit_price": cur_opt_premium,
