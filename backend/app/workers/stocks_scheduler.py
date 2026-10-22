@@ -2692,6 +2692,19 @@ async def run_options_gap_defense_cycle():
                 exit_plan["detailed_exit_text"] = exit_reason_txt
                 exit_plan["closed_at"] = now_iso
 
+                # Mapeo estricto para satisfacer check constraint opt_paper_trades_exit_reason_check
+                allowed_reasons = {'take_profit', 'stop_loss', 'forced_close_time', 'signal_invalidation', 'bad_data_close', 'manual_simulated'}
+                if exit_code in allowed_reasons:
+                    mapped_reason = exit_code
+                elif "TP" in exit_code or "TRAIL" in exit_code or "PROFIT" in exit_code or realized_pnl_usd >= 0:
+                    mapped_reason = "take_profit"
+                elif "SL" in exit_code or "STOP" in exit_code or "LOSS" in exit_code or realized_pnl_usd < 0:
+                    mapped_reason = "stop_loss"
+                elif "INVAL" in exit_code or "FLIP" in exit_code:
+                    mapped_reason = "signal_invalidation"
+                else:
+                    mapped_reason = "manual_simulated"
+
                 # Cerrar posición en opt_paper_trades
                 sb.table("opt_paper_trades").update({
                     "status": "closed",
@@ -2701,7 +2714,7 @@ async def run_options_gap_defense_cycle():
                     "last_mark_at": now_iso,
                     "realized_pnl": realized_pnl_usd,
                     "unrealized_pnl": 0.0,
-                    "exit_reason": exit_code,
+                    "exit_reason": mapped_reason,
                     "exit_plan": exit_plan,
                     "updated_at": now_iso
                 }).eq("id", pid).execute()
