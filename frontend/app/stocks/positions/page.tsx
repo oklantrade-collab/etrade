@@ -431,6 +431,7 @@ export default function StocksPositions() {
                              try {
                                const res = await fetch(`/api/v1/stocks/positions/${pos.id}`, { method: 'DELETE' })
                                if (res.ok) {
+                                setPositions(prev => prev.filter((p: any) => p.id !== pos.id))
                                  fetchData()
                                } else {
                                  alert("Error al eliminar registro")
@@ -541,6 +542,7 @@ export default function StocksPositions() {
                            try {
                              const res = await fetch(`/api/v1/stocks/positions/${pos.id}`, { method: 'DELETE' })
                              if (res.ok) {
+                                setClosedPositions(prev => prev.filter((p: any) => p.id !== pos.id))
                                fetchData()
                              } else {
                                alert("Error al eliminar registro")

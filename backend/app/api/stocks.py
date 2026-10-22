@@ -701,23 +701,41 @@ def _is_valid_uuid(val: str) -> bool:
 
 @router.delete("/positions/{position_id}")
 async def delete_stock_position(position_id: str):
-    """Hard delete a stock position record."""
+    """Hard delete a stock position or trade journal record from stocks_positions and trades_journal."""
     if not _is_valid_uuid(position_id):
         raise HTTPException(status_code=400, detail=f"ID de posicion invalido: '{position_id}'. Debe ser un UUID valido.")
     try:
         sb = get_supabase()
-        res = sb.table("stocks_positions").delete().eq("id", position_id).execute()
+        deleted_any = False
         
-        # En la versión actual de la lib de Supabase, .data contiene los registros afectados
-        if res.data:
-            log_info("stocks_api", f"Position {position_id} deleted successfully")
-            return {"success": True, "message": "Record deleted"}
-        else:
-            return {"success": True, "message": "Delete command executed"}
+        # 1. Intentar borrar en trades_journal
+        try:
+            res_tj = sb.table("trades_journal").delete().eq("id", position_id).execute()
+            if res_tj.data:
+                deleted_any = True
+                log_info("stocks_api", f"Journal entry {position_id} deleted from trades_journal")
+        except Exception as e_tj:
+            log_warning("stocks_api", f"Aviso borrando en trades_journal: {e_tj}")
+
+        # 2. Intentar borrar en stocks_positions
+        try:
+            res_sp = sb.table("stocks_positions").delete().eq("id", position_id).execute()
+            if res_sp.data:
+                deleted_any = True
+                log_info("stocks_api", f"Position {position_id} deleted from stocks_positions")
+        except Exception as e_sp:
+            log_warning("stocks_api", f"Aviso borrando en stocks_positions: {e_sp}")
+
+        return {"success": True, "message": "Record deleted successfully"}
             
     except Exception as e:
-        log_error("stocks_api", f"Error deleting position {position_id}: {e}")
+        log_error("stocks_api", f"Error deleting position/journal {position_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error al eliminar registro: {str(e)}")
+
+@router.delete("/journal/{journal_id}")
+async def delete_stock_journal_entry(journal_id: str):
+    """Hard delete an entry from trades_journal and stocks_positions."""
+    return await delete_stock_position(journal_id)
 
 @router.post("/positions/{position_id}/close")
 async def manual_close_stock_position(position_id: str):
