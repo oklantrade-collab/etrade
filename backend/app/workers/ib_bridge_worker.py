@@ -126,6 +126,14 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             except Exception:
                                 pass
 
+                            u_id = 1
+                            try:
+                                u_res = sb.table("opt_underlyings").select("id").eq("symbol", und_sym).limit(1).execute()
+                                if u_res.data:
+                                    u_id = u_res.data[0]["id"]
+                            except Exception:
+                                pass
+
                             fills = [{
                                 "contract_id": cid,
                                 "conid": conid,
@@ -142,6 +150,7 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             }]
 
                             sb.table("opt_paper_trades").insert({
+                                "underlying_id": u_id,
                                 "symbol": und_sym,
                                 "strategy_type": "long_call" if is_call else "long_put",
                                 "direction": "bullish" if is_call else "bearish",

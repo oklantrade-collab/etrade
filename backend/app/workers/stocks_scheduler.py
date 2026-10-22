@@ -2658,6 +2658,12 @@ async def run_options_gap_defense_cycle():
             eval_pos["stop_loss_underlying"] = exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0
             eval_pos["reentry_count"] = exit_plan.get("reentry_count", 0)
 
+            is_gap_runner = bool(
+                pos.get("is_gap_runner") or
+                exit_plan.get("is_runner") or
+                exit_plan.get("gap_type") in ("OPEN_GAP_UP", "OPEN_GAP_DOWN")
+            )
+
             if "vme" in str(strat).lower():
                 from app.stocks.vme_exit_engine import evaluate_vme_exit
                 eval_res = evaluate_vme_exit(
@@ -2669,7 +2675,7 @@ async def run_options_gap_defense_cycle():
                     sipv_signal_1h=None,
                     position_age_minutes=pos_age_min
                 )
-            else:
+            elif is_gap_runner:
                 eval_res = evaluate_options_gap_aduana_exit(
                     position=eval_pos,
                     current_underlying_price=cur_stock_p,
@@ -2680,6 +2686,24 @@ async def run_options_gap_defense_cycle():
                     position_age_minutes=pos_age_min,
                     sipv_signal=None
                 )
+            else:
+                eval_res = {"should_exit": False}
+                if cur_opt_premium is not None and entry_debit > 0:
+                    pnl_pct = ((cur_opt_premium - entry_debit) / entry_debit) * 100.0
+                    if pnl_pct <= -50.0:
+                        eval_res = {
+                            "should_exit": True,
+                            "rule_code": "OPT_SWING_HARD_SL",
+                            "reason": f"Hard Stop Loss Swing (-50%): PnL={pnl_pct:.1f}%",
+                            "contracts_ratio_to_exit": 1.0
+                        }
+                    elif pnl_pct >= 60.0:
+                        eval_res = {
+                            "should_exit": True,
+                            "rule_code": "OPT_SWING_TP",
+                            "reason": f"Take Profit Swing (+60%): PnL=+{pnl_pct:.1f}%",
+                            "contracts_ratio_to_exit": 1.0
+                        }
 
             # PnL no realizado actual
             unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
