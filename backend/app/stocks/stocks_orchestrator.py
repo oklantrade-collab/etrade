@@ -1013,6 +1013,64 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             await _upsert_queue(supabase, candidate, status='blocked')
             continue
 
+        # ── DISYUNTOR DIARIO & COOLDOWN (Propuesta #3) ──
+        try:
+            from app.core.circuit_breaker import can_open_new_trade
+            can_open, cb_reason = can_open_new_trade(ticker)
+            if not can_open:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por Disyuntor/Cooldown ({cb_reason})")
+                await _upsert_queue(supabase, candidate, status='blocked')
+                continue
+        except Exception as e_cb:
+            log_warning(MODULE, f"Aviso evaluando disyuntor para {ticker}: {e_cb}")
+
+        # ── MACRO SENTIMENT & RELATIVE STRENGTH vs SPY (Propuesta #1) ──
+        try:
+            from app.core.macro_sentiment_engine import evaluate_macro_sentiment
+            from app.core.relative_strength import evaluate_relative_strength_qualification
+            macro_eval = evaluate_macro_sentiment()
+            macro_regime = macro_eval.get("regime", "NEUTRAL")
+            spy_chg = float(macro_eval.get("spy_change_pct", 0.0))
+
+            # Si el mercado está en RISK-OFF, compras long bloqueadas salvo catalizador extremo
+            if not macro_eval.get("allow_stock_buys", True):
+                has_catalyst = bool(candidate.get('has_news') or candidate.get('snap', {}).get('has_news', False))
+                rvol_val = float(candidate.get('snap', {}).get('rvol', 1.0) or 1.0)
+                if not (has_catalyst and rvol_val >= 3.0):
+                    log_info(MODULE, f"⏸️ {ticker}: BLOQUEADA por Macro Sentiment ({macro_eval.get('label')})")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+
+            # Evaluar Fuerza Relativa (RS vs SPY)
+            asset_chg = float(candidate.get('gap_pct') or candidate.get('snap', {}).get('change_pct', 0.0) or 0.0)
+            rs_res = evaluate_relative_strength_qualification(asset_chg, spy_chg, macro_regime)
+            if not rs_res.get("qualified", True):
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por Fuerza Relativa ({rs_res.get('reason')})")
+                await _upsert_queue(supabase, candidate, status='blocked')
+                continue
+        except Exception as e_macro_rs:
+            log_warning(MODULE, f"Aviso evaluando Macro/RS para {ticker}: {e_macro_rs}")
+
+        # ── COST GUARD: SPREAD BID/ASK & VIABILIDAD DE COSTO (Propuesta #2) ──
+        lmt_marketable = price
+        try:
+            from app.core.cost_guard import evaluate_stock_cost_feasibility, calculate_limit_marketable_price
+            snap_c = candidate.get('snap', {}) or {}
+            bid_val = float(snap_c.get('bid') or 0.0)
+            ask_val = float(snap_c.get('ask') or 0.0)
+            target_p = float(candidate.get('tactical_target_ceiling') or (price * 1.05))
+
+            if bid_val > 0 and ask_val > 0:
+                cost_res = evaluate_stock_cost_feasibility(bid_val, ask_val, price, target_p)
+                if not cost_res.get("passed", True):
+                    log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por Cost Guard ({cost_res.get('reason')})")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+
+            lmt_marketable = calculate_limit_marketable_price("buy", bid_val, ask_val, price)
+        except Exception as e_cg:
+            log_warning(MODULE, f"Aviso evaluando Cost Guard para {ticker}: {e_cg}")
+
         # En mercado BEARISH (SP500/Nasdaq en caída y VIX alto), BLOQUEO ESTRICTO:
         # SOLO se permite comprar si tiene catalizador genuino institucional (Noticia confirmada) O es Super-Runner de expansión con RVOL >= 3.0x y tendencia 1H confirmada
         # ── EVALUACIÓN DE RÉGIMEN ESTRUCTURAL 1D (EMA 3/9/20/50/200 + VWAP + ATR) ──
@@ -1250,10 +1308,28 @@ async def process_priority_queue_buys(supabase=None, cfg=None) -> list:
         log_info(MODULE, f"⏸️ Priority Queue: Sin slots o capital disponible: {capital['reason']}")
         return []
 
-    # 3. Macro context
-    from app.stocks.stocks_adaptive_tp import fetch_macro_data
-    macro = await fetch_macro_data(supabase)
-    is_macro_bearish = (macro.get('sentiment') == 'bearish')
+    # 2.1 DISYUNTOR DIARIO GENERAL (Propuesta #3)
+    try:
+        from app.core.circuit_breaker import get_circuit_breaker_state
+        cb_state = get_circuit_breaker_state()
+        if cb_state.get("tripped"):
+            log_info(MODULE, f"⛔ Priority Queue: Disyuntor diario activo ({cb_state.get('trip_reason')}). Compras detenidas.")
+            return []
+    except Exception as e_cb_q:
+        log_warning(MODULE, f"Aviso leyendo disyuntor en priority queue: {e_cb_q}")
+
+    # 3. Macro Sentiment Engine & RS Shield (Propuesta #1)
+    try:
+        from app.core.macro_sentiment_engine import evaluate_macro_sentiment
+        macro_eval = evaluate_macro_sentiment()
+        if not macro_eval.get("allow_stock_buys", True):
+            log_info(MODULE, f"⏸️ Priority Queue: Nuevas compras bloqueadas por Macro Sentiment: {macro_eval.get('label')}")
+            return []
+        is_macro_bearish = (macro_eval.get("regime") == "RISK_OFF")
+    except Exception as e_macro_q:
+        from app.stocks.stocks_adaptive_tp import fetch_macro_data
+        macro = await fetch_macro_data(supabase)
+        is_macro_bearish = (macro.get('sentiment') == 'bearish')
 
     # 4. Posiciones abiertas y blacklist/cooldown
     pos_res = supabase.table('stocks_positions').select('ticker').eq('status', 'open').execute()

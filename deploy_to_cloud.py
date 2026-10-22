@@ -118,6 +118,14 @@ files_to_sync = [
     "app/core/memory_store.py",
     "app/core/logger.py",
     "app/core/supabase_client.py",
+    "app/core/macro_sentiment_engine.py",
+    "app/core/relative_strength.py",
+    "app/core/cost_guard.py",
+    "app/core/circuit_breaker.py",
+    "app/core/structural_regime_engine.py",
+    "app/options/pre_trade_validator.py",
+    "app/options/score.py",
+    "app/api/options.py",
 
     # Otros módulos de la plataforma
     "app/strategy/candle_momentum_guard.py",

@@ -607,6 +607,37 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
     if not aduana_res.approved:
         raise HTTPException(status_code=422, detail=f"ADUANA rechazo la entrada: {aduana_res.reasons}")
 
+    # ── VALIDACIÓN MACRO SENTIMENT (Propuesta #1) ──
+    from app.core.macro_sentiment_engine import evaluate_macro_sentiment
+    macro_sent = evaluate_macro_sentiment()
+    direction_str = str(cand.get("direction") or "bullish").lower()
+    strat_str = str(cand.get("strategy_type") or "").lower()
+    is_call_strat = direction_str == "bullish" or "call" in strat_str
+    if is_call_strat and not macro_sent.get("allow_option_calls", True):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Macro Sentiment Shield: Mercado en {macro_sent.get('regime')} ({macro_sent.get('label')}) prohíbe compras CALL y Bull Spreads. Foco institucional en Puts."
+        )
+
+    # ── VALIDACIÓN PRE-TRADE BID/ASK & LIQUIDEZ (Propuesta #2) ──
+    from app.options.pre_trade_validator import validate_option_candidate_pre_trade
+    legs_to_check = cand.get("legs") or []
+    sym_und = und.get("symbol") or cand.get("symbol") or "UNKNOWN"
+    exp_cand = cand.get("expiry") or "20261026"
+    pre_eval = validate_option_candidate_pre_trade(
+        symbol=sym_und,
+        strategy_type=cand.get("strategy_type", "long_call"),
+        expiry_yyyymmdd=exp_cand,
+        legs=legs_to_check
+    )
+    if not pre_eval.get("is_valid", True):
+        reasons_text = "; ".join(pre_eval.get("reasons", []))
+        log_warning("OPTIONS_API", f"Pre-Trade Validator rechazo entrada en {sym_und}: {reasons_text}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Rechazado por Pre-Trade Validator (Liquidez/Spread): {reasons_text}"
+        )
+
     fill_res = pe.simulate_entry_fill(cand, None, eff, now_dt)
 
     pos_data = {
@@ -644,7 +675,13 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
         stk = f.get("strike")
         rgt = f.get("right")
         side = f.get("side") or "buy"
-        px = f.get("fill_price") or 0.0
+        px = float(f.get("fill_price") or f.get("mid") or f.get("ask") or 0.0)
+        leg_lmt = px
+        for leg_ev in pre_eval.get("legs", []):
+            if float(leg_ev.get("strike") or 0) == float(stk or 0) and str(leg_ev.get("right") or "").upper() == str(rgt or "").upper():
+                leg_lmt = float(leg_ev.get("mid") or px)
+                break
+
         opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
         try:
             sb.table("stocks_orders").insert({
@@ -652,10 +689,11 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
                 "target_band": opt_target_band,
                 "group_name": "OPTIONS_AUTONOMOUS",
                 "rule_code": "APEX_AUTO",
-                "order_type": "market",
+                "order_type": "limit",
+                "limit_price": round(leg_lmt, 2),
                 "direction": side,
                 "shares": qty,
-                "market_price": px,
+                "market_price": round(leg_lmt, 2),
                 "status": "pending",
                 "created_at": fill_res.entry_time,
             }).execute()
@@ -735,13 +773,16 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
 
     if sym and strike:
         try:
+            mark_or_exit_px = float(pos.get("last_mark_price") or 0.0)
             target_band = f"OPT:{exp}:{strike}:{right}"
             sb.table("stocks_orders").insert({
                 "ticker": sym,
                 "group_name": "OPTIONS",
                 "rule_code": "OPT_CALL" if right == "C" else "APEX_AUTO",
                 "direction": "sell",
-                "order_type": "market",
+                "order_type": "limit" if mark_or_exit_px > 0 else "market",
+                "limit_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else None,
+                "market_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else None,
                 "shares": qty,
                 "target_band": target_band,
                 "status": "pending",

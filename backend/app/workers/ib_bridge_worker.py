@@ -74,14 +74,28 @@ def on_ib_order_status(order_id: int, status_info: dict):
     # Si la orden fue completada (FILLED)
     if status == "filled":
         exec_price = avg_price if avg_price > 0 else float(order_ctx.get("market_price") or 0)
+        target_price = float(order_ctx.get("limit_price") or order_ctx.get("market_price") or exec_price)
+        slippage_usd = round(exec_price - target_price, 4) if direction == "buy" else round(target_price - exec_price, 4)
+        slippage_pct = round((slippage_usd / target_price * 100.0), 2) if target_price > 0 else 0.0
+
+        log_info(MODULE, f"📊 Fills Reconciliation: Ticker={ticker} {direction.upper()} | Exec=${exec_price:.2f} Target=${target_price:.2f} | Slippage=${slippage_usd:+.2f} ({slippage_pct:+.2f}%)")
 
         # 1. Actualizar orden en stocks_orders
         try:
-            sb.table("stocks_orders").update({
-                "status": "filled",
-                "filled_price": exec_price,
-                "filled_at": now_iso
-            }).eq("id", order_ctx["id"]).execute()
+            try:
+                sb.table("stocks_orders").update({
+                    "status": "filled",
+                    "filled_price": exec_price,
+                    "slippage_usd": slippage_usd,
+                    "slippage_pct": slippage_pct,
+                    "filled_at": now_iso
+                }).eq("id", order_ctx["id"]).execute()
+            except Exception:
+                sb.table("stocks_orders").update({
+                    "status": "filled",
+                    "filled_price": exec_price,
+                    "filled_at": now_iso
+                }).eq("id", order_ctx["id"]).execute()
         except Exception as e:
             log_error(MODULE, f"Error actualizando orden {order_ctx['id']} en Supabase: {e}")
 
@@ -294,6 +308,13 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             "exit_reason": "IB_BROKER_CONFIRMED_SELL",
                             "trade_type": pos.get("group_name") or "STOCKS_IB"
                         }).execute()
+
+                        # Propuesta #3: Registrar cierre en Disyuntor Diario
+                        try:
+                            from app.core.circuit_breaker import record_trade_completion
+                            record_trade_completion(ticker, pnl_usd)
+                        except Exception as cb_err:
+                            log_warning(MODULE, f"Aviso registrando disyuntor en broker fill: {cb_err}")
                         sb.table("stocks_positions").update({
                             "status": "closed",
                             "shares": 0,
@@ -523,6 +544,12 @@ class IBBridgeWorker:
                             self._in_flight_sells[ticker.upper()] = already_in_flight + shares
 
                         contract = self.ib.us_stock_contract(ticker)
+
+                    # ── BLINDAJE LMT PARA OPCIONES (Propuesta #2) ──
+                    # NUNCA enviar órdenes a mercado en opciones; forzar LMT al precio de referencia
+                    if is_option and order_type != "limit" and price > 0:
+                        log_warning(MODULE, f"🛡️ [OPTION SHIELD] Convirtiendo orden de opción {ticker_u} de MKT a LMT a ${price:.2f} para prevenir slippage destructivo.")
+                        order_type = "limit"
 
                     ib_ord = Order()
                     ib_ord.eTradeOnly = False

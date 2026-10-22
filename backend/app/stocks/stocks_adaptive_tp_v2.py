@@ -653,25 +653,31 @@ def _evaluate_stock_tp_v2_core(
     is_hot = ("HOT" in group or "SCALPING" in group)
 
     MIN_HOLDING_MINUTES = 15.0
-    # ── NUEVO: EXIT AGRESIVO por Momentum 5m para todas las posiciones de Stocks ──
+
+    # ── BUFFER DE COST BASIS & ANTI-CHOPPING (Propuesta #2) ──
+    # Entre -2.5% y +1.2%, la posición está en zona de digestión de costo y spread.
+    # Se PROHÍBEN salidas por micro-ruido de 5m o rotaciones leves de EMA.
+    # Solo el Stop Loss formal o EOD Hard Exit tienen autoridad para cerrar.
+    if -2.50 <= gain_pct < 1.20:
+        return {
+            'action': 'hold',
+            'gain_pct': round(gain_pct, 2),
+            'debug_indicators': {},
+            'reason': f'Cost Basis Buffer activo ({gain_pct:+.2f}%): Dentro del colchón de costo (-2.5% a +1.2%). Protegiendo contra ruido de 5m.'
+        }
+
+    # Si la pérdida supera el buffer (-2.5%) y el momentum se quebró, corte defensivo
     if df_5m is not None and len(df_5m) >= 10:
         try:
             close_col_5m = 'close' if 'close' in df_5m.columns else 'Close'
             ema3_s = df_5m[close_col_5m].ewm(span=3, adjust=False).mean()
             ema9_s = df_5m[close_col_5m].ewm(span=9, adjust=False).mean()
-            last_close = float(df_5m[close_col_5m].iloc[-1])
 
             ema3_val = float(ema3_s.iloc[-1])
             ema9_val = float(ema9_s.iloc[-1])
 
-            # NOTA (Multi-TF ADUANA v6.0): Las salidas con ganancia por momentum
-            # están 100% gobernadas por evaluate_aduana_stocks_exit para garantizar
-            # el piso de maduración (>= +1.5%) y evitar cierres de centavos en 60 segundos.
-
-            # Si está perdiendo y EMA stack se rompió, cortar pérdidas leves rápidas,
-            # pero NUNCA si la posición está en recuperación EREP o pérdida significativa (>= 5%)
-            if gain_pct < -1.0 and ema3_val < ema9_val:
-                if not position.get('erep_active') and gain_pct > -5.0:
+            if gain_pct < -2.50 and ema3_val < ema9_val:
+                if not position.get('erep_active'):
                     return {
                         'action':  'close_total',
                         'pct':     100,
@@ -679,11 +685,11 @@ def _evaluate_stock_tp_v2_core(
                         'gain_pct': round(gain_pct, 2),
                         'debug_indicators': {},
                         'reason': (
-                            f'Aa30_STK Stop Momentum 5m: Pérdida leve {gain_pct:.2f}% + EMA stack rota. Cortando.'
+                            f'Aa30_STK Stop Momentum 5m: Pérdida confirmada {gain_pct:.2f}% (< -2.5% buffer) + EMA stack rota. Cortando.'
                         ),
                     }
         except Exception as e_30:
-            pass  # Fallback al flujo normal si hay error
+            pass
 
     # Sin ganancia → no evaluar TP
     if gain_pct <= 0:

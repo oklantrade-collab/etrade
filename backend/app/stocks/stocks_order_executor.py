@@ -227,6 +227,19 @@ def execute_market_order(
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
 
+        # ── VALIDACIÓN 0.15: DISYUNTOR DIARIO & COOLDOWN (Propuesta #3) ──
+        try:
+            from app.core.circuit_breaker import can_open_new_trade
+            can_open, cb_reason = can_open_new_trade(ticker)
+            if not can_open and not context.get('force_buy', False):
+                log_warning(MODULE, f"⛔ Compra rechazada por Disyuntor/Cooldown para {ticker}: {cb_reason}")
+                return {
+                    "success": False,
+                    "reason": cb_reason
+                }
+        except Exception as e_cb:
+            log_debug(MODULE, f"Bypass verificación disyuntor: {e_cb}")
+
         # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15M NORMAL / 60M SI HUBO PÉRDIDA PREVIA) ──
         # Evita re-abrir la misma posición si cerró recientemente (y 60 min si fue pérdida para erradicar whipsaws)
         try:
@@ -545,6 +558,19 @@ def place_limit_order(
                 }
         except Exception as e_1h:
             log_debug(MODULE, f"Bypass verificación 1H live: {e_1h}")
+
+        # ── VALIDACIÓN 0.15: DISYUNTOR DIARIO & COOLDOWN (Propuesta #3) ──
+        try:
+            from app.core.circuit_breaker import can_open_new_trade
+            can_open, cb_reason = can_open_new_trade(ticker)
+            if not can_open and not context.get('force_buy', False):
+                log_warning(MODULE, f"⛔ Compra rechazada por Disyuntor/Cooldown para {ticker}: {cb_reason}")
+                return {
+                    "success": False,
+                    "reason": cb_reason
+                }
+        except Exception as e_cb:
+            log_debug(MODULE, f"Bypass verificación disyuntor: {e_cb}")
 
         # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15M NORMAL / 60M SI HUBO PÉRDIDA PREVIA) ──
         try:
@@ -944,6 +970,12 @@ def _close_all_positions(ticker: str, price: float):
             f"avg=${avg:.2f} exit=${price:.2f} "
             f"PnL=${pnl:.2f} ({pnl_pct:.2f}%)"
         )
+
+        try:
+            from app.core.circuit_breaker import record_trade_completion
+            record_trade_completion(ticker, pnl)
+        except Exception as e_cb_rec:
+            log_warning(MODULE, f"Error registrando resultado en disyuntor para {ticker}: {e_cb_rec}")
 
         # Nota: El despacho a IB Bridge se realiza en execute_market_order / _close_position para evitar duplicados.
         

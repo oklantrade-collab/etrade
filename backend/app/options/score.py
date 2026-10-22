@@ -601,14 +601,44 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
     is_runner, gap_type, gap_pct = is_gap_runner_opportunity(cand, underlying)
     gap_runner_boost = 25.0 if is_runner else 0.0
 
+    # ── MODULACIÓN POR MACRO SENTIMENT (SPY, QQQ, VIX) (Propuesta #1) ──
+    macro_regime = "NEUTRAL"
+    macro_label = "🟡 Neutral"
+    macro_adj = 0.0
+    is_call_side = str(cand.get("direction", "")).lower() == "bullish" or "call" in str(cand.get("strategy_type", "")).lower()
+    is_put_side = str(cand.get("direction", "")).lower() == "bearish" or "put" in str(cand.get("strategy_type", "")).lower()
+
+    try:
+        from app.core.macro_sentiment_engine import evaluate_macro_sentiment
+        macro_eval = evaluate_macro_sentiment()
+        macro_regime = macro_eval.get("regime", "NEUTRAL")
+        macro_label = macro_eval.get("label", "🟡 Neutral")
+
+        if macro_regime == "RISK_OFF":
+            if is_call_side:
+                macro_adj = -40.0  # Castigo severo a Calls en día de sangría
+            elif is_put_side:
+                macro_adj = +25.0  # Bonificación a Puts / Spreads bajistas para seguir marea
+        elif macro_regime == "RISK_ON":
+            if is_call_side:
+                macro_adj = +15.0  # Impulso a Calls con viento macro a favor
+            elif is_put_side:
+                macro_adj = -20.0  # Penalización a Puts en mercado en rally
+    except Exception:
+        pass
+
     min_score = float(eff.get("min_score", 60))
     if is_dead_stock:
         final_score = 0.0
         eligible_by_score = False
     else:
         effective_boost = max(setup_bonus, gap_runner_boost)
-        final_score = round(max(0.0, min(100.0, raw_base_score + effective_boost)), 1)
-        eligible_by_score = final_score >= min_score and setup_info["is_eligible"]
+        final_score = round(max(0.0, min(100.0, raw_base_score + effective_boost + macro_adj)), 1)
+        # En RISK_OFF, deshabilitar calls automáticamente
+        if macro_regime == "RISK_OFF" and is_call_side:
+            eligible_by_score = False
+        else:
+            eligible_by_score = final_score >= min_score and setup_info["is_eligible"]
 
     # Check missing components and calculate coverage (§5, §9.1)
     missing_components = []
@@ -718,6 +748,9 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
         "gap_runner_boost": gap_runner_boost,
         "gap_type": gap_type,
         "gap_pct": gap_pct,
+        "macro_regime": macro_regime,
+        "macro_label": macro_label,
+        "macro_adjustment": macro_adj,
         "coverage": coverage,
         "missing_components": missing_components,
         "min_score_required": min_score,

@@ -1369,8 +1369,20 @@ def evaluate_aduana_stocks_exit(
 
     # ── CASO A: SI LA POSICIÓN ESTÁ EN PÉRDIDA O BREAKEVEN (gain_pct <= 0) ──
     if gain_pct <= 0:
-        # 0.2 ESCUDO DE INVALIDACIÓN ESTRUCTURAL 1H (Corte temprano antes del STOP_LOSS_INITIAL)
-        if age_mins >= 15.0 and gain_pct <= -0.45 and df_5m is not None and len(df_5m) >= 6 and df_15m is not None and len(df_15m) >= 9:
+        # ── BUFFER DE COST BASIS & ANTI-CHOPPING (Propuesta #2) ──
+        # Si la pérdida no supera el -2.50%, la posición está dentro del colchón de oscilación inicial.
+        # Se prohíben salidas por micro-ruido para no quedar atrapados por el spread Bid/Ask.
+        if gain_pct > -2.50:
+            return {
+                'should_close': False,
+                'action': 'HOLD',
+                'gain_pct': round(gain_pct, 2),
+                'pnl_usd': round(pnl_usd, 2),
+                'reason': f"Cost Basis Buffer activo ({gain_pct:+.2f}%): Dentro del colchón de costo (-2.5% a 0%). Manejo delegado a Stop Loss Estructural formal."
+            }
+
+        # 0.2 ESCUDO DE INVALIDACIÓN ESTRUCTURAL 1H (Corte temprano si supera el buffer -2.50%)
+        if age_mins >= 15.0 and gain_pct <= -2.50 and df_5m is not None and len(df_5m) >= 6 and df_15m is not None and len(df_15m) >= 9:
             try:
                 c5 = _safe_col(df_5m, 'close')
                 o5 = _safe_col(df_5m, 'open')
