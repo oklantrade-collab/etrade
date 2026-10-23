@@ -12,6 +12,7 @@ files_to_copy = [
     # Opciones & Pre-Trade Validator
     "backend/app/options/pre_trade_validator.py",
     "backend/app/options/score.py",
+    "backend/app/options/autonomous_options_dispatcher.py",
     "backend/app/api/options.py",
 
     # Stocks Orchestration & Cost Basis Buffer Exits

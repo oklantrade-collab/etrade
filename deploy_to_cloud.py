@@ -125,6 +125,8 @@ files_to_sync = [
     "app/core/structural_regime_engine.py",
     "app/options/pre_trade_validator.py",
     "app/options/score.py",
+    "app/options/autonomous_options_dispatcher.py",
+    "tests/test_autonomous_options_dispatcher.py",
     "app/api/options.py",
 
     # Otros módulos de la plataforma
@@ -280,6 +282,8 @@ files_to_sync = [
     "app/options/valuation.py",
     "app/options/options_aduana.py",
     "app/options/score.py",
+    "app/options/autonomous_options_dispatcher.py",
+    "tests/test_autonomous_options_dispatcher.py",
     "app/options/portfolio_selector.py",
     "app/options/paper_execution.py",
     "app/options/exit_engine.py",

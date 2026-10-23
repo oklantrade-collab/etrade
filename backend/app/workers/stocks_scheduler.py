@@ -165,9 +165,14 @@ async def get_watchlist(config: dict) -> list[str]:
         except Exception as e_live:
             log_warning(MODULE, f"Error inyectando live gainers a watchlist: {e_live}")
 
+        # Inyectar Líderes Institucionales Opcionables (SPY, QQQ, NVDA, AAPL, etc.)
+        core_optionables = ["SPY", "QQQ", "IWM", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "META", "AMZN", "GOOGL"]
+        for co in core_optionables:
+            tickers.add(co)
+
         if tickers:
             ticker_list = list(tickers)
-            log_info(MODULE, f"Watchlist from DB (today + positions + live runners): {len(ticker_list)} tickers")
+            log_info(MODULE, f"Watchlist from DB (today + positions + live runners + core optionables): {len(ticker_list)} tickers")
             return ticker_list
 
         # 3. Fallback: most recent watchlist (last 3 days)
@@ -3068,6 +3073,15 @@ async def start_stocks_scheduler(force=False):
                         }, on_conflict="ticker").execute()
                     except Exception as e_q:
                         log_debug("STOCKS_SCHEDULER", f"Error encolando Bull Expansion {tk}: {e_q}")
+
+                    # Despacho automático de CALL a TWS si es símbolo opcionable
+                    try:
+                        from app.options.aduana_gap_runner_options import is_optionable
+                        if is_optionable(tk) or tk in base_leaders:
+                            from app.options.autonomous_options_dispatcher import dispatch_autonomous_option_trade
+                            dispatch_autonomous_option_trade(cand, direction="CALL", config=get_stocks_config(), supabase=sb)
+                    except Exception as e_disp_call:
+                        log_warning("STOCKS_SCHEDULER", f"Aviso al despachar CALL para {tk}: {e_disp_call}")
         except Exception as bte_err:
             log_debug("STOCKS_SCHEDULER", f"Bull Expansion Scanner bypass: {bte_err}")
 
@@ -3123,6 +3137,15 @@ async def start_stocks_scheduler(force=False):
                         }, on_conflict="ticker").execute()
                     except Exception as e_q:
                         log_debug("STOCKS_SCHEDULER", f"Error encolando Bear Rollover PUT {tk}: {e_q}")
+
+                    # Despacho automático de PUT a TWS si es símbolo opcionable
+                    try:
+                        from app.options.aduana_gap_runner_options import is_optionable
+                        if is_optionable(tk) or tk in base_optionable:
+                            from app.options.autonomous_options_dispatcher import dispatch_autonomous_option_trade
+                            dispatch_autonomous_option_trade(cand, direction="PUT", config=get_stocks_config(), supabase=sb)
+                    except Exception as e_disp_put:
+                        log_warning("STOCKS_SCHEDULER", f"Aviso al despachar PUT para {tk}: {e_disp_put}")
         except Exception as br_err:
             log_debug("STOCKS_SCHEDULER", f"Bear Rollover PUT Scanner bypass: {br_err}")
 
