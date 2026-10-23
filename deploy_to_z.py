@@ -8,6 +8,7 @@ files_to_copy = [
     "backend/app/core/cost_guard.py",
     "backend/app/core/circuit_breaker.py",
     "backend/app/core/structural_regime_engine.py",
+    "backend/app/core/market_hours.py",
 
     # Opciones & Pre-Trade Validator
     "backend/app/options/pre_trade_validator.py",
@@ -15,6 +16,7 @@ files_to_copy = [
     "backend/app/options/autonomous_options_dispatcher.py",
     "backend/app/options/opt_contract_picker.py",
     "backend/app/options/aduana_gap_runner_options.py",
+    "backend/app/options/stock_driven_options_scanner.py",
     "backend/app/api/options.py",
 
     # Stocks Orchestration & Cost Basis Buffer Exits
@@ -55,9 +57,12 @@ else:
         dst = os.path.join(target_base, f.replace("/", os.sep))
         
         if os.path.exists(src):
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            print(f"Copiado a Z: {f}")
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                print(f"Copiado a Z: {f}")
+            except Exception as e:
+                print(f"No se pudo copiar {f}: {e}")
         else:
             print(f"No existe: {src}")
     print("Sincronización a APOLO (Z:) finalizada.")

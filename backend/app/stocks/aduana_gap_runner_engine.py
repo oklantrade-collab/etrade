@@ -348,7 +348,7 @@ def evaluate_gap_runner_entry_tranches(
     
     2.a: Temporalidad 1H:
          - Open_1H < (Banda Superior Bollinger_1H - Delta)
-         - RSI_1H <= 70.0 (umbral calibrado para no asfixiar runners de apertura).
+         - RSI_1H < 80.0 (umbral calibrado para no asfixiar runners de apertura).
     2.b: Temporalidad 5m (Vela 1 / anterior):
          - Close_5m > Open_5m (Vela verde compradora).
     2.c: Temporalidad 5m (Vela 2 / actual):
@@ -442,8 +442,8 @@ def evaluate_gap_runner_entry_tranches(
         ema9_1h = float(c1h.ewm(span=9, adjust=False).mean().iloc[-1])
         ema3_above_ema9 = bool(ema3_1h > ema9_1h)
 
-        # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) Y (RSI <= 70.0)
-        meets_1h_req = ema3_above_ema9 and (rsi_1h_val <= 70.0)
+        # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) Y (RSI < 80.0)
+        meets_1h_req = ema3_above_ema9 and (rsi_1h_val < 80.0)
         has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9
 
         macro_1h_ok = meets_1h_req
@@ -452,7 +452,7 @@ def evaluate_gap_runner_entry_tranches(
         res["room_to_bb_upper_1h"] = round(room_to_bb_upper_pct, 1)
 
         if not macro_1h_ok:
-            res["reason"] = f"Filtro mínimo 1H no cumplido: Requiere tendencia 1H alcista (EMA3 ${ema3_1h:.2f} > EMA9 ${ema9_1h:.2f}) y RSI <= 70 (actual: {rsi_1h_val:.1f})"
+            res["reason"] = f"Filtro mínimo 1H no cumplido: Requiere tendencia 1H alcista (EMA3 ${ema3_1h:.2f} > EMA9 ${ema9_1h:.2f}) y RSI < 80 (actual: {rsi_1h_val:.1f})"
             return res
     else:
         # Fallback para IPOs con historial joven en 1H
@@ -760,14 +760,14 @@ def evaluate_gap_runner_entry_tranches(
             is_hod_breakout = (cur_high_5m >= hod_prior and cur_close_5m >= (hod_prior * 0.998)) and is_vol_ok
 
         can_enter_t3 = is_15m_continuation or is_hod_breakout
-        is_rsi_acceptable = (rsi_1h_val <= 72.0)
+        is_rsi_acceptable = (rsi_1h_val < 80.0)
 
         if not can_enter_t3:
             res["reason"] = "Tranche 3 en espera: esperando confirmación de vela 3 en 15m o Ruptura HOD en 5m"
             return res
 
         if not is_rsi_acceptable:
-            res["reason"] = f"Tranche 3 pausado: RSI 1H ({rsi_1h_val:.1f} > 72.0) en zona extrema"
+            res["reason"] = f"Tranche 3 pausado: RSI 1H ({rsi_1h_val:.1f} >= 80.0) en zona extrema"
             return res
 
         # Subir SL al mínimo de la 2da vela de 15m o soporte de ruptura

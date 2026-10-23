@@ -246,36 +246,57 @@ def evaluate_trap_shield(
     # REGLAS DE DESCARTE DE TRAMPAS (TRAP SHIELD)
     # ════════════════════════════════════════════════════════════
 
-    # TRAMPA 1: GAP EXCESIVO DESINFLÁNDOSE (> +60% con colapso o falta de catalizador Nivel 1)
-    # Ejemplo AEMD (+493% gap que cae -20%), PDSB día 1 (+121% que colapsa)
+    # TRAMPA 1: GAP EXCESIVO DESINFLÁNDOSE (> +60%)
+    # Excepción Institucional: Si las Bandas de Bollinger están abiertas (Superior +, Inferior -)
+    # y el precio cotiza sobre el VWAP con RVOL alto, NO es trampa: es un Super-Runner en expansión!
     if gap_pct > 60.0:
-        # Si el gap es astronómico (> 60%) y el precio ya cotiza por debajo del Open o del VWAP
-        if current_price < eff_open * 0.98 or is_below_vwap:
-            return {
-                'is_trap': True,
-                'trap_type': 'EXCESSIVE_GAP_FADE',
-                'trap_reason': f"Trampa Gap Masivo (+{gap_pct:.1f}%): Cotiza bajo Open (${eff_open:.2f}) o VWAP (${vwap:.2f}). Descarga masiva.",
-                'gap_pct': round(gap_pct, 1),
-                'is_sweet_spot': False,
-                'is_intraday_alpha': False,
-                'growth_potential_pct': growth_potential_pct,
-                'priority_rank_boost': 0.0,
-                'vwap': round(vwap, 3)
-            }
-        
-        # Si no tiene catalizador de máximo impacto (Nivel 1: FDA / M&A), un gap > 80% es trampa estadística segura
-        if gap_pct > 80.0 and news_tier > 1:
-            return {
-                'is_trap': True,
-                'trap_type': 'EXCESSIVE_GAP_NO_CATALYST',
-                'trap_reason': f"Gap de +{gap_pct:.1f}% sin catalizador de Nivel 1 (Tier={news_tier}). Riesgo extremo de dilución.",
-                'gap_pct': round(gap_pct, 1),
-                'is_sweet_spot': False,
-                'is_intraday_alpha': False,
-                'growth_potential_pct': growth_potential_pct,
-                'priority_rank_boost': 0.0,
-                'vwap': round(vwap, 3)
-            }
+        # Evaluar apertura de bandas en 5m
+        is_bb_5m_open = False
+        if df_5m is not None and len(df_5m) >= 5:
+            try:
+                c5_s = _safe_series(df_5m, 'close')
+                s20 = c5_s.rolling(min(20, len(c5_s)), min_periods=3).mean()
+                std20 = c5_s.rolling(min(20, len(c5_s)), min_periods=3).std().fillna(0)
+                b_up = s20 + 2.0 * std20
+                b_lo = s20 - 2.0 * std20
+                if len(b_up) >= 2:
+                    is_bb_5m_open = bool((b_up.iloc[-1] > b_up.iloc[-2]) and (b_lo.iloc[-1] < b_lo.iloc[-2]))
+            except Exception:
+                pass
+
+        bb_bands_opening = bool(is_bb_15m_opening or is_bb_5m_open)
+
+        # Si bandas están abiertas, sobre VWAP y con volumen activo, anular veto de trampa
+        if bb_bands_opening and not is_below_vwap and rvol >= 2.0:
+            log_info(MODULE, f"🚀 SUPER-RUNNER EXPANSIVO (+{gap_pct:.1f}%): Bandas Bollinger abiertas (Sup+/Inf-), sobre VWAP (${vwap:.2f}) y RVOL {rvol:.1f}x. Veto de trampa anulado.")
+        else:
+            # Si el gap es masivo (> 60%) y el precio cotiza por debajo del Open o del VWAP
+            if current_price < eff_open * 0.98 or is_below_vwap:
+                return {
+                    'is_trap': True,
+                    'trap_type': 'EXCESSIVE_GAP_FADE',
+                    'trap_reason': f"Trampa Gap Masivo (+{gap_pct:.1f}%): Cotiza bajo Open (${eff_open:.2f}) o VWAP (${vwap:.2f}). Descarga masiva.",
+                    'gap_pct': round(gap_pct, 1),
+                    'is_sweet_spot': False,
+                    'is_intraday_alpha': False,
+                    'growth_potential_pct': growth_potential_pct,
+                    'priority_rank_boost': 0.0,
+                    'vwap': round(vwap, 3)
+                }
+
+            # Si no tiene catalizador de máximo impacto ni bandas abiertas, gap > 80% se descarta
+            if gap_pct > 80.0 and news_tier > 1 and not bb_bands_opening:
+                return {
+                    'is_trap': True,
+                    'trap_type': 'EXCESSIVE_GAP_NO_CATALYST',
+                    'trap_reason': f"Gap de +{gap_pct:.1f}% sin catalizador ni bandas abiertas. Riesgo extremo de dilución.",
+                    'gap_pct': round(gap_pct, 1),
+                    'is_sweet_spot': False,
+                    'is_intraday_alpha': False,
+                    'growth_potential_pct': growth_potential_pct,
+                    'priority_rank_boost': 0.0,
+                    'vwap': round(vwap, 3)
+                }
 
     # TRAMPA 2: APERTURA ROJA CON QUIEBRE DE SOPORTE ORB (Gap & Crap clásico)
     # La vela de apertura abrió arriba pero cerró roja y el precio perforó el mínimo de apertura

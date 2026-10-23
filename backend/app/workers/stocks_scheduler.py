@@ -2669,7 +2669,9 @@ async def run_options_gap_defense_cycle():
             is_gap_runner = bool(
                 pos.get("is_gap_runner") or
                 exit_plan.get("is_runner") or
-                exit_plan.get("gap_type") in ("OPEN_GAP_UP", "OPEN_GAP_DOWN")
+                exit_plan.get("gap_type") in ("OPEN_GAP_UP", "OPEN_GAP_DOWN") or
+                "GAP" in str(exit_plan.get("trailing_sl_type", "")).upper() or
+                bool(exit_plan.get("stop_loss_underlying"))
             )
 
             if "vme" in str(strat).lower():
@@ -2826,9 +2828,13 @@ async def run_options_gap_defense_cycle():
         log_warning(MODULE, f"Error en ciclo defensivo de opciones: {e_def}")
 
 
+_LAST_STOCK_DRIVEN_OPTIONS_TS = 0.0
+
+
 async def run_options_auto_execution_cycle():
     """
     Supervisión y ejecución autónoma de candidatas de opciones seleccionadas:
+    0. Escaneo Stock-First periódico (cada 5m) para mantener Opportunities siempre actualizado.
     1. Carga candidatas con status 'selected' en opt_candidates.
     2. Comprueba si ya tienen posición abierta en opt_paper_trades.
     3. Si no están abiertas, las ejecuta inmediatamente:
@@ -2836,10 +2842,22 @@ async def run_options_auto_execution_cycle():
        - Despacha las órdenes de piernas a stocks_orders para ejecución TWS por ib_bridge_worker.
        - Emite alerta Telegram institucional.
     """
+    global _LAST_STOCK_DRIVEN_OPTIONS_TS
     sb = get_supabase()
     try:
         from app.options import settings_defaults as sd
         from app.options.paper_execution import execute_selected_candidate_to_trade
+
+        # 0. Escaneo Stock-First cada 5 minutos
+        now_ts = time.time()
+        if now_ts - _LAST_STOCK_DRIVEN_OPTIONS_TS >= 300.0:
+            _LAST_STOCK_DRIVEN_OPTIONS_TS = now_ts
+            try:
+                from app.options.stock_driven_options_scanner import run_stock_driven_options_pipeline
+                log_info(MODULE, "🔄 Ejecutando ciclo de escaneo de opciones Stock-First (cada 5 min)...")
+                await run_stock_driven_options_pipeline(supabase=sb, limit_per_direction=3)
+            except Exception as pipe_err:
+                log_warning(MODULE, f"Aviso en ciclo periódico de opciones Stock-First: {pipe_err}")
 
         rows = sb.table("opt_settings").select("key,value").execute().data or []
         stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}

@@ -305,8 +305,8 @@ def evaluate_options_gap_entry_tranches(
             if cur_open_1h >= (bb_upper_1h - delta_bb):
                 res["reason"] = f"CALL bloqueado: Open 1H (${cur_open_1h:.2f}) sin espacio ante Banda Superior (${bb_upper_1h:.2f})"
                 return res
-            if cur_rsi_1h > 60.0:
-                res["reason"] = f"CALL bloqueado: RSI 1H ({cur_rsi_1h:.1f}) > 60 (posible agotamiento inicial)"
+            if cur_rsi_1h >= 80.0:
+                res["reason"] = f"CALL bloqueado: RSI 1H ({cur_rsi_1h:.1f}) >= 80 (posible agotamiento inicial)"
                 return res
         # Reglas 1H para PUT (Espejo)
         else:
@@ -770,8 +770,8 @@ def evaluate_options_gap_entry_tranches(
         if df_1h is not None and len(df_1h) >= 15:
             rsi_1h_series = compute_rsi(_safe_col(df_1h, "close"), period=14)
             cur_rsi_1h = float(rsi_1h_series.iloc[-1])
-            if is_call and cur_rsi_1h > 62.0:
-                res["reason"] = f"Tranche 3 CALL bloqueado: RSI 1H ({cur_rsi_1h:.1f}) > 62"
+            if is_call and cur_rsi_1h >= 80.0:
+                res["reason"] = f"Tranche 3 CALL bloqueado: RSI 1H ({cur_rsi_1h:.1f}) >= 80"
                 return res
             if not is_call and cur_rsi_1h < 38.0:
                 res["reason"] = f"Tranche 3 PUT bloqueado: RSI 1H ({cur_rsi_1h:.1f}) < 38"
@@ -963,6 +963,45 @@ def evaluate_options_gap_aduana_exit(
                     "reason": f"Salida Defensiva CALL: Subyacente (${cur_stock_p:.2f}) perforó su VWAP (${cur_vwap:.2f}) a la baja (-0.4%). Riesgo cortado anticipadamente."
                 })
                 return res
+
+    # 3.B. TAKE PROFIT ESTRUCTURAL POR PROXIMIDAD A MURO (<= 0.8% - SALIDA MARKET INMEDIATA)
+    sym_opt = str(position.get("symbol") or "").upper().strip()
+    p_opt_eval = current_underlying_price
+    if sym_opt and p_opt_eval > 0 and unrealized_pnl_pct >= 8.0:
+        try:
+            from app.core.structural_regime_engine import evaluate_structural_regime
+            st_reg_opt = evaluate_structural_regime(sym_opt, p_opt_eval)
+            target_wall = float(st_reg_opt.get("target_resistance_wall") or 0.0)
+            target_ceiling = float(st_reg_opt.get("target_ceiling") or 0.0)
+            target_floor = float(st_reg_opt.get("key_levels_1d", {}).get("bb_lower") or 0.0)
+
+            if is_call:
+                rel_target = target_wall if (target_wall > p_opt_eval and target_wall < target_ceiling) else target_ceiling
+                if rel_target > 0:
+                    dist_to_wall = ((rel_target - p_opt_eval) / p_opt_eval) * 100.0
+                    if dist_to_wall <= 0.80:
+                        res.update({
+                            "should_exit": True,
+                            "exit_type": "take_profit_structural_proximity",
+                            "contracts_ratio_to_exit": 1.0,
+                            "rule_code": "OPT_STRUCTURAL_TARGET_NEAR_TP",
+                            "reason": f"Take Profit Estructural CALL (Proximidad {dist_to_wall:.2f}% <= 0.8%): Subyacente ${p_opt_eval:.2f} a las puertas de muro institucional ${rel_target:.2f}. Salida MARKET inmediata para evitar front-running."
+                        })
+                        return res
+            else:
+                if target_floor > 0:
+                    dist_to_floor = ((p_opt_eval - target_floor) / p_opt_eval) * 100.0
+                    if dist_to_floor <= 0.80:
+                        res.update({
+                            "should_exit": True,
+                            "exit_type": "take_profit_structural_proximity",
+                            "contracts_ratio_to_exit": 1.0,
+                            "rule_code": "OPT_STRUCTURAL_TARGET_NEAR_TP",
+                            "reason": f"Take Profit Estructural PUT (Proximidad {dist_to_floor:.2f}% <= 0.8%): Subyacente ${p_opt_eval:.2f} rozando soporte institucional ${target_floor:.2f}. Salida MARKET inmediata para asegurar pico."
+                        })
+                        return res
+        except Exception:
+            pass
 
     # 4. CLÍMAX TOTAL RSI 1H (> 85 en CALLs / < 15 en PUTs)
     if df_1h is not None and len(df_1h) >= 15:

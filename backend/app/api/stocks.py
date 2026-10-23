@@ -253,7 +253,7 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 min_thresh = get_min_gap_threshold(t)
                 is_trap = bool(opp.get("is_trap", False))
 
-                # Requisito Mínimo en 1H: (EMA3 > EMA9) o (RSI <= 70)
+                # Requisito Mínimo en 1H: (EMA3 > EMA9) o (RSI < 80)
                 is_ema3_above_ema9 = opp.get("is_ema3_above_ema9")
                 rsi_1h_val = opp.get("rsi_1h")
                 if is_ema3_above_ema9 is None or rsi_1h_val is None:
@@ -271,7 +271,7 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                         if rsi_1h_val is None: rsi_1h_val = 50.0
 
                 rsi_1h_num = float(rsi_1h_val if rsi_1h_val is not None else 50.0)
-                meets_1h_criteria = bool(is_ema3_above_ema9 or (rsi_1h_num <= 70.0))
+                meets_1h_criteria = bool(is_ema3_above_ema9 or (rsi_1h_num < 80.0))
                 opp["meets_1h_criteria"] = meets_1h_criteria
 
                 # Califica como Open Gap Up institucional si supera el umbral, no es trampa Y cumple el requisito mínimo de 1H

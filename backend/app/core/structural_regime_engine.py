@@ -33,9 +33,9 @@ def _calculate_indicators_from_df(df: pd.DataFrame, current_price: float) -> Dic
     if df is None or len(df) < 20:
         return {}
 
-    c = df["Close"]
-    h = df["High"] if "High" in df.columns else c
-    l = df["Low"] if "Low" in df.columns else c
+    c = df["Close"] if "Close" in df.columns else (df["close"] if "close" in df.columns else df.iloc[:, -2])
+    h = df["High"] if "High" in df.columns else (df["high"] if "high" in df.columns else c)
+    l = df["Low"] if "Low" in df.columns else (df["low"] if "low" in df.columns else c)
 
     # EMAs
     ema3 = float(c.ewm(span=3, adjust=False).mean().iloc[-1])

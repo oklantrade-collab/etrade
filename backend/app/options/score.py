@@ -565,6 +565,21 @@ def score_candidate(cand: dict[str, Any], underlying: dict[str, Any], eff: dict[
       - w_iv_greeks (10%)
       - w_context (5%)
     """
+    if cand.get("direction_source") == "stock_driven_scanner" and float(cand.get("score") or 0.0) >= 50.0:
+        orig_score = float(cand["score"])
+        orig_bd = dict(cand.get("score_breakdown") or {})
+        orig_bd.update({
+            "score_total": orig_score,
+            "final_score": orig_score,
+            "is_dead_stock": False,
+            "eligible_by_score": True,
+        })
+        return {
+            "score": orig_score,
+            "final_score": orig_score,
+            "score_breakdown": orig_bd
+        }
+
     w_exp = float(eff.get("w_expectancy", 30))
     w_apex = float(eff.get("w_apex_signal", 20))
     w_liq = float(eff.get("w_liquidity", 20))

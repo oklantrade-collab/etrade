@@ -23,9 +23,6 @@ def is_market_open():
     Checks if the US stock market (NYSE) is currently open.
     Uses pandas_market_calendars to detect holidays and half-days.
     """
-    import pandas_market_calendars as mcal
-    import pandas as pd
-    
     now = get_nyc_now()
     
     # Check if it's a weekday (0=Monday, 4=Friday)
@@ -33,6 +30,8 @@ def is_market_open():
         return False, "CERRADO (Fin de semana)"
         
     try:
+        import pandas_market_calendars as mcal
+        import pandas as pd
         # Get NYSE calendar
         nyse = mcal.get_calendar('NYSE')
         today_str = now.strftime('%Y-%m-%d')

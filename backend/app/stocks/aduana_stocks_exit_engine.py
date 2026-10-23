@@ -1226,6 +1226,29 @@ def calculate_alpha_escalating_trailing_stop(
             if atr15 > 0:
                 delta = max(0.01, min(current_price * 0.0035, 0.15 * atr15))
 
+        # ── RATCHET DEL 80% SOBRE EL AVANCE DEL OPEN (Propuesta Aprobada) ──
+        # Si el activo ha tenido una expansión >= 8% sobre el precio OPEN del día,
+        # se fija un Stop inamovible que retiene al menos el 80% de ese recorrido:
+        # Ratchet = Open_Day + 0.80 * (High_maximo - Open_Day)
+        open_day = float(position.get('candle_open_day') or 0.0)
+        if open_day <= 0 and df_5m is not None and len(df_5m) > 0:
+            open_day = float(_safe_col(df_5m, 'open').iloc[0])
+        if open_day <= 0:
+            open_day = entry_p
+
+        highest_seen = float(position.get('trail_high') or position.get('highest_price_reached') or current_price)
+        if df_5m is not None and len(df_5m) > 0:
+            h5_series = _safe_col(df_5m, 'high')
+            if len(h5_series) > 0:
+                highest_seen = max(highest_seen, float(h5_series.max()))
+
+        if open_day > 0 and highest_seen >= (open_day * 1.08):
+            ratchet_sl_80 = round(open_day + 0.80 * (highest_seen - open_day), 2)
+            if ratchet_sl_80 > best_sl and ratchet_sl_80 < current_price * 0.999:
+                best_sl = ratchet_sl_80
+                active_stage = 'STAGE_RATCHET_80_OPEN'
+                reasons.append(f"Ratchet80%(Open ${open_day:.2f}->High ${highest_seen:.2f}=>${ratchet_sl_80:.2f})")
+
         # ── A. Regla 2c: Si Precio > BB_Upper (en 5m o 15m), mover TSL a (Open - Delta) ──
         if df_5m is not None and len(df_5m) >= 6:
             c5 = _safe_col(df_5m, 'close')
@@ -1474,6 +1497,48 @@ def evaluate_aduana_stocks_exit(
         }
 
     # ── CASO B: POSICIÓN EN GANANCIA (gain_pct > 0) ──
+    # ── 0.4 TAKE PROFIT ESTRUCTURAL POR PROXIMIDAD A MURO (<= 0.8% - SALIDA MARKET INMEDIATA) ──
+    ticker_sym = str(position.get('ticker') or position.get('symbol') or '').upper().strip()
+    if gain_pct >= 2.0 and ticker_sym and current_price > 0:
+        try:
+            from app.core.structural_regime_engine import evaluate_structural_regime
+            st_reg = evaluate_structural_regime(ticker_sym, current_price, df_1d=df_1d)
+            target_wall = float(st_reg.get("target_resistance_wall") or 0.0)
+            target_ceiling = float(st_reg.get("target_ceiling") or 0.0)
+            target_floor = float(st_reg.get("key_levels_1d", {}).get("bb_lower") or 0.0)
+
+            if is_long:
+                relevant_target = target_wall if (target_wall > current_price and target_wall < target_ceiling) else target_ceiling
+                if relevant_target > 0:
+                    dist_to_wall_pct = ((relevant_target - current_price) / current_price) * 100.0
+                    if dist_to_wall_pct <= 0.80:
+                        return {
+                            'should_close': True,
+                            'action': 'CLOSE_TOTAL',
+                            'shares_to_close': shares,
+                            'pct_to_close': 100,
+                            'rule_code': 'ADUANA_STK_STRUCTURAL_TARGET_NEAR_TP',
+                            'gain_pct': round(gain_pct, 2),
+                            'pnl_usd': round(pnl_usd, 2),
+                            'reason': f"Take Profit Estructural (Proximidad {dist_to_wall_pct:.2f}% <= 0.8%): Subyacente ${current_price:.2f} a las puertas de muro institucional ${relevant_target:.2f}. Salida MARKET inmediata para evitar front-running (+{gain_pct:.2f}%)."
+                        }
+            else:
+                if target_floor > 0:
+                    dist_to_floor_pct = ((current_price - target_floor) / current_price) * 100.0
+                    if dist_to_floor_pct <= 0.80:
+                        return {
+                            'should_close': True,
+                            'action': 'CLOSE_TOTAL',
+                            'shares_to_close': shares,
+                            'pct_to_close': 100,
+                            'rule_code': 'ADUANA_STK_STRUCTURAL_TARGET_NEAR_TP',
+                            'gain_pct': round(gain_pct, 2),
+                            'pnl_usd': round(pnl_usd, 2),
+                            'reason': f"Take Profit Estructural Short (Proximidad {dist_to_floor_pct:.2f}% <= 0.8%): Subyacente ${current_price:.2f} rozando soporte institucional ${target_floor:.2f}. Salida MARKET inmediata (+{gain_pct:.2f}%)."
+                        }
+        except Exception:
+            pass
+
     # 0.5 EVALUACIÓN DEL MOTOR AGUDO SECCIÓN A (1a, 1b, 2a, 2b, 2c, 2d)
     sharp_res = evaluate_alpha_runner_sharp_exit(
         position=position,
@@ -1546,6 +1611,50 @@ def evaluate_aduana_stocks_exit(
             age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
         except Exception:
             pass
+
+    # ── NUEVA REGLA: RATCHET 80% DEL AVANCE DESDE EL OPEN ──
+    open_day_val = float(position.get('candle_open_day') or 0.0)
+    if open_day_val <= 0 and df_5m is not None and len(df_5m) > 0:
+        open_day_val = float(_safe_col(df_5m, 'open').iloc[0])
+    if open_day_val <= 0:
+        open_day_val = entry_p
+
+    highest_peak = float(position.get('highest_price_reached') or position.get('trail_high') or current_price)
+    if df_5m is not None and len(df_5m) > 0:
+        h5_series = _safe_col(df_5m, 'high')
+        if len(h5_series) > 0:
+            highest_peak = max(highest_peak, float(h5_series.max()))
+
+    if is_long and open_day_val > 0 and highest_peak >= (open_day_val * 1.08):
+        ratchet_80_price = round(open_day_val + 0.80 * (highest_peak - open_day_val), 2)
+        if current_price < ratchet_80_price and gain_pct >= 1.0:
+            return {
+                'should_close': True,
+                'action': 'CLOSE_TOTAL',
+                'shares_to_close': shares,
+                'pct_to_close': 100,
+                'rule_code': 'ADUANA_STK_RATCHET_80_OPEN_BREAK',
+                'gain_pct': round(gain_pct, 2),
+                'pnl_usd': round(pnl_usd, 2),
+                'reason': f"Ratchet 80% Avance OPEN: High ${highest_peak:.2f} sobre Open ${open_day_val:.2f}. Protegiendo 80% del recorrido en ${ratchet_80_price:.2f}."
+            }
+
+    # ── NUEVA REGLA DINÁMICA 15M: TOMA PARCIAL POR DECAIMIENTO DE RVOL ──
+    partial_rvol_done = bool(position.get('rvol_15m_tp_done') or position.get('tp_block1_executed') or position.get('climax_tp50_done'))
+    if not partial_rvol_done and age_mins >= 14.0 and gain_pct >= 2.0 and is_long:
+        is_decaying = (fuel.get('state') in ('EXHAUSTED', 'CLIMAX_EXHAUSTION')) or (fuel.get('rvol', 1.0) < 1.3)
+        if is_decaying and micro_5m.get('is_trigger', False):
+            shares_to_sell = max(1, int(shares * 0.5)) if shares > 1 else shares
+            return {
+                'should_close': True,
+                'action': 'CLOSE_PARTIAL_50' if shares > 1 else 'CLOSE_TOTAL',
+                'shares_to_close': shares_to_sell,
+                'pct_to_close': 50 if shares > 1 else 100,
+                'rule_code': 'ADUANA_STK_RVOL_15M_DECAY_TP50',
+                'gain_pct': round(gain_pct, 2),
+                'pnl_usd': round(pnl_usd, 2),
+                'reason': f"TP Parcial Dinámico 15m: RVOL desacelerando ({fuel.get('reason')}). Asegurando 50% de ganancia (+{gain_pct:.2f}%)."
+            }
 
     # ── 1. TOPE EOD INTRADÍA (15:15 - 15:50 ET) — ÚLTIMAS 3 VELAS DE 15m ──
     if is_eod_final_candles(now_dt):

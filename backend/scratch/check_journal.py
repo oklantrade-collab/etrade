@@ -1,17 +1,9 @@
-import asyncio
-import os
-import sys
-
-# Add backend to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import os, sys
+sys.path.append(os.path.abspath('backend'))
 from app.core.supabase_client import get_supabase
+sb = get_supabase()
 
-async def check_journal():
-    sb = get_supabase()
-    res = sb.table("trades_journal").select("*").order("exit_date", desc=True).limit(20).execute()
-    for entry in res.data:
-        print(f"[{entry['exit_date']}] {entry['ticker']} {entry['strategy']} PnL: {entry['pnl_usd']}$ Reason: {entry['exit_reason']}")
-
-if __name__ == "__main__":
-    asyncio.run(check_journal())
+print('=== TRADES_JOURNAL >= 2026-10-21 ===')
+tj = sb.table('trades_journal').select('*').gte('entry_date', '2026-10-21T00:00:00Z').order('entry_date').execute().data or []
+for t in tj:
+    print(f"{t.get('ticker')} | Entry: {t.get('entry_date')} @ {t.get('entry_price')} | Exit: {t.get('exit_date')} @ {t.get('exit_price')} | Shares: {t.get('shares')} | PnL: ${t.get('pnl_usd')} ({t.get('pnl_pct')}%) | Reason: {t.get('exit_reason')}")

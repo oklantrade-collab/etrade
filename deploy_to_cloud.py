@@ -290,6 +290,7 @@ files_to_sync = [
     "app/options/calibration.py",
     "app/options/worker.py",
     "app/options/aduana_gap_runner_options.py",
+    "app/options/stock_driven_options_scanner.py",
     "app/options/opt_contract_picker.py",
     "app/options/opt_gap_aduana_defense.py",
     "app/workers/ib_bridge_worker.py",

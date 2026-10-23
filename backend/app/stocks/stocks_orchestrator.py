@@ -849,11 +849,11 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             eff_gap = gap_val if gap_val != 0.0 else chg_val
             is_trap = bool(snap.get('is_trap', False))
 
-            # Requisito Mínimo en 1H: (EMA3 > EMA9) Y (EMA3 ascendente) Y (RSI <= 70)
+            # Requisito Mínimo en 1H: (EMA3 > EMA9) Y (EMA3 ascendente) Y (RSI < 80)
             h1_snap = get_live_1h_candle_and_sipv(ticker, float(snap.get('price') or 0.0))
             is_ema3_above_ema9 = bool(h1_snap.get('is_ema3_above_ema9', False))
             rsi_1h_snap = float(h1_snap.get('rsi_1h') or snap.get('rsi') or 50.0)
-            meets_1h_req = is_ema3_above_ema9 and is_ema3_asc and (rsi_1h_snap <= 70.0)
+            meets_1h_req = is_ema3_above_ema9 and is_ema3_asc and (rsi_1h_snap < 80.0)
 
             is_open_gap_runner = (eff_gap >= min_thresh) and (not is_trap) and meets_1h_req
 
@@ -1038,14 +1038,20 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             macro_regime = macro_eval.get("regime", "NEUTRAL")
             spy_chg = float(macro_eval.get("spy_change_pct", 0.0))
 
-            # Si el mercado está en RISK-OFF, compras long bloqueadas salvo catalizador extremo
+            # Si el mercado está en RISK-OFF, compras long bloqueadas salvo catalizador extremo o alta actividad/RVOL
             if not macro_eval.get("allow_stock_buys", True):
+                is_gap_runner_cand = bool(candidate.get("group_name") == "OPEN_GAP_RUNNER" or candidate.get("is_gap_runner") or float(candidate.get("gap_pct") or 0.0) >= 3.0)
+                rvol_val = float(candidate.get('snap', {}).get('rvol', 1.0) or candidate.get('rvol', 1.0) or 1.0)
                 has_catalyst = bool(candidate.get('has_news') or candidate.get('snap', {}).get('has_news', False))
-                rvol_val = float(candidate.get('snap', {}).get('rvol', 1.0) or 1.0)
-                if not (has_catalyst and rvol_val >= 3.0):
+                
+                # Excepción Institucional: Activo con alta actividad y RVOL alto predomina sobre el sentimiento de mercado
+                is_volume_exception = (rvol_val >= 2.0) or (is_gap_runner_cand and rvol_val >= 1.3) or (has_catalyst and rvol_val >= 1.8)
+                if not is_volume_exception:
                     log_info(MODULE, f"⏸️ {ticker}: BLOQUEADA por Macro Sentiment ({macro_eval.get('label')})")
                     await _upsert_queue(supabase, candidate, status='blocked')
                     continue
+                else:
+                    log_info(MODULE, f"⚡ {ticker}: EXCEPCIÓN concedida en RISK-OFF por alto RVOL ({rvol_val:.1f}x) / Gap ({candidate.get('gap_pct')}%)")
 
             # Evaluar Fuerza Relativa (RS vs SPY)
             asset_chg = float(candidate.get('gap_pct') or candidate.get('snap', {}).get('change_pct', 0.0) or 0.0)

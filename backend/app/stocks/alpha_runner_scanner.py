@@ -323,7 +323,7 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             EquityQuery('GT', ['dayvolume', 300_000]),
             EquityQuery('GT', ['intradayprice', 1.0]),
             EquityQuery('LT', ['intradayprice', 100.0]),
-            EquityQuery('GT', ['intradaymarketcap', 15_000_000]),
+            EquityQuery('GT', ['intradaymarketcap', 1_000_000]),
         ])
 
         fetch_size = max(35, limit + 10)
@@ -359,12 +359,13 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 if not (vol >= 300_000 and rvol_prelim >= 2.5 and chg_pct >= 5.0):
                     continue
 
-            # 2. TAREA 2: Filtro Micro-Cap ($15M a $50M) y Anti-Cascarón:
-            # Excluye cascarones < $15M. Si está entre $15M y $50M, flexibiliza a Vol >= 1M con RVOL >= 3.0x
-            if mcap < 15_000_000:
+            # 2. TAREA 2: Filtro Micro-Cap con requisito de Bandas de Bollinger Abiertas:
+            # Permite micro/nano-caps (mcap >= $1M) siempre que tengan liquidez real (vol >= 300k, rvol >= 2.0x)
+            # Para empresas < $15M, se exigirá adicionalmente confirmación de expansión con Bandas Abiertas (Sup+ / Inf-).
+            if mcap < 1_000_000 and mcap > 0:
                 continue
             if mcap < 50_000_000:
-                is_qualified_micro = (vol >= 1_000_000 and rvol_prelim >= 3.0) or (vol >= 1_500_000 and avg_vol >= 200_000)
+                is_qualified_micro = (vol >= 300_000 and rvol_prelim >= 1.5) or (vol >= 1_000_000)
                 if not is_qualified_micro:
                     continue
 
