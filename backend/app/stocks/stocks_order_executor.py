@@ -393,7 +393,7 @@ def execute_market_order(
     order_data = {
         "ticker": ticker,
         "group_name": rule.get("group_name"),
-        "rule_code": rule_code,
+        "rule_code": str(rule_code or "").strip() or "APEX_AUTO",
         "order_type": "market",
         "direction": direction,
         "shares": shares,
@@ -424,7 +424,27 @@ def execute_market_order(
         except Exception:
             pass
 
-    sb.table("stocks_orders").insert(order_data).execute()
+    try:
+        sb.table("stocks_orders").insert(order_data).execute()
+    except Exception as e_ord_ins:
+        rc = str(order_data.get("rule_code") or "").strip() or "APEX_AUTO"
+        if "23503" in str(e_ord_ins) or "stocks_orders_rule_code_fkey" in str(e_ord_ins):
+            log_warning(MODULE, f"Aviso: rule_code '{rc}' no registrado en stocks_rules. Reintentando...")
+            try:
+                sb.table('stocks_rules').upsert({
+                    'rule_code': rc,
+                    'name': f'Auto registered {rc}',
+                    'group_name': rule.get('group_name') or 'AUTO',
+                    'direction': direction.lower(),
+                    'order_type': 'market',
+                    'enabled': True
+                }, on_conflict='rule_code').execute()
+                sb.table("stocks_orders").insert(order_data).execute()
+            except Exception:
+                order_data["rule_code"] = "APEX_AUTO"
+                sb.table("stocks_orders").insert(order_data).execute()
+        else:
+            raise e_ord_ins
 
     # En STOCKS solo permitimos LONG (BUY).
     # Si la orden va hacia IBKR TWS (ib_live=True), el callback de TWS abrirá la posición al llenar la orden.
@@ -687,7 +707,7 @@ def place_limit_order(
     order_data = {
         "ticker": ticker,
         "group_name": rule.get("group_name"),
-        "rule_code": rule_code,
+        "rule_code": str(rule_code or "").strip() or "APEX_AUTO",
         "order_type": "limit",
         "direction": direction,
         "shares": shares,
@@ -705,7 +725,27 @@ def place_limit_order(
         "created_at": now.isoformat(),
     }
 
-    sb.table("stocks_orders").insert(order_data).execute()
+    try:
+        sb.table("stocks_orders").insert(order_data).execute()
+    except Exception as e_ord_ins:
+        rc = str(order_data.get("rule_code") or "").strip() or "APEX_AUTO"
+        if "23503" in str(e_ord_ins) or "stocks_orders_rule_code_fkey" in str(e_ord_ins):
+            log_warning(MODULE, f"Aviso: rule_code '{rc}' no registrado en stocks_rules. Reintentando...")
+            try:
+                sb.table('stocks_rules').upsert({
+                    'rule_code': rc,
+                    'name': f'Auto registered {rc}',
+                    'group_name': rule.get('group_name') or 'AUTO',
+                    'direction': direction.lower(),
+                    'order_type': 'market',
+                    'enabled': True
+                }, on_conflict='rule_code').execute()
+                sb.table("stocks_orders").insert(order_data).execute()
+            except Exception:
+                order_data["rule_code"] = "APEX_AUTO"
+                sb.table("stocks_orders").insert(order_data).execute()
+        else:
+            raise e_ord_ins
 
     # Enriquecer alerta con valor intrínseco si existe
     intrinsic_info = f"Precio Intrínseco: ${context.get('intrinsic_price', 0):.2f}\n" if context.get("intrinsic_price") else ""

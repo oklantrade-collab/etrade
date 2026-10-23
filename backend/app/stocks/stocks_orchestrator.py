@@ -1202,6 +1202,8 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             order_type = best_rule.get('order_type', 'market')
             rule_code  = rule_sig.get('rule_code', 'APEX_AUTO')
 
+        rule_code = str(rule_code or "").strip() or "APEX_AUTO"
+
         sizing = calculate_position_size(
             ticker         = ticker,
             price          = price,
@@ -1321,8 +1323,8 @@ async def _upsert_queue(
                 'ticker':          candidate['ticker'],
                 'group_name':      group_name_val,
                 'price_at_rank':   candidate.get('price'),
-                'apex_score_4h':   candidate.get('apex_4h'),
-                'apex_score_1d':   candidate.get('apex_1d'),
+                'apex_score_4h':   float(candidate.get('apex_4h') or candidate.get('apex_score_4h') or 50.0),
+                'apex_score_1d':   float(candidate.get('apex_1d') or candidate.get('apex_score_1d') or 50.0),
                 'return_expected': candidate.get('return_expected', 0),
                 'confidence':      candidate['confidence'],
                 'composite_rank':  candidate['composite_rank'],
