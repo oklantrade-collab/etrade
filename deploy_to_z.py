@@ -16,6 +16,8 @@ files_to_copy = [
     "backend/app/options/autonomous_options_dispatcher.py",
     "backend/app/options/opt_contract_picker.py",
     "backend/app/options/aduana_gap_runner_options.py",
+    "backend/app/options/options_aduana.py",
+    "backend/app/options/settings_defaults.py",
     "backend/app/options/stock_driven_options_scanner.py",
     "backend/app/api/options.py",
 

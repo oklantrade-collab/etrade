@@ -123,8 +123,8 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
 
     # O-3 max_loss <= riesgo por operacion (techo duro incluido)
     sym = str(cand.get("symbol") or (ctx.underlying or {}).get("symbol") or "").upper()
-    is_megacap = sym in ("SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL")
-    base_cap = float(eff.get("max_risk_megacap_usd", 1000.0)) if is_megacap else float(eff["max_risk_per_trade_usd"])
+    is_megacap = sym in ("SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL", "PLTR", "M")
+    base_cap = float(eff.get("max_risk_megacap_usd", 1500.0)) if is_megacap else float(eff.get("max_risk_per_trade_usd", 1000.0))
     cap = min(base_cap, sd.hard_caps()["max_risk_per_trade_usd"])
     tot = cand.get("max_loss_total")
     add("O-3", tot is not None and qty and tot <= cap + 1e-9, f"max_loss_total={tot} cap={cap}")

@@ -472,7 +472,8 @@ async def run_stock_driven_options_pipeline(
             "spread_pct": best_contract.spread_pct,
             "open_interest": best_contract.open_interest,
             "volume": best_contract.volume,
-            "multiplier": 100
+            "multiplier": 100,
+            "market_data_type": "LIVE"
         }
 
         candidate_payload = {
