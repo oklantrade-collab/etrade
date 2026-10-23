@@ -178,6 +178,8 @@ files_to_sync = [
     "app/stocks/pullback_engine.py",
     "app/stocks/buying_force_detector.py",
     "app/stocks/alpha_runner_scanner.py",
+    "app/stocks/bull_expansion_scanner.py",
+    "tests/test_bull_expansion_scanner.py",
     "app/stocks/live_1h_candle_service.py",
     "app/stocks/news_catalyst_service.py",
     "app/stocks/order_executor.py",
