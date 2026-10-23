@@ -91,7 +91,8 @@ def calculate_semaphore_and_buying_force(
     minus_di_5m: float = 15.0,
     open_ge_close: bool = True,
     room_to_bb_upper_1d: Optional[float] = None,
-    sma20_1d: Optional[float] = None
+    sma20_1d: Optional[float] = None,
+    is_1h_gap_up: bool = False
 ) -> Dict[str, Any]:
     """
     Calcula la Fuerza Compradora (0-100), Semáforo Visual y Rank Score:
@@ -194,6 +195,13 @@ def calculate_semaphore_and_buying_force(
         sem_label = f"🟢 SUPER-RUNNER EXPANSION (+{room_to_bb_upper_1d:.0f}% A BB 1D)"
         sem_color = "#10B981"
         sem_tip = f"Open Gap Up (+{gap_pct:.1f}%) con autopista libre hasta la Banda Superior de Bollinger 1D (+{room_to_bb_upper_1d:.1f}%). Reversión desde el fondo confirmada con RVOL {rvol:.1f}x. COMPRA HABILITADA."
+        setup_bonus = 35.0
+    # CASO A.2.8: EARLY MOMENTUM RUNNER (OPEN GAP UP HORARIO O IMPULSO CON RVOL MASIVO)
+    elif (is_1h_gap_up and rvol >= 2.0) or (is_ema3_1h_ascending and is_ema3_above_ema9 and rvol >= 2.5 and change_pct >= 5.0 and dist_from_high_pct <= 15.0):
+        semaphore = "EARLY_MOMENTUM"
+        sem_label = f"🟢 EARLY MOMENTUM RUNNER (RVOL {rvol:.1f}x)"
+        sem_color = "#10B981"
+        sem_tip = f"Impulso temprano confirmado: 1H Gap Up o aceleración EMA3 con RVOL {rvol:.1f}x. COMPRA HABILITADA sin esperar 45 min."
         setup_bonus = 35.0
     # CASO A.3: CANDADO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA)
     elif gap_pct is not None and gap_pct > 25.0:
@@ -363,6 +371,7 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 open_ge_close=live_1h.get("open_ge_close_prev", True),
                 room_to_bb_upper_1d=room_to_bb,
                 sma20_1d=sma20_1d,
+                is_1h_gap_up=live_1h.get("is_1h_gap_up", False),
             )
 
             candidates.append({
@@ -389,6 +398,8 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "bb_upper_1d": bb_upper_1d,
                 "sma20_1d": sma20_1d,
                 "is_expansion_runner": (metrics["semaphore"] == "EXPANSION_RUNNER"),
+                "is_early_momentum": (metrics["semaphore"] == "EARLY_MOMENTUM"),
+                "is_momentum_runner": (metrics["semaphore"] in ("EARLY_MOMENTUM", "EXPANSION_RUNNER", "SWEET_SPOT")),
                 # Vela 1H en Formación & SIPV + 5m
                 "is_ema3_1h_ascending": live_1h.get("is_ema3_1h_ascending", True),
                 "is_ema3_1h_descending": live_1h.get("is_ema3_1h_descending", False),

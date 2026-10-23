@@ -99,6 +99,9 @@ def classify_catalyst_text(headline: str, summary: str = "") -> dict:
 
 def analyze_news_items(news_list: Optional[List[dict]]) -> dict:
     """Evalúa una lista de noticias para un ticker y retorna el catalizador dominante."""
+    import time
+    now_ts = time.time()
+
     if not news_list:
         return {
             'tier': 2,
@@ -109,16 +112,23 @@ def analyze_news_items(news_list: Optional[List[dict]]) -> dict:
             'reason': 'Sin feed de noticias en las últimas 24h.'
         }
 
-    # Prioridad: Si alguna es tóxica -> VETO (Tier 0)
-    # Si no, buscar el Tier 1 más alto
     dominant = None
     for item in news_list[:6]:
         title = item.get('title') or item.get('headline') or ''
         summary = item.get('summary') or ''
+        pub_time = float(item.get('publish_time') or 0.0)
+        age_hours = ((now_ts - pub_time) / 3600.0) if pub_time > 0 else 0.0
+
         res = classify_catalyst_text(title, summary)
         
+        # Filtro de Antigüedad para Veto Tóxico (Tier 0):
+        # Solo vetar si la noticia de dilución ocurrió en las últimas 48 horas.
+        # Noticias antiguas (ej. un reverse split de hace semanas/meses) son irrelevantes para el momentum de hoy.
         if res['tier'] == 0:
-            return res  # Veto inmediato
+            if pub_time > 0 and age_hours > 48.0:
+                log_info(MODULE, f"Ignorando veto tóxico histórico ({age_hours:.1f}h > 48h): '{title[:70]}'")
+                continue
+            return res  # Veto legítimo de dilución reciente (<48h)
             
         if dominant is None or res['tier'] < dominant['tier']:
             dominant = res
@@ -150,12 +160,14 @@ def fetch_ticker_news(ticker: str, max_items: int = 5) -> List[dict]:
             publisher = n.get('publisher') or ''
             link = n.get('link') or ''
             summary = n.get('summary') or publisher
+            pub_time = int(n.get('providerPublishTime') or 0)
             if title:
                 items.append({
                     'title': title,
                     'summary': summary,
                     'publisher': publisher,
-                    'link': link
+                    'link': link,
+                    'publish_time': pub_time
                 })
         return items
     except Exception as e:

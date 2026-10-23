@@ -216,6 +216,17 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         elif sipv_lower_absorption:
             reason = f"Absorción SIPV en soporte (Mecha inf: {lower_wick_ratio*100:.1f}%)."
 
+        # Open Gap Up entre velas de 1H (ej. caso TANH a las 13:00 y 14:00)
+        is_1h_gap_up = False
+        gap_up_1h_pct = 0.0
+        if len(df_1h) >= 2:
+            prev_1h_close = float(df_1h["Close"].iloc[-2])
+            curr_1h_open = float(df_1h["Open"].iloc[-1])
+            if prev_1h_close > 0:
+                gap_up_1h_pct = round(((curr_1h_open - prev_1h_close) / prev_1h_close * 100.0), 2)
+                if gap_up_1h_pct >= 2.0:
+                    is_1h_gap_up = True
+
         # Métricas de 5m (Sweet Spot & Pyramiding)
         adx_5m, plus_di_5m, minus_di_5m = 25.0, 25.0, 15.0
         rsi_5m = 55.0
@@ -271,6 +282,8 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "rsi_5m": rsi_5m,
             "is_last_candle_green": is_last_candle_green,
             "open_ge_close_prev": open_ge_close_prev,
+            "is_1h_gap_up": is_1h_gap_up,
+            "gap_up_1h_pct": gap_up_1h_pct,
         }
 
         _1H_CACHE[clean_ticker] = {"timestamp": now_ts, "data": result}

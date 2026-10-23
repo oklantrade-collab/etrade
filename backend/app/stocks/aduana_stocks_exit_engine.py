@@ -740,9 +740,10 @@ def evaluate_alpha_runner_sharp_exit(
         return res
 
     gain_pct = (current_price - entry_p) / entry_p * 100.0
+    pnl_usd = (current_price - entry_p) * shares
     group_name = str(position.get('group_name', '') or position.get('pool_type', '')).upper()
     rule_pos = str(position.get('rule_code', '') or position.get('strategy', '')).upper()
-    is_alpha_runner = ('ALPHA_RUNNER' in group_name) or ('ALPHA' in rule_pos) or ('PULLBACK_' in rule_pos)
+    is_alpha_runner = ('ALPHA_RUNNER' in group_name) or ('ALPHA' in rule_pos) or ('PULLBACK_' in rule_pos) or ('EMR_' in rule_pos) or ('MOMENTUM' in rule_pos)
     partial_done = bool(position.get('tp_block1_executed') or position.get('tp_1h_executed'))
 
     # Antigüedad de la posición en minutos (Mínimo de maduración 15 minutos salvo clímax >= 2.5%)
@@ -953,6 +954,51 @@ def evaluate_alpha_runner_sharp_exit(
                         }
             except Exception as e_climax:
                 log_debug(MODULE, f"Error evaluando Clímax Multivariable 15m: {e_climax}")
+
+            # -----------------------------------------------------------------
+            # GATILLO DE SALIDA CLÍMAX POR RECHAZO BOLLINGER (ADUANA_CLIMAX_BB_REJECTION)
+            # Vela 15m con OPEN >= BB_Upper_15m * 0.995 (abrió fuera o sobre banda superior)
+            # + Fuerte mecha superior de rechazo (upper_wick >= max(0.15, body * 1.5) o wick/range >= 0.40)
+            # -----------------------------------------------------------------
+            body_15m_cur = abs(current_price - open_15m_cur)
+            top_body_15m_cur = max(open_15m_cur, current_price)
+            upper_wick_15m_cur = high_15m_cur - top_body_15m_cur
+            cur_wick_ratio = upper_wick_15m_cur / rng_15m_cur if rng_15m_cur > 0 else 0.0
+            cur_opened_above_bb = (bb_up_15m_cur > 0 and open_15m_cur >= bb_up_15m_cur * 0.995)
+            cur_has_strong_rejection = (upper_wick_15m_cur >= max(0.15, body_15m_cur * 1.5)) or (cur_wick_ratio >= 0.40)
+            is_cur_bb_rejection = cur_opened_above_bb and cur_has_strong_rejection
+
+            prev_body_15m = abs(prev_c15 - prev_o15)
+            prev_top_15m = max(prev_o15, prev_c15)
+            prev_upper_wick_15m = prev_h15 - prev_top_15m
+            prev_wick_ratio = prev_upper_wick_15m / prev_rng15 if prev_rng15 > 0 else 0.0
+            prev_opened_above_bb = (prev_bb_up15 > 0 and prev_o15 >= prev_bb_up15 * 0.995)
+            prev_has_strong_rejection = (prev_upper_wick_15m >= max(0.15, prev_body_15m * 1.5)) or (prev_wick_ratio >= 0.40)
+            is_prev_bb_rejection = prev_opened_above_bb and prev_has_strong_rejection and (current_price <= prev_top_15m * 1.002)
+
+            if (is_cur_bb_rejection or is_prev_bb_rejection) and gain_pct >= 2.5:
+                close_total = (is_alpha_runner or partial_done or shares < 2 or gain_pct >= 6.0)
+                pct = 100 if close_total else 50
+                shares_to_sell = shares if pct == 100 else max(1, int(shares * 0.5))
+                candle_desc = "Vela actual 15m" if is_cur_bb_rejection else "Vela previa 15m"
+                wick_pct_disp = (cur_wick_ratio if is_cur_bb_rejection else prev_wick_ratio) * 100.0
+                open_ref = open_15m_cur if is_cur_bb_rejection else prev_o15
+                bb_ref = bb_up_15m_cur if is_cur_bb_rejection else prev_bb_up15
+                return {
+                    **res,
+                    'should_close': True,
+                    'action': 'CLOSE_TOTAL' if pct == 100 else 'CLOSE_PARTIAL_50',
+                    'pct_to_close': pct,
+                    'shares_to_close': shares_to_sell,
+                    'rule_code': 'ADUANA_CLIMAX_BB_REJECTION',
+                    'gain_pct': round(gain_pct, 2),
+                    'pnl_usd': round(pnl_usd, 2),
+                    'reason': (
+                        f"🚨 ADUANA CLÍMAX (Rechazo en Bollinger Superior): {candle_desc} abrió sobre BB Superior "
+                        f"(Open ${open_ref:.2f} >= BB_Upper ${bb_ref:.2f}) con fuerte mecha de rechazo ({wick_pct_disp:.1f}% del rango). "
+                        f"Cierre {pct}% asegurando +{gain_pct:.2f}% de ganancia."
+                    )
+                }
 
             # Condición 2a:
             # Vela de 15m supera BB_Upper_15m (prev_c15 > prev_bb_up15 o high_15m_cur > bb_up_15m_cur),

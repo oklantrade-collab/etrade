@@ -2974,6 +2974,56 @@ async def start_stocks_scheduler(force=False):
         coalesce=True,
     )
 
+    # 1d. IBKR RECURRENT HIGH_OPEN_GAP SCANNER: cada 10 minutos en horario de mercado
+    async def run_ib_open_gap_scanner_cycle():
+        is_open, _ = is_market_open()
+        if not is_open:
+            return
+        try:
+            from datetime import date
+            from app.data.ib_scanner import scan_open_gaps
+            log_info("STOCKS_SCHEDULER", "Ejecutando IB Scanner recurrente: HIGH_OPEN_GAP...")
+            gaps = await scan_open_gaps(
+                direction="up",
+                max_results=15,
+                min_price=1.0,
+                max_price=200.0,
+                min_volume=200_000,
+                timeout_s=10.0,
+                filter_options=False
+            )
+            if gaps:
+                log_info("STOCKS_SCHEDULER", f"IB HIGH_OPEN_GAP scanner encontro {len(gaps)} tickers activos.")
+                sb = get_supabase()
+                today_str = date.today().isoformat()
+                for r in gaps:
+                    tk = str(r.get("ticker", "")).upper().strip()
+                    if tk:
+                        try:
+                            sb.table("watchlist_daily").upsert({
+                                "ticker": tk,
+                                "date": today_str,
+                                "pool_type": "IB_HIGH_OPEN_GAP, HOT",
+                                "catalyst_type": "HIGH_OPEN_GAP",
+                                "catalyst_score": 8,
+                                "hard_filter_pass": True,
+                            }, on_conflict="ticker,date").execute()
+                        except Exception:
+                            pass
+        except Exception as sc_err:
+            log_debug("STOCKS_SCHEDULER", f"IB Scanner recurrente bypass: {sc_err}")
+
+    scheduler.add_job(
+        run_ib_open_gap_scanner_cycle,
+        trigger=IntervalTrigger(minutes=10),
+        id="ib_high_open_gap_scanner",
+        name="IBKR High Open Gap Scanner (10m)",
+        max_instances=1,
+        replace_existing=True,
+        misfire_grace_time=120,
+        coalesce=True,
+    )
+
     # 2. INVERSIÓN PRO: daily at 16:05 ET (5 min after market close)
     scheduler.add_job(
         run_pro_cycle,

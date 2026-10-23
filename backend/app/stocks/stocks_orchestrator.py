@@ -174,22 +174,28 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
     is_alpha = bool(
         snap.get('is_intraday_alpha') or 
         snap.get('is_expansion_runner') or 
+        snap.get('is_early_momentum') or
+        snap.get('is_momentum_runner') or
         snap.get('source') == 'live_top_gainers' or
-        (float(snap.get('rvol') or 1.0) >= 2.0 and float(snap.get('change_pct') or 0.0) >= 5.0)
+        (float(snap.get('rvol') or 1.0) >= 2.5 and float(snap.get('change_pct') or 0.0) >= 5.0)
     )
 
     reasons  = []
 
-    if rsi >= max_rsi:
-        reasons.append(f'RSI sobrecomprado ({rsi:.0f} ≥ {max_rsi})')
-
-    # Para Alpha Runners y Super-Runners de expansión, las zonas Fib altas y Upper_3 son normales en breakout y no deben bloquear
+    # EXENCIÓN INTELIGENTE PARA MOMENTUM RUNNERS:
+    # En un rally de momentum/breakout explosivo (como TANH), RSI 15m se ubica naturalmente en 75-90.
+    # Bloquear por RSI > 75 castiga a los verdaderos líderes institucionales.
+    # Para runners calificados solo se bloquea ante clímax extremo (RSI >= 92).
     if not is_alpha:
+        if rsi >= max_rsi:
+            reasons.append(f'RSI sobrecomprado ({rsi:.0f} ≥ {max_rsi})')
         if fib_zone >= max_fib:
             reasons.append(f'Zona Fib alta ({fib_zone} ≥ {max_fib})')
-
         if upper_3 > 0 and price > upper_3:
             reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
+    else:
+        if rsi >= 92.0:
+            reasons.append(f'RSI Clímax Extremo ({rsi:.0f} ≥ 92)')
 
     # Trap Shield: Bloqueo innegociable de trampas de apertura
     if bool(snap.get('is_trap', False)):
@@ -1096,7 +1102,7 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         if is_macro_bearish:
             has_catalyst = bool(candidate.get('has_news') or candidate.get('snap', {}).get('has_news', False))
             rvol_val = float(candidate.get('snap', {}).get('rvol', 1.0) or 1.0)
-            is_strong_expansion = bool(candidate.get('is_expansion_runner') and rvol_val >= 3.0 and candidate.get('snap', {}).get('is_ema3_1h_ascending', True))
+            is_strong_expansion = bool((candidate.get('is_expansion_runner') or candidate.get('is_early_momentum') or candidate.get('semaphore') == 'EARLY_MOMENTUM') and rvol_val >= 2.5 and candidate.get('snap', {}).get('is_ema3_1h_ascending', True))
             is_exempt_runner = has_catalyst or is_strong_expansion
             if not is_exempt_runner:
                 log_info(MODULE, f"⏸️ {ticker}: BLOQUEADA por Filtro Macro Bearish (SP500/Nasdaq cayendo y VIX elevado sin noticia/catalizador institucional).")
@@ -1106,8 +1112,11 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
-        # Prioridad 0: Regla Open Gap Runner o VME Expansion (Tranche 1 directa, Dip & Rip o VME)
-        if candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('GAP_'):
+        # Prioridad 0: Early Momentum Runner, Open Gap Runner o VME Expansion
+        if candidate.get('is_early_momentum') or candidate.get('semaphore') == 'EARLY_MOMENTUM':
+            rule_code = 'EMR_EARLY_MOMENTUM'
+            order_type = 'market'
+        elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('GAP_'):
             rule_code = candidate['triggered_rule']
             order_type = 'market'
         elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('FT_'):
