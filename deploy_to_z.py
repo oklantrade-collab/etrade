@@ -13,6 +13,8 @@ files_to_copy = [
     "backend/app/options/pre_trade_validator.py",
     "backend/app/options/score.py",
     "backend/app/options/autonomous_options_dispatcher.py",
+    "backend/app/options/opt_contract_picker.py",
+    "backend/app/options/aduana_gap_runner_options.py",
     "backend/app/api/options.py",
 
     # Stocks Orchestration & Cost Basis Buffer Exits
@@ -20,6 +22,7 @@ files_to_copy = [
     "backend/app/stocks/stocks_order_executor.py",
     "backend/app/stocks/stocks_adaptive_tp_v2.py",
     "backend/app/stocks/aduana_stocks_exit_engine.py",
+    "backend/app/stocks/aduana_gap_runner_engine.py",
     "backend/app/stocks/alpha_runner_scanner.py",
     "backend/app/stocks/bull_expansion_scanner.py",
     "backend/app/stocks/bear_rollover_scanner.py",
@@ -28,6 +31,9 @@ files_to_copy = [
     "backend/app/stocks/trap_shield.py",
     "backend/app/workers/stocks_scheduler.py",
     "backend/app/data/ib_scanner.py",
+    "backend/tests/test_bull_expansion_scanner.py",
+    "backend/tests/test_bear_rollover_scanner.py",
+    "backend/tests/test_autonomous_options_dispatcher.py",
 
     # IBKR Bridge Worker (APOLO TWS Bridge + LMT Shield + Slippage Reconciliation)
     "backend/app/workers/ib_bridge_worker.py",
