@@ -544,13 +544,24 @@ async def run_stock_driven_options_pipeline(
                 selected_options.append({"id": cid, "symbol": sym, "direction": direction, "strike": best_contract.strike, "score": score})
 
                 # ── REGLA 2: DISPARO AUTOMÁTICO UNA VEZ ELEGIBLE O SELECCIONADA ──
+                # Verificar límite de capital ($5,000) y tope de posiciones abiertas (3)
                 try:
-                    from app.options.paper_execution import execute_selected_candidate_to_trade
-                    cand_record = ins_res.data[0]
-                    und_dict = {"symbol": sym, "id": uid, "price": p}
-                    executed_pos = execute_selected_candidate_to_trade(sb, cand_record, eff, und=und_dict, now_dt=now_dt)
-                    if executed_pos:
-                        log_info(MODULE, f"🚀 DISPARO AUTOMÁTICO EJECUTADO: {sym} {direction} [{status}] -> Posición creada y orden enviada a TWS")
+                    open_trades = sb.table("opt_paper_trades").select("id, max_loss_total, symbol").eq("status", "open").execute().data or []
+                    current_open_risk = sum(float(t.get("max_loss_total") or 0.0) for t in open_trades)
+                    capital_limit = float(eff.get("max_open_risk_usd", 5000.0))
+                    max_positions = int(eff.get("max_open_positions", 3))
+
+                    if len(open_trades) >= max_positions:
+                        log_info(MODULE, f"⏸️ No se auto-dispara {sym}: Límite alcanzado ({len(open_trades)}/{max_positions} posiciones abiertas en broker/paper).")
+                    elif current_open_risk + cost_total > capital_limit:
+                        log_info(MODULE, f"⛔ No se auto-dispara {sym}: Riesgo actual (${current_open_risk:.2f}) + orden (${cost_total:.2f}) excede el límite de capital de ${capital_limit:.2f}.")
+                    else:
+                        from app.options.paper_execution import execute_selected_candidate_to_trade
+                        cand_record = ins_res.data[0]
+                        und_dict = {"symbol": sym, "id": uid, "price": p}
+                        executed_pos = execute_selected_candidate_to_trade(sb, cand_record, eff, und=und_dict, now_dt=now_dt)
+                        if executed_pos:
+                            log_info(MODULE, f"🚀 DISPARO AUTOMÁTICO EJECUTADO: {sym} {direction} [{status}] -> Posición creada y orden enviada a TWS")
                 except Exception as e_auto:
                     log_warning(MODULE, f"Aviso al auto-disparar opción {sym} {direction}: {e_auto}")
 

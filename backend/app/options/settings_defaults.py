@@ -40,7 +40,7 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "capital_usd": (5000, 100, 50000),
     "max_risk_per_trade_usd": (800, 5, 2500),
     "max_risk_megacap_usd": (1500, 100, 2500),
-    "max_open_risk_usd": (2500, 5, 6000),
+    "max_open_risk_usd": (5000, 5, 10000),
     "min_potential_profit_usd": (40, 0, 1000),
     "min_ev_total_usd": (12, 0, 500),
     "daily_stop_usd": (500, 5, 2000),

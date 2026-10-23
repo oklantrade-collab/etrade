@@ -312,6 +312,32 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     event_flags = und.get("event_flags")
     ctx = aduana.static_context(uid, event_flags, underlying=und)
     ctx.now = now_dt
+
+    # Cargar posiciones abiertas reales para evaluar O-4 (Riesgo total <= $5000) y O-11 (Máx 3 posiciones)
+    try:
+        open_rows = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
+        max_simultaneous = int(eff.get("max_open_positions", 3))
+        if len(open_rows) >= max_simultaneous:
+            return None
+
+        current_open_risk = sum(float(p.get("max_loss_total") or p.get("entry_total_invested") or 0.0) for p in open_rows)
+        max_capital = float(eff.get("max_open_risk_usd", 5000.0))
+        cand_max_loss = float(cand.get("max_loss_total") or 0.0)
+        if current_open_risk + cand_max_loss > max_capital:
+            return None
+
+        ctx.positions = [
+            aduana.OpenPosition(
+                underlying_id=p.get("underlying_id") or 0,
+                max_loss_total=float(p.get("max_loss_total") or p.get("entry_total_invested") or 0.0),
+                direction=p.get("direction", "bullish"),
+                candidate_id=p.get("candidate_id")
+            )
+            for p in open_rows
+        ]
+    except Exception:
+        pass
+
     aduana_res = aduana.validate_entry(cand, ctx, eff)
     if not aduana_res.approved:
         return None

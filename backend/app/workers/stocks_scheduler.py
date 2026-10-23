@@ -2882,11 +2882,25 @@ async def run_options_auto_execution_cycle():
         if not sel_cands:
             return
 
+        open_trades = sb.table("opt_paper_trades").select("id, max_loss_total").eq("status", "open").execute().data or []
+        current_open_risk = sum(float(t.get("max_loss_total") or 0.0) for t in open_trades)
+        max_positions = int(eff.get("max_open_positions", 3))
+        capital_limit = float(eff.get("max_open_risk_usd", 5000.0))
+
+        if len(open_trades) >= max_positions or current_open_risk >= capital_limit:
+            return
+
         for cand in sel_cands:
+            if len(open_trades) >= max_positions:
+                break
             cid = cand["id"]
             und = cand.get("opt_underlyings") or {}
             sym_c = und.get("symbol") or cand.get("symbol") or ""
             dir_c = cand.get("direction")
+
+            cand_risk = float(cand.get("max_loss_total") or 0.0)
+            if current_open_risk + cand_risk > capital_limit:
+                continue
 
             # Evitar re-ejecución si ya hay posición abierta para este símbolo y dirección
             already_open = sb.table("opt_paper_trades").select("id").eq("symbol", sym_c).eq("direction", dir_c).eq("status", "open").execute().data if sym_c else []
