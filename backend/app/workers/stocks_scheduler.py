@@ -2873,9 +2873,9 @@ async def run_options_auto_execution_cycle():
         sel_cands = (
             sb.table("opt_candidates")
             .select("*, opt_underlyings(*)")
-            .eq("eligibility_status", "selected")
-            .order("id", desc=True)
-            .limit(5)
+            .in_("eligibility_status", ["selected", "eligible"])
+            .order("score", desc=True)
+            .limit(10)
             .execute()
             .data or []
         )
@@ -2884,7 +2884,12 @@ async def run_options_auto_execution_cycle():
 
         for cand in sel_cands:
             cid = cand["id"]
-            already_open = sb.table("opt_paper_trades").select("id").eq("candidate_id", cid).eq("status", "open").execute().data
+            und = cand.get("opt_underlyings") or {}
+            sym_c = und.get("symbol") or cand.get("symbol") or ""
+            dir_c = cand.get("direction")
+
+            # Evitar re-ejecución si ya hay posición abierta para este símbolo y dirección
+            already_open = sb.table("opt_paper_trades").select("id").eq("symbol", sym_c).eq("direction", dir_c).eq("status", "open").execute().data if sym_c else []
             if already_open:
                 continue
 

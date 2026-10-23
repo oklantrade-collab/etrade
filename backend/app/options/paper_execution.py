@@ -286,11 +286,16 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     cid = cand["id"]
     uid = cand.get("underlying_id")
 
-    # 1. Comprobar si ya existe posición abierta para esta candidata
+    # 1. Comprobar si ya existe posición abierta para esta candidata o subyacente en la misma dirección
     try:
-        existing = sb.table("opt_paper_trades").select("*").eq("candidate_id", cid).eq("status", "open").execute().data
-        if existing:
-            return existing[0]
+        sym_check = und.get("symbol") or cand.get("symbol") or ""
+        if sym_check:
+            existing = sb.table("opt_paper_trades").select("*").eq("symbol", sym_check).eq("direction", cand.get("direction")).eq("status", "open").execute().data
+            if existing:
+                return existing[0]
+        existing_cand = sb.table("opt_paper_trades").select("*").eq("candidate_id", cid).eq("status", "open").execute().data
+        if existing_cand:
+            return existing_cand[0]
     except Exception:
         pass
 
@@ -359,7 +364,7 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
                 "target_band": opt_target_band,
                 "group_name": "OPTIONS_AUTONOMOUS",
                 "rule_code": "APEX_AUTO",
-                "order_type": "market",
+                "order_type": "limit",
                 "direction": side,
                 "shares": qty,
                 "market_price": px,

@@ -318,6 +318,11 @@ async def run_stock_driven_options_pipeline(
     now_iso = now_dt.isoformat()
     today_date = now_dt.date()
 
+    from app.options import settings_defaults as sd
+    rows = sb.table("opt_settings").select("key,value").execute().data or []
+    stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}
+    eff = sd.effective_settings(stored)
+
     # 1. Definir universo de símbolos candidatos (Watchlist + Posiciones + Runners + Core Optionables)
     candidate_symbols = list(CORE_OPTIONABLE_SYMBOLS)
     try:
@@ -410,16 +415,31 @@ async def run_stock_driven_options_pipeline(
 
         if not best_contract:
             log_warning(MODULE, f"No se encontró contrato líquido para {sym} {direction}: {rej_reasons}")
-            return
+            return False
+
+        # ── REGLA 1: TOPE MÁXIMO DE RIESGO (Si excede, NO entra al ranking, escoge el siguiente) ──
+        is_megacap = sym in ("SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL", "PLTR", "M")
+        base_cap = float(eff.get("max_risk_megacap_usd", 1500.0)) if is_megacap else float(eff.get("max_risk_per_trade_usd", 800.0))
+        cap = min(base_cap, 2000.0)
+
+        entry_debit = float(best_contract.ask if best_contract.ask > 0 else best_contract.mid)
+        min_contract_cost = round(entry_debit * 100.0, 2)
+
+        if min_contract_cost > cap:
+            log_info(MODULE, f"⛔ Excluido del ranking: {sym} {direction} costo mínimo de 1 contrato (${min_contract_cost:.2f}) excede el tope (${cap:.2f}). Se evalúa el siguiente del ranking.")
+            return False
 
         strat_type = "long_call" if direction == "CALL" else "long_put"
         dir_norm = "bullish" if direction == "CALL" else "bearish"
         status = "selected" if rank == 1 else "eligible"
 
-        entry_debit = float(best_contract.ask if best_contract.ask > 0 else best_contract.mid)
         mid_debit = float(best_contract.mid)
-        qty = max(1, best_contract.target_total_contracts)
+        qty = max(1, min(best_contract.target_total_contracts, int(cap / min_contract_cost)))
         cost_total = round(entry_debit * 100 * qty, 2)
+        if cost_total > cap:
+            qty = max(1, int(cap / min_contract_cost))
+            cost_total = round(entry_debit * 100 * qty, 2)
+
         max_loss = cost_total
         max_profit = round(cost_total * 1.50, 2)
         breakeven = round(best_contract.strike + entry_debit if direction == "CALL" else best_contract.strike - entry_debit, 2)
@@ -520,18 +540,43 @@ async def run_stock_driven_options_pipeline(
             ins_res = sb.table("opt_candidates").insert(candidate_payload).execute()
             if ins_res.data:
                 cid = ins_res.data[0]["id"]
-                log_info(MODULE, f"✅ OPORTUNIDAD CARGADA: {sym} {direction} (ID: {cid}, Strike: ${best_contract.strike}, Score: {score}, Status: {status})")
+                log_info(MODULE, f"✅ OPORTUNIDAD CARGADA AL RANKING #{rank}: {sym} {direction} (ID: {cid}, Strike: ${best_contract.strike}, Score: {score}, Status: {status})")
                 selected_options.append({"id": cid, "symbol": sym, "direction": direction, "strike": best_contract.strike, "score": score})
+
+                # ── REGLA 2: DISPARO AUTOMÁTICO UNA VEZ ELEGIBLE O SELECCIONADA ──
+                try:
+                    from app.options.paper_execution import execute_selected_candidate_to_trade
+                    cand_record = ins_res.data[0]
+                    und_dict = {"symbol": sym, "id": uid, "price": p}
+                    executed_pos = execute_selected_candidate_to_trade(sb, cand_record, eff, und=und_dict, now_dt=now_dt)
+                    if executed_pos:
+                        log_info(MODULE, f"🚀 DISPARO AUTOMÁTICO EJECUTADO: {sym} {direction} [{status}] -> Posición creada y orden enviada a TWS")
+                except Exception as e_auto:
+                    log_warning(MODULE, f"Aviso al auto-disparar opción {sym} {direction}: {e_auto}")
+
+                return True
+            return False
         except Exception as e_ins:
             log_error(MODULE, f"Error insertando candidata en opt_candidates para {sym}: {e_ins}")
+            return False
 
-    # Ejecutar carga para los Top CALLs
-    for r, c in enumerate(top_calls, start=1):
-        await process_selected_underlying(c, "CALL", r)
+    # Ejecutar carga para los Top CALLs que respeten el tope de capital
+    rank_call = 1
+    for c in call_candidates:
+        if rank_call > limit_per_direction:
+            break
+        ok = await process_selected_underlying(c, "CALL", rank_call)
+        if ok:
+            rank_call += 1
 
-    # Ejecutar carga para los Top PUTs
-    for r, p in enumerate(top_puts, start=1):
-        await process_selected_underlying(p, "PUT", r)
+    # Ejecutar carga para los Top PUTs que respeten el tope de capital
+    rank_put = 1
+    for p in put_candidates:
+        if rank_put > limit_per_direction:
+            break
+        ok = await process_selected_underlying(p, "PUT", rank_put)
+        if ok:
+            rank_put += 1
 
     # 5. Actualizar Heartbeat del Worker para que la UI muestre WORKER: ONLINE
     try:
