@@ -21,6 +21,7 @@ files_to_copy = [
     "backend/app/stocks/aduana_stocks_exit_engine.py",
     "backend/app/stocks/alpha_runner_scanner.py",
     "backend/app/stocks/bull_expansion_scanner.py",
+    "backend/app/stocks/bear_rollover_scanner.py",
     "backend/app/stocks/catalyst_classifier.py",
     "backend/app/stocks/live_1h_candle_service.py",
     "backend/app/stocks/trap_shield.py",

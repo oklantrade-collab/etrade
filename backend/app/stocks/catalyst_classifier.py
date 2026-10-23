@@ -42,6 +42,15 @@ TIER_2_GROWTH = [
     r'debt elimination', r'litigation settled', r'corexa'
 ]
 
+TIER_1_BEARISH = [
+    r'misses estimates', r'earnings miss', r'revenue miss', r'lowers guidance',
+    r'cuts guidance', r'slashes guidance', r'fda rejects?', r'complete response letter',
+    r'\bcrl\b', r'clinical hold', r'failed trial', r'primary endpoint not met',
+    r'auditor resigns?', r'accounting probe', r'accounting irregularities',
+    r'downgrades? to (sell|underperform)', r'slashes price target', r'cuts price target',
+    r'dividend (cut|suspended)', r'workforce reduction', r'mass layoffs'
+]
+
 
 def classify_catalyst_text(headline: str, summary: str = "") -> dict:
     """Clasifica el texto de un titular o nota de prensa en su respectivo Tier."""
@@ -179,4 +188,83 @@ def analyze_ticker_live_catalyst(ticker: str, news_list: Optional[List[dict]] = 
     """Obtiene noticias en vivo (si no se pasan) y clasifica el catalizador del ticker."""
     items = news_list if news_list else fetch_ticker_news(ticker, max_items=5)
     return analyze_news_items(items)
+
+
+def classify_bearish_catalyst_text(headline: str, summary: str = "") -> dict:
+    """Clasifica si un titular representa un catalizador bajista de alto impacto para PUTs."""
+    combined = f"{headline} {summary}".lower()
+
+    # 1. Toxic / Dilution / Quiebra / Fraude (Tier 0 clásico -> Super Bearish para PUTs)
+    for pattern in TIER_0_TOXIC:
+        if re.search(pattern, combined):
+            return {
+                'tier': 1,
+                'is_bearish': True,
+                'catalyst_name': 'TOXIC_DILUTION_OR_FRAUD',
+                'matched_pattern': pattern,
+                'headline': headline,
+                'impact_score': 95,
+                'reason': f"Catalizador bajista severo de dilución o investigación ({pattern})."
+            }
+
+    # 2. Bearish Operativo / Resultados / Degradación
+    for pattern in TIER_1_BEARISH:
+        if re.search(pattern, combined):
+            return {
+                'tier': 1,
+                'is_bearish': True,
+                'catalyst_name': 'BEARISH_DOWNGRADE_OR_MISS',
+                'matched_pattern': pattern,
+                'headline': headline,
+                'impact_score': 90,
+                'reason': f"Catalizador bajista de deterioro fundamental confirmado ({pattern})."
+            }
+
+    return {
+        'tier': 3,
+        'is_bearish': False,
+        'catalyst_name': 'NO_BEARISH_CATALYST',
+        'matched_pattern': None,
+        'headline': headline,
+        'impact_score': 30,
+        'reason': "Sin catalizador bajista significativo."
+    }
+
+
+def analyze_ticker_live_bearish_catalyst(ticker: str, news_list: Optional[List[dict]] = None) -> dict:
+    """Evalúa noticias recientes buscando catalizadores bajistas activos (<48h)."""
+    import time
+    now_ts = time.time()
+    items = news_list if news_list is not None else fetch_ticker_news(ticker, max_items=6)
+    if not items:
+        return {
+            'tier': 3,
+            'is_bearish': False,
+            'catalyst_name': 'NO_RECENT_NEWS',
+            'headline': 'Sin noticias recientes',
+            'impact_score': 30,
+            'reason': 'Sin feed de noticias en las últimas 24h.'
+        }
+
+    for item in items[:6]:
+        title = item.get('title') or item.get('headline') or ''
+        summary = item.get('summary') or ''
+        pub_time = float(item.get('publish_time') or 0.0)
+        age_hours = ((now_ts - pub_time) / 3600.0) if pub_time > 0 else 0.0
+
+        if pub_time > 0 and age_hours > 48.0:
+            continue
+
+        res = classify_bearish_catalyst_text(title, summary)
+        if res.get('is_bearish'):
+            return res
+
+    return {
+        'tier': 3,
+        'is_bearish': False,
+        'catalyst_name': 'NEUTRAL_NEWS',
+        'headline': 'Sin noticias bajistas',
+        'impact_score': 30,
+        'reason': 'Noticias generales sin sesgo bajista evidente.'
+    }
 

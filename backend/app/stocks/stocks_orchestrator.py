@@ -1170,8 +1170,8 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         order_type = 'market'
         rule_code  = 'APEX_AUTO'
 
-        # Prioridad 0: Bull Expansion Ignition, Early Momentum Runner, Open Gap Runner o VME Expansion
-        if candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('STE_'):
+        # Prioridad 0: Bull Expansion Ignition, Bear Rollover PUT, Early Momentum Runner, Open Gap Runner o VME Expansion
+        if candidate.get('triggered_rule') and (str(candidate.get('triggered_rule')).startswith('STE_') or str(candidate.get('triggered_rule')).startswith('OPT_BEAR_')):
             rule_code = candidate['triggered_rule']
             order_type = 'market'
         elif candidate.get('is_early_momentum') or candidate.get('semaphore') == 'EARLY_MOMENTUM':
@@ -1234,7 +1234,7 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             'group_name':  candidate.get('group_name', ''),
             'close_all':   False,
             'dca_enabled': False,
-            'strategy':    'STE_BULL_EXPANSION' if str(rule_code).startswith('STE_') else ('ADUANA_GAP_RUNNER' if str(rule_code).startswith('GAP_') else ('VME_EXPANSION' if str(rule_code).startswith('VME_') else candidate.get('group_name', ''))),
+            'strategy':    'OPT_BEAR_ROLLOVER' if str(rule_code).startswith('OPT_BEAR_') else ('STE_BULL_EXPANSION' if str(rule_code).startswith('STE_') else ('ADUANA_GAP_RUNNER' if str(rule_code).startswith('GAP_') else ('VME_EXPANSION' if str(rule_code).startswith('VME_') else candidate.get('group_name', '')))),
         }
 
         try:

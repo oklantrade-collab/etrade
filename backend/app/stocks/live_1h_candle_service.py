@@ -298,7 +298,9 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
 
         # Métricas de 15m (Momentum Ladder & Bollinger Bands Expansion)
         is_15m_high_growing = False
+        is_15m_low_breaking = False
         is_15m_bb_breakout = False
+        is_15m_bb_breakdown_lower = False
         is_bb_15m_opening = False
         bb_upper_15m = 0.0
         bb_lower_15m = 0.0
@@ -323,9 +325,12 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                         df_15m.loc[last_15m_idx, "Close"] = current_price
                         if current_price > df_15m.loc[last_15m_idx, "High"]:
                             df_15m.loc[last_15m_idx, "High"] = current_price
+                        if current_price < df_15m.loc[last_15m_idx, "Low"]:
+                            df_15m.loc[last_15m_idx, "Low"] = current_price
 
                     c15 = df_15m["Close"]
                     h15 = df_15m["High"]
+                    l15 = df_15m["Low"]
                     v15 = df_15m["Volume"]
                     sma20_15 = c15.rolling(20, min_periods=3).mean()
                     std20_15 = c15.rolling(20, min_periods=3).std().fillna(0)
@@ -334,14 +339,18 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
 
                     high_15m_cur = float(h15.iloc[-1])
                     prev_high_15m = float(h15.iloc[-2])
+                    low_15m_cur = float(l15.iloc[-1])
+                    prev_low_15m = float(l15.iloc[-2])
                     bb_upper_15m = float(bb_up_15.iloc[-1])
                     bb_lower_15m = float(bb_lo_15.iloc[-1])
 
-                    # a) Velas 15m crecientes (High actual > High vela anterior)
+                    # a) Velas 15m crecientes (High actual > High vela anterior) / decrecientes (Low actual < Low vela anterior)
                     is_15m_high_growing = bool(high_15m_cur > prev_high_15m)
+                    is_15m_low_breaking = bool(low_15m_cur < prev_low_15m)
 
-                    # b) High >= Banda Superior Bollinger 15m
+                    # b) High >= Banda Superior Bollinger 15m / Low <= Banda Inferior
                     is_15m_bb_breakout = bool(high_15m_cur >= bb_upper_15m * 0.998)
+                    is_15m_bb_breakdown_lower = bool(low_15m_cur <= bb_lower_15m * 1.002)
 
                     # c) Bandas Abiertas (Bandas expanding): Superior subiendo e Inferior bajando
                     if len(bb_up_15) >= 2:
@@ -390,7 +399,9 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "gap_up_1h_pct": gap_up_1h_pct,
             # Métricas 15m
             "is_15m_high_growing": is_15m_high_growing,
+            "is_15m_low_breaking": is_15m_low_breaking,
             "is_15m_bb_breakout": is_15m_bb_breakout,
+            "is_15m_bb_breakdown_lower": is_15m_bb_breakdown_lower,
             "is_bb_15m_opening": is_bb_15m_opening,
             "bb_upper_15m": round(bb_upper_15m, 2),
             "bb_lower_15m": round(bb_lower_15m, 2),

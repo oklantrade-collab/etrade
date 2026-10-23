@@ -3082,6 +3082,61 @@ async def start_stocks_scheduler(force=False):
         coalesce=True,
     )
 
+    # 1f. BEAR ROLLOVER PUT SCANNER: cada 10 minutos en horario de mercado
+    async def run_bear_rollover_put_scanner_cycle():
+        is_open, _ = is_market_open()
+        if not is_open:
+            return
+        try:
+            from datetime import date
+            from app.stocks.bear_rollover_scanner import scan_universe_bear_rollover
+            sb = get_supabase()
+
+            today_str = date.today().isoformat()
+            res_wl = sb.table("watchlist_daily").select("ticker").eq("date", today_str).limit(40).execute()
+            wl_tickers = [str(r.get("ticker", "")).upper() for r in (res_wl.data or []) if r.get("ticker")]
+
+            base_optionable = ["SPY", "QQQ", "IWM", "NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AMD", "NFLX", "INTC", "BA", "PYPL", "COIN", "DIS"]
+            universe = list(dict.fromkeys(wl_tickers + base_optionable))
+
+            log_info("STOCKS_SCHEDULER", f"Ejecutando escáner BEAR_ROLLOVER para PUTs en {len(universe)} tickers...")
+            qualified = scan_universe_bear_rollover(universe, max_candidates=5)
+
+            if qualified:
+                log_info("STOCKS_SCHEDULER", f"🔥 Bear Rollover Scanner encontró {len(qualified)} oportunidades de PUTs.")
+                for cand in qualified:
+                    tk = cand["ticker"]
+                    try:
+                        sb.table("stocks_priority_queue").upsert({
+                            "ticker": tk,
+                            "price_at_rank": cand["price"],
+                            "composite_rank": cand["composite_rank"],
+                            "apex_score_4h": cand["composite_rank"],
+                            "apex_score_1d": cand["composite_rank"],
+                            "status": "pending",
+                            "group_name": cand["group_name"],
+                            "entry_reason": cand["entry_reason"],
+                            "triggered_rule": cand["triggered_rule"],
+                            "confidence": cand["confidence"],
+                            "gap_pct": 0.0,
+                            "is_overbought": False,
+                        }, on_conflict="ticker").execute()
+                    except Exception as e_q:
+                        log_debug("STOCKS_SCHEDULER", f"Error encolando Bear Rollover PUT {tk}: {e_q}")
+        except Exception as br_err:
+            log_debug("STOCKS_SCHEDULER", f"Bear Rollover PUT Scanner bypass: {br_err}")
+
+    scheduler.add_job(
+        run_bear_rollover_put_scanner_cycle,
+        trigger=IntervalTrigger(minutes=10),
+        id="bear_rollover_put_scanner",
+        name="Bear Rollover PUT Scanner (10m)",
+        max_instances=1,
+        replace_existing=True,
+        misfire_grace_time=120,
+        coalesce=True,
+    )
+
     # 2. INVERSIÓN PRO: daily at 16:05 ET (5 min after market close)
     scheduler.add_job(
         run_pro_cycle,
