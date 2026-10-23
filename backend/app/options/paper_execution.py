@@ -11,8 +11,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.logger import log_info, log_warning
+from app.core.market_hours import is_market_open
 from app.options import strategies as st
 
+MODULE = "PAPER_EXECUTION"
 MODEL_VERSION = "v1.0-s6"
 
 
@@ -283,6 +286,12 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     de Interactive Brokers (ib_bridge_worker / TWS) las ejecute en el broker.
     """
     now_dt = now_dt or datetime.now(timezone.utc)
+    is_open = is_market_open()
+    market_open = is_open[0] if isinstance(is_open, tuple) else bool(is_open)
+    if not market_open:
+        log_info(MODULE, f"Mercado cerrado. No se ejecutan nuevas posiciones de opciones para candidata {cand.get('id')}")
+        return None
+
     cid = cand["id"]
     uid = cand.get("underlying_id")
 

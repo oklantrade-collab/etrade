@@ -20,6 +20,10 @@ files_to_copy = [
     "backend/app/options/settings_defaults.py",
     "backend/app/options/paper_execution.py",
     "backend/app/options/stock_driven_options_scanner.py",
+    "backend/app/options/exit_engine.py",
+    "backend/app/options/candidates.py",
+    "backend/app/options/worker.py",
+    "backend/app/options/bs.py",
     "backend/app/api/options.py",
 
     # Stocks Orchestration & Cost Basis Buffer Exits

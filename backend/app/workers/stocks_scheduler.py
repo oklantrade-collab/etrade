@@ -2567,6 +2567,12 @@ async def run_options_gap_defense_cycle():
     4. Ejecuta Hard SL (-35%), Stall Guard (20 min), Trailing Ratchet Tier 2/3, Breakeven Shield, VWAP Exit, RSI Climax TP.
     5. Actualiza Stop Loss dinámico monotónico y watermark en opt_paper_trades.
     """
+    from app.core.market_hours import is_market_open
+    res = is_market_open()
+    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    if not is_open:
+        return
+
     sb = get_supabase()
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
@@ -2843,6 +2849,12 @@ async def run_options_auto_execution_cycle():
        - Emite alerta Telegram institucional.
     """
     global _LAST_STOCK_DRIVEN_OPTIONS_TS
+    from app.core.market_hours import is_market_open
+    res = is_market_open()
+    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    if not is_open:
+        return
+
     sb = get_supabase()
     try:
         from app.options import settings_defaults as sd

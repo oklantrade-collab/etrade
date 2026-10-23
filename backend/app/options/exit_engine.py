@@ -481,6 +481,12 @@ def evaluate_position_exit(position: dict[str, Any],
                            now: datetime | None = None,
                            tech_context: dict[str, Any] | None = None) -> tuple[bool, str | None, dict[str, Any]]:
     """Evalua si una posicion debe cerrarse y bajo que motivo."""
+    from app.core.market_hours import is_market_open
+    res = is_market_open()
+    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    if not is_open:
+        return {"open_count": 0, "closed_count": 0, "exits": [], "message": "Market closed, skipping exit evaluations"}
+
     now_dt = now or datetime.now(timezone.utc)
 
     # 1. Mark to market
@@ -521,6 +527,12 @@ def evaluate_position_exit(position: dict[str, Any],
 
 def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     """Recorre todas las posiciones abiertas, actualiza su mark-to-market y ejecuta salidas aprobadas."""
+    from app.core.market_hours import is_market_open
+    res = is_market_open()
+    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    if not is_open:
+        return {"open_count": 0, "closed_count": 0, "exits": [], "message": "Market closed, skipping exit evaluations"}
+
     now_dt = now or datetime.now(timezone.utc)
     try:
         positions = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []

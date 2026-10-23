@@ -312,6 +312,14 @@ async def run_stock_driven_options_pipeline(
     Ejecuta el escaneo de acciones, filtra los top CALLs y PUTs, consulta sus opciones
     y pobla de forma inmediata la tabla opt_candidates con estado 'eligible'/'selected'.
     """
+    from app.core.market_hours import is_market_open
+    res = is_market_open()
+    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    status_txt = res[1] if isinstance(res, tuple) else ("ABIERTO" if is_open else "CERRADO")
+    if not is_open:
+        log_info(MODULE, f"Mercado cerrado ({status_txt}). Omitiendo escaneo y ejecución de opciones.")
+        return {"ok": False, "reason": "Market closed", "status": status_txt}
+
     sb = supabase or get_supabase()
     provider = YFinanceProvider()
     now_dt = datetime.now(timezone.utc)
