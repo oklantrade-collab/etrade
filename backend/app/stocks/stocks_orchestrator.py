@@ -1099,14 +1099,72 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             candidate["tactical_target_ceiling"] = st_regime.get("target_ceiling", price * 1.03)
             log_info(MODULE, f"🟡 {ticker}: COUNTER TREND BOUNCE detectado. Techo dinámico fijado en EMA20 (${st_regime.get('target_ceiling'):.2f}).")
 
-        if is_macro_bearish:
-            has_catalyst = bool(candidate.get('has_news') or candidate.get('snap', {}).get('has_news', False))
-            rvol_val = float(candidate.get('snap', {}).get('rvol', 1.0) or 1.0)
-            is_strong_expansion = bool((candidate.get('is_expansion_runner') or candidate.get('is_early_momentum') or candidate.get('semaphore') == 'EARLY_MOMENTUM') and rvol_val >= 2.5 and candidate.get('snap', {}).get('is_ema3_1h_ascending', True))
-            is_exempt_runner = has_catalyst or is_strong_expansion
-            if not is_exempt_runner:
-                log_info(MODULE, f"⏸️ {ticker}: BLOQUEADA por Filtro Macro Bearish (SP500/Nasdaq cayendo y VIX elevado sin noticia/catalizador institucional).")
+        # ── BLINDAJE ANTI-AGOTAMIENTO Y GAPS FALSOS (Módulos 1, 2, 3, 4, 5, 6) ──
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            live_intraday = get_live_1h_candle_and_sipv(ticker, price)
+
+            c_gap_pct = float(candidate.get('gap_pct') or candidate.get('snap', {}).get('gap_pct', 0.0) or 0.0)
+            c_has_catalyst = bool(candidate.get('has_news') or candidate.get('snap', {}).get('has_news', False))
+            c_cat_tier = int(candidate.get('catalyst_tier') or candidate.get('snap', {}).get('catalyst_tier', 3) or 3)
+            c_rvol = float(candidate.get('snap', {}).get('rvol', 1.0) or candidate.get('rvol', 1.0) or 1.0)
+            c_mcap = float(candidate.get('market_cap') or candidate.get('snap', {}).get('market_cap', 0.0) or 0.0)
+
+            c_day_open = float(live_intraday.get('day_open_price', 0.0))
+            c_vwap = float(live_intraday.get('vwap_intraday', 0.0))
+            c_is_15m_growing = bool(live_intraday.get('is_15m_high_growing', False))
+            c_is_15m_bb_break = bool(live_intraday.get('is_15m_bb_breakout', False))
+            c_is_bb_opening = bool(live_intraday.get('is_bb_15m_opening', False))
+            c_vol_decay = float(live_intraday.get('vol_decay_ratio_15m', 1.0))
+
+            effective_float = (c_mcap / max(0.01, price)) if c_mcap > 0 else 0
+
+            # 1. CANDADO VELA ROJA INTRADÍA (Precio < Open del Día con Gap >= 5%)
+            if c_gap_pct >= 5.0 and c_day_open > 0 and price < c_day_open * 0.998:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VELA ROJA INTRADÍA (Precio ${price:.2f} < Open ${c_day_open:.2f} con Gap +{c_gap_pct:.1f}%).")
+                await _upsert_queue(supabase, candidate, status='blocked')
                 continue
+
+            # 2. CANDADO VWAP INTRADÍA (Anti Bear Flag)
+            if c_gap_pct >= 5.0 and c_vwap > 0 and price < c_vwap * 0.998:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por BEAR FLAG (Precio ${price:.2f} < VWAP ${c_vwap:.2f} con Gap +{c_gap_pct:.1f}%).")
+                await _upsert_queue(supabase, candidate, status='blocked')
+                continue
+
+            # 3. CANDADO GAP SIN CATALIZADOR NI MOMENTUM 15M (Anti Gap & Crap)
+            if c_gap_pct >= 5.0 and not c_has_catalyst and c_cat_tier > 2:
+                has_15m_ladder = (c_is_15m_growing and c_is_15m_bb_break and c_rvol >= 2.5)
+                if not has_15m_ladder:
+                    log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por GAP & CRAP (Gap +{c_gap_pct:.1f}% sin catalizador Tier 1/2 y sin escalera 15m).")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+
+            # 4. CANDADO FLOAT MASIVO EN GAP (Caso QS)
+            if c_gap_pct >= 5.0 and (effective_float >= 50_000_000 or c_mcap >= 1_000_000_000):
+                if c_rvol < 3.5 and c_cat_tier > 1:
+                    log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por FLOAT MASIVO EN GAP ({effective_float/1e6:.1f}M sh, RVOL {c_rvol:.1f}x < 3.5x sin Tier 1).")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+
+            # 5. CANDADO SECADO DE VOLUMEN EN CONSOLIDACIÓN
+            if c_gap_pct >= 5.0 and c_vol_decay < 0.35 and not c_is_15m_growing:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VOLUME DECAY (Vol 15m cayó -{(1-c_vol_decay)*100:.0f}% en consolidación sin nuevo High).")
+                await _upsert_queue(supabase, candidate, status='blocked')
+                continue
+
+            # 6. CANDADO MACRO BEARISH / RISK-OFF
+            if is_macro_bearish:
+                is_alpha_runner = (candidate.get('is_early_momentum') or candidate.get('semaphore') == 'EARLY_MOMENTUM' or c_rvol >= 3.0)
+                is_healthy_tape = (price >= c_vwap * 0.998 and price >= c_day_open * 0.998)
+                is_small_float = (effective_float < 50_000_000 or c_mcap < 250_000_000)
+                is_exempt_bearish = is_alpha_runner and is_healthy_tape and is_small_float and (c_has_catalyst or (c_is_15m_growing and c_is_bb_opening))
+                if not is_exempt_bearish:
+                    log_info(MODULE, f"⏸️ {ticker}: BLOQUEADA por VIENTO EN CONTRA MACRO (Risk-Off. Solo runners descorrelacionados con RVOL >= 3.0x y float pequeño).")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+
+        except Exception as e_anti_ex:
+            log_warning(MODULE, f"Aviso evaluando Blindaje Anti-Agotamiento para {ticker}: {e_anti_ex}")
 
         rule_sig   = candidate.get('rule_signal', {})
         order_type = 'market'

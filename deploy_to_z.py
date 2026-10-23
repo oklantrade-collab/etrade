@@ -22,6 +22,7 @@ files_to_copy = [
     "backend/app/stocks/alpha_runner_scanner.py",
     "backend/app/stocks/catalyst_classifier.py",
     "backend/app/stocks/live_1h_candle_service.py",
+    "backend/app/stocks/trap_shield.py",
     "backend/app/workers/stocks_scheduler.py",
     "backend/app/data/ib_scanner.py",
 

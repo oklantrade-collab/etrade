@@ -97,6 +97,17 @@ def validate_option_candidate_pre_trade(
     legs_analyzed = []
     net_debit_mid = 0.0
 
+    # Regla 0: Filtro Macro Bearish / Risk-Off para Opciones CALL
+    is_call_strategy = any(str(l.get("right") or "C").upper() == "C" and str(l.get("side") or "buy").lower() == "buy" for l in legs)
+    if is_call_strategy:
+        try:
+            from app.core.macro_sentiment_engine import evaluate_macro_sentiment
+            macro_st = evaluate_macro_sentiment()
+            if macro_st.get("regime") == "RISK_OFF" or not macro_st.get("allow_option_calls", True):
+                reasons.append(f"VETO MACRO: Mercado en {macro_st.get('label', 'RISK-OFF')} (SP500/Nasdaq en caída). Prohibido comprar CALLs.")
+        except Exception as e_m_opt:
+            log_warning(MODULE, f"Error evaluando Macro en opciones: {e_m_opt}")
+
     for l in legs:
         stk = float(l.get("strike") or 0.0)
         rgt = str(l.get("right") or "C").upper()

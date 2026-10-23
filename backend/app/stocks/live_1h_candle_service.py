@@ -128,6 +128,13 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         "bb_lower_15m": 0.0,
         "bb_up_slope_15m": 0.0,
         "bb_lo_slope_15m": 0.0,
+        # Métricas Anti-Agotamiento Intradía (VWAP, Open del Día, Volume Decay)
+        "day_open_price": current_price or 0.0,
+        "vwap_intraday": current_price or 0.0,
+        "is_below_vwap": False,
+        "is_below_day_open": False,
+        "vol_decay_ratio_15m": 1.0,
+        "is_vol_decay_trap": False,
     }
 
     try:
@@ -263,6 +270,32 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                 is_last_candle_green = bool(prev_bar["Close"] >= prev_bar["Open"])
                 open_ge_close_prev = bool(curr_bar["Open"] >= (prev_bar["Close"] - 0.01))
 
+        # Métricas Anti-Agotamiento Intradía (VWAP y Open del Día)
+        eff_price = current_price or c_close
+        day_open_price = eff_price
+        vwap_intraday = eff_price
+        if df_5m is not None and not df_5m.empty:
+            today_date = df_5m.index[-1].date()
+            df_today = df_5m[df_5m.index.date == today_date]
+            if len(df_today) >= 1:
+                try:
+                    day_open_price = float(df_today["Open"].iloc[0])
+                    h_t = df_today["High"]
+                    l_t = df_today["Low"]
+                    c_t = df_today["Close"]
+                    v_t = df_today["Volume"]
+                    v_sum = float(v_t.sum())
+                    if v_sum > 0:
+                        typical_t = (h_t + l_t + c_t) / 3.0
+                        vwap_intraday = float((typical_t * v_t).sum() / v_sum)
+                    else:
+                        vwap_intraday = float(c_t.iloc[-1])
+                except Exception as e_vwap:
+                    log_debug(MODULE, f"Error calculando VWAP para {clean_ticker}: {e_vwap}")
+
+        is_below_vwap = bool(vwap_intraday > 0 and eff_price < vwap_intraday * 0.998)
+        is_below_day_open = bool(day_open_price > 0 and eff_price < day_open_price * 0.998)
+
         # Métricas de 15m (Momentum Ladder & Bollinger Bands Expansion)
         is_15m_high_growing = False
         is_15m_bb_breakout = False
@@ -271,6 +304,8 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         bb_lower_15m = 0.0
         bb_up_slope_15m = 0.0
         bb_lo_slope_15m = 0.0
+        vol_decay_ratio_15m = 1.0
+        is_vol_decay_trap = False
 
         if df_5m is not None and not df_5m.empty and len(df_5m) >= 6:
             try:
@@ -291,6 +326,7 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
 
                     c15 = df_15m["Close"]
                     h15 = df_15m["High"]
+                    v15 = df_15m["Volume"]
                     sma20_15 = c15.rolling(20, min_periods=3).mean()
                     std20_15 = c15.rolling(20, min_periods=3).std().fillna(0)
                     bb_up_15 = sma20_15 + 2.0 * std20_15
@@ -312,6 +348,12 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                         bb_up_slope_15m = float(bb_up_15.iloc[-1] - bb_up_15.iloc[-2])
                         bb_lo_slope_15m = float(bb_lo_15.iloc[-1] - bb_lo_15.iloc[-2])
                         is_bb_15m_opening = bool(bb_up_slope_15m > 0 and bb_lo_slope_15m < 0)
+
+                    # d) Volume Decay: Caída drástica de volumen en consolidación
+                    cur_vol_15 = float(v15.iloc[-1])
+                    prev_vol_15 = float(v15.iloc[-2]) if len(v15) >= 2 else cur_vol_15
+                    vol_decay_ratio_15m = round(cur_vol_15 / max(1.0, prev_vol_15), 2)
+                    is_vol_decay_trap = bool(vol_decay_ratio_15m < 0.40 and not is_15m_high_growing)
             except Exception as e_15m:
                 log_debug(MODULE, f"Error calculando métricas 15m para {clean_ticker}: {e_15m}")
 
@@ -354,6 +396,13 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "bb_lower_15m": round(bb_lower_15m, 2),
             "bb_up_slope_15m": round(bb_up_slope_15m, 4),
             "bb_lo_slope_15m": round(bb_lo_slope_15m, 4),
+            # Métricas Anti-Agotamiento Intradía (VWAP, Open del Día, Volume Decay)
+            "day_open_price": round(day_open_price, 2),
+            "vwap_intraday": round(vwap_intraday, 3),
+            "is_below_vwap": is_below_vwap,
+            "is_below_day_open": is_below_day_open,
+            "vol_decay_ratio_15m": vol_decay_ratio_15m,
+            "is_vol_decay_trap": is_vol_decay_trap,
         }
 
         _1H_CACHE[clean_ticker] = {"timestamp": now_ts, "data": result}

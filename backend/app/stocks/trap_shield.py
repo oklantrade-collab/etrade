@@ -189,6 +189,12 @@ def evaluate_trap_shield(
     adr_pct: float = 4.0,
     consumed_pct: float = 30.0,
     bands_15m: Optional[dict] = None,
+    is_15m_high_growing: bool = False,
+    is_15m_bb_breakout: bool = False,
+    is_bb_15m_opening: bool = False,
+    vol_decay_ratio_15m: float = 1.0,
+    float_shares: float = 0.0,
+    market_cap: float = 0.0,
 ) -> dict:
     """
     EVALUADOR PRINCIPAL: TRAP SHIELD & INTRADAY ALPHA CANDIDATE
@@ -291,16 +297,13 @@ def evaluate_trap_shield(
                 'vwap': round(vwap, 3)
             }
 
-    # TRAMPA 3: COTIZA CLARAMENTE POR DEBAJO DEL VWAP CON GAP ALTO
-    if gap_pct >= 20.0 and is_below_vwap:
-        # Si está en recuperación ORB y el precio actual ya superó el Open o está sobre/cerca de VWAP
-        if orb_info.get('orb_bullish_recovery', False) or (current_price >= eff_open * 0.998):
-            log_info(MODULE, f"🟢 Excepción Below VWAP: En recuperación ORB superando Open (${eff_open:.2f}). Veto anulado.")
-        else:
+    # TRAMPA 3: VELA ROJA INTRADÍA QUE PERFORA EL OPEN DEL DÍA (GAP >= 5% FALLIDO)
+    if gap_pct >= 5.0 and current_price < eff_open * 0.998:
+        if not orb_info.get('orb_bullish_recovery', False):
             return {
                 'is_trap': True,
-                'trap_type': 'BELOW_VWAP',
-                'trap_reason': f"Precio (${current_price:.2f}) bajo VWAP (${vwap:.2f}) con Gap de +{gap_pct:.1f}%. Compradores atrapados.",
+                'trap_type': 'RED_DAILY_CANDLE_BELOW_OPEN',
+                'trap_reason': f"Gap Fallido: Precio (${current_price:.2f}) cotiza bajo Open del día (${eff_open:.2f}) con Gap de +{gap_pct:.1f}%. Vela diaria roja.",
                 'gap_pct': round(gap_pct, 1),
                 'is_sweet_spot': False,
                 'is_intraday_alpha': False,
@@ -308,6 +311,67 @@ def evaluate_trap_shield(
                 'priority_rank_boost': 0.0,
                 'vwap': round(vwap, 3)
             }
+
+    # TRAMPA 4: COTIZA POR DEBAJO DEL VWAP CON GAP >= 5% (BEAR FLAG EN CONSOLIDACIÓN)
+    if gap_pct >= 5.0 and is_below_vwap:
+        if not (orb_info.get('orb_bullish_recovery', False) and current_price >= eff_open):
+            return {
+                'is_trap': True,
+                'trap_type': 'BELOW_VWAP_BEAR_FLAG',
+                'trap_reason': f"Bear Flag: Precio (${current_price:.2f}) bajo VWAP (${vwap:.2f}) con Gap de +{gap_pct:.1f}%. Consolidación bajista.",
+                'gap_pct': round(gap_pct, 1),
+                'is_sweet_spot': False,
+                'is_intraday_alpha': False,
+                'growth_potential_pct': growth_potential_pct,
+                'priority_rank_boost': 0.0,
+                'vwap': round(vwap, 3)
+            }
+
+    # TRAMPA 5: GAP >= 5% SIN CATALIZADOR NI MOMENTUM 15M (ANTI GAP & CRAP - CASO QS/ZURA/BDN)
+    if gap_pct >= 5.0 and news_tier > 2:
+        has_momentum_15m_ladder = bool(is_15m_high_growing and is_15m_bb_breakout and rvol >= 2.5)
+        if not has_momentum_15m_ladder:
+            return {
+                'is_trap': True,
+                'trap_type': 'GAP_NO_CATALYST_NO_MOMENTUM',
+                'trap_reason': f"Gap & Crap: Gap (+{gap_pct:.1f}%) sin catalizador de impacto (Tier={news_tier}) y sin escalera de momentum 15m. 80% probabilidad de fade.",
+                'gap_pct': round(gap_pct, 1),
+                'is_sweet_spot': False,
+                'is_intraday_alpha': False,
+                'growth_potential_pct': growth_potential_pct,
+                'priority_rank_boost': 0.0,
+                'vwap': round(vwap, 3)
+            }
+
+    # TRAMPA 6: FLOAT MASIVO CON GAP DESINFLÁNDOSE (CASO QS)
+    effective_float = float_shares if float_shares > 0 else ((market_cap / max(0.01, current_price)) if market_cap > 0 else 0)
+    if gap_pct >= 5.0 and (effective_float >= 50_000_000 or market_cap >= 1_000_000_000):
+        if rvol < 3.5 and news_tier > 1:
+            return {
+                'is_trap': True,
+                'trap_type': 'LARGE_FLOAT_GAP_FADE',
+                'trap_reason': f"Float Masivo ({effective_float/1e6:.1f}M sh) con Gap (+{gap_pct:.1f}%). Requiere catalizador Tier 1 y RVOL >= 3.5x para sostenerse (Caso QS).",
+                'gap_pct': round(gap_pct, 1),
+                'is_sweet_spot': False,
+                'is_intraday_alpha': False,
+                'growth_potential_pct': growth_potential_pct,
+                'priority_rank_boost': 0.0,
+                'vwap': round(vwap, 3)
+            }
+
+    # TRAMPA 7: SECADO SEVERO DE VOLUMEN EN CONSOLIDACIÓN (VOLUME DECAY TRAP)
+    if gap_pct >= 5.0 and vol_decay_ratio_15m < 0.35 and not is_15m_high_growing:
+        return {
+            'is_trap': True,
+            'trap_type': 'VOLUME_DECAY_IN_CONSOLIDATION',
+            'trap_reason': f"Secado de Volumen: Volumen de 15m cayó -{(1-vol_decay_ratio_15m)*100:.0f}% en consolidación sin marcar nuevo High. Esperar vela de ruptura.",
+            'gap_pct': round(gap_pct, 1),
+            'is_sweet_spot': False,
+            'is_intraday_alpha': False,
+            'growth_potential_pct': growth_potential_pct,
+            'priority_rank_boost': 0.0,
+            'vwap': round(vwap, 3)
+        }
 
     # ════════════════════════════════════════════════════════════
     # ZONA DE ORO (SWEET SPOT) & ALTA PRIORIDAD INTRADÍA
