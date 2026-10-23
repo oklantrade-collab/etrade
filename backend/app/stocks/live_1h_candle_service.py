@@ -118,6 +118,16 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         "rsi_5m": 55.0,
         "is_last_candle_green": True,
         "open_ge_close_prev": True,
+        # Métricas 15m & Gap Up
+        "is_1h_gap_up": False,
+        "gap_up_1h_pct": 0.0,
+        "is_15m_high_growing": False,
+        "is_15m_bb_breakout": False,
+        "is_bb_15m_opening": False,
+        "bb_upper_15m": 0.0,
+        "bb_lower_15m": 0.0,
+        "bb_up_slope_15m": 0.0,
+        "bb_lo_slope_15m": 0.0,
     }
 
     try:
@@ -253,6 +263,58 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                 is_last_candle_green = bool(prev_bar["Close"] >= prev_bar["Open"])
                 open_ge_close_prev = bool(curr_bar["Open"] >= (prev_bar["Close"] - 0.01))
 
+        # Métricas de 15m (Momentum Ladder & Bollinger Bands Expansion)
+        is_15m_high_growing = False
+        is_15m_bb_breakout = False
+        is_bb_15m_opening = False
+        bb_upper_15m = 0.0
+        bb_lower_15m = 0.0
+        bb_up_slope_15m = 0.0
+        bb_lo_slope_15m = 0.0
+
+        if df_5m is not None and not df_5m.empty and len(df_5m) >= 6:
+            try:
+                df_15m = df_5m.resample("15min").agg({
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum"
+                }).dropna()
+
+                if len(df_15m) >= 3:
+                    if current_price and current_price > 0:
+                        last_15m_idx = df_15m.index[-1]
+                        df_15m.loc[last_15m_idx, "Close"] = current_price
+                        if current_price > df_15m.loc[last_15m_idx, "High"]:
+                            df_15m.loc[last_15m_idx, "High"] = current_price
+
+                    c15 = df_15m["Close"]
+                    h15 = df_15m["High"]
+                    sma20_15 = c15.rolling(20, min_periods=3).mean()
+                    std20_15 = c15.rolling(20, min_periods=3).std().fillna(0)
+                    bb_up_15 = sma20_15 + 2.0 * std20_15
+                    bb_lo_15 = sma20_15 - 2.0 * std20_15
+
+                    high_15m_cur = float(h15.iloc[-1])
+                    prev_high_15m = float(h15.iloc[-2])
+                    bb_upper_15m = float(bb_up_15.iloc[-1])
+                    bb_lower_15m = float(bb_lo_15.iloc[-1])
+
+                    # a) Velas 15m crecientes (High actual > High vela anterior)
+                    is_15m_high_growing = bool(high_15m_cur > prev_high_15m)
+
+                    # b) High >= Banda Superior Bollinger 15m
+                    is_15m_bb_breakout = bool(high_15m_cur >= bb_upper_15m * 0.998)
+
+                    # c) Bandas Abiertas (Bandas expanding): Superior subiendo e Inferior bajando
+                    if len(bb_up_15) >= 2:
+                        bb_up_slope_15m = float(bb_up_15.iloc[-1] - bb_up_15.iloc[-2])
+                        bb_lo_slope_15m = float(bb_lo_15.iloc[-1] - bb_lo_15.iloc[-2])
+                        is_bb_15m_opening = bool(bb_up_slope_15m > 0 and bb_lo_slope_15m < 0)
+            except Exception as e_15m:
+                log_debug(MODULE, f"Error calculando métricas 15m para {clean_ticker}: {e_15m}")
+
         result = {
             "ticker": clean_ticker,
             "is_ema3_1h_ascending": is_ascending,
@@ -284,6 +346,14 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "open_ge_close_prev": open_ge_close_prev,
             "is_1h_gap_up": is_1h_gap_up,
             "gap_up_1h_pct": gap_up_1h_pct,
+            # Métricas 15m
+            "is_15m_high_growing": is_15m_high_growing,
+            "is_15m_bb_breakout": is_15m_bb_breakout,
+            "is_bb_15m_opening": is_bb_15m_opening,
+            "bb_upper_15m": round(bb_upper_15m, 2),
+            "bb_lower_15m": round(bb_lower_15m, 2),
+            "bb_up_slope_15m": round(bb_up_slope_15m, 4),
+            "bb_lo_slope_15m": round(bb_lo_slope_15m, 4),
         }
 
         _1H_CACHE[clean_ticker] = {"timestamp": now_ts, "data": result}

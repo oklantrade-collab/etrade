@@ -92,7 +92,11 @@ def calculate_semaphore_and_buying_force(
     open_ge_close: bool = True,
     room_to_bb_upper_1d: Optional[float] = None,
     sma20_1d: Optional[float] = None,
-    is_1h_gap_up: bool = False
+    is_1h_gap_up: bool = False,
+    gap_up_1h_pct: float = 0.0,
+    is_15m_high_growing: bool = False,
+    is_15m_bb_breakout: bool = False,
+    is_bb_15m_opening: bool = False,
 ) -> Dict[str, Any]:
     """
     Calcula la Fuerza Compradora (0-100), Semáforo Visual y Rank Score:
@@ -141,10 +145,21 @@ def calculate_semaphore_and_buying_force(
         penalty_5m = min(40.0, abs(delta_p_5m) * 15.0)
         raw_buying_force -= penalty_5m
 
-    # Castigo severo si la EMA3 de 1H está plana o descendente:
-    if not is_ema3_1h_ascending:
+    # ── DETECCIÓN TEMPRANA DE RUNNERS (RVOL >= 2.5x + RUTA A o RUTA B) ──
+    has_institutional_rvol = (rvol >= 2.5)
+
+    # RUTA A: Velas 15m crecientes (High > High anterior) y perforando BB Upper 15m
+    path_a_15m = bool(is_15m_high_growing and is_15m_bb_breakout)
+
+    # RUTA B: Open Gap Up en 1 Hora
+    path_b_1h = bool(is_1h_gap_up)
+
+    is_early_momentum_trigger = has_institutional_rvol and (path_a_15m or path_b_1h) and not sipv_upper_rejection
+
+    # Castigo severo si la EMA3 de 1H está plana o descendente (salvo Early Momentum comprobado):
+    if not is_ema3_1h_ascending and not is_early_momentum_trigger:
         raw_buying_force = min(raw_buying_force * 0.5, 30.0)
-    elif not is_ema3_above_ema9:
+    elif not is_ema3_above_ema9 and not is_early_momentum_trigger:
         # TAREA 3: Si hay ignición institucional explosiva (RVOL >= 3.0x) con EMA3 de 1H subiendo activamente,
         # NO topar a 45 pts; añadir bonus institucional y permitir que la fuerza compradora refleje el rally de reversión Día 1:
         if rvol >= 3.0 and is_ema3_1h_ascending and (ema3_slope_1h > 0.02 or change_pct >= 5.0):
@@ -152,6 +167,12 @@ def calculate_semaphore_and_buying_force(
             raw_buying_force = min(raw_buying_force, 85.0)
         else:
             raw_buying_force = min(raw_buying_force, 45.0)
+
+    # Si es Early Momentum con RVOL institucional masivo, asegurar alta fuerza compradora:
+    if is_early_momentum_trigger:
+        raw_buying_force = max(raw_buying_force, 75.0) + min(15.0, rvol * 2.0)
+        raw_buying_force = min(raw_buying_force, 95.0)
+
     has_room_to_bb = (room_to_bb_upper_1d is not None and room_to_bb_upper_1d >= 20.0)
     is_super_runner_expansion = (
         gap_pct is not None and gap_pct >= 5.0 and has_room_to_bb and rvol >= 1.5 and plus_di_5m >= minus_di_5m
@@ -168,8 +189,31 @@ def calculate_semaphore_and_buying_force(
     buying_force = int(round(min(100.0, max(5.0, raw_buying_force))))
 
     # 5. Determinación del Semáforo Visual y Ajuste al Ranking
+    # CASO 0: EARLY MOMENTUM RUNNER (RUTA A: 15m BB BREAKOUT / BANDAS ABIERTAS O RUTA B: 1H GAP UP CON RVOL >= 2.5x)
+    # Prioridad máxima sobre EMA3/EMA9 lenta para capturar el runner en su 1ª o 2ª vela
+    if is_early_momentum_trigger:
+        semaphore = "EARLY_MOMENTUM"
+        if path_a_15m and is_bb_15m_opening:
+            sem_label = f"🟢 EARLY RUNNER (BB OPENING & RVOL {rvol:.1f}x)"
+            sem_color = "#10B981"
+            sem_tip = (
+                f"Expansión explosiva 15m: Bandas abiertas (Sup+ / Inf-), "
+                f"High creciente perforando BB Upper con RVOL {rvol:.1f}x. "
+                f"Confirmación máxima de tendencia alcista en vela 1-2. COMPRA PRIORITARIA."
+            )
+            setup_bonus = 40.0
+        elif path_a_15m:
+            sem_label = f"🟢 EARLY RUNNER (15M LADDER RVOL {rvol:.1f}x)"
+            sem_color = "#10B981"
+            sem_tip = f"Momentum 15m confirmado: High creciente superando BB Upper con RVOL {rvol:.1f}x. COMPRA HABILITADA."
+            setup_bonus = 35.0
+        else:
+            sem_label = f"🟢 EARLY RUNNER (1H GAP UP RVOL {rvol:.1f}x)"
+            sem_color = "#10B981"
+            sem_tip = f"Apertura 1H Gap Up (+{gap_up_1h_pct:.1f}%) con RVOL {rvol:.1f}x. Entrada en cambio de hora sin esperar consolidación. COMPRA HABILITADA."
+            setup_bonus = 35.0
     # CASO A: EMA3 DE 1H PLANA O DESCENDENTE (Prioridad de bloqueo)
-    if not is_ema3_1h_ascending:
+    elif not is_ema3_1h_ascending:
         semaphore = "DESCENDING"
         sem_label = "🔴 EMA3 1H DESCENDENTE (AGOTAMIENTO)"
         sem_color = "#EF4444"
@@ -195,13 +239,6 @@ def calculate_semaphore_and_buying_force(
         sem_label = f"🟢 SUPER-RUNNER EXPANSION (+{room_to_bb_upper_1d:.0f}% A BB 1D)"
         sem_color = "#10B981"
         sem_tip = f"Open Gap Up (+{gap_pct:.1f}%) con autopista libre hasta la Banda Superior de Bollinger 1D (+{room_to_bb_upper_1d:.1f}%). Reversión desde el fondo confirmada con RVOL {rvol:.1f}x. COMPRA HABILITADA."
-        setup_bonus = 35.0
-    # CASO A.2.8: EARLY MOMENTUM RUNNER (OPEN GAP UP HORARIO O IMPULSO CON RVOL MASIVO)
-    elif (is_1h_gap_up and rvol >= 2.0) or (is_ema3_1h_ascending and is_ema3_above_ema9 and rvol >= 2.5 and change_pct >= 5.0 and dist_from_high_pct <= 15.0):
-        semaphore = "EARLY_MOMENTUM"
-        sem_label = f"🟢 EARLY MOMENTUM RUNNER (RVOL {rvol:.1f}x)"
-        sem_color = "#10B981"
-        sem_tip = f"Impulso temprano confirmado: 1H Gap Up o aceleración EMA3 con RVOL {rvol:.1f}x. COMPRA HABILITADA sin esperar 45 min."
         setup_bonus = 35.0
     # CASO A.3: CANDADO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA)
     elif gap_pct is not None and gap_pct > 25.0:
@@ -372,6 +409,10 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 room_to_bb_upper_1d=room_to_bb,
                 sma20_1d=sma20_1d,
                 is_1h_gap_up=live_1h.get("is_1h_gap_up", False),
+                gap_up_1h_pct=live_1h.get("gap_up_1h_pct", 0.0),
+                is_15m_high_growing=live_1h.get("is_15m_high_growing", False),
+                is_15m_bb_breakout=live_1h.get("is_15m_bb_breakout", False),
+                is_bb_15m_opening=live_1h.get("is_bb_15m_opening", False),
             )
 
             candidates.append({
@@ -400,6 +441,11 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "is_expansion_runner": (metrics["semaphore"] == "EXPANSION_RUNNER"),
                 "is_early_momentum": (metrics["semaphore"] == "EARLY_MOMENTUM"),
                 "is_momentum_runner": (metrics["semaphore"] in ("EARLY_MOMENTUM", "EXPANSION_RUNNER", "SWEET_SPOT")),
+                "is_15m_high_growing": live_1h.get("is_15m_high_growing", False),
+                "is_15m_bb_breakout": live_1h.get("is_15m_bb_breakout", False),
+                "is_bb_15m_opening": live_1h.get("is_bb_15m_opening", False),
+                "bb_upper_15m": live_1h.get("bb_upper_15m", 0.0),
+                "bb_lower_15m": live_1h.get("bb_lower_15m", 0.0),
                 # Vela 1H en Formación & SIPV + 5m
                 "is_ema3_1h_ascending": live_1h.get("is_ema3_1h_ascending", True),
                 "is_ema3_1h_descending": live_1h.get("is_ema3_1h_descending", False),

@@ -1916,12 +1916,14 @@ async def run_stocks_cycle(force=False):
                 has_news = bool(g.get("has_news", False))
                 is_ema3_asc = bool(g.get("is_ema3_1h_ascending", True))
 
-                # TAREA 1 & 2: Filtro Calificado Estándar o Low-Float Explosivo:
+                # TAREA 1 & 2: Filtro Calificado Estándar, Low-Float Explosivo o Early Momentum Runner:
                 # Estándar: Vol >= 1M, MCap >= $25M, BF >= 65, EMA3 1H ascendente
                 is_standard_runner = (vol >= 1_000_000 and mcap >= 25_000_000 and bf >= 65.0 and is_ema3_asc)
                 # Low-float: Requiere mínimo 500k volumen, RVOL >= 3.0x, Chg >= +6%, BF >= 70 y EMA3 1H ascendente
                 is_low_float_runner = (vol >= 500_000 and rvol_val >= 3.0 and chg >= 6.0 and mcap >= 25_000_000 and bf >= 70.0 and is_ema3_asc)
-                if not (sym and (is_standard_runner or is_low_float_runner)):
+                # Early Momentum Runner: 15m BB Breakout / Bandas Abiertas o 1H Gap Up con RVOL >= 2.5x
+                is_early_runner = bool(g.get("is_early_momentum", False)) and vol >= 300_000 and rvol_val >= 2.5 and bf >= 65.0
+                if not (sym and (is_standard_runner or is_low_float_runner or is_early_runner)):
                     continue
 
                 # ── FILTRO HORARIO INTELIGENTE (CICLO DE VIDA DEL MOMENTUM) ──
@@ -1929,10 +1931,11 @@ async def run_stocks_cycle(force=False):
                 # PERO se permiten dos excepciones críticas que renuevan el ciclo:
                 # 1. Ignición Intradía Nueva: RVOL >= 3.0x, BF >= 75, Var >= +12% o Noticia relevante de impacto
                 # 2. Ruptura de Consolidación Base 1H (Leg-2 Breakout): EMA3 1H ascendente, BF >= 70 y RVOL >= 2.0x
+                # 3. Early Momentum Runner fresco (Velas 15m crecientes o 1H Gap Up)
                 if is_post_lunch:
                     is_midday_ignition = (rvol_val >= 3.0 and bf >= 75.0 and chg >= 12.0) or (has_news and bf >= 70.0)
                     is_leg2_breakout = (is_ema3_asc and bf >= 70.0 and rvol_val >= 2.0)
-                    if not (is_midday_ignition or is_leg2_breakout):
+                    if not (is_midday_ignition or is_leg2_breakout or is_early_runner):
                         log_debug(MODULE, f"⏳ Filtro Horario: {sym} descartado post 12:30 ET (Ciclo matutino agotado sin ruptura fresca).")
                         continue
 

@@ -19,6 +19,11 @@ files_to_copy = [
     "backend/app/stocks/stocks_order_executor.py",
     "backend/app/stocks/stocks_adaptive_tp_v2.py",
     "backend/app/stocks/aduana_stocks_exit_engine.py",
+    "backend/app/stocks/alpha_runner_scanner.py",
+    "backend/app/stocks/catalyst_classifier.py",
+    "backend/app/stocks/live_1h_candle_service.py",
+    "backend/app/workers/stocks_scheduler.py",
+    "backend/app/data/ib_scanner.py",
 
     # IBKR Bridge Worker (APOLO TWS Bridge + LMT Shield + Slippage Reconciliation)
     "backend/app/workers/ib_bridge_worker.py",
