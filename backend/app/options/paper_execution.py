@@ -145,16 +145,19 @@ def simulate_exit_fill(position: dict[str, Any],
                        eff: dict[str, Any],
                        exit_reason: str,
                        adverse: bool = False,
-                       now: datetime | None = None) -> ExitExecutionResult:
-    """Simula la salida conservadora (cierre) de una posicion.
+                       now: datetime | None = None,
+                       qty_override: int | None = None) -> ExitExecutionResult:
+    """Simula la salida conservadora (cierre total o parcial) de una posicion.
     Invierte cada pierna:
       - Pierna abierta como 'buy' se cierra con 'sell' al bid - slippage.
       - Pierna abierta como 'sell' se cierra con 'buy' al ask + slippage.
     """
     now_dt = now or datetime.now(timezone.utc)
     entry_fills = position.get("entry_fills") or []
-    qty = int(position.get("qty") or 1)
-    total_invested = float(position.get("entry_total_invested") or 0.0)
+    pos_qty = int(position.get("qty") or 1)
+    qty = qty_override if qty_override is not None else pos_qty
+    total_invested_full = float(position.get("entry_total_invested") or 0.0)
+    invested_portion = round(total_invested_full * (qty / max(1, pos_qty)), 2)
 
     slip_param = "slippage_adverse" if adverse else "slippage_normal"
     slip_mult = float(eff.get(slip_param) or (0.03 if adverse else 0.01))
@@ -209,7 +212,7 @@ def simulate_exit_fill(position: dict[str, Any],
     exit_credit = round(total_credit, 4)
     # Total recuperado neto de comisiones de salida
     total_recovered = round(exit_credit * 100.0 * qty - exit_costs, 2)
-    realized_pnl = round(total_recovered - total_invested, 2)
+    realized_pnl = round(total_recovered - invested_portion, 2)
 
     return ExitExecutionResult(
         exit_credit=exit_credit,

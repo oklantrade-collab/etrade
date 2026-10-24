@@ -232,6 +232,23 @@ export default function OptionsPositions() {
           >
             Historial / Cerradas ({summary?.closed_positions ?? items.filter(i => i.status === 'closed').length})
           </button>
+
+          {tab === 'open' && (
+            <span style={{
+              fontSize: 11,
+              padding: '4px 10px',
+              borderRadius: 6,
+              background: (summary?.open_positions ?? items.length) >= 3 ? 'rgba(239, 68, 68, 0.15)' : 'rgba(34, 197, 94, 0.15)',
+              color: (summary?.open_positions ?? items.length) >= 3 ? '#EF4444' : '#22C55E',
+              border: '1px solid currentColor',
+              fontWeight: 700,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5
+            }}>
+              🎯 Slots Activos: {summary?.open_positions ?? items.length} / 3 {(summary?.open_positions ?? items.length) >= 3 ? '(Cupo Lleno)' : `(${3 - (summary?.open_positions ?? items.length)} Libres)`}
+            </span>
+          )}
         </div>
 
         {loading && <div style={{ color: '#888', fontSize: 12, padding: '20px 0', textAlign: 'center' }}>Cargando posiciones…</div>}
@@ -280,7 +297,14 @@ export default function OptionsPositions() {
                     style={{ cursor: 'pointer', background: sel === p.id ? 'rgba(255,255,255,0.03)' : 'transparent' }}
                   >
                     <td style={{ ...td, color: '#FFF', fontWeight: 700 }}>
-                      <div>{p.symbol}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>{p.symbol}</span>
+                        {p.exit_plan?.partial_tp_taken && (
+                          <span style={{ fontSize: 9, color: '#22C55E', background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.3)', padding: '1px 5px', borderRadius: 4 }}>
+                            ⚡ 50% TP TOMADO
+                          </span>
+                        )}
+                      </div>
                       {p.exit_plan?.stop_loss_underlying > 0 && (
                         <div style={{ fontSize: 9, color: '#FFA726', fontWeight: 500, marginTop: 2 }}>
                           🛡️ SL: ${n(p.exit_plan.stop_loss_underlying)} ({p.exit_plan.trailing_sl_type})

@@ -60,28 +60,42 @@ def evaluate_stock_for_options_triggers(
     news_items: Optional[list] = None
 ) -> Dict[str, Any]:
     """
-    Evalúa si una acción cumple con los 3 disparadores institucionales para CALL o PUT.
-    Retorna un diccionario detallado con las métricas, puntajes y calificación.
+    Evalúa si una acción cumple con los 4 disparadores institucionales para CALL o PUT:
+      1. Giro MTF (15m EMA20 Filtro + 5m EMA3/EMA9 Giro de Retroceso)
+      2. Ruptura ORB 15M (Opening Range Breakout)
+      3. VWAP Dinámico (Reclaim / Reject)
+      4. Gap & Go Intradía (Open Gap Up >= +1.5% o Down <= -1.5% con RVOL >= 2.0x)
+    Aplica el Motor de Catalizadores (Tier 1/2 multiplicador, Tier 0 veto para CALLs)
+    y calcula la proyección probabilística P(Touch) Intradía y R:R Estructural.
     """
     sym = symbol.strip().upper()
     res: Dict[str, Any] = {
         "symbol": sym,
         "is_qualified": False,
-        "recommended_direction": None,   # 'CALL' | 'PUT' | None
+        "recommended_direction": None,
         "score": 0.0,
         "triggers_fired": [],
-        "regime_info": {},
+        "reason": "",
         "metrics": {},
-        "reason": ""
+        "catalyst_info": {},
+        "p_touch_day_pct": 50.0,
+        "expected_rr": 1.5,
     }
 
-    if df_5m is None or df_5m.empty or len(df_5m) < 10:
-        res["reason"] = "Datos de 5m insuficientes"
+    if df_5m is None or df_15m is None or len(df_5m) < 10 or len(df_15m) < 5:
+        res["reason"] = "Datos OHLCV insuficientes para análisis multi-timeframe"
         return res
 
-    if df_15m is None or df_15m.empty or len(df_15m) < 8:
-        res["reason"] = "Datos de 15m insuficientes"
-        return res
+    # ─────────────────────────────────────────────────────────────
+    # 1. STRUCTURAL REGIME ENGINE & NIVELES ESTRUCTURALES
+    # ─────────────────────────────────────────────────────────────
+    st_reg = evaluate_structural_regime(df_1d, df_15m, df_5m)
+    regime_code = st_reg.get("regime_code", "UNKNOWN")
+
+    c15 = _safe_col(df_15m, "close")
+    o15 = _safe_col(df_15m, "open")
+    h15 = _safe_col(df_15m, "high")
+    l15 = _safe_col(df_15m, "low")
 
     c5 = _safe_col(df_5m, "close")
     o5 = _safe_col(df_5m, "open")
@@ -89,215 +103,241 @@ def evaluate_stock_for_options_triggers(
     l5 = _safe_col(df_5m, "low")
     v5 = _safe_col(df_5m, "volume")
 
-    c15 = _safe_col(df_15m, "close")
-    o15 = _safe_col(df_15m, "open")
-    h15 = _safe_col(df_15m, "high")
-    l15 = _safe_col(df_15m, "low")
-    v15 = _safe_col(df_15m, "volume")
-
     cur_price = float(c5.iloc[-1])
-    if cur_price <= 0:
-        res["reason"] = "Precio inválido"
-        return res
+    c5_last = float(c5.iloc[-1])
+    o5_last = float(o5.iloc[-1])
+    is_candle_green_5m = c5_last >= o5_last
+    is_candle_red_5m = c5_last < o5_last
 
-    # ─────────────────────────────────────────────────────────────
-    # 1. EVALUACIÓN DE RÉGIMEN ESTRUCTURAL 1D
-    # ─────────────────────────────────────────────────────────────
-    st_reg = evaluate_structural_regime(sym, cur_price, df_1d=df_1d)
-    regime_code = st_reg.get("regime_code", "NEUTRAL")
-    target_wall = float(st_reg.get("target_resistance_wall") or 0.0)
-    target_ceiling = float(st_reg.get("target_ceiling") or 0.0)
-    target_floor = float(st_reg.get("key_levels_1d", {}).get("bb_lower") or 0.0)
-    room_up_pct = float(st_reg.get("room_to_bb_upper_pct") or 0.0)
-    room_wall_pct = float(st_reg.get("room_to_resistance_pct") or 0.0)
+    # Filtro de Tendencia Mayor en 15m (EMA20 de 15m)
+    ema20_15m_s = c15.ewm(span=20, adjust=False).mean()
+    cur_ema20_15m = float(ema20_15m_s.iloc[-1])
+    prev_ema20_15m = float(ema20_15m_s.iloc[-2]) if len(ema20_15m_s) >= 2 else cur_ema20_15m
+    ema20_15m_slope = ((cur_ema20_15m - prev_ema20_15m) / (prev_ema20_15m + 1e-6)) * 100.0
 
-    # ─────────────────────────────────────────────────────────────
-    # 2. DISPARADOR 1: DUAL-TIMEFRAME EMA3/EMA9 + VWAP + BOLLINGER
-    # ─────────────────────────────────────────────────────────────
-    # 15m Macro Slope
+    # Medias Rápidas en 15m
     ema3_15m_s = c15.ewm(span=3, adjust=False).mean()
     ema9_15m_s = c15.ewm(span=9, adjust=False).mean()
     cur_ema3_15m = float(ema3_15m_s.iloc[-1])
-    prev_ema3_15m = float(ema3_15m_s.iloc[-2]) if len(ema3_15m_s) >= 2 else cur_ema3_15m
     cur_ema9_15m = float(ema9_15m_s.iloc[-1])
+    prev_ema3_15m = float(ema3_15m_s.iloc[-2]) if len(ema3_15m_s) >= 2 else cur_ema3_15m
     ema3_slope_15m = ((cur_ema3_15m - prev_ema3_15m) / (prev_ema3_15m + 1e-6)) * 100.0
 
-    # 5m Micro Crossover & Micro Trigger
+    # 5m Micro Crossover
     ema3_5m_s = c5.ewm(span=3, adjust=False).mean()
     ema9_5m_s = c5.ewm(span=9, adjust=False).mean()
     cur_ema3_5m = float(ema3_5m_s.iloc[-1])
+    prev_ema3_5m = float(ema3_5m_s.iloc[-2]) if len(ema3_5m_s) >= 2 else cur_ema3_5m
     cur_ema9_5m = float(ema9_5m_s.iloc[-1])
+    prev_ema9_5m = float(ema9_5m_s.iloc[-2]) if len(ema9_5m_s) >= 2 else cur_ema9_5m
 
     # VWAP en 5m
     vwap_5m_s = compute_vwap(df_5m)
     cur_vwap_5m = float(vwap_5m_s.iloc[-1]) if len(vwap_5m_s) > 0 else cur_price
 
-    # Velas de 5m
-    c5_last = float(c5.iloc[-1])
-    o5_last = float(o5.iloc[-1])
-    is_candle_green_5m = c5_last > o5_last
-    is_candle_red_5m = c5_last < o5_last
+    # RVOL y Ráfaga de Volumen en 5m
+    v5_clean = v5.dropna()
+    avg_v5 = float(v5_clean.iloc[-20:].mean()) if len(v5_clean) >= 20 else 1000.0
+    last_v5 = float(v5_clean.iloc[-1]) if len(v5_clean) > 0 else 0.0
+    volume_burst_5m = (last_v5 >= avg_v5 * 1.30) and (last_v5 > 3000)
+    cum_vol = float(v5_clean.sum())
+    rvol_est = round(max(1.0, cum_vol / max(1.0, avg_v5 * len(v5_clean))), 2)
 
-    # Bandas de Bollinger en 15m (Apertura / Volatilidad en expansión)
-    bb_15m = compute_bollinger_bands(c15, period=20, num_std=2.0)
-    bw_series = (bb_15m["upper"] - bb_15m["lower"]) / (bb_15m["basis"] + 1e-6)
-    bw_15m_cur = float(bw_series.iloc[-1])
-    bw_15m_prev = float(bw_series.iloc[-2]) if len(bw_series) >= 2 else bw_15m_cur
-    is_bb_opening = bw_15m_cur >= bw_15m_prev * 0.99
-
-    # Verificación Disparador 1 CALL
-    trig1_call = (
-        (cur_ema3_5m >= cur_ema9_5m) and
-        (cur_price >= cur_vwap_5m * 0.998) and
-        (ema3_slope_15m >= 0.0) and
-        is_candle_green_5m
-    )
-
-    # Verificación Disparador 1 PUT
-    trig1_put = (
-        (cur_ema3_5m <= cur_ema9_5m) and
-        (cur_price <= cur_vwap_5m * 1.002) and
-        (ema3_slope_15m <= 0.0) and
-        is_candle_red_5m
-    )
-
-    # ─────────────────────────────────────────────────────────────
-    # 3. DISPARADOR 2: CATALIZADOR INSTITUCIONAL EN VIVO
-    # ─────────────────────────────────────────────────────────────
-    cat_call = analyze_ticker_live_catalyst(sym, news_list=news_items)
-    cat_call_score = float(cat_call.get("catalyst_score") or 0.0)
-    has_call_catalyst = cat_call_score >= 60.0
-
-    cat_put = analyze_ticker_live_bearish_catalyst(sym, news_list=news_items)
-    cat_put_score = float(cat_put.get("catalyst_score") or 0.0)
-    has_put_catalyst = cat_put_score >= 60.0
-
-    # ─────────────────────────────────────────────────────────────
-    # 4. DISPARADOR 3: VOLUMEN ACELERADO, RVOL & ADX EN TENDENCIA
-    # ─────────────────────────────────────────────────────────────
     # ADX en 5m
     df_5m_lower = df_5m.rename(columns={col: col.lower() for col in df_5m.columns})
     adx_df = calculate_adx(df_5m_lower, period=14)
     cur_adx = float(adx_df["adx"].iloc[-1]) if "adx" in adx_df else 20.0
     cur_plus_di = float(adx_df["plus_di"].iloc[-1]) if "plus_di" in adx_df else 20.0
     cur_minus_di = float(adx_df["minus_di"].iloc[-1]) if "minus_di" in adx_df else 20.0
-    is_trend_strong = cur_adx >= 22.0
-
-    # RVOL & Ráfaga en 5m
-    v5_clean = v5.dropna()
-    avg_v5 = float(v5_clean.iloc[-20:].mean()) if len(v5_clean) >= 20 else 1000.0
-    last_v5 = float(v5_clean.iloc[-1]) if len(v5_clean) > 0 else 0.0
-    volume_burst_5m = (last_v5 >= avg_v5 * 1.40) and (last_v5 > 5000)
-
-    # Estimación de RVOL diario acumulado
-    cum_vol = float(v5_clean.sum())
-    rvol_est = round(max(1.0, cum_vol / max(1.0, avg_v5 * len(v5_clean))), 2)
-
-    trig3_call = (is_trend_strong and cur_plus_di > cur_minus_di) or (rvol_est >= 1.8) or volume_burst_5m
-    trig3_put = (is_trend_strong and cur_minus_di > cur_plus_di) or (rvol_est >= 1.8) or volume_burst_5m
 
     # ─────────────────────────────────────────────────────────────
-    # 5. PUNTUACIÓN Y CLASIFICACIÓN (CALL vs PUT)
+    # 2. EVALUACIÓN DE LOS 4 DISPARADORES INSTITUCIONALES
     # ─────────────────────────────────────────────────────────────
-    # Puntuación CALL
-    score_call = 0.0
-    if regime_code == "BULL_TREND_EXPANSION":
-        score_call += 35.0
-    elif regime_code == "COUNTER_TREND_BOUNCE" and room_wall_pct >= 4.0:
-        score_call += 25.0
-    elif not st_reg.get("is_deep_bear_excluded"):
-        score_call += 15.0
 
-    if trig1_call:
-        score_call += 25.0
-    if has_call_catalyst:
-        score_call += 20.0
-    if trig3_call:
-        score_call += 20.0
-    if room_up_pct >= 4.0 or room_wall_pct >= 4.0:
-        score_call += 15.0
+    # ── GATILLO 1: Giro de Retroceso Multi-Timeframe (MTF) ──
+    # CALL: 15m EMA20 alcista (Precio > EMA20 y pendiente >= 0) + 5m Giro (EMA3 > EMA9 tras retroceso)
+    trig1_mtf_call = (
+        (cur_price >= cur_ema20_15m * 0.998) and
+        (ema20_15m_slope >= -0.05) and
+        (cur_ema3_5m >= cur_ema9_5m) and
+        (prev_ema3_5m <= prev_ema9_5m * 1.002 or is_candle_green_5m)
+    )
+    # PUT: 15m EMA20 bajista (Precio < EMA20 y pendiente <= 0) + 5m Giro (EMA3 < EMA9 tras rebote)
+    trig1_mtf_put = (
+        (cur_price <= cur_ema20_15m * 1.002) and
+        (ema20_15m_slope <= 0.05) and
+        (cur_ema3_5m <= cur_ema9_5m) and
+        (prev_ema3_5m >= prev_ema9_5m * 0.998 or is_candle_red_5m)
+    )
 
-    # Puntuación PUT
-    score_put = 0.0
-    if regime_code == "DEEP_BEAR_WINTER" or "BEAR" in regime_code:
-        score_put += 35.0
-    elif regime_code == "COUNTER_TREND_BOUNCE" and abs(room_wall_pct) <= 1.5:
-        score_put += 30.0  # Rechazo en el muro de EMA20
+    # ── GATILLO 2: Ruptura ORB 15M (Opening Range Breakout) ──
+    orb_high_15m = float(h15.iloc[0]) if len(h15) > 0 else cur_price
+    orb_low_15m = float(l15.iloc[0]) if len(l15) > 0 else cur_price
+    trig2_orb_call = (len(df_15m) >= 2) and (cur_price >= orb_high_15m) and is_candle_green_5m
+    trig2_orb_put = (len(df_15m) >= 2) and (cur_price <= orb_low_15m) and is_candle_red_5m
+
+    # ── GATILLO 3: VWAP Dinámico (Reclaim / Reject) ──
+    trig3_vwap_call = (cur_price >= cur_vwap_5m) and is_candle_green_5m and (volume_burst_5m or rvol_est >= 1.5)
+    trig3_vwap_put = (cur_price <= cur_vwap_5m) and is_candle_red_5m and (volume_burst_5m or rvol_est >= 1.5)
+
+    # ── GATILLO 4: Gap & Go Intradía ──
+    open_day = float(o15.iloc[0])
+    prev_close = float(df_1d["close"].iloc[-2]) if (df_1d is not None and len(df_1d) >= 2) else float(c15.iloc[0])
+    gap_pct = ((open_day - prev_close) / (prev_close + 1e-6)) * 100.0
+    first_15m_green = float(c15.iloc[0]) >= float(o15.iloc[0])
+    first_15m_red = float(c15.iloc[0]) <= float(o15.iloc[0])
+
+    trig4_gap_call = (gap_pct >= 1.5) and (rvol_est >= 2.0) and first_15m_green and (cur_price >= orb_high_15m * 0.998)
+    trig4_gap_put = (gap_pct <= -1.5) and (rvol_est >= 2.0) and first_15m_red and (cur_price <= orb_low_15m * 1.002)
+
+    # ─────────────────────────────────────────────────────────────
+    # 3. MOTOR DE CATALIZADORES (Noticias, Earnings, FDA, Dilución)
+    # ─────────────────────────────────────────────────────────────
+    cat_call = analyze_ticker_live_catalyst(sym, news_list=news_items)
+    is_toxic_dilution = bool(cat_call.get("is_toxic", False))
+    tier_call = int(cat_call.get("tier", 3))
+
+    cat_put = analyze_ticker_live_bearish_catalyst(sym, news_list=news_items)
+    tier_put = int(cat_put.get("tier", 3))
+    is_bearish_catalyst = bool(cat_put.get("is_bearish", False)) or is_toxic_dilution
+
+    # Multiplicador de Catalizador (M_cat)
+    if is_toxic_dilution:
+        m_cat_call = 0.0  # VETO INCONDICIONAL PARA CALLs
+    elif tier_call == 1:
+        m_cat_call = 1.50
+    elif tier_call == 2:
+        m_cat_call = 1.30
     else:
-        score_put += 15.0
+        m_cat_call = 1.00
 
-    if trig1_put:
-        score_put += 25.0
-    if has_put_catalyst:
-        score_put += 20.0
-    if trig3_put:
-        score_put += 20.0
-    room_floor_pct = ((cur_price - target_floor) / cur_price * 100.0) if target_floor > 0 else 0.0
-    if room_floor_pct >= 4.0:
-        score_put += 15.0
+    if is_bearish_catalyst or tier_put == 1:
+        m_cat_put = 1.50
+    elif tier_put == 2:
+        m_cat_put = 1.30
+    else:
+        m_cat_put = 1.00
 
-    # Decisiones finales
-    score_call = round(min(100.0, score_call), 1)
-    score_put = round(min(100.0, score_put), 1)
+    # ─────────────────────────────────────────────────────────────
+    # 4. PUNTUACIÓN BASE DE DISPARADORES
+    # ─────────────────────────────────────────────────────────────
+    base_call = 0.0
+    triggers_call = []
+    if trig1_mtf_call:
+        base_call += 25.0
+        triggers_call.append("TRIG_MTF_PULLBACK")
+    if trig2_orb_call:
+        base_call += 25.0
+        triggers_call.append("TRIG_ORB_15M")
+    if trig3_vwap_call:
+        base_call += 20.0
+        triggers_call.append("TRIG_VWAP_DYNAMIC")
+    if trig4_gap_call:
+        base_call += 30.0
+        triggers_call.append("TRIG_GAP_AND_GO")
+    if regime_code == "BULL_TREND_EXPANSION":
+        base_call += 20.0
+    elif regime_code == "COUNTER_TREND_BOUNCE":
+        base_call += 10.0
 
-    triggers_active = []
-    if score_call >= 65.0 and score_call > score_put and not st_reg.get("is_deep_bear_excluded"):
-        if trig1_call:
-            triggers_active.append("TRIG_EMA_DUAL_TF")
-        if has_call_catalyst:
-            triggers_active.append("TRIG_LIVE_CATALYST")
-        if trig3_call:
-            triggers_active.append("TRIG_VOLUME_ADX_BURST")
+    base_put = 0.0
+    triggers_put = []
+    if trig1_mtf_put:
+        base_put += 25.0
+        triggers_put.append("TRIG_MTF_PULLBACK")
+    if trig2_orb_put:
+        base_put += 25.0
+        triggers_put.append("TRIG_ORB_15M")
+    if trig3_vwap_put:
+        base_put += 20.0
+        triggers_put.append("TRIG_VWAP_DYNAMIC")
+    if trig4_gap_put:
+        base_put += 30.0
+        triggers_put.append("TRIG_GAP_AND_GO")
+    if "BEAR" in regime_code:
+        base_put += 20.0
+    elif regime_code == "COUNTER_TREND_BOUNCE" and cur_price <= cur_ema20_15m:
+        base_put += 15.0
 
+    # Puntuación final ponderada con el multiplicador de catalizador
+    final_score_call = round(min(100.0, base_call * m_cat_call), 1)
+    final_score_put = round(min(100.0, base_put * m_cat_put), 1)
+
+    # ─────────────────────────────────────────────────────────────
+    # 5. CÁLCULO DE PROYECCIÓN PROBABILÍSTICA P(TOUCH) Y R:R
+    # ─────────────────────────────────────────────────────────────
+    atr_15m = float(tech_atr_15m := (h15 - l15).rolling(14, min_periods=1).mean().iloc[-1] if len(h15) >= 5 else cur_price * 0.01)
+    target_wall = float(st_reg.get("target_resistance_wall") or (cur_price * 1.05))
+    target_floor = float(st_reg.get("target_support_floor") or (cur_price * 0.95))
+
+    def _calc_p_touch(dist: float, atr: float) -> float:
+        import math
+        z = dist / max(1e-4, atr * 4.0)  # ~16 velas de 15m restantes
+        p = 2.0 * (1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))) * 100.0
+        return round(min(95.0, max(15.0, p)), 1)
+
+    p_touch_call = _calc_p_touch(max(0.01, target_wall - cur_price), atr_15m)
+    p_touch_put = _calc_p_touch(max(0.01, cur_price - target_floor), atr_15m)
+
+    # ─────────────────────────────────────────────────────────────
+    # 6. DECISIÓN DE CALIFICACIÓN
+    # ─────────────────────────────────────────────────────────────
+    if final_score_call >= 60.0 and final_score_call >= final_score_put and not is_toxic_dilution:
         res.update({
             "is_qualified": True,
             "recommended_direction": "CALL",
-            "score": score_call,
-            "triggers_fired": triggers_active,
+            "score": final_score_call,
+            "triggers_fired": triggers_call,
             "regime_info": st_reg,
+            "p_touch_day_pct": p_touch_call,
+            "expected_rr": round(abs(target_wall - cur_price) / max(0.01, cur_price * 0.015), 2),
+            "catalyst_info": {
+                "tier": tier_call,
+                "name": cat_call.get("catalyst_name", "TÉCNICO_PURO"),
+                "headline": cat_call.get("headline", ""),
+                "multiplier": m_cat_call,
+            },
             "metrics": {
                 "price": cur_price,
-                "adx": round(cur_adx, 1),
-                "plus_di": round(cur_plus_di, 1),
-                "minus_di": round(cur_minus_di, 1),
                 "rvol": rvol_est,
+                "adx": round(cur_adx, 1),
+                "gap_pct": round(gap_pct, 2),
+                "target_ceiling": target_wall,
                 "target_resistance_wall": target_wall,
-                "target_ceiling": target_ceiling,
-                "room_to_resistance_pct": room_wall_pct,
-                "room_to_bb_upper_pct": room_up_pct,
+                "room_to_resistance_pct": round(((target_wall - cur_price) / cur_price) * 100.0, 2),
             },
-            "reason": f"CALL calificado ({score_call} pts): Régimen {regime_code}, Disparadores: {', '.join(triggers_active)}"
+            "reason": f"CALL calificado ({final_score_call} pts | {cat_call.get('catalyst_name', 'TÉCNICO')}): Gatillos [{', '.join(triggers_call)}]"
         })
         return res
 
-    elif score_put >= 65.0 and score_put > score_call:
-        if trig1_put:
-            triggers_active.append("TRIG_EMA_DUAL_TF")
-        if has_put_catalyst:
-            triggers_active.append("TRIG_LIVE_CATALYST")
-        if trig3_put:
-            triggers_active.append("TRIG_VOLUME_ADX_BURST")
-
+    elif final_score_put >= 60.0 and final_score_put > final_score_call:
         res.update({
             "is_qualified": True,
             "recommended_direction": "PUT",
-            "score": score_put,
-            "triggers_fired": triggers_active,
+            "score": final_score_put,
+            "triggers_fired": triggers_put,
             "regime_info": st_reg,
+            "p_touch_day_pct": p_touch_put,
+            "expected_rr": round(abs(cur_price - target_floor) / max(0.01, cur_price * 0.015), 2),
+            "catalyst_info": {
+                "tier": tier_put,
+                "name": cat_put.get("catalyst_name", "BEARISH_MOMENTUM"),
+                "headline": cat_put.get("headline", ""),
+                "multiplier": m_cat_put,
+            },
             "metrics": {
                 "price": cur_price,
-                "adx": round(cur_adx, 1),
-                "plus_di": round(cur_plus_di, 1),
-                "minus_di": round(cur_minus_di, 1),
                 "rvol": rvol_est,
+                "adx": round(cur_adx, 1),
+                "gap_pct": round(gap_pct, 2),
                 "target_support_floor": target_floor,
-                "room_to_support_pct": round(room_floor_pct, 2),
+                "room_to_support_pct": round(((cur_price - target_floor) / cur_price) * 100.0, 2),
             },
-            "reason": f"PUT calificado ({score_put} pts): Régimen {regime_code}, Disparadores: {', '.join(triggers_active)}"
+            "reason": f"PUT calificado ({final_score_put} pts | {cat_put.get('catalyst_name', 'BEARISH')}): Gatillos [{', '.join(triggers_put)}]"
         })
         return res
 
-    res["reason"] = f"Puntuación insuficiente (CALL: {score_call}, PUT: {score_put} < 65.0)"
+    res["reason"] = f"Puntuación insuficiente (CALL: {final_score_call}, PUT: {final_score_put} < 60.0)"
     return res
 
 
@@ -460,6 +500,9 @@ async def run_stock_driven_options_pipeline(
         target_wall = m.get("target_resistance_wall") or target_ceiling
         target_floor = m.get("target_support_floor") or (p * 0.94)
 
+        cat_info = cand.get("catalyst_info") or {}
+        has_cat = cat_info.get("tier") in (1, 2)
+
         exit_plan = {
             "initial_sl": initial_sl,
             "stop_loss_underlying": initial_sl,
@@ -469,7 +512,9 @@ async def run_stock_driven_options_pipeline(
             "target_support_floor": target_floor,
             "proximity_threshold_pct": 0.80,
             "take_profit_structural": True,
-            "is_runner": True,
+            "is_runner": has_cat,
+            "has_catalyst": has_cat,
+            "tp_scale_mode": "AGGRESSIVE_RUNNER" if has_cat else "TECHNICAL_SCALP",
             "gap_type": "OPEN_GAP_UP" if direction == "CALL" else "OPEN_GAP_DOWN",
             "last_eval_at": now_iso
         }
@@ -478,6 +523,11 @@ async def run_stock_driven_options_pipeline(
             "setup_name": st_reg.get("regime_code", "MOMENTUM_RUNNER"),
             "setup_label": f"🚀 {direction} {sym} ({score} pts) | {cand.get('reason')}",
             "triggers_fired": cand.get("triggers_fired"),
+            "catalyst_name": cat_info.get("name", "TÉCNICO"),
+            "catalyst_tier": cat_info.get("tier", 3),
+            "catalyst_multiplier": cat_info.get("multiplier", 1.0),
+            "p_touch_day_pct": cand.get("p_touch_day_pct", 50.0),
+            "expected_rr": cand.get("expected_rr", 1.5),
             "is_dead_stock": False,
             "structural_regime": st_reg,
             "rvol": m.get("rvol", 1.8),

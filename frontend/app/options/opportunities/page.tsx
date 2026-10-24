@@ -54,6 +54,60 @@ function ScoreBadge({ score }: { score: number | null | undefined }) {
   )
 }
 
+function TriggersBadge({ triggers, pTouch, catName }: { triggers?: string[], pTouch?: number, catName?: string }) {
+  if ((!triggers || triggers.length === 0) && !catName && pTouch == null) return null
+  return (
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginTop: 3 }}>
+      {catName && catName !== 'TÉCNICO' && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 800,
+          padding: '1px 5px',
+          borderRadius: 4,
+          background: 'rgba(234,179,8,0.18)',
+          color: '#EAB308',
+          border: '1px solid rgba(234,179,8,0.35)',
+        }}>
+          📰 {catName}
+        </span>
+      )}
+      {(triggers || []).map(t => {
+        let label = t.replace('TRIG_', '')
+        if (label === 'MTF_PULLBACK') label = 'MTF GIRO'
+        else if (label === 'ORB_15M') label = 'ORB 15M'
+        else if (label === 'VWAP_DYNAMIC') label = 'VWAP'
+        else if (label === 'GAP_AND_GO') label = 'GAP & GO'
+        return (
+          <span key={t} style={{
+            fontSize: 9,
+            fontWeight: 800,
+            padding: '1px 5px',
+            borderRadius: 4,
+            background: 'rgba(56,189,248,0.15)',
+            color: '#38BDF8',
+            border: '1px solid rgba(56,189,248,0.3)',
+          }}>
+            ⚡ {label}
+          </span>
+        )
+      })}
+      {pTouch != null && (
+        <span style={{
+          fontSize: 9,
+          fontWeight: 800,
+          padding: '1px 5px',
+          borderRadius: 4,
+          background: 'rgba(34,197,94,0.15)',
+          color: '#22C55E',
+          border: '1px solid rgba(34,197,94,0.3)',
+        }} title="Probabilidad de Tocar Target Intradía">
+          🎯 {pTouch}% PoP
+        </span>
+      )}
+    </div>
+  )
+}
+
 function StatusBadge({ status }: { status: string }) {
   if (status === 'selected') {
     return (
@@ -1086,6 +1140,7 @@ export default function OpportunitiesPage() {
                               <span>{group.symbol}</span>
                               <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
                               <StructuralRegimeBadge regime={c.structural_regime} compact />
+                              <TriggersBadge triggers={c.score_breakdown?.triggers_fired} pTouch={c.score_breakdown?.p_touch_day_pct} catName={c.score_breakdown?.catalyst_name} />
                               {group.rest.length > 0 && (
                                 <button
                                   onClick={(e) => {
@@ -1286,14 +1341,14 @@ export default function OpportunitiesPage() {
                                         {detail.score_breakdown && (
                                           <div style={{ marginTop: 10, background: 'rgba(255,255,255,0.03)', padding: 10, borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)' }}>
                                             <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 4 }}>
-                                              Desglose Score (doc §9.2)
+                                              ⚡ Disparadores Intradía, Catalizador & Proyección
                                             </div>
                                             <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, color: '#AAA' }}>
-                                              <span>EV: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.expectancy, 1)}</b></span>
-                                              <span>APEX: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.apex_signal, 1)}</b></span>
-                                              <span>Liquidez: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.liquidity, 1)}</b></span>
-                                              <span>Riesgo: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.risk, 1)}</b></span>
-                                              <span>Griegas: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.iv_greeks, 1)}</b></span>
+                                              <span>Gatillos: <b style={{ color: '#38BDF8' }}>{(detail.score_breakdown.triggers_fired || []).map((t: string) => t.replace('TRIG_', '')).join(', ') || 'Técnico'}</b></span>
+                                              <span>Catalizador: <b style={{ color: '#EAB308' }}>{detail.score_breakdown.catalyst_name || 'TÉCNICO'}</b></span>
+                                              <span>P(Touch): <b style={{ color: '#22C55E' }}>{detail.score_breakdown.p_touch_day_pct || 50}%</b></span>
+                                              <span>R:R Estructural: <b style={{ color: '#FFF' }}>1 : {detail.score_breakdown.expected_rr || 1.5}</b></span>
+                                              <span>RVOL: <b style={{ color: '#FFF' }}>{detail.score_breakdown.rvol || '—'}</b></span>
                                             </div>
                                           </div>
                                         )}
@@ -1500,14 +1555,14 @@ export default function OpportunitiesPage() {
                                         {detail.score_breakdown && (
                                           <div style={{ marginTop: 10, background: 'rgba(255,255,255,0.03)', padding: 10, borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)' }}>
                                             <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', marginBottom: 4 }}>
-                                              Desglose Score (doc §9.2)
+                                              ⚡ Disparadores Intradía, Catalizador & Proyección
                                             </div>
                                             <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, color: '#AAA' }}>
-                                              <span>EV: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.expectancy, 1)}</b></span>
-                                              <span>APEX: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.apex_signal, 1)}</b></span>
-                                              <span>Liquidez: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.liquidity, 1)}</b></span>
-                                              <span>Riesgo: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.risk, 1)}</b></span>
-                                              <span>Griegas: <b style={{ color: '#FFF' }}>{n(detail.score_breakdown.iv_greeks, 1)}</b></span>
+                                              <span>Gatillos: <b style={{ color: '#38BDF8' }}>{(detail.score_breakdown.triggers_fired || []).map((t: string) => t.replace('TRIG_', '')).join(', ') || 'Técnico'}</b></span>
+                                              <span>Catalizador: <b style={{ color: '#EAB308' }}>{detail.score_breakdown.catalyst_name || 'TÉCNICO'}</b></span>
+                                              <span>P(Touch): <b style={{ color: '#22C55E' }}>{detail.score_breakdown.p_touch_day_pct || 50}%</b></span>
+                                              <span>R:R Estructural: <b style={{ color: '#FFF' }}>1 : {detail.score_breakdown.expected_rr || 1.5}</b></span>
+                                              <span>RVOL: <b style={{ color: '#FFF' }}>{detail.score_breakdown.rvol || '—'}</b></span>
                                             </div>
                                           </div>
                                         )}

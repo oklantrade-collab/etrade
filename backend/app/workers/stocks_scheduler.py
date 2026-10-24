@@ -2680,7 +2680,20 @@ async def run_options_gap_defense_cycle():
                 bool(exit_plan.get("stop_loss_underlying"))
             )
 
-            if "vme" in str(strat).lower():
+            # 1. Evaluación de las 5 Reglas Institucionales (Escalonado Agresivo)
+            from app.options.exit_engine import evaluate_technical_rules_and_stops, get_underlying_technical_context
+            tech_ctx = get_underlying_technical_context(symbol)
+            by_tech, reason_tech, tech_info = evaluate_technical_rules_and_stops(eval_pos, tech_ctx, now_dt)
+
+            if by_tech:
+                eval_res = {
+                    "should_exit": True,
+                    "rule_code": reason_tech,
+                    "reason": tech_info.get("detail", reason_tech),
+                    "contracts_ratio_to_exit": tech_info.get("exit_ratio", 1.0)
+                }
+                exit_plan = tech_info.get("exit_plan", exit_plan)
+            elif "vme" in str(strat).lower():
                 from app.stocks.vme_exit_engine import evaluate_vme_exit
                 eval_res = evaluate_vme_exit(
                     position=eval_pos,
@@ -2747,19 +2760,47 @@ async def run_options_gap_defense_cycle():
                 else:
                     mapped_reason = "manual_simulated"
 
-                # Cerrar posición en opt_paper_trades
-                sb.table("opt_paper_trades").update({
-                    "status": "closed",
-                    "exit_time": now_iso,
-                    "exit_credit": cur_opt_premium,
-                    "last_mark_price": cur_opt_premium,
-                    "last_mark_at": now_iso,
-                    "realized_pnl": realized_pnl_usd,
-                    "unrealized_pnl": 0.0,
-                    "exit_reason": mapped_reason,
-                    "exit_plan": exit_plan,
-                    "updated_at": now_iso
-                }).eq("id", pid).execute()
+                # Cierre Parcial (Escalonado Agresivo) vs Cierre Total
+                exit_ratio = float(eval_res.get("contracts_ratio_to_exit") or 1.0)
+                is_partial = (exit_ratio < 1.0 and qty >= 2)
+                qty_to_close = max(1, qty // 2) if is_partial else qty
+                remaining_qty = qty - qty_to_close
+                pnl_portion = round(realized_pnl_usd * (qty_to_close / qty), 2)
+
+                if is_partial and remaining_qty > 0:
+                    exit_plan["partial_tp_taken"] = True
+                    exit_plan["trailing_sl_type"] = "EMA9_15M"
+                    cur_invested = float(pos.get("entry_total_invested") or (entry_debit * 100 * qty))
+                    new_invested = round(cur_invested * (remaining_qty / qty), 2)
+                    cur_realized = float(pos.get("realized_pnl") or 0.0)
+                    new_realized = round(cur_realized + pnl_portion, 2)
+
+                    sb.table("opt_paper_trades").update({
+                        "qty": remaining_qty,
+                        "entry_total_invested": new_invested,
+                        "realized_pnl": new_realized,
+                        "last_mark_price": cur_opt_premium,
+                        "last_mark_at": now_iso,
+                        "exit_plan": exit_plan,
+                        "updated_at": now_iso
+                    }).eq("id", pid).execute()
+                    log_info(MODULE, f"🎯 TOMA PARCIAL ESCALONADA 50%: {symbol} cerró {qty_to_close} contratos a ${cur_opt_premium:.2f} (+${pnl_portion:.2f}). Quedan {remaining_qty} con Trailing SL.")
+                else:
+                    # Cerrar posición completa en opt_paper_trades
+                    cur_realized = float(pos.get("realized_pnl") or 0.0)
+                    total_realized = round(cur_realized + realized_pnl_usd, 2)
+                    sb.table("opt_paper_trades").update({
+                        "status": "closed",
+                        "exit_time": now_iso,
+                        "exit_credit": cur_opt_premium,
+                        "last_mark_price": cur_opt_premium,
+                        "last_mark_at": now_iso,
+                        "realized_pnl": total_realized,
+                        "unrealized_pnl": 0.0,
+                        "exit_reason": mapped_reason,
+                        "exit_plan": exit_plan,
+                        "updated_at": now_iso
+                    }).eq("id", pid).execute()
 
                 # Enviar orden de cierre SELL a stocks_orders para ejecución en TWS si hay puente
                 exp_compact = expiry_str.replace("-", "")[:8] if expiry_str else "20261026"
@@ -2772,7 +2813,7 @@ async def run_options_gap_defense_cycle():
                         "rule_code": "APEX_AUTO",
                         "order_type": "market",
                         "direction": "sell",
-                        "shares": qty,
+                        "shares": qty_to_close,
                         "market_price": cur_opt_premium,
                         "status": "pending",
                         "created_at": now_iso

@@ -63,3 +63,43 @@ def bs_theta(S: float, K: float, T: float, r: float, sigma: float, right: str) -
         return (term1 + term2) / 365.0
     term2 = r * K * math.exp(-r * T) * _cdf(-d2)
     return (term1 + term2) / 365.0
+
+
+def compute_intraday_options_projection(
+    underlying_price: float,
+    target_price: float,
+    strike: float,
+    dte_days: float,
+    iv: float,
+    delta: float,
+    gamma: float,
+    spread_pct: float,
+    rvol: float = 1.8,
+    catalyst_multiplier: float = 1.0,
+    right: str = "C"
+) -> dict[str, float]:
+    """
+    Calcula la proyección matemática y probabilística de rentabilidad intradía:
+      - p_touch_pct: Probabilidad aproximada de tocar el target durante la sesión.
+      - projected_premium_delta: Ganancia proyectada de la prima por Delta + Gamma.
+      - ev_score: Esperanza matemática combinada con RVOL, spread y catalizador.
+    """
+    dist = abs(target_price - underlying_price)
+    atr_est = underlying_price * 0.01
+    z = dist / max(1e-4, atr_est * 4.0)
+    p_touch = min(95.0, max(15.0, 2.0 * (1.0 - _cdf(z)) * 100.0))
+
+    ds = target_price - underlying_price if right == "C" else underlying_price - target_price
+    # Expansión de Taylor: Delta * dS + 0.5 * Gamma * (dS^2)
+    gamma_boost = 0.5 * abs(gamma) * (ds ** 2) if gamma > 0 else 0.0
+    linear_gain = abs(delta) * max(0.0, ds)
+    projected_premium_delta = linear_gain + gamma_boost
+
+    spread_penalty = max(0.0, min(0.5, spread_pct / 100.0))
+    ev = (p_touch / 100.0) * (projected_premium_delta) * (1.0 - spread_penalty) * min(2.5, rvol) * catalyst_multiplier
+
+    return {
+        "p_touch_pct": round(p_touch, 1),
+        "projected_premium_delta": round(projected_premium_delta, 4),
+        "ev_score": round(ev, 2)
+    }
