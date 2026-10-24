@@ -922,20 +922,21 @@ def evaluate_options_gap_aduana_exit(
             })
             return res
 
-    # PILAR 3 (OPCIONES): BLINDAJE RÁPIDO BREAKEVEN PARA CALLs Y PUTs (+1.0% subyacente o +15% prima -> BE)
+    # PILAR 3 (OPCIONES): BLINDAJE RÁPIDO BREAKEVEN PARA CALLs Y PUTs (+5.0% subyacente o prima -> BE + 1% Lock)
     und_entry_p = float(position.get("entry_underlying_price") or position.get("entry_price") or 0.0)
     und_pnl_pct = 0.0
     if und_entry_p > 0:
         und_pnl_pct = ((current_underlying_price - und_entry_p) / und_entry_p * 100.0) if is_call else ((und_entry_p - current_underlying_price) / und_entry_p * 100.0)
 
-    if (peak_pnl_pct >= 15.0 or und_pnl_pct >= 1.0) and peak_pnl_pct < 25.0:
+    # Regla Institucional: Al avanzar +5% en subyacente o prima, blindar en (precio compra + 1%)
+    if (peak_pnl_pct >= 5.0 or und_pnl_pct >= 5.0) and peak_pnl_pct < 25.0:
         if current_option_premium <= entry_premium * 1.01:
             res.update({
                 "should_exit": True,
                 "exit_type": "trailing_stop",
                 "contracts_ratio_to_exit": 1.0,
-                "rule_code": "OPT_GAP_CALL_BREAKEVEN" if is_call else "OPT_GAP_PUT_BREAKEVEN",
-                "reason": f"Breakeven Shield {'CALL' if is_call else 'PUT'} activado: Ganancia pico prima +{peak_pnl_pct:.1f}% o subyacente +{und_pnl_pct:.2f}%. Prima protege costo (${entry_premium*1.01:.2f})"
+                "rule_code": "OPT_GAP_BE_LOCK_PLUS_1PCT",
+                "reason": f"Breakeven Lock (+1% Protegido) {'CALL' if is_call else 'PUT'}: Ganancia previa superó +5% (prima +{peak_pnl_pct:.1f}%, subyacente +{und_pnl_pct:.2f}%). Prima protege compra + 1% (${entry_premium*1.01:.2f})"
             })
             return res
 
@@ -1077,14 +1078,23 @@ def evaluate_options_gap_aduana_exit(
                 if proposed_sl > current_sl:
                     res["new_stop_loss_underlying"] = proposed_sl
                     res["rule_code"] = "OPT_GAP_SL_EMA9_15M"
+
+            # Breakeven Lock + 1% para CALLs (+5% subyacente -> SL al precio de compra + 1%)
+            if und_entry_p > 0 and current_underlying_price >= round(und_entry_p * 1.05, 2):
+                sl_be_plus_1 = round(und_entry_p * 1.01, 2)
+                if sl_be_plus_1 > (res["new_stop_loss_underlying"] or current_sl):
+                    res["new_stop_loss_underlying"] = sl_be_plus_1
+                    res["rule_code"] = "BE_LOCK_PLUS_1PCT"
+
             # Si el precio perfora el SL actual
-            if current_sl > 0.0 and current_underlying_price <= current_sl:
+            active_sl = res["new_stop_loss_underlying"] or current_sl
+            if active_sl > 0.0 and current_underlying_price <= active_sl:
                 res.update({
                     "should_exit": True,
                     "exit_type": "stop_loss_underlying",
                     "contracts_ratio_to_exit": 1.0,
-                    "rule_code": "OPT_GAP_SL_EMA9_15M",
-                    "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) <= SL (${current_sl:.2f})"
+                    "rule_code": res.get("rule_code") or "OPT_GAP_SL_EMA9_15M",
+                    "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) <= SL (${active_sl:.2f})"
                 })
                 return res
         else:
@@ -1094,13 +1104,23 @@ def evaluate_options_gap_aduana_exit(
                 if current_sl == 0.0 or proposed_sl < current_sl:
                     res["new_stop_loss_underlying"] = proposed_sl
                     res["rule_code"] = "OPT_GAP_SL_EMA9_15M"
-            if current_sl > 0.0 and current_underlying_price >= current_sl:
+
+            # Breakeven Lock - 1% para PUTs a la inversa (-5% subyacente -> SL techo al precio de compra - 1%)
+            if und_entry_p > 0 and current_underlying_price <= round(und_entry_p * 0.95, 2):
+                sl_be_minus_1 = round(und_entry_p * 0.99, 2)
+                curr_sl_target = res["new_stop_loss_underlying"] or current_sl
+                if curr_sl_target == 0.0 or sl_be_minus_1 < curr_sl_target:
+                    res["new_stop_loss_underlying"] = sl_be_minus_1
+                    res["rule_code"] = "BE_LOCK_PLUS_1PCT"
+
+            active_sl = res["new_stop_loss_underlying"] or current_sl
+            if active_sl > 0.0 and current_underlying_price >= active_sl:
                 res.update({
                     "should_exit": True,
                     "exit_type": "stop_loss_underlying",
                     "contracts_ratio_to_exit": 1.0,
-                    "rule_code": "OPT_GAP_SL_EMA9_15M",
-                    "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) >= SL (${current_sl:.2f})"
+                    "rule_code": res.get("rule_code") or "OPT_GAP_SL_EMA9_15M",
+                    "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) >= SL (${active_sl:.2f})"
                 })
                 return res
 

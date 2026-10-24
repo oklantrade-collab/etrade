@@ -170,6 +170,7 @@ DB_EXIT_REASONS_MAP = {
     "signal_invalidation": "signal_invalidation",
     "bad_data_close": "bad_data_close",
     "manual_simulated": "manual_simulated",
+    "sl_be_lock_1pct": "take_profit",
     "tp_rsi_climax_1h": "take_profit",
     "tp_upper_5_6": "take_profit",
     "tp_lower_5_6": "take_profit",
@@ -222,6 +223,20 @@ def evaluate_technical_rules_and_stops(
     new_sl = current_sl
     new_sl_type = current_sl_type
 
+    entry_stock_p = float(
+        exit_plan.get("entry_underlying_price") or
+        exit_plan.get("initial_stock_price") or
+        position.get("entry_underlying_price") or
+        0.0
+    )
+    if entry_stock_p <= 0.0:
+        init_sl = float(exit_plan.get("initial_sl") or 0.0)
+        if init_sl > 0.0:
+            entry_stock_p = round(init_sl / 0.97, 2) if is_call else round(init_sl / 1.03, 2)
+        elif current_price > 0.0:
+            entry_stock_p = current_price
+            exit_plan["entry_underlying_price"] = entry_stock_p
+
     if is_call:
         # En CALL: Si EMA9 sube, elevar SL dinámico
         if cur_ema9_15m > prev_ema9_15m and cur_ema9_15m > 0:
@@ -243,6 +258,17 @@ def evaluate_technical_rules_and_stops(
                 new_sl = midpoint_15m
                 new_sl_type = "MIDPOINT_15M"
 
+        # ── NUEVA REGLA INSTITUCIONAL: STOP LOSS RATCHET BREAKEVEN + 1% LOCK (CALLs) ──
+        # Si el precio sube >= +5% desde la compra, elevar SL al (precio de compra + 1%)
+        if entry_stock_p > 0.0 and current_price >= round(entry_stock_p * 1.05, 2):
+            sl_be_plus_1 = round(entry_stock_p * 1.01, 2)
+            if sl_be_plus_1 > new_sl:
+                new_sl = sl_be_plus_1
+                new_sl_type = "BE_LOCK_PLUS_1PCT"
+            exit_plan["be_locked"] = True
+            exit_plan["be_lock_trigger_price"] = round(entry_stock_p * 1.05, 2)
+            exit_plan["be_lock_sl_price"] = sl_be_plus_1
+
     elif is_put:
         # En PUT: Si EMA9 baja, reducir techo de SL dinámico
         if cur_ema9_15m < prev_ema9_15m and cur_ema9_15m > 0:
@@ -263,6 +289,17 @@ def evaluate_technical_rules_and_stops(
             if new_sl == 0.0 or midpoint_15m < new_sl:
                 new_sl = midpoint_15m
                 new_sl_type = "MIDPOINT_15M"
+
+        # ── NUEVA REGLA INSTITUCIONAL: STOP LOSS RATCHET BREAKEVEN - 1% LOCK (PUTs a la inversa) ──
+        # Si el subyacente cae <= -5% desde la compra, reducir SL techo al (precio de compra - 1%)
+        if entry_stock_p > 0.0 and current_price <= round(entry_stock_p * 0.95, 2):
+            sl_be_minus_1 = round(entry_stock_p * 0.99, 2)
+            if new_sl == 0.0 or sl_be_minus_1 < new_sl:
+                new_sl = sl_be_minus_1
+                new_sl_type = "BE_LOCK_PLUS_1PCT"
+            exit_plan["be_locked"] = True
+            exit_plan["be_lock_trigger_price"] = round(entry_stock_p * 0.95, 2)
+            exit_plan["be_lock_sl_price"] = sl_be_minus_1
 
     exit_plan["stop_loss_underlying"] = new_sl
     exit_plan["trailing_sl_type"] = new_sl_type
@@ -452,9 +489,20 @@ def should_exit_take_profit(position: dict[str, Any], unrealized_pnl: float, eff
 
 
 def should_exit_stop_loss(position: dict[str, Any], unrealized_pnl: float, eff: dict[str, Any]) -> tuple[bool, str | None]:
-    """Evalua condicion de Stop Loss simulado (§12.3)."""
+    """Evalua condicion de Stop Loss simulado (§12.3) y Breakeven Lock (+1% buffer)."""
     stype = position.get("strategy_type") or ""
     invested = float(position.get("entry_total_invested") or 0.0)
+    entry_debit = float(position.get("entry_debit") or 0.0)
+    last_mark = float(position.get("last_mark_price") or 0.0)
+    exit_plan = dict(position.get("exit_plan") or {})
+
+    # Protección Breakeven Lock (+5% avance -> Stop Loss al +1% de la compra)
+    highest_seen = float(exit_plan.get("highest_premium_seen") or max(entry_debit, last_mark))
+    be_locked = bool(exit_plan.get("be_locked") or (entry_debit > 0 and highest_seen >= round(entry_debit * 1.05, 4)))
+    if be_locked and entry_debit > 0 and last_mark > 0:
+        be_floor_prem = round(entry_debit * 1.01, 4)
+        if last_mark <= be_floor_prem:
+            return True, f"Stop Loss BE Lock (+1% Protegido): Prima ${last_mark:.2f} <= ${be_floor_prem:.2f} (+1% de compra tras avance previo +5%)"
 
     if stype in ("long_call", "long_put"):
         sl_pct = float(eff.get("long_sl_pct") or 50.0)

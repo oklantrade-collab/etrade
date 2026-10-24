@@ -306,8 +306,13 @@ export default function OptionsPositions() {
                         )}
                       </div>
                       {p.exit_plan?.stop_loss_underlying > 0 && (
-                        <div style={{ fontSize: 9, color: '#FFA726', fontWeight: 500, marginTop: 2 }}>
-                          🛡️ SL: ${n(p.exit_plan.stop_loss_underlying)} ({p.exit_plan.trailing_sl_type})
+                        <div style={{
+                          fontSize: 9,
+                          color: (p.exit_plan?.be_locked || p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT') ? '#22C55E' : '#FFA726',
+                          fontWeight: 600,
+                          marginTop: 2
+                        }}>
+                          {(p.exit_plan?.be_locked || p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT') ? '🔒 BE +1% SL:' : '🛡️ SL:'} ${n(p.exit_plan.stop_loss_underlying)} ({p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT' ? '+1% LOCK' : p.exit_plan.trailing_sl_type})
                         </div>
                       )}
                     </td>
@@ -375,7 +380,8 @@ export default function OptionsPositions() {
                                 fontSize: 10,
                                 fontWeight: 600,
                               }}>
-                                {p.exit_plan?.detailed_exit_reason?.includes('ema3_flat') ? '⚡ Agotamiento EMA3 1H' :
+                                {p.exit_plan?.detailed_exit_reason?.includes('be_lock') ? '🔒 SL Breakeven +1%' :
+                                 p.exit_plan?.detailed_exit_reason?.includes('ema3_flat') ? '⚡ Agotamiento EMA3 1H' :
                                  p.exit_plan?.detailed_exit_reason?.includes('sipv_trend_flip_15m') ? '🔄 Giro SIPV 15m' :
                                  p.exit_plan?.detailed_exit_reason?.includes('sipv') ? '🔄 Giro SIPV 1H' :
                                  p.exit_plan?.detailed_exit_reason?.includes('ema_cross') ? '⚡ Cruce EMA 15m' :

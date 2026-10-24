@@ -2672,6 +2672,17 @@ async def run_options_gap_defense_cycle():
             eval_pos["stop_loss_underlying"] = exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0
             eval_pos["reentry_count"] = exit_plan.get("reentry_count", 0)
 
+            # Asegurar entry_underlying_price para evaluación del Breakeven Lock (+5% -> +1%)
+            entry_stock_p = float(exit_plan.get("entry_underlying_price") or exit_plan.get("initial_stock_price") or pos.get("entry_underlying_price") or 0.0)
+            if entry_stock_p <= 0.0:
+                init_sl = float(exit_plan.get("initial_sl") or 0.0)
+                if init_sl > 0.0:
+                    entry_stock_p = round(init_sl / 0.97, 2) if is_call else round(init_sl / 1.03, 2)
+                else:
+                    entry_stock_p = cur_stock_p
+                exit_plan["entry_underlying_price"] = entry_stock_p
+            eval_pos["entry_underlying_price"] = entry_stock_p
+
             is_gap_runner = bool(
                 pos.get("is_gap_runner") or
                 exit_plan.get("is_runner") or
@@ -2861,6 +2872,21 @@ async def run_options_gap_defense_cycle():
                     exit_plan["trailing_sl_type"] = eval_res.get("rule_code", "SL_DYNAMIC")
                 if new_tsl:
                     exit_plan["trailing_sl_underlying"] = new_tsl
+
+                # Regla Breakeven Lock + 1% en exit_plan (+5% avance subyacente -> SL a compra + 1% / compra - 1%)
+                if is_call and cur_stock_p >= round(entry_stock_p * 1.05, 2):
+                    exit_plan["be_locked"] = True
+                    be_sl = round(entry_stock_p * 1.01, 2)
+                    if be_sl > float(exit_plan.get("stop_loss_underlying") or 0.0):
+                        exit_plan["stop_loss_underlying"] = be_sl
+                        exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
+                elif not is_call and cur_stock_p <= round(entry_stock_p * 0.95, 2):
+                    exit_plan["be_locked"] = True
+                    be_sl = round(entry_stock_p * 0.99, 2)
+                    curr_sl = float(exit_plan.get("stop_loss_underlying") or 0.0)
+                    if curr_sl == 0.0 or be_sl < curr_sl:
+                        exit_plan["stop_loss_underlying"] = be_sl
+                        exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
 
                 exit_plan["last_eval_at"] = now_iso
                 sb.table("opt_paper_trades").update({

@@ -504,6 +504,8 @@ async def run_stock_driven_options_pipeline(
         has_cat = cat_info.get("tier") in (1, 2)
 
         exit_plan = {
+            "entry_underlying_price": p,
+            "initial_stock_price": p,
             "initial_sl": initial_sl,
             "stop_loss_underlying": initial_sl,
             "trailing_sl_type": "OPT_GAP_SL_EMA9_15M",
