@@ -114,8 +114,17 @@ def select_best_option_contract(
             continue
 
         dte = (exp_date - ref_date).days
-        # Filtro DTE: entre 2 y 21 días (evitar 0DTE y evitar meses lejanos con delta dragging)
-        if dte < 2 or dte > 21:
+
+        # Weekend Theta Shield:
+        # Los jueves (weekday 3) y viernes (weekday 4), prohibir contratos que expiren en fin de semana o lunes inmediato (DTE <= 4)
+        # Exigir vencimiento a partir de la siguiente semana para evitar decaimiento sin mercado
+        weekday = ref_date.weekday()
+        if weekday in (3, 4) and dte <= 4:
+            rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): Rechazado por Weekend Theta Shield (DTE={dte} <= 4 en fin de semana)")
+            continue
+
+        # Filtro DTE general: entre 3 y 21 días (evitar 0DTE y evitar meses lejanos con delta dragging)
+        if dte < 3 or dte > 21:
             continue
 
         # Obtener cotizaciones latest

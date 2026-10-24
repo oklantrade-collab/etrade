@@ -2567,9 +2567,8 @@ async def run_options_gap_defense_cycle():
     4. Ejecuta Hard SL (-35%), Stall Guard (20 min), Trailing Ratchet Tier 2/3, Breakeven Shield, VWAP Exit, RSI Climax TP.
     5. Actualiza Stop Loss dinámico monotónico y watermark en opt_paper_trades.
     """
-    from app.core.market_hours import is_market_open
-    res = is_market_open()
-    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    from app.core.market_hours import is_options_market_open
+    is_open, reason_open = is_options_market_open()
     if not is_open:
         return
 
@@ -2822,10 +2821,11 @@ async def run_options_gap_defense_cycle():
                         "target_band": f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}",
                         "group_name": "OPEN_GAP_RUNNER_OPT",
                         "rule_code": "APEX_AUTO",
-                        "order_type": "market",
+                        "order_type": "limit",
                         "direction": "sell",
                         "shares": qty_to_close,
                         "market_price": cur_opt_premium,
+                        "limit_price": round(cur_opt_premium, 2),
                         "status": "pending",
                         "created_at": now_iso
                     }).execute()
@@ -2916,9 +2916,8 @@ async def run_options_auto_execution_cycle():
        - Emite alerta Telegram institucional.
     """
     global _LAST_STOCK_DRIVEN_OPTIONS_TS
-    from app.core.market_hours import is_market_open
-    res = is_market_open()
-    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    from app.core.market_hours import is_options_market_open
+    is_open, reason_open = is_options_market_open()
     if not is_open:
         return
 
@@ -2961,24 +2960,52 @@ async def run_options_auto_execution_cycle():
         if not sel_cands:
             return
 
-        open_trades = sb.table("opt_paper_trades").select("id, max_loss_total").eq("status", "open").execute().data or []
+        open_trades = sb.table("opt_paper_trades").select("id, max_loss_total, symbol").eq("status", "open").execute().data or []
         current_open_risk = sum(float(t.get("max_loss_total") or 0.0) for t in open_trades)
         max_positions = int(eff.get("max_open_positions", 3))
         capital_limit = float(eff.get("max_open_risk_usd", 5000.0))
 
-        if len(open_trades) >= max_positions or current_open_risk >= capital_limit:
+        # Contar órdenes de compra de opciones en tránsito (en vuelo)
+        in_flight_buys = sb.table("stocks_orders")\
+            .select("id, ticker, market_price, limit_price, shares, target_band, group_name")\
+            .eq("direction", "buy")\
+            .in_("status", ["pending", "processing"])\
+            .execute().data or []
+
+        opt_in_flight = [
+            o for o in in_flight_buys 
+            if "OPT:" in str(o.get("target_band") or "") or "OPT" in str(o.get("group_name") or "")
+        ]
+
+        in_flight_risk = sum(
+            float(o.get("limit_price") or o.get("market_price") or 0.0) * int(o.get("shares") or 1) * 100.0 
+            for o in opt_in_flight
+        )
+
+        total_occupied_slots = len(open_trades) + len(opt_in_flight)
+        total_occupied_risk = current_open_risk + in_flight_risk
+
+        if total_occupied_slots >= max_positions or total_occupied_risk >= capital_limit:
+            log_info(MODULE, f"⏸️ Opciones: cupo máximo alcanzado ({len(open_trades)} abiertas + {len(opt_in_flight)} en vuelo = {total_occupied_slots}/{max_positions} slots). Riesgo: ${total_occupied_risk:.2f}/${capital_limit:.2f}")
             return
 
+        # Símbolos activos para evitar duplicación
+        active_opt_symbols = set(t.get("symbol") for t in open_trades if t.get("symbol"))
+        active_opt_symbols.update(o.get("ticker") for o in opt_in_flight if o.get("ticker"))
+
         for cand in sel_cands:
-            if len(open_trades) >= max_positions:
+            if total_occupied_slots >= max_positions:
                 break
             cid = cand["id"]
             und = cand.get("opt_underlyings") or {}
             sym_c = und.get("symbol") or cand.get("symbol") or ""
             dir_c = cand.get("direction")
 
+            if sym_c in active_opt_symbols:
+                continue
+
             cand_risk = float(cand.get("max_loss_total") or 0.0)
-            if current_open_risk + cand_risk > capital_limit:
+            if total_occupied_risk + cand_risk > capital_limit:
                 continue
 
             # Evitar re-ejecución si ya hay posición abierta para este símbolo y dirección

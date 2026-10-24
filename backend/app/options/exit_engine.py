@@ -554,11 +554,10 @@ def evaluate_position_exit(position: dict[str, Any],
                            now: datetime | None = None,
                            tech_context: dict[str, Any] | None = None) -> tuple[bool, str | None, dict[str, Any]]:
     """Evalua si una posicion debe cerrarse y bajo que motivo."""
-    from app.core.market_hours import is_market_open
-    res = is_market_open()
-    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    from app.core.market_hours import is_options_market_open
+    is_open, reason_open = is_options_market_open()
     if not is_open:
-        return {"open_count": 0, "closed_count": 0, "exits": [], "message": "Market closed, skipping exit evaluations"}
+        return False, None, {"open_count": 0, "closed_count": 0, "exits": [], "message": f"Options market closed: {reason_open}"}
 
     now_dt = now or datetime.now(timezone.utc)
 
@@ -600,11 +599,10 @@ def evaluate_position_exit(position: dict[str, Any],
 
 def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None) -> dict[str, Any]:
     """Recorre todas las posiciones abiertas, actualiza su mark-to-market y ejecuta salidas aprobadas."""
-    from app.core.market_hours import is_market_open
-    res = is_market_open()
-    is_open = res[0] if isinstance(res, tuple) else bool(res)
+    from app.core.market_hours import is_options_market_open
+    is_open, reason_open = is_options_market_open()
     if not is_open:
-        return {"open_count": 0, "closed_count": 0, "exits": [], "message": "Market closed, skipping exit evaluations"}
+        return {"open_count": 0, "closed_count": 0, "exits": [], "message": f"Options market closed: {reason_open}"}
 
     now_dt = now or datetime.now(timezone.utc)
     try:
@@ -741,10 +739,11 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
                         "target_band": opt_target_band,
                         "group_name": "OPTIONS_AUTONOMOUS",
                         "rule_code": "APEX_AUTO",
-                        "order_type": "market",
+                        "order_type": "limit",
                         "direction": side,
                         "shares": qty_to_close,
                         "market_price": px,
+                        "limit_price": round(px, 2),
                         "status": "pending",
                         "created_at": exit_fill_res.exit_time,
                     }).execute()

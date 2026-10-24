@@ -106,3 +106,31 @@ def is_forex_market_open() -> bool:
     
     # Monday to Thursday
     return True
+
+
+def is_options_market_open(buffer_start_min: int = 5, buffer_end_min: int = 5) -> tuple[bool, str]:
+    """
+    Verifica si el mercado de opciones de EE.UU. (CBOE/NYSE) está abierto y en horario seguro de negociación.
+    Horario regular: 09:30 a 16:00 EST.
+    Horario seguro con buffer: 09:35 a 15:55 EST (evita spreads caóticos de apertura y rechazos de post-cierre).
+    """
+    now = get_nyc_now()
+    if now.weekday() > 4:
+        return False, "CERRADO (Fin de semana)"
+
+    # Verificar calendario bursátil general (feriados)
+    is_open_stk, reason_stk = is_market_open()
+    if not is_open_stk:
+        return False, f"CERRADO ({reason_stk})"
+
+    # Hora en NYC con buffers
+    nyc_time = now.time()
+    t_start = time(9, 30 + buffer_start_min)  # 09:35 EST
+    t_end = time(16 - 1, 60 - buffer_end_min)  # 15:55 EST
+
+    if nyc_time < t_start:
+        return False, f"CERRADO (Buffer Inicial hasta 09:35 EST, actual: {nyc_time.strftime('%H:%M')})"
+    if nyc_time >= t_end:
+        return False, f"CERRADO (Buffer Final desde 15:55 EST, actual: {nyc_time.strftime('%H:%M')})"
+
+    return True, "ABIERTO (Opciones)"

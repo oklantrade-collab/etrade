@@ -406,6 +406,7 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
                 "direction": side,
                 "shares": qty,
                 "market_price": px,
+                "limit_price": round(px, 2),
                 "status": "pending",
                 "created_at": fill_res.entry_time,
             }).execute()

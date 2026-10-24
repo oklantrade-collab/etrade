@@ -516,10 +516,24 @@ class IBBridgeWorker:
                         except Exception as opt_parse_err:
                             log_warning(MODULE, f"Aviso al parsear contrato de opción ({ticker_u}, target={target_b}): {opt_parse_err}")
 
-                    if not contract:
-                        # ── BLOQUEO ANTI-SHORT BLINDADO: eTrader opera exclusivamente LONG en Stocks ──
+                    # Si era candidata de opción pero no se pudo construir el contrato, cancelar para evitar operar acciones por error
+                    if is_option_candidate and not contract:
+                        msg = f"⚠️ [OPTION PARSE GUARD] Orden {order_id} ({ticker_u}, target={target_b}) no pudo resolver contrato de opción. Cancelando orden para evitar operar acciones por error."
+                        log_warning(MODULE, msg)
+                        sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                        continue
+
+                    # ── GUARDIA DE MERCADO PARA OPCIONES ──
+                    if is_option:
+                        from app.core.market_hours import is_options_market_open
+                        is_opt_open, opt_reason = is_options_market_open()
+                        if not is_opt_open:
+                            log_warning(MODULE, f"⏸️ [MARKET GATE] Mercado de opciones cerrado ({opt_reason}). Orden {ticker_u} ({direction}) no despachada a TWS para evitar rechazo del broker.")
+                            continue
+
+                    # ── BLOQUEO ANTI-SHORT PARA ACCIONES (NUNCA APLICA A OPCIONES) ──
+                    if not is_option and not contract:
                         if direction == "sell":
-                            # Siempre forzar lectura fresca de posiciones del broker
                             self.ib.request_broker_positions(timeout=3.0)
                             broker_pos = self.ib._positions.get(ticker.upper())
 
@@ -540,16 +554,19 @@ class IBBridgeWorker:
                                 log_warning(MODULE, f"⚠️ [CLAMP SHARES] Ajustando venta de {ticker} de {shares} a {available_shares} acc para no entrar en corto.")
                                 shares = available_shares
 
-                            # Registrar en el ledger en vuelo
                             self._in_flight_sells[ticker.upper()] = already_in_flight + shares
 
                         contract = self.ib.us_stock_contract(ticker)
 
-                    # ── BLINDAJE LMT PARA OPCIONES (Propuesta #2) ──
-                    # NUNCA enviar órdenes a mercado en opciones; forzar LMT al precio de referencia
-                    if is_option and order_type != "limit" and price > 0:
-                        log_warning(MODULE, f"🛡️ [OPTION SHIELD] Convirtiendo orden de opción {ticker_u} de MKT a LMT a ${price:.2f} para prevenir slippage destructivo.")
+                    # ── BLINDAJE LMT ESTRICTO PARA OPCIONES (Cero Slippage) ──
+                    if is_option:
+                        eff_price = price if price > 0 else float(order.get("limit_price") or order.get("market_price") or 0.0)
+                        if eff_price <= 0:
+                            log_warning(MODULE, f"⚠️ Orden de opción {ticker_u} sin precio límite válido. Cancelando para evitar ejecución descontrolada.")
+                            sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                            continue
                         order_type = "limit"
+                        price = eff_price
 
                     ib_ord = Order()
                     ib_ord.eTradeOnly = False
