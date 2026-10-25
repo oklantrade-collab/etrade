@@ -1226,6 +1226,14 @@ def calculate_alpha_escalating_trailing_stop(
             if atr15 > 0:
                 delta = max(0.01, min(current_price * 0.0035, 0.15 * atr15))
 
+        # ── RATCHET A BREAKEVEN (CENTRO DE COSTO + 1%) AL ALCANZAR +4.0% ──
+        if entry_p > 0 and highest_seen >= (entry_p * 1.04):
+            be_sl_plus1 = round(entry_p * 1.01, 2)
+            if be_sl_plus1 > best_sl and be_sl_plus1 < current_price:
+                best_sl = be_sl_plus1
+                active_stage = 'STAGE_RATCHET_BREAKEVEN_PLUS1'
+                reasons.append(f"RatchetBE+1%(Entry ${entry_p:.2f}->High ${highest_seen:.2f}=>${be_sl_plus1:.2f})")
+
         # ── RATCHET DEL 80% SOBRE EL AVANCE DEL OPEN (Propuesta Aprobada) ──
         # Si el activo ha tenido una expansión >= 8% sobre el precio OPEN del día,
         # se fija un Stop inamovible que retiene al menos el 80% de ese recorrido:

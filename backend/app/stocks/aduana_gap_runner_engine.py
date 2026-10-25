@@ -487,6 +487,23 @@ def evaluate_gap_runner_entry_tranches(
         l_last = float(l5.iloc[-1])
         h_last = float(h5.iloc[-1])
 
+        # Regla 1: Filtro de Confirmación "ORB Breakout" para Gaps Gigantes (> +30%)
+        # Si el gap es superior al 30% y la primera vela de 5m fue roja (cierre < apertura):
+        # Se prohíbe la compra a ciegas en la apertura de la vela 2 (evita trampas Gap & Crap como STAK/BOLT).
+        # Solo se autoriza la entrada si alguna vela posterior rompe por encima del High de la primera vela (ORB High).
+        if gap_pct > 30.0 and len(df_5m) >= 2:
+            c1_open = float(o5.iloc[0])
+            c1_close = float(c5.iloc[0])
+            c1_high = float(h5.iloc[0])
+            if c1_close < c1_open:
+                has_orb_reclaimed = bool(np.any(c5.iloc[1:].to_numpy() >= c1_high * 0.998))
+                if not has_orb_reclaimed:
+                    res["reason"] = (
+                        f"Filtro ORB Gaps > 30%: Vela 1 fue roja de descarga (${c1_open:.2f}->${c1_close:.2f}). "
+                        f"Esperando ruptura de ORB High (${c1_high:.2f}). Compra descartada para evitar Gap & Crap."
+                    )
+                    return res
+
         # Caso 1: Solo 2 velas de 5m (Ruta Directa inmediata en apertura)
         if len(df_5m) == 2:
             is_candle_1_green = c_prev > o_prev
@@ -500,9 +517,10 @@ def evaluate_gap_runner_entry_tranches(
                 res["reason"] = f"Vela 2 (5m) no confirma empuje continuo (Open ${o_last:.2f} vs Close_Prev ${c_prev:.2f})"
                 return res
 
-            init_sl = round(min(l_prev, cur_p * 0.95), 2)
+            # Regla 3: Stop Loss estructural con Hard Cap de -4.5% máximo
+            init_sl = round(max(min(l_prev, cur_p * 0.965), cur_p * 0.955), 2)
             if init_sl <= 0 or init_sl >= cur_p:
-                init_sl = round(cur_p * 0.95, 2)
+                init_sl = round(cur_p * 0.955, 2)
 
             res.update({
                 "should_enter": True,
@@ -550,9 +568,10 @@ def evaluate_gap_runner_entry_tranches(
                             return res
 
                 delta = max(0.01 * cur_p, 0.15 * float(h_prev - l_prev))
-                init_sl = round(low_dip - delta, 2)
+                # Regla 3: Hard Cap SL en Dip & Rip (-4.5% máximo)
+                init_sl = round(max(low_dip - delta, cur_p * 0.955), 2)
                 if init_sl <= 0 or init_sl >= cur_p:
-                    init_sl = round(low_dip * 0.99, 2)
+                    init_sl = round(cur_p * 0.955, 2)
 
                 rule_label = "GAP_DIP_AND_RIP_1"
                 fill_tag = " (Gap Fill)" if is_gap_fill_sweep else ""
@@ -638,9 +657,10 @@ def evaluate_gap_runner_entry_tranches(
             is_turn_green_2 = (c_last >= o_last) and (c_last >= c_prev or o_last >= c_prev * 0.995)
 
             if is_turn_green_1 and is_turn_green_2:
-                init_sl = round(min(l_prev, cur_p * 0.95), 2)
+                # Regla 3: Hard Cap SL en Ruta Directa retrasada (-4.5% máximo)
+                init_sl = round(max(min(l_prev, cur_p * 0.965), cur_p * 0.955), 2)
                 if init_sl <= 0 or init_sl >= cur_p:
-                    init_sl = round(cur_p * 0.95, 2)
+                    init_sl = round(cur_p * 0.955, 2)
 
                 res.update({
                     "should_enter": True,
@@ -849,15 +869,53 @@ def evaluate_gap_runner_aduana_exit(
     cur_sl = float(position.get("stop_loss") or 0.0)
 
     # ─────────────────────────────────────────────────────────────
-    # VALIDACIÓN 1: Hard Stop Loss
+    # VALIDACIÓN 0: REGLA 2 - RATCHET A BREAKEVEN (CENTRO DE COSTO + DELTA 1%) AL ALCANZAR +4.0%
+    # ─────────────────────────────────────────────────────────────
+    highest_p = float(position.get("highest_price_reached") or current_price)
+    if current_price > highest_p:
+        highest_p = current_price
+
+    gain_peak_pct = ((highest_p - avg_price) / avg_price * 100.0) if avg_price > 0 else 0.0
+    if gain_peak_pct >= 4.0:
+        be_price = round(avg_price * 1.01, 2)  # Centro de costo + 1.0% de ganancia garantizada
+        if cur_sl < be_price:
+            cur_sl = be_price
+            res["new_stop_loss"] = be_price
+            log_info(MODULE, f"🛡️ Ratchet Breakeven activado para {position.get('ticker')}: Pico alcanzado +{gain_peak_pct:.1f}% >= +4%. SL asegurado en ${be_price:.2f} (+1% neto protegido).")
+
+    # ─────────────────────────────────────────────────────────────
+    # VALIDACIÓN 0.5: REGLA 5 - TOMA PARCIAL DE BENEFICIOS (50% AL +20.0%)
+    # ─────────────────────────────────────────────────────────────
+    has_partial_tp = bool(position.get("tp_block1_executed") or position.get("partial_tp_taken") or position.get("partial_taken"))
+    cur_gain_pct = ((current_price - avg_price) / avg_price * 100.0) if avg_price > 0 else 0.0
+    if total_shares >= 2 and not has_partial_tp and cur_gain_pct >= 20.0:
+        shares_to_exit = total_shares // 2
+        res.update({
+            "should_exit": True,
+            "exit_type": "partial_50",
+            "rule_code": "ADUANA_GAP_TAKE_PROFIT_20",
+            "shares_to_exit": shares_to_exit,
+            "reason": f"Toma Parcial 50% al +20%: Ganancia actual alcanzó +{cur_gain_pct:.1f}% >= +20%. Se aseguran {shares_to_exit} acciones en caja."
+        })
+        return res
+
+    # ─────────────────────────────────────────────────────────────
+    # VALIDACIÓN 1: Stop Loss (Hard SL o Breakeven SL Protegido)
     # ─────────────────────────────────────────────────────────────
     if cur_sl > 0 and current_price <= cur_sl:
+        is_be_sl = (cur_sl >= avg_price)
+        rule_cd = "ADUANA_GAP_BREAKEVEN_SL" if is_be_sl else "ADUANA_GAP_HARD_SL"
+        sl_desc = (
+            f"Stop Loss Protegido (+1% neto asegurado): Precio (${current_price:.2f}) <= SL (${cur_sl:.2f})"
+            if is_be_sl else
+            f"Stop Loss ejecutado: Precio (${current_price:.2f}) <= SL (${cur_sl:.2f})"
+        )
         res.update({
             "should_exit": True,
             "exit_type": "full",
-            "rule_code": "ADUANA_GAP_HARD_SL",
+            "rule_code": rule_cd,
             "shares_to_exit": total_shares,
-            "reason": f"Stop Loss ejecutado: Precio (${current_price:.2f}) <= SL (${cur_sl:.2f})"
+            "reason": sl_desc
         })
         return res
 
