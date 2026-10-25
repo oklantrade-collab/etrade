@@ -177,14 +177,22 @@ def calculate_semaphore_and_buying_force(
     is_super_runner_expansion = (
         gap_pct is not None and gap_pct >= 5.0 and has_room_to_bb and rvol >= 1.5 and plus_di_5m >= minus_di_5m
     )
+    # IGNICIÓN EXPLOSIVA EN APERTURA (Gaps > 25% con volumen y precio sobre Open o vela 1 verde):
+    is_gap_orb_ignition = (
+        gap_pct is not None and gap_pct > 25.0 and (candle_1_green or open_ge_close or (plus_di_5m >= minus_di_5m)) and (rvol >= 2.0 or delta_p_5m >= 0.0)
+    )
 
     # Castigo o bonificación de fuerza compradora para Gaps:
-    if is_super_runner_expansion:
-        # SUPER-RUNNER EXPANSION: No se castiga la fuerza compradora; tiene autopista en 1D y volumen institucional
-        raw_buying_force += min(25.0, room_to_bb_upper_1d * 0.25)
+    if is_super_runner_expansion or is_gap_orb_ignition:
+        # SUPER-RUNNER EXPANSION / ORB IGNITION: No se castiga la fuerza compradora; ignición institucional en apertura
+        bonus_gap = min(25.0, (room_to_bb_upper_1d * 0.25) if (room_to_bb_upper_1d is not None and room_to_bb_upper_1d > 0) else 15.0)
+        raw_buying_force = max(raw_buying_force, 75.0) + min(15.0, rvol * 2.0)
+        raw_buying_force += bonus_gap
+        raw_buying_force = min(raw_buying_force, 98.0)
     elif gap_pct is not None and gap_pct > 25.0:
-        # Castigo de fuerza compradora para Gaps excesivos por sobreextensión en apertura (sin espacio 1D)
-        raw_buying_force = min(raw_buying_force, 45.0)
+        # Castigo de fuerza compradora SOLO para Gaps desinflándose activamente (presión vendedora / vela roja)
+        if delta_p_5m < -1.5 or (not open_ge_close and not candle_1_green and rvol < 2.0):
+            raw_buying_force = min(raw_buying_force, 45.0)
 
     buying_force = int(round(min(100.0, max(5.0, raw_buying_force))))
 
@@ -240,12 +248,19 @@ def calculate_semaphore_and_buying_force(
         sem_color = "#10B981"
         sem_tip = f"Open Gap Up (+{gap_pct:.1f}%) con autopista libre hasta la Banda Superior de Bollinger 1D (+{room_to_bb_upper_1d:.1f}%). Reversión desde el fondo confirmada con RVOL {rvol:.1f}x. COMPRA HABILITADA."
         setup_bonus = 35.0
-    # CASO A.3: CANDADO GAP EXHAUSTION (> 25% EN APERTURA / FILTRO ANTI-LQDA)
+    # CASO A.2.6: SUPER-RUNNER ORB IGNITION (OPEN GAP UP > 25% SOSTENIDO SOBRE OPEN CON VOLUMEN INSTITUCIONAL)
+    elif is_gap_orb_ignition:
+        semaphore = "SUPER_RUNNER_IGNITION"
+        sem_label = f"🟢 SUPER-RUNNER ORB IGNITION (+{gap_pct:.1f}% RVOL {rvol:.1f}x)"
+        sem_color = "#10B981"
+        sem_tip = f"Ignición explosiva en apertura (+{gap_pct:.1f}%). Sostenida sobre Open con RVOL institucional ({rvol:.1f}x). COMPRA PRIORITARIA LMT (+1%)."
+        setup_bonus = 35.0
+    # CASO A.3: CANDADO GAP EXHAUSTION (> 25% EN APERTURA DESINFLÁNDOSE / FILTRO ANTI-LQDA)
     elif gap_pct is not None and gap_pct > 25.0:
         semaphore = "EXHAUSTION_GAP"
         sem_label = f"🟡 CLÍMAX GAP (+{gap_pct:.1f}% > 25%)"
         sem_color = "#F59E0B"
-        sem_tip = f"Gap de apertura excesivo (+{gap_pct:.1f}% > 25%). Riesgo extremo de agotamiento y dilución pre-market (Filtro Anti-LQDA). Prohibido comprar en primeros 45m."
+        sem_tip = f"Gap de apertura excesivo (+{gap_pct:.1f}% > 25%) con debilidad o venta activa. Riesgo de dilución/agotamiento. Esperar consolidación."
         setup_bonus = -20.0
     # CASO B: RECHAZO SIPV EN TECHO (Mecha superior prominente en 1H)
     elif sipv_upper_rejection:
@@ -439,9 +454,10 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "room_to_bb_upper_1d": room_to_bb,
                 "bb_upper_1d": bb_upper_1d,
                 "sma20_1d": sma20_1d,
-                "is_expansion_runner": (metrics["semaphore"] == "EXPANSION_RUNNER"),
-                "is_early_momentum": (metrics["semaphore"] == "EARLY_MOMENTUM"),
-                "is_momentum_runner": (metrics["semaphore"] in ("EARLY_MOMENTUM", "EXPANSION_RUNNER", "SWEET_SPOT")),
+                "is_expansion_runner": (metrics["semaphore"] in ("EXPANSION_RUNNER", "SUPER_RUNNER_IGNITION")),
+                "is_early_momentum": (metrics["semaphore"] in ("EARLY_MOMENTUM", "SUPER_RUNNER_IGNITION")),
+                "is_super_runner_ignition": (metrics["semaphore"] == "SUPER_RUNNER_IGNITION"),
+                "is_momentum_runner": (metrics["semaphore"] in ("EARLY_MOMENTUM", "EXPANSION_RUNNER", "SWEET_SPOT", "SUPER_RUNNER_IGNITION")),
                 "is_15m_high_growing": live_1h.get("is_15m_high_growing", False),
                 "is_15m_bb_breakout": live_1h.get("is_15m_bb_breakout", False),
                 "is_bb_15m_opening": live_1h.get("is_bb_15m_opening", False),

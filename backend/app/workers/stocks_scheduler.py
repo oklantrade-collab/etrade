@@ -750,10 +750,10 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["growth_potential_pct"] = trap_shield_res['growth_potential_pct']
         ind_15m["intraday_alpha_score"] = trap_shield_res.get('intraday_alpha_score', 0)
 
-        # Clasificar categoría ALPHA_RUNNER explícitamente si es runner de $15M-$500M o Intraday Alpha
+        # Clasificar categoría ALPHA_RUNNER explícitamente si es runner de $5M-$500M o Intraday Alpha
         is_alpha_runner_cat = (
             trap_shield_res.get('is_intraday_alpha', False)
-            or (15_000_000 <= mcap <= 500_000_000 and (rvol_1h_val >= 1.8 or abs(float(ind_15m.get("change_pct") or 0)) >= 4.0))
+            or (5_000_000 <= mcap <= 500_000_000 and (rvol_1h_val >= 1.8 or abs(float(ind_15m.get("change_pct") or 0)) >= 4.0))
             or ("ALPHA_RUNNER" in str(ind_15m.get("pool_type", "")))
         )
         if is_alpha_runner_cat and not trap_shield_res['is_trap']:
@@ -1926,9 +1926,11 @@ async def run_stocks_cycle(force=False):
                 is_standard_runner = (vol >= 1_000_000 and mcap >= 25_000_000 and bf >= 65.0 and is_ema3_asc)
                 # Low-float: Requiere mínimo 500k volumen, RVOL >= 3.0x, Chg >= +6%, BF >= 70 y EMA3 1H ascendente
                 is_low_float_runner = (vol >= 500_000 and rvol_val >= 3.0 and chg >= 6.0 and mcap >= 25_000_000 and bf >= 70.0 and is_ema3_asc)
-                # Early Momentum Runner: 15m BB Breakout / Bandas Abiertas o 1H Gap Up con RVOL >= 2.5x
-                is_early_runner = bool(g.get("is_early_momentum", False)) and vol >= 300_000 and rvol_val >= 2.5 and bf >= 65.0
-                if not (sym and (is_standard_runner or is_low_float_runner or is_early_runner)):
+                # Micro/Low-Float Explosivo ($5M a $25M): Requiere volumen masivo (>= 1M), RVOL >= 3.0x, Chg >= +6%, BF >= 70
+                is_explosive_micro_runner = (vol >= 1_000_000 and rvol_val >= 3.0 and chg >= 6.0 and mcap >= 5_000_000 and bf >= 70.0 and is_ema3_asc)
+                # Early Momentum Runner: 15m BB Breakout / Bandas Abiertas, 1H Gap Up o Super Runner Ignition con RVOL >= 2.0x
+                is_early_runner = bool(g.get("is_early_momentum", False) or g.get("is_super_runner_ignition", False)) and vol >= 300_000 and rvol_val >= 2.0 and bf >= 65.0
+                if not (sym and (is_standard_runner or is_low_float_runner or is_early_runner or is_explosive_micro_runner)):
                     continue
 
                 # ── FILTRO HORARIO INTELIGENTE (CICLO DE VIDA DEL MOMENTUM) ──

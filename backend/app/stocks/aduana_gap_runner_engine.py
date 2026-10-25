@@ -443,8 +443,15 @@ def evaluate_gap_runner_entry_tranches(
         ema3_above_ema9 = bool(ema3_1h > ema9_1h)
 
         # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) Y (RSI < 80.0)
-        meets_1h_req = ema3_above_ema9 and (rsi_1h_val < 80.0)
-        has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9
+        # Excepción Institucional: Reversión Explosiva Día 1 con Gap >= 10%, vela 1H verde y EMA3 1H en fuerte ascenso
+        is_day1_reversal = False
+        if gap_pct >= 10.0 and len(c1h) >= 2:
+            ema3_prev_1h = float(c1h.ewm(span=3, adjust=False).mean().iloc[-2])
+            is_day1_reversal = (ema3_1h > ema3_prev_1h and float(c1h.iloc[-1]) >= float(o1h.iloc[-1]))
+
+        # Para standard runners requiere EMA3 > EMA9 y RSI < 80; para Reversión Explosiva Día 1 el impulso inicial es admitido
+        meets_1h_req = (ema3_above_ema9 and rsi_1h_val < 80.0) or is_day1_reversal
+        has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9 or is_day1_reversal
 
         macro_1h_ok = meets_1h_req
         res["macro_1h_ok"] = macro_1h_ok
@@ -628,7 +635,7 @@ def evaluate_gap_runner_entry_tranches(
         if not had_red_pullback:
             # Todas las velas previas fueron verdes (Ruta Directa retrasada)
             is_turn_green_1 = c_prev > o_prev
-            is_turn_green_2 = (c_last >= o_last) and (o_last >= c_prev * 0.998)
+            is_turn_green_2 = (c_last >= o_last) and (c_last >= c_prev or o_last >= c_prev * 0.995)
 
             if is_turn_green_1 and is_turn_green_2:
                 init_sl = round(min(l_prev, cur_p * 0.95), 2)

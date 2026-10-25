@@ -247,16 +247,15 @@ def evaluate_trap_shield(
     # ════════════════════════════════════════════════════════════
 
     # TRAMPA 1: GAP EXCESIVO DESINFLÁNDOSE (> +60%)
-    # Excepción Institucional: Si las Bandas de Bollinger están abiertas (Superior +, Inferior -)
-    # y el precio cotiza sobre el VWAP con RVOL alto, NO es trampa: es un Super-Runner en expansión!
+    # Excepción Institucional: Si el precio cotiza sobre VWAP o rompe ORB High con RVOL alto, NO es trampa: es un Super-Runner en expansión!
     if gap_pct > 60.0:
         # Evaluar apertura de bandas en 5m
         is_bb_5m_open = False
-        if df_5m is not None and len(df_5m) >= 5:
+        if df_5m is not None and len(df_5m) >= 2:
             try:
                 c5_s = _safe_series(df_5m, 'close')
-                s20 = c5_s.rolling(min(20, len(c5_s)), min_periods=3).mean()
-                std20 = c5_s.rolling(min(20, len(c5_s)), min_periods=3).std().fillna(0)
+                s20 = c5_s.rolling(min(20, len(c5_s)), min_periods=2).mean()
+                std20 = c5_s.rolling(min(20, len(c5_s)), min_periods=2).std().fillna(0)
                 b_up = s20 + 2.0 * std20
                 b_lo = s20 - 2.0 * std20
                 if len(b_up) >= 2:
@@ -265,17 +264,18 @@ def evaluate_trap_shield(
                 pass
 
         bb_bands_opening = bool(is_bb_15m_opening or is_bb_5m_open)
+        is_orb_breakout = bool(orb_info.get('has_orb') and current_price >= orb_info.get('orb_high', current_price) * 0.998)
 
-        # Si bandas están abiertas, sobre VWAP y con volumen activo, anular veto de trampa
-        if bb_bands_opening and not is_below_vwap and rvol >= 2.0:
-            log_info(MODULE, f"🚀 SUPER-RUNNER EXPANSIVO (+{gap_pct:.1f}%): Bandas Bollinger abiertas (Sup+/Inf-), sobre VWAP (${vwap:.2f}) y RVOL {rvol:.1f}x. Veto de trampa anulado.")
+        # Si bandas están abiertas, sobre VWAP o en ruptura ORB High con volumen activo, anular veto de trampa
+        if (bb_bands_opening or not is_below_vwap or is_orb_breakout) and rvol >= 2.0:
+            log_info(MODULE, f"🚀 SUPER-RUNNER EXPANSIVO (+{gap_pct:.1f}%): Sobre VWAP (${vwap:.2f}) / ORB Breakout con RVOL {rvol:.1f}x. Veto de trampa anulado.")
         else:
-            # Si el gap es masivo (> 60%) y el precio cotiza por debajo del Open o del VWAP
-            if current_price < eff_open * 0.98 or is_below_vwap:
+            # Solo es fade real si cotiza simultáneamente por debajo del Open y del VWAP
+            if current_price < eff_open * 0.98 and is_below_vwap:
                 return {
                     'is_trap': True,
                     'trap_type': 'EXCESSIVE_GAP_FADE',
-                    'trap_reason': f"Trampa Gap Masivo (+{gap_pct:.1f}%): Cotiza bajo Open (${eff_open:.2f}) o VWAP (${vwap:.2f}). Descarga masiva.",
+                    'trap_reason': f"Trampa Gap Masivo (+{gap_pct:.1f}%): Cotiza bajo Open (${eff_open:.2f}) y bajo VWAP (${vwap:.2f}). Descarga masiva.",
                     'gap_pct': round(gap_pct, 1),
                     'is_sweet_spot': False,
                     'is_intraday_alpha': False,
@@ -284,12 +284,12 @@ def evaluate_trap_shield(
                     'vwap': round(vwap, 3)
                 }
 
-            # Si no tiene catalizador de máximo impacto ni bandas abiertas, gap > 80% se descarta
-            if gap_pct > 80.0 and news_tier > 1 and not bb_bands_opening:
+            # Si no tiene catalizador de máximo impacto ni cotiza sobre VWAP, gap > 80% se descarta
+            if gap_pct > 80.0 and news_tier > 1 and is_below_vwap:
                 return {
                     'is_trap': True,
                     'trap_type': 'EXCESSIVE_GAP_NO_CATALYST',
-                    'trap_reason': f"Gap de +{gap_pct:.1f}% sin catalizador ni bandas abiertas. Riesgo extremo de dilución.",
+                    'trap_reason': f"Gap de +{gap_pct:.1f}% bajo VWAP sin catalizador Tier 1. Riesgo extremo de dilución.",
                     'gap_pct': round(gap_pct, 1),
                     'is_sweet_spot': False,
                     'is_intraday_alpha': False,
