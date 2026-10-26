@@ -882,8 +882,18 @@ def evaluate_options_gap_aduana_exit(
         return res
 
     # 2. STALL GUARD POR THETA DECAY (20 min estancado)
+    # Solo aplica para contratos intradía 0-3 DTE. Prohibido para multi-semana swing (DTE >= 4)
+    exp_str_sg = str(position.get("expiry") or "")
+    dte_val_sg = 0
+    if len(exp_str_sg) >= 10:
+        try:
+            from datetime import date
+            dte_val_sg = (date.fromisoformat(exp_str_sg[:10]) - datetime.now(timezone.utc).date()).days
+        except Exception:
+            pass
+
     reentry_count = int(position.get("reentry_count") or 0)
-    if position_age_minutes >= 20.0 and reentry_count == 0 and unrealized_pnl_pct <= -15.0:
+    if dte_val_sg < 4 and position_age_minutes >= 20.0 and reentry_count == 0 and unrealized_pnl_pct <= -15.0:
         res.update({
             "should_exit": True,
             "exit_type": "stall_guard",

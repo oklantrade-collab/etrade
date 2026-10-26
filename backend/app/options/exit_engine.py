@@ -306,6 +306,23 @@ def evaluate_technical_rules_and_stops(
     exit_plan["last_underlying_price"] = current_price
     exit_plan["last_eval_at"] = now_dt.isoformat()
 
+    # Calcular DTE para distinguir opciones intradía de Swing Multi-Semana
+    exp_val = position.get("expiry")
+    exp_date = None
+    if isinstance(exp_val, str) and len(exp_val) >= 10:
+        try:
+            from datetime import date
+            exp_date = date.fromisoformat(exp_val[:10])
+        except Exception:
+            exp_date = None
+    elif hasattr(exp_val, "strftime"):
+        exp_date = exp_val
+
+    today_date = now_dt.date()
+    dte_days = (exp_date - today_date).days if exp_date else 999
+    is_swing_multiweek = (dte_days >= 4)
+    unr_pnl_pct = float(position.get("unrealized_pnl_pct") or 0.0)
+
     # Calcular antigüedad de la posición en minutos para proteger entradas recién abiertas (< 15 min)
     pos_age_min = 999.0
     entry_time_str = position.get("entry_time") or position.get("created_at")
@@ -321,16 +338,21 @@ def evaluate_technical_rules_and_stops(
     # (Con colchón mínimo de 5 min tras la apertura para evitar cierres a los 15 segundos)
     # ─────────────────────────────────────────────────────────────
     if pos_age_min >= 5.0:
-        if is_call and new_sl > 0.0 and current_price <= new_sl:
-            return True, "sl_underlying_pierced", {
-                "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} <= SL ${new_sl:.2f} ({new_sl_type})",
-                "exit_plan": exit_plan
-            }
-        elif is_put and new_sl > 0.0 and current_price >= new_sl:
-            return True, "sl_underlying_pierced", {
-                "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} >= SL ${new_sl:.2f} ({new_sl_type})",
-                "exit_plan": exit_plan
-            }
+        # En opciones que vencen la próxima semana o posteriores (Swing Multi-Semana),
+        # NO se permite cerrar en pérdida por micro-perforaciones técnicas intradía
+        if is_swing_multiweek and unr_pnl_pct < 1.0:
+            pass  # Protegido por regla de negocio Swing: solo salir con ganancia >= +1%
+        else:
+            if is_call and new_sl > 0.0 and current_price <= new_sl:
+                return True, "sl_underlying_pierced", {
+                    "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} <= SL ${new_sl:.2f} ({new_sl_type})",
+                    "exit_plan": exit_plan
+                }
+            elif is_put and new_sl > 0.0 and current_price >= new_sl:
+                return True, "sl_underlying_pierced", {
+                    "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} >= SL ${new_sl:.2f} ({new_sl_type})",
+                    "exit_plan": exit_plan
+                }
 
     # ─────────────────────────────────────────────────────────────
     # FASE 3: EVALUACIÓN DE LAS 5 REGLAS INSTITUCIONALES (ESCALONADO AGRESIVO)
@@ -382,8 +404,9 @@ def evaluate_technical_rules_and_stops(
                 "exit_ratio": ratio,
             }
 
-        # Reglas de invalidación técnica requieren al menos 15 minutos de maduración para no cerrar a los 15s de abrir
-        if pos_age_min >= 15.0:
+        # Reglas de invalidación técnica requieren al menos 15 minutos de maduración
+        # y NO aplican para cerrar en pérdida contratos que vencen la próxima semana o posteriores (Swing)
+        if pos_age_min >= 15.0 and (not is_swing_multiweek or unr_pnl_pct >= 1.0):
             # Regla 1: Ángulo EMA3 1H horizontal o descendente (slope <= 0.0%) -> Cierre Total
             if ema3_slope_1h <= 0.0:
                 return True, "ema3_flat_descending_1h", {
@@ -443,8 +466,9 @@ def evaluate_technical_rules_and_stops(
                 "exit_ratio": ratio,
             }
 
-        # Reglas de invalidación técnica requieren al menos 15 minutos de maduración para no cerrar a los 15s de abrir
-        if pos_age_min >= 15.0:
+        # Reglas de invalidación técnica requieren al menos 15 minutos de maduración
+        # y NO aplican para cerrar en pérdida contratos que vencen la próxima semana o posteriores (Swing)
+        if pos_age_min >= 15.0 and (not is_swing_multiweek or unr_pnl_pct >= 1.0):
             # Regla 1 (Inversa): Ángulo EMA3 1H horizontal o ascendente (slope >= 0.0%) -> Cierre Total
             if ema3_slope_1h >= 0.0:
                 return True, "ema3_flat_ascending_1h", {

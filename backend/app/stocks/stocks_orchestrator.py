@@ -186,6 +186,9 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
     # En un rally de momentum/breakout explosivo (como TANH), RSI 15m se ubica naturalmente en 75-90.
     # Bloquear por RSI > 75 castiga a los verdaderos líderes institucionales.
     # Para runners calificados solo se bloquea ante clímax extremo (RSI >= 92).
+    # BLINDAJE ANTI-AGOTAMIENTO INSTITUCIONAL:
+    # Para acciones estándar, RSI >= 72 es techo de sobrecompra.
+    # Para Alpha Runners calificados, el tope absoluto es RSI >= 78 (NUNCA permitir compras en agotamiento 80-92).
     if not is_alpha:
         if rsi >= max_rsi:
             reasons.append(f'RSI sobrecomprado ({rsi:.0f} ≥ {max_rsi})')
@@ -194,8 +197,16 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
         if upper_3 > 0 and price > upper_3:
             reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
     else:
-        if rsi >= 92.0:
-            reasons.append(f'RSI Clímax Extremo ({rsi:.0f} ≥ 92)')
+        if rsi >= 78.0:
+            reasons.append(f'RSI Agotamiento Alpha Runner ({rsi:.0f} ≥ 78)')
+        if upper_3 > 0 and price > upper_3 * 1.02:
+            reasons.append(f'Precio excesivamente sobre Upper_3 (${price:.2f} > ${upper_3 * 1.02:.2f})')
+
+    # Candado de Sobreextensión respecto a EMA20 (15m): si el precio está extendido > +2.5%
+    ema20_15m = float(snap.get('ema20_15m') or snap.get('ema20') or 0.0)
+    if ema20_15m > 0 and price > ema20_15m * 1.025:
+        ext_pct = ((price - ema20_15m) / ema20_15m) * 100.0
+        reasons.append(f'Sobreextendido sobre EMA20 15m (+{ext_pct:.1f}% > +2.5%)')
 
     # Trap Shield: Bloqueo innegociable de trampas de apertura
     if bool(snap.get('is_trap', False)):
@@ -482,13 +493,46 @@ def evaluate_5m_breakout(
             result['reason'] = f'5m: EMA20 ángulo negativo ({ema20_angle:.4f}%)'
             return result
 
-        # ¡TODAS LAS CONDICIONES CUMPLIDAS!
         price = float(df_5m[close_5m].iloc[-1])
+
+        # Condición 3: Blindaje Anti-Agotamiento RSI 5m <= 70.0
+        delta_5m = df_5m[close_5m].diff()
+        gain_5m = delta_5m.where(delta_5m > 0, 0.0).ewm(alpha=1/14, adjust=False).mean()
+        loss_5m = (-delta_5m.where(delta_5m < 0, 0.0)).ewm(alpha=1/14, adjust=False).mean()
+        rs_5m = gain_5m / loss_5m.replace(0, np.nan)
+        rsi_5m = float((100.0 - (100.0 / (1.0 + rs_5m))).iloc[-1]) if not rs_5m.empty else 50.0
+
+        if rsi_5m > 70.0:
+            result['reason'] = f'5m: RSI sobrecomprado ({rsi_5m:.1f} > 70.0). Riesgo de compra en agotamiento.'
+            return result
+
+        # Condición 4: Blindaje Rubber-Band (Extensión máxima a EMA20 <= 2.0%)
+        if last_ema20 > 0:
+            ext_ema20_pct = ((price - last_ema20) / last_ema20) * 100.0
+            if ext_ema20_pct > 2.0:
+                result['reason'] = f'5m: Precio sobreextendido de EMA20 (+{ext_ema20_pct:.2f}% > +2.0%). Esperando retroceso.'
+                return result
+
+        # Condición 5: Filtro Horario y Pullback Post-11:30 ET
+        from app.core.market_hours import get_nyc_now
+        nyc_now = get_nyc_now()
+        is_after_morning = (nyc_now.hour > 11) or (nyc_now.hour == 11 and nyc_now.minute >= 30)
+
+        if is_after_morning:
+            # Post-11:30 ET prohibido comprar breakouts al vacío. Se exige que una de las últimas 3 velas haya testeado EMA9/20
+            low_col = 'low' if 'low' in df_5m.columns else ('Low' if 'Low' in df_5m.columns else close_5m)
+            min_low_3 = float(df_5m[low_col].iloc[-3:].min())
+            tested_support = (min_low_3 <= last_ema9 * 1.004) or (min_low_3 <= last_ema20 * 1.004)
+            if not tested_support:
+                result['reason'] = f'5m: Breakout tardío post-11:30 ET bloqueado (sin retroceso/test a EMA9/20 en últimas 3 velas).'
+                return result
+
+        # ¡TODAS LAS CONDICIONES CUMPLIDAS!
         result['triggered'] = True
         result['reason'] = (
-            f'🎯 BREAKOUT 5m CONFIRMADO: '
+            f'🎯 BREAKOUT 5m CONFIRMADO (Filtrado Anti-Agotamiento): '
             f'EMA3={last_ema3:.4f} > EMA9={last_ema9:.4f} > EMA20={last_ema20:.4f} | '
-            f'Ángulos EMA9={ema9_angle:.4f}% EMA20={ema20_angle:.4f}% | '
+            f'RSI_5m={rsi_5m:.1f} (<=70) | Ext_EMA20=+{((price-last_ema20)/last_ema20*100):.1f}% (<=2%) | '
             f'Macro OK: EMA50_1D > EMA200_1D + SIPV_1D=Buy | '
             f'Precio={price:.2f}'
         )
@@ -1151,15 +1195,16 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
 
             effective_float = (c_mcap / max(0.01, price)) if c_mcap > 0 else 0
 
-            # 1. CANDADO VELA ROJA INTRADÍA (Precio < Open del Día con Gap >= 5%)
-            if c_gap_pct >= 5.0 and c_day_open > 0 and price < c_day_open * 0.998:
-                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VELA ROJA INTRADÍA (Precio ${price:.2f} < Open ${c_day_open:.2f} con Gap +{c_gap_pct:.1f}%).")
+            # 1. CANDADO UNIVERSAL VWAP INTRADÍA (Anti Bear Flag / Trampa de Techo)
+            # NUNCA comprar una acción que cotiza por debajo de su precio ponderado por volumen
+            if c_vwap > 0 and price < c_vwap * 0.998:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VWAP INTRADÍA (Precio ${price:.2f} < VWAP ${c_vwap:.2f}). Prohibido comprar bajo VWAP.")
                 await _upsert_queue(supabase, candidate, status='blocked')
                 continue
 
-            # 2. CANDADO VWAP INTRADÍA (Anti Bear Flag)
-            if c_gap_pct >= 5.0 and c_vwap > 0 and price < c_vwap * 0.998:
-                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por BEAR FLAG (Precio ${price:.2f} < VWAP ${c_vwap:.2f} con Gap +{c_gap_pct:.1f}%).")
+            # 2. CANDADO VELA ROJA INTRADÍA (Precio < Open del Día)
+            if c_day_open > 0 and price < c_day_open * 0.995:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VELA ROJA INTRADÍA (Precio ${price:.2f} < Open ${c_day_open:.2f}). Sesión vendedora.")
                 await _upsert_queue(supabase, candidate, status='blocked')
                 continue
 

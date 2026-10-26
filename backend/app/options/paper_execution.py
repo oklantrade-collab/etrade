@@ -254,10 +254,19 @@ def mark_position_to_market(position: dict[str, Any],
             valid = False
             break
 
-        if orig_side == "buy":
-            net_proceeds += float(bid)
+        # Valuación a precio justo Mid-Market (si use_mid_pricing está activo) o liquidación conservadora
+        f_bid = float(bid)
+        f_ask = float(ask)
+        use_mid = bool(eff.get("use_mid_pricing", False))
+
+        if use_mid and f_bid > 0 and f_ask > 0:
+            leg_price = round((f_bid + f_ask) / 2.0, 4)
+            net_proceeds += leg_price if orig_side == "buy" else -leg_price
         else:
-            net_proceeds -= float(ask)
+            if orig_side == "buy":
+                net_proceeds += f_bid
+            else:
+                net_proceeds -= f_ask
 
     if not valid:
         return {

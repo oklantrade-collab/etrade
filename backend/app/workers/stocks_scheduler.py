@@ -2788,8 +2788,30 @@ async def run_options_gap_defense_cycle():
 
             # PnL no realizado actual
             unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
+            cur_pnl_pct = round(((cur_opt_premium - entry_debit) / entry_debit * 100.0), 2) if entry_debit > 0 else 0.0
+
+            # ── CANDADO REGLA DE NEGOCIO: OPCIONES MULTI-SEMANA (DTE >= 4) ──
+            # "Si la opción vence la próxima semana o posterior y queremos cerrar esta semana,
+            # DEBE ser siempre en ganancia con por lo menos más del 1% de ganancias."
+            exp_date_v = None
+            if expiry_str:
+                try:
+                    from datetime import date
+                    exp_date_v = date.fromisoformat(expiry_str[:10])
+                except Exception:
+                    pass
+            dte_days_v = (exp_date_v - now_dt.date()).days if exp_date_v else 0
+            is_swing_multiweek = (dte_days_v >= 4)
+
+            eval_pos["unrealized_pnl_pct"] = cur_pnl_pct
 
             if eval_res.get("should_exit"):
+                exit_code_cand = eval_res.get("rule_code", "OPT_GAP_EXIT")
+                is_emergency_hard_sl = (exit_code_cand == "OPT_SWING_HARD_SL" or "HARD_SL" in exit_code_cand) and cur_pnl_pct <= -45.0
+
+                if is_swing_multiweek and cur_pnl_pct < 1.0 and not is_emergency_hard_sl:
+                    log_info(MODULE, f"⛔ BLOQUEO SALIDA SWING: {symbol} vence {expiry_str} (DTE {dte_days_v}d). Regla de negocio: Opciones que vencen la próxima semana o posteriores NO se cierran en pérdida por ruido técnico esta semana (PnL actual: {cur_pnl_pct:+.2f}% < +1.0%). Manteniendo posición abierta.")
+                    eval_res["should_exit"] = False
                 exit_code = eval_res.get("rule_code", "OPT_GAP_EXIT")
                 exit_reason_txt = eval_res.get("reason", exit_code)
                 realized_pnl_usd = unrealized_pnl_usd

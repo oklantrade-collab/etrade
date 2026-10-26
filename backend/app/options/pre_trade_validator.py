@@ -80,7 +80,7 @@ def validate_option_candidate_pre_trade(
     strategy_type: str,
     expiry_yyyymmdd: str,
     legs: List[Dict[str, Any]],
-    max_leg_spread_pct: float = 12.0
+    max_leg_spread_pct: float = 7.0
 ) -> Dict[str, Any]:
     """
     Valida integralmente las condiciones de liquidez y calcula el Limit Net Debit.
