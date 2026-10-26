@@ -489,6 +489,54 @@ def evaluate_stock_tp_v2(
     Prioridad 2: Motor adaptativo de bloques v2 base.
     Cero filtros de $1.00 USD — Cualquier ganancia positiva se toma ante agotamiento.
     """
+    # ── 0. MODELO OPT3 (flag GAP_EXIT_MODEL=OPT3): posiciones GAP salen SOLO por Tramos 25/50/25 + SL/TSL ──
+    try:
+        from app.stocks.gap_exit_opt3 import is_opt3_gap_position
+        if is_opt3_gap_position(position):
+            from app.stocks.aduana_gap_runner_engine import evaluate_gap_runner_aduana_exit
+            o3 = evaluate_gap_runner_aduana_exit(
+                position=position, current_price=current_price,
+                df_5m=df_5m, df_15m=df_15m, df_1h=df_1h, df_1d=None
+            )
+            new_sl = o3.get('new_stop_loss')
+            if new_sl:
+                cur_sl = float(position.get('stop_loss') or 0.0)
+                if new_sl > cur_sl and new_sl < current_price:
+                    from app.core.supabase_client import get_supabase
+                    get_supabase().table("stocks_positions").update({
+                        "stop_loss": new_sl,
+                        "trailing_sl_price": new_sl,
+                        "sl_activation_reason": str(o3.get('reason', 'OPT3'))[:50]
+                    }).eq("id", position["id"]).execute()
+            if o3.get('should_exit'):
+                if o3.get('exit_type') == 'partial':
+                    return {
+                        'action': f"close_{o3.get('tp_block') or 'block1'}",
+                        'shares': o3.get('shares_to_exit', 0),
+                        'pct': o3.get('pct', 25),
+                        'trigger': o3.get('rule_code', 'ADUANA_GAP_OPT3'),
+                        'reason': o3.get('reason', 'OPT3 Tramo parcial'),
+                        'debug_indicators': {}
+                    }
+                return {
+                    'action': 'close_total',
+                    'shares': o3.get('shares_to_exit', 0),
+                    'pct': 100,
+                    'trigger': o3.get('rule_code', 'ADUANA_GAP_OPT3'),
+                    'reason': o3.get('reason', 'OPT3 Cierre Total'),
+                    'debug_indicators': {}
+                }
+            return {
+                'action': 'hold',
+                'trigger': 'ADUANA_GAP_OPT3_HOLD',
+                'reason': o3.get('reason') or 'OPT3: sin señal de salida',
+                'debug_indicators': {}
+            }
+    except Exception as e_opt3:
+        log_error("ADUANA_TP_V2", f"Error en modelo OPT3 para {ticker}: {e_opt3}")
+        return {'action': 'hold', 'trigger': 'ADUANA_GAP_OPT3_ERROR',
+                'reason': f'OPT3 error: {e_opt3}', 'debug_indicators': {}}
+
     # ── 1. EVALUACIÓN PRIORITARIA ADUANA EXIT ENGINE ──
     try:
         from app.stocks.aduana_stocks_exit_engine import evaluate_aduana_stocks_exit

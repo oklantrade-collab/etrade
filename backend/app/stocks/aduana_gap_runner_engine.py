@@ -829,6 +829,33 @@ def evaluate_gap_runner_aduana_exit(
     df_1d: Optional[pd.DataFrame] = None
 ) -> Dict[str, Any]:
     """
+    Despachador de salidas GAP según el flag GAP_EXIT_MODEL:
+      - "LEGACY" (por defecto): comportamiento histórico (_evaluate_gap_runner_legacy_exit).
+      - "OPT3": Opción 3 Optimizada (Tramos 25/50/25 + Gracia 10:15 ET), ver gap_exit_opt3.py.
+        En OPT3 la lógica LEGACY se evalúa solo en modo sombra (se registra qué habría hecho, sin ejecutarlo).
+    """
+    from app.stocks.gap_exit_opt3 import is_opt3_gap_position, evaluate_gap_opt3_exit, log_legacy_shadow
+    if not is_opt3_gap_position(position):
+        return _evaluate_gap_runner_legacy_exit(position, current_price, df_5m, df_15m, df_1h, df_1d)
+
+    opt3_res = evaluate_gap_opt3_exit(position, current_price, df_5m=df_5m, df_15m=df_15m, df_1h=df_1h)
+    try:
+        legacy_res = _evaluate_gap_runner_legacy_exit(dict(position), current_price, df_5m, df_15m, df_1h, df_1d)
+        log_legacy_shadow(position, opt3_res, legacy_res)
+    except Exception as e_shadow:
+        log_warning(MODULE, f"Error en modo sombra LEGACY para {position.get('ticker')}: {e_shadow}")
+    return opt3_res
+
+
+def _evaluate_gap_runner_legacy_exit(
+    position: Dict[str, Any],
+    current_price: float,
+    df_5m: Optional[pd.DataFrame] = None,
+    df_15m: Optional[pd.DataFrame] = None,
+    df_1h: Optional[pd.DataFrame] = None,
+    df_1d: Optional[pd.DataFrame] = None
+) -> Dict[str, Any]:
+    """
     Reglas de Supervisión, Stop Loss, Trailing Stop y Salidas ADUANA GAP RUNNER:
     
     1. Temporalidad 15 Minutos:

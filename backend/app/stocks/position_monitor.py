@@ -219,9 +219,19 @@ class PositionMonitor:
                 except Exception as age_e:
                     log_debug(MODULE, f"Error calculando age para {ticker}: {age_e}")
 
+            # ── MODELO DE SALIDA OPT3 (flag GAP_EXIT_MODEL=OPT3, solo posiciones GAP) ──
+            # En OPT3 las salidas las gobierna gap_exit_opt3 (SL duro, TSL 15m al cierre, tramos 25/50/25).
+            # Se desactivan las capas que no formaron parte del backtest validado (proactiva, escudo de
+            # tendencia, ratchets universales, agotamiento 1H, sharp exit).
+            try:
+                from app.stocks.gap_exit_opt3 import is_opt3_gap_position
+                opt3_gap = is_opt3_gap_position(trade)
+            except Exception:
+                opt3_gap = False
+
             # ── Cierre Proactivo AaPX51/BbPX51 ──
             # Requiere al menos MIN_HOLDING_MINUTES (15 min) salvo ganancia de clímax >= 2.5%
-            if age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5:
+            if (age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5) and not opt3_gap:
                 closed = await self.check_proactive_exit_stocks(ticker, trade, current_price, pnl_pct, sb)
                 if closed:
                     return
@@ -324,12 +334,15 @@ class PositionMonitor:
             )
 
             sl_action = sl_res['action']
+            if opt3_gap:
+                # OPT3: el SL/trailing lo gobierna gap_exit_opt3; se ignora el SL dinámico SIPV.
+                sl_action = 'none'
 
             # Evaluación de Stop Loss con Escudo de Tendencia:
             # Si el precio toca el SL intradía, verificamos si está protegido por el Escudo de Tendencia
             if stop_loss > 0 and current_price <= stop_loss:
                 # Si el régimen 1H es defensivo (impulso 1H frenado o en agotamiento) O si la tendencia 15m ya se quebró:
-                if regime_1h_defensive or not trend_15m_bullish:
+                if opt3_gap or regime_1h_defensive or not trend_15m_bullish:
                     log_warning(MODULE, f"🔴 STOP LOSS CONFIRMADO: {ticker} @ ${current_price:.2f} <= SL ${stop_loss:.2f} con tendencia rota/defensiva (1H slope={slope_1h:.2f}%, 15m bullish={trend_15m_bullish}). Cerrando...")
                     await self._close_position(trade, current_price, "sl_hard_exit_defensive")
                     return
@@ -340,7 +353,7 @@ class PositionMonitor:
 
             # Si el precio perforó el Stop Loss o Dynamic SL evaluado técnicamente
             if sl_action in ('close_backstop', 'trigger_dynamic_sl'):
-                if regime_1h_defensive or not trend_15m_bullish:
+                if opt3_gap or regime_1h_defensive or not trend_15m_bullish:
                     log_warning(MODULE, f"🔴 STOP LOSS HIT: {ticker} @ ${current_price:.2f} ({sl_action}). Ejecutando cierre a mercado...")
                     await self._close_position(trade, current_price, f"sl_{sl_action}")
                     return
@@ -443,6 +456,10 @@ class PositionMonitor:
                     ratchet_reason = "1H Defensive Regime Profit Lock"
 
             # Si el nivel propuesto supera el SL actual y está por debajo del precio actual:
+            if opt3_gap:
+                # OPT3: anula los ratchets universales (+10%/+25%/+50%, BB floor, régimen 1H, alpha TSL, 1H);
+                # el SL solo lo mueve gap_exit_opt3 (Ratchet BE +1% y trailing EMA9 15m).
+                proposed_sl = cur_sl
             if proposed_sl > cur_sl and proposed_sl < current_price:
                 sb.table("stocks_positions").update({
                     "stop_loss": proposed_sl,
@@ -472,7 +489,7 @@ class PositionMonitor:
 
             # ── SALIDA INMEDIATA POR AGOTAMIENTO DE FUERZA COMPRADORA (ALPHA RUNNERS) ──
             # Requerimiento: "cuando agote su fuerza compradora es salir inmediatamente"
-            if "ALPHA" in group or "RUNNER" in group or "FAST" in str(trade.get("rule_code", "")).upper():
+            if ("ALPHA" in group or "RUNNER" in group or "FAST" in str(trade.get("rule_code", "")).upper()) and not opt3_gap:
                 try:
                     from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
                     live_1h_data = get_live_1h_candle_and_sipv(ticker, current_price)
@@ -490,7 +507,7 @@ class PositionMonitor:
 
             # ── NUEVO: BLUE PROACTIVE EXIT (Salidas Rápidas 5m para APEX AZUL) ──
             rule_code_pos = str(trade.get("rule_code", "") or trade.get("strategy", "") or "")
-            if rule_code_pos.startswith("BLUE_") and (age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5):
+            if rule_code_pos.startswith("BLUE_") and not opt3_gap and (age_mins >= MIN_HOLDING_MINUTES or pnl_pct >= 2.5):
                 try:
                     hist_5m_blue = t_obj.history(period="2d", interval="5m")
 
@@ -575,7 +592,7 @@ class PositionMonitor:
                     df_15m=hist_15m,
                     df_1h=hist_1h
                 )
-                if sharp_exit_res.get('should_close'):
+                if sharp_exit_res.get('should_close') and not opt3_gap:
                     action = sharp_exit_res.get('action')
                     reason = sharp_exit_res.get('reason')
                     pct = sharp_exit_res.get('pct_to_close', 50)
@@ -738,6 +755,10 @@ class PositionMonitor:
         ticker = trade["ticker"]
         entry_price = safe_float(trade.get("entry_price") or trade.get("avg_price"))
         shares = int(safe_float(trade.get("shares")))
+        # Tras cierres parciales (tramos TP) solo queda 'shares_remaining' por vender: evita sobre-vender el original.
+        _rem = safe_float(trade.get("shares_remaining"))
+        if _rem > 0:
+            shares = min(shares, int(_rem)) if shares > 0 else int(_rem)
 
         pnl_usd = round((exit_price - entry_price) * shares, 2)
         pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
