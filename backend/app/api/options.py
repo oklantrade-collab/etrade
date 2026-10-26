@@ -529,6 +529,11 @@ def get_portfolio_selections(limit: int = 10):
 def list_positions(status: str = "open", symbol: str | None = None, strategy: str | None = None, limit: int = 100):
     """Lista posiciones de Paper Trading (abiertas y/o cerradas) con metricas agregadas."""
     sb = get_supabase()
+    try:
+        from app.options.broker_sync import reconcile_with_ib_broker_portfolio
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=5.0)
+    except Exception:
+        pass
     stored, _, _ = _load_stored()
     eff = sd.effective_settings(stored)
     try:
@@ -539,7 +544,8 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
             q = q.eq("symbol", symbol.upper())
         if strategy:
             q = q.eq("strategy_type", strategy)
-        items = q.order("entry_time", desc=True).limit(min(limit, 300)).execute().data or []
+        order_col = "exit_time" if status == "closed" else "entry_time"
+        items = q.order(order_col, desc=True).limit(min(limit, 300)).execute().data or []
     except Exception as e:
         return {"items": [], "error": str(e)[:200]}
 
@@ -782,22 +788,22 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
 
     if sym and strike:
         try:
-            mark_or_exit_px = float(pos.get("last_mark_price") or 0.0)
+            mark_or_exit_px = float(pos.get("last_mark_price") or pos.get("entry_debit") or 0.05)
             target_band = f"OPT:{exp}:{strike}:{right}"
             sb.table("stocks_orders").insert({
                 "ticker": sym,
                 "group_name": "OPTIONS",
                 "rule_code": "OPT_CALL" if right == "C" else "APEX_AUTO",
                 "direction": "sell",
-                "order_type": "limit" if mark_or_exit_px > 0 else "market",
-                "limit_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else None,
-                "market_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else None,
+                "order_type": "market",
+                "limit_price": 0.05,
+                "market_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else 0.05,
                 "shares": qty,
                 "target_band": target_band,
                 "status": "pending",
                 "created_at": now_iso
             }).execute()
-            log_info("options_api", f"Orden SELL de cierre para opción {sym} {target_band} encolada para TWS en stocks_orders")
+            log_info("options_api", f"Orden SELL MARKET de cierre para opción {sym} {target_band} ({qty}x) encolada para TWS en stocks_orders")
         except Exception as o_err:
             log_warning("options_api", f"Aviso al encolar orden de cierre en stocks_orders: {o_err}")
 

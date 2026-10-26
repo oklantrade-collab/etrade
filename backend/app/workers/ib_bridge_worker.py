@@ -559,15 +559,34 @@ class IBBridgeWorker:
 
                         contract = self.ib.us_stock_contract(ticker)
 
-                    # ── BLINDAJE LMT ESTRICTO PARA OPCIONES (Cero Slippage) ──
+                    # ── BLINDAJE ANTI-SHORT Y TIPO DE ORDEN PARA OPCIONES ──
                     if is_option:
-                        eff_price = price if price > 0 else float(order.get("limit_price") or order.get("market_price") or 0.0)
-                        if eff_price <= 0:
-                            log_warning(MODULE, f"⚠️ Orden de opción {ticker_u} sin precio límite válido. Cancelando para evitar ejecución descontrolada.")
-                            sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
-                            continue
-                        order_type = "limit"
-                        price = eff_price
+                        if direction == "sell":
+                            # Verificar que realmente tengamos la opción en TWS antes de enviar SELL
+                            self.ib.request_broker_positions(timeout=3.0)
+                            held_opt_qty = 0
+                            for pk, pv in (self.ib._positions or {}).items():
+                                if pv.get("sec_type") == "OPT" and str(pv.get("underlying") or "").upper() == contract.symbol.upper():
+                                    if str(pv.get("expiry") or "").replace("-", "") == str(contract.lastTradeDateOrContractMonth or "").replace("-", ""):
+                                        if abs(float(pv.get("strike") or 0) - float(contract.strike or 0)) <= 0.05 and str(pv.get("right") or "").upper() == str(contract.right or "").upper():
+                                            held_opt_qty = int(round(float(pv.get("shares") or 0)))
+                                            break
+                            if held_opt_qty <= 0:
+                                log_warning(MODULE, f"⛔ [OPTION ANTI-SHORT] Orden SELL {ticker_u} ({target_b}) cancelada: 0 contratos abiertos en TWS.")
+                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                                continue
+                            if shares > held_opt_qty:
+                                shares = held_opt_qty
+                            # Para cierres SELL de opciones: usar MKT para garantizar salida inmediata en TWS
+                            order_type = "market"
+                        else:
+                            eff_price = price if price > 0 else float(order.get("limit_price") or order.get("market_price") or 0.0)
+                            if eff_price <= 0:
+                                log_warning(MODULE, f"⚠️ Orden BUY de opción {ticker_u} sin precio límite válido. Cancelando.")
+                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                                continue
+                            order_type = "limit"
+                            price = eff_price
 
                     ib_ord = Order()
                     ib_ord.eTradeOnly = False
@@ -990,9 +1009,21 @@ class IBBridgeWorker:
         last_reconcile = 0
         last_reconnect_attempt = time.time()
         reconnect_cooldown = 15  # Intentar reconectar a TWS cada 15 segundos
+        initial_mtime = os.path.getmtime(os.path.abspath(__file__))
 
         while self.running:
             try:
+                # Auto-reload si el archivo fue actualizado en disco
+                try:
+                    if os.path.getmtime(os.path.abspath(__file__)) > initial_mtime + 1.0:
+                        log_info(MODULE, "🔄 Código de ib_bridge_worker actualizado en disco. Reiniciando proceso...")
+                        if self.ib:
+                            self.ib.disconnect_tws()
+                        sys.exit(0)
+                except SystemExit:
+                    raise
+                except Exception:
+                    pass
                 # 1. Comprobar salud de conexión con TWS (con cooldown para no saturar)
                 if not self.ib or not self.ib.connected:
                     now = time.time()

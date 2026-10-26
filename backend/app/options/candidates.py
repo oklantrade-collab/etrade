@@ -220,10 +220,19 @@ def run_portfolio_selection(sb, eff: dict[str, Any], settings_version: int = 0) 
     und_rows = sb.table("opt_underlyings").select("*").execute().data or []
     und_map = {u["id"]: u for u in und_rows}
 
-    # Candidatas candidatas a seleccion (las elegibles o que estaban seleccionadas)
-    candidates = (sb.table("opt_candidates").select("*")
-                  .in_("eligibility_status", ["eligible", "selected"])
-                  .execute().data or [])
+    # Limpiar candidatas obsoletas de días anteriores o vencimiento hoy (0DTE)
+    today_start_iso = f"{today.isoformat()}T00:00:00+00:00"
+    try:
+        sb.table("opt_candidates").update({"eligibility_status": "rejected"}).in_("eligibility_status", ["eligible", "selected", "pending"]).lt("created_at", today_start_iso).execute()
+    except Exception:
+        pass
+
+    # Candidatas candidatas a seleccion (SOLO las creadas hoy y con vencimiento posterior a hoy)
+    raw_candidates = (sb.table("opt_candidates").select("*")
+                      .in_("eligibility_status", ["eligible", "selected"])
+                      .gte("created_at", today_start_iso)
+                      .execute().data or [])
+    candidates = [c for c in raw_candidates if str(c.get("expiry") or "")[:10] > today.isoformat()]
     if not candidates:
         return {"selected": [], "total_risk_allocated": 0.0, "status": "no eligible candidates"}
 
@@ -252,13 +261,7 @@ def run_portfolio_selection(sb, eff: dict[str, Any], settings_version: int = 0) 
             upd["max_loss_total"] = matching["max_loss_total"]
         sb.table("opt_candidates").update(upd).eq("id", cid).execute()
 
-    # Auto-ejecución inmediata de candidatas seleccionadas a opt_paper_trades y stocks_orders
-    from app.options.paper_execution import execute_selected_candidate_to_trade
-    for sel_c in sel_res.selected:
-        try:
-            execute_selected_candidate_to_trade(sb, sel_c, eff, und=und_map.get(sel_c.get("underlying_id")))
-        except Exception as exec_err:
-            log_info(MODULE, f"Aviso al auto-ejecutar candidata {sel_c.get('id')}: {exec_err}")
+    # La ejecución hacia TWS se realiza exclusivamente en run_options_auto_execution_cycle con validación de slots del Broker.
 
     try:
         sb.table("opt_selections").insert({

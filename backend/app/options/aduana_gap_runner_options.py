@@ -869,8 +869,9 @@ def evaluate_options_gap_aduana_exit(
     unrealized_pnl_pct = ((current_option_premium - entry_premium) / entry_premium) * 100.0 if entry_premium > 0 else 0.0
     highest_premium_seen = float(position.get("highest_premium_seen") or max(entry_premium, current_option_premium))
 
-    # 1. HARD STOP LOSS EN PRIMA (-35%)
-    if unrealized_pnl_pct <= -35.0:
+    # 1. HARD STOP LOSS EN PRIMA (-35%) — Solo si tiene >= 5 min de maduración y cotización real
+    has_live_quote = bool(position.get("has_live_opt_quote", True))
+    if position_age_minutes >= 5.0 and has_live_quote and unrealized_pnl_pct <= -35.0:
         res.update({
             "should_exit": True,
             "exit_type": "hard_stop",
@@ -1086,9 +1087,9 @@ def evaluate_options_gap_aduana_exit(
                     res["new_stop_loss_underlying"] = sl_be_plus_1
                     res["rule_code"] = "BE_LOCK_PLUS_1PCT"
 
-            # Si el precio perfora el SL actual
+            # Si el precio perfora el SL actual (con ventana mínima de 5 min tras la apertura)
             active_sl = res["new_stop_loss_underlying"] or current_sl
-            if active_sl > 0.0 and current_underlying_price <= active_sl:
+            if position_age_minutes >= 5.0 and active_sl > 0.0 and current_underlying_price <= active_sl:
                 res.update({
                     "should_exit": True,
                     "exit_type": "stop_loss_underlying",
@@ -1114,7 +1115,7 @@ def evaluate_options_gap_aduana_exit(
                     res["rule_code"] = "BE_LOCK_PLUS_1PCT"
 
             active_sl = res["new_stop_loss_underlying"] or current_sl
-            if active_sl > 0.0 and current_underlying_price >= active_sl:
+            if position_age_minutes >= 5.0 and active_sl > 0.0 and current_underlying_price >= active_sl:
                 res.update({
                     "should_exit": True,
                     "exit_type": "stop_loss_underlying",

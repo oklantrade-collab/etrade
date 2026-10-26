@@ -298,6 +298,17 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     cid = cand["id"]
     uid = cand.get("underlying_id")
 
+    # 0. Rechazar candidatas obsoletas (de días anteriores) o con vencimiento 0DTE
+    today_iso = now_dt.date().isoformat()
+    cand_created = str(cand.get("created_at") or "")[:10]
+    cand_expiry = str(cand.get("expiry") or "")[:10]
+    if (cand_created and cand_created < today_iso) or (cand_expiry and cand_expiry <= today_iso):
+        try:
+            sb.table("opt_candidates").update({"eligibility_status": "rejected"}).eq("id", cid).execute()
+        except Exception:
+            pass
+        return None
+
     # 1. Comprobar si ya existe posición abierta para esta candidata o subyacente en la misma dirección
     try:
         sym_check = und.get("symbol") or cand.get("symbol") or ""
@@ -305,6 +316,12 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
             existing = sb.table("opt_paper_trades").select("*").eq("symbol", sym_check).eq("direction", cand.get("direction")).eq("status", "open").execute().data
             if existing:
                 return existing[0]
+            # Si ya se envió una orden hoy para este símbolo en los últimos 30 minutos, evitar bucle de órdenes repetidas
+            recent_ord = sb.table("stocks_orders").select("id, created_at").eq("ticker", sym_check[:10]).eq("direction", "buy").order("created_at", desc=True).limit(1).execute().data
+            if recent_ord and recent_ord[0].get("created_at"):
+                o_dt = datetime.fromisoformat(str(recent_ord[0]["created_at"]).replace("Z", "+00:00"))
+                if (now_dt - o_dt).total_seconds() < 1800.0:
+                    return None
         existing_cand = sb.table("opt_paper_trades").select("*").eq("candidate_id", cid).eq("status", "open").execute().data
         if existing_cand:
             return existing_cand[0]

@@ -2609,6 +2609,8 @@ async def run_options_gap_defense_cycle():
     now_iso = now_dt.isoformat()
 
     try:
+        from app.options.broker_sync import reconcile_with_ib_broker_portfolio, is_option_held_in_broker
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=10.0)
         open_trades = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
         if not open_trades:
             return
@@ -2643,8 +2645,29 @@ async def run_options_gap_defense_cycle():
             strike = float(legs[0].get("strike") or cur_stock_p) if legs else cur_stock_p
             expiry_str = pos.get("expiry") or ""
 
-            # 1. Intentar obtener cotización live de la opción desde yfinance
-            if expiry_str:
+            has_live_opt_quote = False
+            # 1. Intentar obtener cotización real desde opt_quotes_latest (TWS) o yfinance
+            if legs and isinstance(legs[0], dict):
+                try:
+                    conid_q = legs[0].get("conid")
+                    if conid_q:
+                        c_row = sb.table("opt_contracts").select("id").eq("conid", conid_q).limit(1).execute().data
+                        if c_row:
+                            q_row = sb.table("opt_quotes_latest").select("bid,ask,last,market_data_type").eq("contract_id", c_row[0]["id"]).limit(1).execute().data
+                            if q_row and q_row[0].get("market_data_type") != "ERROR":
+                                qb = float(q_row[0].get("bid") or 0.0)
+                                qa = float(q_row[0].get("ask") or 0.0)
+                                ql = float(q_row[0].get("last") or 0.0)
+                                if qb > 0 and qa > 0:
+                                    cur_opt_premium = round((qb + qa) / 2.0, 4)
+                                    has_live_opt_quote = True
+                                elif ql > 0:
+                                    cur_opt_premium = round(ql, 4)
+                                    has_live_opt_quote = True
+                except Exception:
+                    pass
+
+            if not has_live_opt_quote and expiry_str:
                 try:
                     import yfinance as yf
                     t_yf = yf.Ticker(symbol)
@@ -2657,24 +2680,10 @@ async def run_options_gap_defense_cycle():
                         l = float(match["lastPrice"].iloc[0] or 0.0)
                         if b > 0 and a > 0:
                             cur_opt_premium = round((b + a) / 2.0, 4)
+                            has_live_opt_quote = True
                         elif l > 0:
                             cur_opt_premium = round(l, 4)
-                except Exception:
-                    pass
-
-            # 2. Si no se obtuvo prima de mercado, calcular vía Black-Scholes teórico
-            if cur_opt_premium is None or cur_opt_premium <= 0:
-                try:
-                    from datetime import date
-                    dte_days = 7.0
-                    if expiry_str:
-                        exp_d = date.fromisoformat(expiry_str[:10])
-                        dte_days = max(1.0, float((exp_d - now_dt.date()).days))
-                    t_years = dte_days / 365.0
-                    iv_est = 0.25
-                    bs_val = bs_price(cur_stock_p, strike, t_years, 0.045, iv_est, "C" if is_call else "P")
-                    if bs_val is not None:
-                        cur_opt_premium = round(bs_val, 4)
+                            has_live_opt_quote = True
                 except Exception:
                     pass
 
@@ -2699,6 +2708,7 @@ async def run_options_gap_defense_cycle():
             # Posición formateada para la evaluación
             eval_pos = dict(pos)
             eval_pos["direction"] = "CALL" if is_call else "PUT"
+            eval_pos["has_live_opt_quote"] = has_live_opt_quote
             eval_pos["highest_premium_seen"] = highest_seen
             eval_pos["stop_loss_underlying"] = exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0
             eval_pos["reentry_count"] = exit_plan.get("reentry_count", 0)
@@ -2759,7 +2769,7 @@ async def run_options_gap_defense_cycle():
                 )
             else:
                 eval_res = {"should_exit": False}
-                if cur_opt_premium is not None and entry_debit > 0:
+                if has_live_opt_quote and pos_age_min >= 5.0 and cur_opt_premium is not None and entry_debit > 0:
                     pnl_pct = ((cur_opt_premium - entry_debit) / entry_debit) * 100.0
                     if pnl_pct <= -50.0:
                         eval_res = {
@@ -2844,26 +2854,27 @@ async def run_options_gap_defense_cycle():
                         "updated_at": now_iso
                     }).eq("id", pid).execute()
 
-                # Enviar orden de cierre SELL a stocks_orders para ejecución en TWS si hay puente
+                # Enviar orden de cierre SELL a stocks_orders SOLO si el contrato existe en el Broker TWS
                 exp_compact = expiry_str.replace("-", "")[:8] if expiry_str else "20261026"
-                opt_ticker_formatted = f"{symbol}:OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
                 opt_tb = f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
                 try:
-                    existing_sell = sb.table("stocks_orders").select("id").eq("ticker", symbol[:10]).eq("target_band", opt_tb).eq("direction", "sell").in_("status", ["pending", "processing"]).limit(1).execute()
-                    if not existing_sell.data:
-                        sb.table("stocks_orders").insert({
-                            "ticker": symbol[:10],
-                            "target_band": opt_tb,
-                            "group_name": "OPEN_GAP_RUNNER_OPT",
-                            "rule_code": "APEX_AUTO",
-                            "order_type": "market",
-                            "direction": "sell",
-                            "shares": qty_to_close,
-                            "market_price": cur_opt_premium,
-                            "limit_price": round(cur_opt_premium, 2),
-                            "status": "pending",
-                            "created_at": now_iso
-                        }).execute()
+                    held_in_tws, tws_qty = is_option_held_in_broker(sb, symbol, expiry_str, strike, "C" if is_call else "P")
+                    if held_in_tws:
+                        existing_sell = sb.table("stocks_orders").select("id").eq("ticker", symbol[:10]).eq("target_band", opt_tb).eq("direction", "sell").in_("status", ["pending", "processing"]).limit(1).execute()
+                        if not existing_sell.data:
+                            sb.table("stocks_orders").insert({
+                                "ticker": symbol[:10],
+                                "target_band": opt_tb,
+                                "group_name": "OPEN_GAP_RUNNER_OPT",
+                                "rule_code": "APEX_AUTO",
+                                "order_type": "market",
+                                "direction": "sell",
+                                "shares": min(qty_to_close, tws_qty) if tws_qty > 0 else qty_to_close,
+                                "market_price": cur_opt_premium,
+                                "limit_price": 0.05,
+                                "status": "pending",
+                                "created_at": now_iso
+                            }).execute()
                 except Exception as ord_err:
                     log_warning(MODULE, f"Aviso enviando orden de cierre opciones {pid}: {ord_err}")
 
@@ -2983,10 +2994,12 @@ async def run_options_auto_execution_cycle():
         except Exception as sel_err:
             log_warning(MODULE, f"Aviso en run_portfolio_selection automático: {sel_err}")
 
+        today_start_iso = f"{datetime.now(timezone.utc).date().isoformat()}T00:00:00+00:00"
         sel_cands = (
             sb.table("opt_candidates")
             .select("*, opt_underlyings(*)")
             .in_("eligibility_status", ["selected", "eligible"])
+            .gte("created_at", today_start_iso)
             .order("score", desc=True)
             .limit(10)
             .execute()
