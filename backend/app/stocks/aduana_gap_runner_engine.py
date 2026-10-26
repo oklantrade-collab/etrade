@@ -477,6 +477,14 @@ def evaluate_gap_runner_entry_tranches(
     # CASO A: TRANCHE 1 (Primer 1/3 - 33.3%)
     # ─────────────────────────────────────────────────────────────
     if not is_open_pos:
+        open_day = float(o5.iloc[0])
+        buy_stop_trigger = round(open_day * 1.01, 2)
+        max_high_day = float(np.max(h5.to_numpy()))
+
+        res["order_type"] = "stop"
+        res["trigger_price"] = buy_stop_trigger
+        res["open_day"] = open_day
+
         c_prev = float(c5.iloc[-2])
         o_prev = float(o5.iloc[-2])
         l_prev = float(l5.iloc[-2])
@@ -503,6 +511,16 @@ def evaluate_gap_runner_entry_tranches(
                         f"Esperando ruptura de ORB High (${c1_high:.2f}). Compra descartada para evitar Gap & Crap."
                     )
                     return res
+
+        # Regla 1.B: Condición BUY STOP a (Open + 1%)
+        # Si el precio máximo alcanzado en la sesión no ha superado Open + 1%, la orden BUY STOP no se activa.
+        skip_buy_stop = bool(config and config.get("skip_buy_stop_1pct_check"))
+        if not skip_buy_stop and max_high_day < buy_stop_trigger:
+            res["reason"] = (
+                f"Filtro BUY STOP (Open + 1%): Precio máximo alcanzado (${max_high_day:.2f}) no ha superado "
+                f"el trigger de confirmación Open + 1% (${buy_stop_trigger:.2f}, Open=${open_day:.2f}). Compra no activada."
+            )
+            return res
 
         # Caso 1: Solo 2 velas de 5m (Ruta Directa inmediata en apertura)
         if len(df_5m) == 2:

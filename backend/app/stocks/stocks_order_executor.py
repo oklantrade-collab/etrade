@@ -780,6 +780,146 @@ def place_limit_order(
     }
 
 
+def place_stop_order(
+    ticker: str,
+    direction: str,
+    rule_code: str,
+    context: dict,
+    rule: dict,
+) -> dict:
+    """
+    Coloca una orden BUY STOP (STP) en stocks_orders a (Open + 1%).
+    En IBKR TWS se envía como Order(orderType="STP", auxPrice=trigger_price).
+    Si el precio no alcanza Open + 1%, la orden nunca se ejecuta, evitando pérdidas por Gap & Crap.
+    """
+    sb = get_supabase()
+    config = _get_config()
+
+    market_price = float(context.get("price") or 0.0)
+    open_day = float(context.get("day_open_price") or context.get("open_day") or context.get("open") or 0.0)
+    trigger_price = float(
+        context.get("trigger_price")
+        or (round(open_day * 1.01, 2) if open_day > 0 else round(market_price * 1.01, 2))
+    )
+
+    if trigger_price <= 0:
+        return {"success": False, "reason": "Trigger price BUY STOP inválido"}
+
+    # Validación 1: Riesgo Total Acumulado
+    capital = config["total_capital"]
+    max_pct = config["max_pct_per_trade"]
+    max_total_risk_pct = config["max_total_risk_pct"]
+    open_pos_res = sb.table("stocks_positions").select("total_cost").eq("status", "open").execute()
+    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_res.data or []))
+    max_allowed_investment = capital * max_total_risk_pct
+
+    if direction == "buy" and current_investment >= max_allowed_investment:
+        return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
+
+    # Validación 2: Tamaño de lote (Múltiplos de 5)
+    shares = _calculate_shares(capital, max_pct, trigger_price)
+    if rule_code == "GAP_TRANCHE_1" or str(rule_code).startswith("GAP_"):
+        shares = max(5, int((shares * 0.33) // 5) * 5)
+
+    max_trade_cap_usd = capital * min(max_pct, 0.10)
+    if (shares * trigger_price) > max_trade_cap_usd:
+        shares = int(max_trade_cap_usd // (trigger_price * 5)) * 5
+        if shares < 5 and max_trade_cap_usd >= (5 * trigger_price):
+            shares = 5
+
+    if direction == "buy" and shares < 5:
+        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 @ ${trigger_price:.2f}"}
+
+    if direction == "buy" and current_investment + (shares * trigger_price) > max_allowed_investment:
+        remaining_cap = max_allowed_investment - current_investment
+        shares = int(remaining_cap // (trigger_price * 5)) * 5
+        if shares <= 0:
+            return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
+
+    now = datetime.now(timezone.utc)
+    expires_at_dt = now + timedelta(minutes=int(context.get("ttl_minutes") or 45))
+    ib_live = is_ib_bridge_alive()
+
+    # Si no hay IB Bridge activo y el precio ya superó el trigger_price, rellenar en simulación
+    already_triggered_sim = (not ib_live) and (market_price >= trigger_price)
+    initial_status = "filled" if already_triggered_sim else "pending"
+    fill_px = max(market_price, trigger_price) if already_triggered_sim else None
+
+    order_data = {
+        "ticker": ticker,
+        "group_name": rule.get("group_name") or "OPEN_GAP_RUNNER",
+        "rule_code": str(rule_code or "").strip() or "GAP_TRANCHE_1",
+        "order_type": "stop",
+        "direction": direction,
+        "shares": shares,
+        "trigger_price": trigger_price,
+        "limit_price": round(trigger_price * 1.005, 2),
+        "estimated_price": trigger_price,
+        "target_band": "BUY_STOP_OPEN_1PCT",
+        "market_price": market_price if market_price > 0 else trigger_price,
+        "ia_score": context.get("ia_score"),
+        "tech_score": context.get("tech_score"),
+        "movement_type": context.get("movement_type"),
+        "rvol": context.get("rvol"),
+        "status": initial_status,
+        "filled_price": fill_px,
+        "filled_at": now.isoformat() if already_triggered_sim else None,
+        "expires_at": expires_at_dt.isoformat(),
+        "created_at": now.isoformat(),
+    }
+
+    try:
+        sb.table("stocks_orders").insert(order_data).execute()
+    except Exception as e_ord_ins:
+        rc = str(order_data.get("rule_code") or "").strip() or "APEX_AUTO"
+        if "23503" in str(e_ord_ins) or "stocks_orders_rule_code_fkey" in str(e_ord_ins):
+            try:
+                sb.table("stocks_rules").upsert({
+                    "rule_code": rc,
+                    "name": f"Auto registered {rc}",
+                    "group_name": rule.get("group_name") or "OPEN_GAP_RUNNER",
+                    "direction": direction.lower(),
+                    "order_type": "stop",
+                    "enabled": True
+                }, on_conflict="rule_code").execute()
+                sb.table("stocks_orders").insert(order_data).execute()
+            except Exception:
+                order_data["rule_code"] = "APEX_AUTO"
+                sb.table("stocks_orders").insert(order_data).execute()
+        else:
+            raise e_ord_ins
+
+    if already_triggered_sim and direction.lower() == "buy":
+        _open_or_update_position(ticker, fill_px, shares, rule.get("group_name") or "OPEN_GAP_RUNNER")
+
+    mode_str = "[IBKR PAPER STP]" if ib_live else "[PAPER STP]"
+    log_info(
+        MODULE,
+        f"{mode_str} 🎯 BUY STOP {direction.upper()} {ticker} x{shares} @ Trigger ${trigger_price:.2f} (Open=${open_day:.2f}, Actual=${market_price:.2f})"
+    )
+
+    _send_telegram_sync(
+        f"{mode_str} 🎯 STOCKS BUY STOP (Open + 1%)\n"
+        f"Ticker: {ticker}\n"
+        f"Regla: {rule_code}\n"
+        f"Trigger STP: ${trigger_price:.2f}\n"
+        f"Open Día: ${open_day:.2f}\n"
+        f"Precio Actual: ${market_price:.2f}\n"
+        f"Shares: {shares}"
+    )
+
+    return {
+        "success": True,
+        "order_type": "stop",
+        "direction": direction,
+        "ticker": ticker,
+        "trigger_price": trigger_price,
+        "price": trigger_price,
+        "shares": shares,
+        "ib_routed": ib_live,
+    }
+
+
 def check_and_fill_pending_limits():
     """
     Revisa órdenes LIMIT pendientes y las rellena
@@ -789,11 +929,11 @@ def check_and_fill_pending_limits():
     sb = get_supabase()
     now = datetime.now(timezone.utc)
 
-    # Obtener órdenes pendientes no expiradas
+    # Obtener órdenes pendientes no expiradas (LIMIT y STOP)
     pending = sb.table("stocks_orders") \
         .select("*") \
         .eq("status", "pending") \
-        .eq("order_type", "limit") \
+        .in_("order_type", ["limit", "stop"]) \
         .execute()
 
     if not pending.data:
@@ -827,15 +967,23 @@ def check_and_fill_pending_limits():
         except Exception:
             continue
 
-        limit_price = float(order.get("limit_price", 0))
+        ord_type = str(order.get("order_type") or "limit").lower()
+        limit_price = float(order.get("limit_price") or 0.0)
+        trigger_price = float(order.get("trigger_price") or limit_price or 0.0)
         direction = order["direction"]
 
-        # Check if price reached the limit
+        # Check if price reached the limit or stop trigger
         should_fill = False
-        if direction == "buy" and current_price <= limit_price:
-            should_fill = True
-        elif direction == "sell" and current_price >= limit_price:
-            should_fill = True
+        if ord_type == "stop":
+            if direction == "buy" and trigger_price > 0 and current_price >= trigger_price:
+                should_fill = True
+            elif direction == "sell" and trigger_price > 0 and current_price <= trigger_price:
+                should_fill = True
+        else:
+            if direction == "buy" and limit_price > 0 and current_price <= limit_price:
+                should_fill = True
+            elif direction == "sell" and limit_price > 0 and current_price >= limit_price:
+                should_fill = True
 
         if should_fill:
             sb.table("stocks_orders") \

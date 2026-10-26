@@ -990,7 +990,7 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
 async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase, is_macro_bearish: bool = False) -> list:
     """Ejecuta las compras en orden de prioridad."""
     from app.stocks.stocks_order_executor import (
-        execute_market_order, place_limit_order,
+        execute_market_order, place_limit_order, place_stop_order,
     )
 
     ops_remaining = capital['ops_possible']
@@ -1185,7 +1185,7 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             order_type = 'market'
         elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('GAP_'):
             rule_code = candidate['triggered_rule']
-            order_type = 'market'
+            order_type = 'stop'
         elif candidate.get('triggered_rule') and str(candidate.get('triggered_rule')).startswith('FT_'):
             rule_code = candidate['triggered_rule']
             order_type = 'market'
@@ -1236,6 +1236,12 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         context['rule_code'] = rule_code
         context['gap_pct'] = candidate.get('gap_pct', 0.0)
         context['is_sweet_spot'] = candidate.get('is_sweet_spot', False)
+        try:
+            if c_day_open > 0:
+                context['day_open_price'] = c_day_open
+                context['trigger_price'] = round(c_day_open * 1.01, 2)
+        except Exception:
+            pass
 
         rule_mock = {
             'rule_code':   rule_code,
@@ -1248,6 +1254,14 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
         try:
             if order_type == 'market':
                 order = execute_market_order(
+                    ticker    = ticker,
+                    direction = 'buy',
+                    rule_code = rule_code,
+                    context   = context,
+                    rule      = rule_mock,
+                )
+            elif order_type == 'stop':
+                order = place_stop_order(
                     ticker    = ticker,
                     direction = 'buy',
                     rule_code = rule_code,

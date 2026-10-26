@@ -457,6 +457,7 @@ class IBBridgeWorker:
                 order_type = order.get("order_type", "market").lower()
                 shares = int(order.get("shares") or 5)
                 price = float(order.get("limit_price") or order.get("market_price") or 0.0)
+                trigger_price = float(order.get("trigger_price") or price or 0.0)
 
                 # Marcar inmediatamente en proceso para evitar envíos duplicados
                 sb.table("stocks_orders").update({"status": "processing"}).eq("id", order_id).execute()
@@ -574,7 +575,14 @@ class IBBridgeWorker:
                     ib_ord.action = direction.upper()
                     ib_ord.totalQuantity = shares
                     
-                    if order_type == "limit" and price > 0:
+                    if order_type in ("stop", "stp", "buy_stop") and trigger_price > 0:
+                        ib_ord.orderType = "STP"
+                        ib_ord.auxPrice = round(trigger_price, 2)
+                    elif order_type in ("stop_limit", "stp_lmt") and trigger_price > 0:
+                        ib_ord.orderType = "STP LMT"
+                        ib_ord.auxPrice = round(trigger_price, 2)
+                        ib_ord.lmtPrice = round(price if price > 0 else (trigger_price * 1.005), 2)
+                    elif order_type == "limit" and price > 0:
                         ib_ord.orderType = "LMT"
                         ib_ord.lmtPrice = round(price, 2)
                     else:
