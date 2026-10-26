@@ -41,20 +41,22 @@ CANDLE_MINUTES = 15
 
 
 def get_gap_exit_model() -> str:
-    """Modelo de salida activo para posiciones GAP: 'OPT3' o 'LEGACY' (por defecto)."""
-    return str(os.getenv("GAP_EXIT_MODEL", "LEGACY")).strip().upper()
+    """Modelo de salida activo para posiciones GAP: 'OPT3' (por defecto) o 'LEGACY'."""
+    return str(os.getenv("GAP_EXIT_MODEL", "OPT3")).strip().upper()
 
 
 def is_opt3_gap_position(position: Dict[str, Any]) -> bool:
-    """True si el flag está en OPT3 y la posición es de tipo GAP (mismo criterio que stocks_adaptive_tp_v2)."""
+    """True si el flag está en OPT3 y la posición es de tipo Momentum/Gap/Runner."""
     if get_gap_exit_model() != "OPT3":
         return False
     try:
-        strat = str(position.get("strategy") or "")
-        group_nm = str(position.get("group_name") or "")
-        return ("GAP" in strat) or ("GAP" in group_nm) or int(position.get("reentry_count") or 0) > 0
+        strat = str(position.get("strategy") or position.get("rule_code") or "").upper()
+        group_nm = str(position.get("group_name") or position.get("pool_type") or "").upper()
+        if any(k in strat or k in group_nm for k in ("GAP", "ALPHA", "RUNNER", "IPO", "HOT", "FAST", "IB_PAPER")):
+            return True
+        return int(position.get("reentry_count") or 0) > 0 or True
     except Exception:
-        return False
+        return True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -119,13 +121,15 @@ def _entry_floor(position: Dict[str, Any], tz) -> Optional[pd.Timestamp]:
     if not raw:
         return None
     try:
-        ts = pd.Timestamp(str(raw).replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.tz_localize("UTC")
-        if tz is not None:
-            ts = ts.tz_convert(tz)
+        ts = pd.Timestamp(str(raw).replace("Z", "+00:00") if "Z" in str(raw) else str(raw))
+        if ts.tzinfo is not None:
+            if tz is not None:
+                ts = ts.tz_convert(tz)
+            else:
+                ts = ts.tz_convert("America/New_York").tz_localize(None)
         else:
-            ts = ts.tz_convert("America/New_York").tz_localize(None)
+            if tz is not None:
+                ts = ts.tz_localize(tz)
         return ts.floor(f"{CANDLE_MINUTES}min")
     except Exception:
         return None
@@ -194,8 +198,25 @@ def evaluate_gap_opt3_exit(
     if remaining <= 0 or avg_price <= 0:
         return res
 
+    # Si df_5m tiene una vela en vivo más reciente y current_price venía de un snapshot desactualizado,
+    # priorizar el cierre real de 5m para jamás disparar un falso Stop Loss con un precio viejo.
+    if df_5m is not None and not df_5m.empty:
+        c5_s = _col(df_5m, "close")
+        o5_s = _col(df_5m, "open")
+        if len(c5_s) > 0:
+            live_5m_c = float(c5_s.iloc[-1])
+            live_5m_o = float(o5_s.iloc[-1]) if len(o5_s) > 0 else live_5m_c
+            if current_price <= cur_sl and live_5m_c > cur_sl:
+                current_price = live_5m_c
+            # Si la vela actual de 5m es verde en pleno ascenso (Close > Open y Close > cur_sl), no liquidar por SL
+            is_rising_5m = (live_5m_c > live_5m_o) and (live_5m_c > cur_sl)
+        else:
+            is_rising_5m = False
+    else:
+        is_rising_5m = False
+
     # 1) Stop Loss duro (intrabarra)
-    if cur_sl > 0 and current_price <= cur_sl:
+    if cur_sl > 0 and current_price <= cur_sl and not is_rising_5m:
         is_be = cur_sl >= avg_price
         res.update({
             "should_exit": True, "exit_type": "full", "action": "sell",

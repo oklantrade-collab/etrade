@@ -240,14 +240,24 @@ class IBConnection(EWrapper, EClient):
 
     def request_broker_positions(self, timeout: float = 6.0) -> Dict[str, dict]:
         """Request all open positions from TWS and wait until positionEnd."""
+        if not hasattr(self, "_last_valid_positions"):
+            self._last_valid_positions = {}
         self._positions = {}
         self._positions_event.clear()
+        self._positions_sync_ok = False
         try:
             self.reqPositions()
-            self._positions_event.wait(timeout=timeout)
+            finished = self._positions_event.wait(timeout=timeout)
             self.cancelPositions()
+            if finished:
+                self._positions_sync_ok = True
+                self._last_valid_positions = dict(self._positions)
+            else:
+                log_warning(MODULE, f"[IB Positions] Timeout ({timeout}s) waiting for positionEnd; preserving last valid snapshot ({len(self._last_valid_positions)} items).")
+                return dict(self._last_valid_positions)
         except Exception as e:
             log_warning(MODULE, f"Error requesting positions from TWS: {e}")
+            return dict(self._last_valid_positions)
         return self._positions
 
     # ── Contract Builder ──────────────────────────────────

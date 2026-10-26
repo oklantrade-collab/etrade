@@ -2417,11 +2417,16 @@ async def run_stocks_tp_v2_cycle():
         ticker = pos['ticker']
 
         try:
+            fresh_pos_res = sb.table('stocks_positions').select('*').eq('id', pos['id']).execute()
+            if fresh_pos_res.data:
+                pos = fresh_pos_res.data[0]
+                if pos.get('status') != 'open':
+                    continue
+
             snap_res = sb.table('market_snapshot').select('*').eq('symbol', ticker).execute()
             snap = snap_res.data[0] if snap_res.data else {}
-            price = float(snap.get('price') or snap.get('close', 0))
-            if price <= 0:
-                continue
+            snap_price = float(snap.get('price') or snap.get('close', 0))
+            pos_price = float(pos.get('current_price') or 0)
 
             df_15m = await _get_timeframe_df_for_tp(ticker, '15m', '60d')
             if df_15m is None or (isinstance(df_15m, pd.DataFrame) and df_15m.empty):
@@ -2429,6 +2434,31 @@ async def run_stocks_tp_v2_cycle():
                 continue
 
             df_5m  = await _get_timeframe_df_for_tp(ticker, '5m', '5d')
+
+            live_5m_price = 0.0
+            if df_5m is not None and not df_5m.empty:
+                for col_c in ('close', 'Close', 'CLOSE'):
+                    if col_c in df_5m.columns:
+                        live_5m_price = float(df_5m[col_c].iloc[-1])
+                        break
+            price = live_5m_price if live_5m_price > 0 else (pos_price if pos_price > 0 else snap_price)
+            if price <= 0:
+                continue
+
+            entry = float(pos.get('avg_price', 0))
+            gain  = (price - entry) / entry * 100 if entry > 0 else 0
+            age_mins = 999.0
+            entry_time_str = pos.get('first_buy_at') or pos.get('entry_time')
+            if entry_time_str:
+                try:
+                    entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+                    age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
+                except Exception:
+                    age_mins = 999.0
+
+            if age_mins < 15.0 and gain < 2.5:
+                log_info('TP_v2', f'{ticker}: En período de gracia inicial ({age_mins:.1f}m < 15m, P&L {gain:+.2f}%). Omitiendo salida prematura.')
+                continue
             
             # ── Integración EREP para Stocks ──
             try:
@@ -2817,20 +2847,23 @@ async def run_options_gap_defense_cycle():
                 # Enviar orden de cierre SELL a stocks_orders para ejecución en TWS si hay puente
                 exp_compact = expiry_str.replace("-", "")[:8] if expiry_str else "20261026"
                 opt_ticker_formatted = f"{symbol}:OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
+                opt_tb = f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
                 try:
-                    sb.table("stocks_orders").insert({
-                        "ticker": symbol[:10],
-                        "target_band": f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}",
-                        "group_name": "OPEN_GAP_RUNNER_OPT",
-                        "rule_code": "APEX_AUTO",
-                        "order_type": "limit",
-                        "direction": "sell",
-                        "shares": qty_to_close,
-                        "market_price": cur_opt_premium,
-                        "limit_price": round(cur_opt_premium, 2),
-                        "status": "pending",
-                        "created_at": now_iso
-                    }).execute()
+                    existing_sell = sb.table("stocks_orders").select("id").eq("ticker", symbol[:10]).eq("target_band", opt_tb).eq("direction", "sell").in_("status", ["pending", "processing"]).limit(1).execute()
+                    if not existing_sell.data:
+                        sb.table("stocks_orders").insert({
+                            "ticker": symbol[:10],
+                            "target_band": opt_tb,
+                            "group_name": "OPEN_GAP_RUNNER_OPT",
+                            "rule_code": "APEX_AUTO",
+                            "order_type": "market",
+                            "direction": "sell",
+                            "shares": qty_to_close,
+                            "market_price": cur_opt_premium,
+                            "limit_price": round(cur_opt_premium, 2),
+                            "status": "pending",
+                            "created_at": now_iso
+                        }).execute()
                 except Exception as ord_err:
                     log_warning(MODULE, f"Aviso enviando orden de cierre opciones {pid}: {ord_err}")
 

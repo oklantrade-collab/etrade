@@ -306,19 +306,31 @@ def evaluate_technical_rules_and_stops(
     exit_plan["last_underlying_price"] = current_price
     exit_plan["last_eval_at"] = now_dt.isoformat()
 
+    # Calcular antigüedad de la posición en minutos para proteger entradas recién abiertas (< 15 min)
+    pos_age_min = 999.0
+    entry_time_str = position.get("entry_time") or position.get("created_at")
+    if entry_time_str:
+        try:
+            e_dt = datetime.fromisoformat(str(entry_time_str).replace("Z", "+00:00"))
+            pos_age_min = max(0.0, (now_dt - e_dt).total_seconds() / 60.0)
+        except Exception:
+            pos_age_min = 999.0
+
     # ─────────────────────────────────────────────────────────────
     # FASE 2: VERIFICAR SI EL STOP LOSS DEL SUBYACENTE FUE PERFORADO
+    # (Con colchón mínimo de 5 min tras la apertura para evitar cierres a los 15 segundos)
     # ─────────────────────────────────────────────────────────────
-    if is_call and new_sl > 0.0 and current_price <= new_sl:
-        return True, "sl_underlying_pierced", {
-            "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} <= SL ${new_sl:.2f} ({new_sl_type})",
-            "exit_plan": exit_plan
-        }
-    elif is_put and new_sl > 0.0 and current_price >= new_sl:
-        return True, "sl_underlying_pierced", {
-            "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} >= SL ${new_sl:.2f} ({new_sl_type})",
-            "exit_plan": exit_plan
-        }
+    if pos_age_min >= 5.0:
+        if is_call and new_sl > 0.0 and current_price <= new_sl:
+            return True, "sl_underlying_pierced", {
+                "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} <= SL ${new_sl:.2f} ({new_sl_type})",
+                "exit_plan": exit_plan
+            }
+        elif is_put and new_sl > 0.0 and current_price >= new_sl:
+            return True, "sl_underlying_pierced", {
+                "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} >= SL ${new_sl:.2f} ({new_sl_type})",
+                "exit_plan": exit_plan
+            }
 
     # ─────────────────────────────────────────────────────────────
     # FASE 3: EVALUACIÓN DE LAS 5 REGLAS INSTITUCIONALES (ESCALONADO AGRESIVO)
@@ -353,7 +365,7 @@ def evaluate_technical_rules_and_stops(
         elif upper_5_1h > 0 and current_price >= upper_5_1h:
             hit_upper = f"UPPER_5 1H (${upper_5_1h:.2f})"
 
-        if hit_upper:
+        if hit_upper and pos_age_min >= 5.0:
             ratio = 0.5 if pos_qty >= 2 else 1.0
             return True, "tp_upper_5_6", {
                 "detail": f"Take Profit CALL Clímax: Subyacente (${current_price:.2f}) alcanzó {hit_upper}",
@@ -362,7 +374,7 @@ def evaluate_technical_rules_and_stops(
             }
 
         # Regla 3: RSI 1H >= 80 (Sobrecompra Extrema -> Take Profit Clímax)
-        if rsi_1h >= 80.0:
+        if rsi_1h >= 80.0 and pos_age_min >= 5.0:
             ratio = 0.5 if pos_qty >= 2 else 1.0
             return True, "tp_rsi_climax_1h", {
                 "detail": f"Take Profit CALL Clímax: RSI 1H ({rsi_1h:.1f}) >= 80.0",
@@ -370,35 +382,37 @@ def evaluate_technical_rules_and_stops(
                 "exit_ratio": ratio,
             }
 
-        # Regla 1: Ángulo EMA3 1H horizontal o descendente (slope <= 0.0%) -> Cierre Total
-        if ema3_slope_1h <= 0.0:
-            return True, "ema3_flat_descending_1h", {
-                "detail": f"Cierre defensivo CALL: Ángulo EMA3 1H plano o descendente ({ema3_slope_1h:+.4f}%)",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
+        # Reglas de invalidación técnica requieren al menos 15 minutos de maduración para no cerrar a los 15s de abrir
+        if pos_age_min >= 15.0:
+            # Regla 1: Ángulo EMA3 1H horizontal o descendente (slope <= 0.0%) -> Cierre Total
+            if ema3_slope_1h <= 0.0:
+                return True, "ema3_flat_descending_1h", {
+                    "detail": f"Cierre defensivo CALL: Ángulo EMA3 1H plano o descendente ({ema3_slope_1h:+.4f}%)",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
 
-        # Regla 2: EMA3 < EMA9 en 15m (Pérdida de inercia a medio plazo) -> Cierre Total
-        if ema3_15m > 0 and ema9_15m > 0 and ema3_15m < ema9_15m:
-            return True, "ema_cross_15m", {
-                "detail": f"Cierre de CALL: EMA3 15m (${ema3_15m:.2f}) < EMA9 15m (${ema9_15m:.2f})",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
+            # Regla 2: EMA3 < EMA9 en 15m (Pérdida de inercia a medio plazo) -> Cierre Total
+            if ema3_15m > 0 and ema9_15m > 0 and ema3_15m < ema9_15m:
+                return True, "ema_cross_15m", {
+                    "detail": f"Cierre de CALL: EMA3 15m (${ema3_15m:.2f}) < EMA9 15m (${ema9_15m:.2f})",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
 
-        # Regla 5: SIPV marca SELL o cambio de tendencia en 1H/15m -> Cierre Total
-        if is_sipv_sell_1h:
-            return True, "sipv_trend_flip_1h", {
-                "detail": "Cierre de CALL: SIPV marca SELL / Giro bajista en 1H",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
-        elif is_sipv_sell_15m:
-            return True, "sipv_trend_flip_15m", {
-                "detail": "Cierre de CALL: SIPV Clímax 15m (High > Banda Bollinger Superior con mecha de rechazo)",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
+            # Regla 5: SIPV marca SELL o cambio de tendencia en 1H/15m -> Cierre Total
+            if is_sipv_sell_1h:
+                return True, "sipv_trend_flip_1h", {
+                    "detail": "Cierre de CALL: SIPV marca SELL / Giro bajista en 1H",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
+            elif is_sipv_sell_15m:
+                return True, "sipv_trend_flip_15m", {
+                    "detail": "Cierre de CALL: SIPV Clímax 15m (High > Banda Bollinger Superior con mecha de rechazo)",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
 
     elif is_put:
         # Regla 4 (Inversa): Toca LOWER_5 o LOWER_6 en 15m o 1H (Clímax Institucional -> Take Profit)
@@ -412,7 +426,7 @@ def evaluate_technical_rules_and_stops(
         elif lower_5_1h > 0 and current_price <= lower_5_1h:
             hit_lower = f"LOWER_5 1H (${lower_5_1h:.2f})"
 
-        if hit_lower:
+        if hit_lower and pos_age_min >= 5.0:
             ratio = 0.5 if pos_qty >= 2 else 1.0
             return True, "tp_lower_5_6", {
                 "detail": f"Take Profit PUT Clímax: Subyacente (${current_price:.2f}) alcanzó {hit_lower}",
@@ -421,7 +435,7 @@ def evaluate_technical_rules_and_stops(
             }
 
         # Regla 3 (Inversa): RSI 1H <= 20 (Sobreventa Extrema -> Take Profit Clímax)
-        if rsi_1h <= 20.0:
+        if rsi_1h <= 20.0 and pos_age_min >= 5.0:
             ratio = 0.5 if pos_qty >= 2 else 1.0
             return True, "tp_rsi_climax_1h", {
                 "detail": f"Take Profit PUT Clímax: RSI 1H ({rsi_1h:.1f}) <= 20.0",
@@ -429,35 +443,37 @@ def evaluate_technical_rules_and_stops(
                 "exit_ratio": ratio,
             }
 
-        # Regla 1 (Inversa): Ángulo EMA3 1H horizontal o ascendente (slope >= 0.0%) -> Cierre Total
-        if ema3_slope_1h >= 0.0:
-            return True, "ema3_flat_ascending_1h", {
-                "detail": f"Cierre defensivo PUT: Ángulo EMA3 1H plano o ascendente ({ema3_slope_1h:+.4f}%)",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
+        # Reglas de invalidación técnica requieren al menos 15 minutos de maduración para no cerrar a los 15s de abrir
+        if pos_age_min >= 15.0:
+            # Regla 1 (Inversa): Ángulo EMA3 1H horizontal o ascendente (slope >= 0.0%) -> Cierre Total
+            if ema3_slope_1h >= 0.0:
+                return True, "ema3_flat_ascending_1h", {
+                    "detail": f"Cierre defensivo PUT: Ángulo EMA3 1H plano o ascendente ({ema3_slope_1h:+.4f}%)",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
 
-        # Regla 2 (Inversa): EMA3 > EMA9 en 15m (Recuperación contra el PUT) -> Cierre Total
-        if ema3_15m > 0 and ema9_15m > 0 and ema3_15m > ema9_15m:
-            return True, "ema_cross_15m", {
-                "detail": f"Cierre de PUT: EMA3 15m (${ema3_15m:.2f}) > EMA9 15m (${ema9_15m:.2f})",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
+            # Regla 2 (Inversa): EMA3 > EMA9 en 15m (Recuperación contra el PUT) -> Cierre Total
+            if ema3_15m > 0 and ema9_15m > 0 and ema3_15m > ema9_15m:
+                return True, "ema_cross_15m", {
+                    "detail": f"Cierre de PUT: EMA3 15m (${ema3_15m:.2f}) > EMA9 15m (${ema9_15m:.2f})",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
 
-        # Regla 5 (Inversa): SIPV marca BUY o cambio de tendencia en 1H/15m -> Cierre Total
-        if is_sipv_buy_1h:
-            return True, "sipv_trend_flip_1h", {
-                "detail": "Cierre de PUT: SIPV marca BUY / Giro alcista en 1H",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
-        elif is_sipv_buy_15m:
-            return True, "sipv_trend_flip_15m", {
-                "detail": "Cierre de PUT: SIPV Clímax 15m (Low < Banda Bollinger Inferior con mecha de absorción)",
-                "exit_plan": exit_plan,
-                "exit_ratio": 1.0,
-            }
+            # Regla 5 (Inversa): SIPV marca BUY o cambio de tendencia en 1H/15m -> Cierre Total
+            if is_sipv_buy_1h:
+                return True, "sipv_trend_flip_1h", {
+                    "detail": "Cierre de PUT: SIPV marca BUY / Giro alcista en 1H",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
+            elif is_sipv_buy_15m:
+                return True, "sipv_trend_flip_15m", {
+                    "detail": "Cierre de PUT: SIPV Clímax 15m (Low < Banda Bollinger Inferior con mecha de absorción)",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
 
     return False, None, {"exit_plan": exit_plan}
 
@@ -734,19 +750,21 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
                     side = f.get("closing_side") or "sell"
                     px = f.get("fill_price") or exit_fill_res.exit_credit
                     opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
-                    sb.table("stocks_orders").insert({
-                        "ticker": pos["symbol"][:10],
-                        "target_band": opt_target_band,
-                        "group_name": "OPTIONS_AUTONOMOUS",
-                        "rule_code": "APEX_AUTO",
-                        "order_type": "limit",
-                        "direction": side,
-                        "shares": qty_to_close,
-                        "market_price": px,
-                        "limit_price": round(px, 2),
-                        "status": "pending",
-                        "created_at": exit_fill_res.exit_time,
-                    }).execute()
+                    existing_sell = sb.table("stocks_orders").select("id").eq("ticker", pos["symbol"][:10]).eq("target_band", opt_target_band).eq("direction", side).in_("status", ["pending", "processing"]).limit(1).execute()
+                    if not existing_sell.data:
+                        sb.table("stocks_orders").insert({
+                            "ticker": pos["symbol"][:10],
+                            "target_band": opt_target_band,
+                            "group_name": "OPTIONS_AUTONOMOUS",
+                            "rule_code": "APEX_AUTO",
+                            "order_type": "market",
+                            "direction": side,
+                            "shares": qty_to_close,
+                            "market_price": px,
+                            "limit_price": round(px, 2),
+                            "status": "pending",
+                            "created_at": exit_fill_res.exit_time,
+                        }).execute()
             except Exception as ord_e:
                 log_warning(MODULE, f"Aviso al despachar orden de salida a stocks_orders: {ord_e}")
 

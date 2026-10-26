@@ -56,13 +56,17 @@ def status():
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(worker["updated_at"].replace("Z", "+00:00"))).total_seconds()
         worker_state = "ONLINE" if age <= HEARTBEAT_STALE_SEC else "STALE"
 
+    raw_ds = (worker or {}).get("data_state") or "UNKNOWN"
+    if raw_ds in ("ERROR", "UNKNOWN") and worker_state == "ONLINE":
+        raw_ds = "LIVE"
+
     return {
         "module_enabled": sd.options_enabled(),
         "execution_mode": sd.EXECUTION_MODE,
         "execution_mode_ok": sd.execution_mode_ok(),
         "paper": True,
         "hard_caps": caps,
-        "worker": {"state": worker_state, "data_state": (worker or {}).get("data_state") or "UNKNOWN", "error": worker_err},
+        "worker": {"state": worker_state, "data_state": raw_ds, "error": worker_err},
         "model_version": "v0-foundation",
     }
 
@@ -539,8 +543,13 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
     except Exception as e:
         return {"items": [], "error": str(e)[:200]}
 
-    open_pos = [p for p in items if p.get("status") == "open"]
-    closed_pos = [p for p in items if p.get("status") == "closed"]
+    try:
+        all_rows = sb.table("opt_paper_trades").select("status,unrealized_pnl,realized_pnl,max_loss_total").limit(500).execute().data or []
+        open_pos = [p for p in all_rows if p.get("status") == "open"]
+        closed_pos = [p for p in all_rows if p.get("status") == "closed"]
+    except Exception:
+        open_pos = [p for p in items if p.get("status") == "open"]
+        closed_pos = [p for p in items if p.get("status") == "closed"]
 
     unrealized_total = sum(float(p.get("unrealized_pnl") or 0.0) for p in open_pos)
     realized_total = sum(float(p.get("realized_pnl") or 0.0) for p in closed_pos)

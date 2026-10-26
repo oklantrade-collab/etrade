@@ -300,8 +300,21 @@ def evaluate_fast_track_exits(
                     res['sl_reason'] = f"Trailing Stop 15m EMA9 Ascendente: ${proposed_tsl:.2f} (EMA9 ${ema9_now:.2f} - Delta ${delta_15m:.2f})"
                     cur_sl = proposed_tsl
 
-            # Comprobar si el precio perforó el Trailing Stop
-            if cur_sl > 0 and current_price <= cur_sl:
+            # Verificar precio real contra vela de 5m para evitar falsos cierres por snapshot stale (ej. DOUG)
+            is_rising_5m = False
+            if df_5m is not None and len(df_5m) >= 1:
+                c5_s = _safe_col(df_5m, 'close')
+                o5_s = _safe_col(df_5m, 'open')
+                if len(c5_s) > 0:
+                    c5_now = float(c5_s.iloc[-1])
+                    o5_now = float(o5_s.iloc[-1]) if len(o5_s) > 0 else c5_now
+                    if current_price <= cur_sl and c5_now > cur_sl:
+                        current_price = c5_now
+                    is_rising_5m = (c5_now > o5_now) and (c5_now > cur_sl)
+
+            # Comprobar si el precio perforó el Trailing Stop (SOLO si el SL ya está en ganancia/breakeven >= entry_p
+            # y la vela de 5m no está en pleno ascenso verde; el SL inicial en pérdida lo gestiona position_monitor)
+            if cur_sl > 0 and cur_sl >= entry_p and current_price <= cur_sl and not is_rising_5m:
                 res.update({
                     'should_exit': True,
                     'action': 'FULL_EXIT',

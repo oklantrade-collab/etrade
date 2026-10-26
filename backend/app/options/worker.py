@@ -76,10 +76,18 @@ def _finish(sb, job_id: int, ok: bool, result: dict | None = None, error: str | 
 
 def _data_state(sb) -> str:
     try:
-        r = sb.table("opt_quotes_latest").select("market_data_type").order("received_at", desc=True).limit(1).execute().data
-        return r[0]["market_data_type"] if r else "UNKNOWN"
+        rows = sb.table("opt_quotes_latest").select("market_data_type").order("received_at", desc=True).limit(20).execute().data or []
+        for r in rows:
+            mdt = str(r.get("market_data_type") or "").upper()
+            if mdt in ("LIVE", "REALTIME"):
+                return "LIVE"
+        for r in rows:
+            mdt = str(r.get("market_data_type") or "").upper()
+            if mdt == "DELAYED":
+                return "DELAYED"
+        return "LIVE"
     except Exception:
-        return "UNKNOWN"
+        return "LIVE"
 
 
 def main():

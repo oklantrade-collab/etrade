@@ -617,6 +617,9 @@ class IBBridgeWorker:
         try:
             sb = get_supabase()
             broker_positions = self.ib.request_broker_positions(timeout=6.0)
+            if not getattr(self.ib, "_positions_sync_ok", True) and not broker_positions:
+                log_warning(MODULE, "⏸️ Omitiendo reconciliación: TWS no confirmó positionEnd y snapshot está vacío.")
+                return
             now_iso = datetime.now(timezone.utc).isoformat()
 
             # Guardar el snapshot del portfolio real en stocks_config
@@ -761,6 +764,18 @@ class IBBridgeWorker:
             # CONFIRMACIÓN BROKER: Cerrar en stocks_positions cualquier acción que el broker confirme que ya NO existe
             for sym, p_data in sb_open_stocks.items():
                 if sym not in broker_stocks:
+                    try:
+                        fb_str = p_data.get("first_buy_at") or p_data.get("updated_at")
+                        if fb_str:
+                            fb_dt = datetime.fromisoformat(str(fb_str).replace("Z", "+00:00"))
+                            if (datetime.now(timezone.utc) - fb_dt).total_seconds() < 90.0:
+                                continue
+                        inflight_buy = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing"]).limit(1).execute()
+                        if inflight_buy.data:
+                            continue
+                    except Exception:
+                        pass
+
                     real_exit_time = now_iso
                     real_exit_price = p_data.get("current_price") or p_data.get("avg_price")
                     try:
@@ -786,41 +801,176 @@ class IBBridgeWorker:
                     }).eq("id", p_data["id"]).execute()
                     log_info(MODULE, f"📤 [SYNC STOCKS] Acción cerrada en Supabase sincronizada con orden real ({real_exit_time}): {sym}")
 
-            # ── 3. RECONCILIAR OPT_PAPER_TRADES (SÓLO OPCIONES) ──
+            # ── 3. RECONCILIAR OPT_PAPER_TRADES (SINCRONIZACIÓN BIDIRECCIONAL CON BROKER TWS) ──
             try:
                 opt_open_res = sb.table("opt_paper_trades").select("*").eq("status", "open").execute()
-                sb_open_opts = {t["symbol"]: t for t in (opt_open_res.data or [])}
+                open_opt_rows = opt_open_res.data or []
 
-                # Simbolos subyacentes con opciones abiertas en el broker
-                broker_opt_symbols = set()
+                def _fmt_exp(raw_e: str) -> str:
+                    s = str(raw_e or "").strip().replace("-", "")
+                    if len(s) == 8 and s.isdigit():
+                        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+                    return str(raw_e or "")[:10]
+
+                def _row_contract_key(row_d: dict) -> tuple:
+                    sym_u = str(row_d.get("symbol") or "").upper()
+                    exp_s = _fmt_exp(row_d.get("expiry") or "")
+                    fills = row_d.get("entry_fills") or []
+                    stk_f = float(fills[0].get("strike") or 0.0) if fills else 0.0
+                    rgt_s = str(fills[0].get("right") or ("C" if "call" in str(row_d.get("strategy_type") or "").lower() else "P")).upper() if fills else ("C" if "call" in str(row_d.get("strategy_type") or "").lower() else "P")
+                    return (sym_u, exp_s, round(stk_f, 2), rgt_s)
+
+                sb_open_by_key = {}
+                for r in open_opt_rows:
+                    ck = _row_contract_key(r)
+                    if ck not in sb_open_by_key:
+                        sb_open_by_key[ck] = r
+                    else:
+                        sb.table("opt_paper_trades").delete().eq("id", r["id"]).execute()
+
+                active_broker_keys = set()
                 for opt_key, b_data in broker_options.items():
-                    und_sym = b_data.get("underlying") or opt_key.split(":")[0]
-                    broker_opt_symbols.add(und_sym.upper())
+                    qty = int(round(float(b_data.get("shares") or 0)))
+                    if qty <= 0:
+                        continue
+                    und_sym = str(b_data.get("underlying") or opt_key.split(":")[0]).upper()
+                    exp_iso = _fmt_exp(b_data.get("expiry") or "")
+                    strike_v = round(float(b_data.get("strike") or 0.0), 2)
+                    right_v = str(b_data.get("right") or "C").upper()
+                    strat_v = "long_call" if right_v == "C" else "long_put"
+                    dir_v = "bullish" if right_v == "C" else "bearish"
+                    avg_cost_contract = float(b_data.get("avg_cost") or 0.0)
+                    entry_debit = round(avg_cost_contract / 100.0, 4) if avg_cost_contract > 0 else 0.01
+                    total_invested = round(avg_cost_contract * qty, 2) if avg_cost_contract > 0 else round(entry_debit * 100.0 * qty, 2)
+                    conid_v = b_data.get("conid")
 
-                # Cerrar en opt_paper_trades cualquier posición que NO esté en el broker
-                for sym, opt_t in sb_open_opts.items():
-                    if sym.upper() not in broker_opt_symbols:
-                        real_exit_time = now_iso
+                    ck = (und_sym, exp_iso, strike_v, right_v)
+                    active_broker_keys.add(ck)
+
+                    if ck in sb_open_by_key:
+                        ex_row = sb_open_by_key[ck]
+                        if int(ex_row.get("qty") or 0) != qty or abs(float(ex_row.get("entry_debit") or 0) - entry_debit) > 0.02:
+                            sb.table("opt_paper_trades").update({
+                                "qty": qty,
+                                "entry_debit": entry_debit,
+                                "entry_total_invested": total_invested,
+                                "max_loss_total": total_invested,
+                                "updated_at": now_iso
+                            }).eq("id", ex_row["id"]).execute()
+                            log_info(MODULE, f"🔄 [SYNC OPTIONS] Contrato ajustado en opt_paper_trades: {und_sym} {exp_iso} {strike_v}{right_v} -> {qty}x @ ${entry_debit:.2f}")
+                    else:
+                        uid = 1
                         try:
-                            sell_opt = sb.table("stocks_orders")\
-                                .select("filled_at")\
-                                .eq("ticker", sym)\
-                                .eq("direction", "sell")\
-                                .eq("status", "filled")\
-                                .order("filled_at", desc=True)\
-                                .limit(1)\
-                                .execute()
-                            if sell_opt.data and sell_opt.data[0].get("filled_at"):
-                                real_exit_time = sell_opt.data[0]["filled_at"]
+                            u_res = sb.table("opt_underlyings").select("id").eq("symbol", und_sym).limit(1).execute()
+                            if u_res.data:
+                                uid = u_res.data[0]["id"]
+                            else:
+                                ins_u = sb.table("opt_underlyings").insert({"symbol": und_sym, "optionable": True, "data_state": "LIVE"}).execute()
+                                if ins_u.data:
+                                    uid = ins_u.data[0]["id"]
                         except Exception:
                             pass
-                        sb.table("opt_paper_trades").update({
-                            "status": "closed",
-                            "exit_reason": "broker_reconciliation",
-                            "exit_time": real_exit_time,
-                            "updated_at": real_exit_time
-                        }).eq("id", opt_t["id"]).execute()
-                        log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada en opt_paper_trades ({real_exit_time}) por no existir en TWS.")
+
+                        leg_fill = [{
+                            "conid": conid_v,
+                            "side": "buy",
+                            "closing_side": "sell",
+                            "right": right_v,
+                            "strike": strike_v,
+                            "bid": entry_debit,
+                            "ask": entry_debit,
+                            "fill_price": entry_debit,
+                            "slippage_applied": 0.0,
+                            "market_data_type": "LIVE",
+                            "fee_usd": 0.70,
+                        }]
+
+                        recent_opt = sb.table("opt_paper_trades")\
+                            .select("*")\
+                            .eq("symbol", und_sym)\
+                            .eq("strategy_type", strat_v)\
+                            .order("id", desc=True)\
+                            .limit(5)\
+                            .execute()
+                        target_heal = None
+                        for cand_r in (recent_opt.data or []):
+                            if _row_contract_key(cand_r) == ck:
+                                target_heal = cand_r
+                                break
+
+                        if target_heal:
+                            sb.table("opt_paper_trades").update({
+                                "status": "open",
+                                "qty": qty,
+                                "expiry": exp_iso,
+                                "entry_debit": entry_debit,
+                                "entry_fills": leg_fill,
+                                "entry_total_invested": total_invested,
+                                "max_loss_total": total_invested,
+                                "exit_time": None,
+                                "exit_credit": None,
+                                "exit_fills": None,
+                                "exit_reason": None,
+                                "realized_pnl": None,
+                                "updated_at": now_iso
+                            }).eq("id", target_heal["id"]).execute()
+                            log_info(MODULE, f"♻️ [HEALING OPTIONS] Opción {und_sym} {exp_iso} {strike_v}{right_v} reabierta en opt_paper_trades ({qty}x @ ${entry_debit:.2f})")
+                        else:
+                            sb.table("opt_paper_trades").insert({
+                                "underlying_id": uid,
+                                "symbol": und_sym,
+                                "strategy_type": strat_v,
+                                "direction": dir_v,
+                                "status": "open",
+                                "qty": qty,
+                                "expiry": exp_iso,
+                                "entry_time": now_iso,
+                                "entry_debit": entry_debit,
+                                "entry_fills": leg_fill,
+                                "entry_costs": round(0.70 * qty, 2),
+                                "entry_total_invested": total_invested,
+                                "max_loss_total": total_invested,
+                                "max_profit_total": round(total_invested * 2.0, 2),
+                                "breakeven": round(strike_v + entry_debit, 2) if right_v == "C" else round(strike_v - entry_debit, 2),
+                                "unrealized_pnl": 0.0,
+                                "last_mark_price": entry_debit,
+                                "last_mark_at": now_iso,
+                                "exit_plan": {"trailing_sl_type": "INITIAL", "highest_premium_seen": entry_debit},
+                                "model_version": "v1.0-tws-sync",
+                                "settings_version": 1,
+                                "updated_at": now_iso
+                            }).execute()
+                            log_info(MODULE, f"📥 [SYNC OPTIONS] Opción del Broker agregada a opt_paper_trades: {und_sym} {exp_iso} {strike_v}{right_v} ({qty}x @ ${entry_debit:.2f})")
+
+                # Cerrar o limpiar en opt_paper_trades cualquier posición que NO esté en el broker
+                for ck, opt_t in sb_open_by_key.items():
+                    if ck not in active_broker_keys:
+                        sym = opt_t["symbol"]
+                        try:
+                            et_str = opt_t.get("entry_time") or opt_t.get("updated_at")
+                            if et_str:
+                                et_dt = datetime.fromisoformat(str(et_str).replace("Z", "+00:00"))
+                                if (datetime.now(timezone.utc) - et_dt).total_seconds() < 90.0:
+                                    inflight_opt = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing"]).limit(1).execute()
+                                    if inflight_opt.data:
+                                        continue
+                        except Exception:
+                            pass
+
+                        exp_c = ck[1].replace("-", "")
+                        tb_match = f"OPT:{exp_c}:{ck[2]}:{ck[3]}"
+                        filled_buy = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").eq("status", "filled").limit(1).execute()
+                        if not filled_buy.data:
+                            sb.table("opt_paper_trades").delete().eq("id", opt_t["id"]).execute()
+                            log_info(MODULE, f"🧹 [CLEAN OPTIONS] Opción no ejecutada en TWS eliminada de opt_paper_trades: {sym} {tb_match}")
+                        else:
+                            sb.table("opt_paper_trades").update({
+                                "status": "closed",
+                                "exit_reason": "manual_simulated",
+                                "exit_time": now_iso,
+                                "updated_at": now_iso
+                            }).eq("id", opt_t["id"]).execute()
+                            log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada en opt_paper_trades por no existir en TWS.")
             except Exception as opt_sync_e:
                 log_warning(MODULE, f"Error reconciliando opt_paper_trades: {opt_sync_e}")
 
