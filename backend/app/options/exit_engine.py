@@ -322,6 +322,16 @@ def evaluate_technical_rules_and_stops(
     dte_days = (exp_date - today_date).days if exp_date else 999
     is_swing_multiweek = (dte_days >= 4)
     unr_pnl_pct = float(position.get("unrealized_pnl_pct") or 0.0)
+    if unr_pnl_pct == 0.0:
+        inv = float(position.get("entry_total_invested") or 0.0)
+        unr = float(position.get("unrealized_pnl") or 0.0)
+        if inv > 0:
+            unr_pnl_pct = round((unr / inv) * 100.0, 2)
+        elif position.get("entry_debit") and position.get("last_mark_price"):
+            ed = float(position.get("entry_debit") or 0.0)
+            mp = float(position.get("last_mark_price") or 0.0)
+            if ed > 0:
+                unr_pnl_pct = round(((mp - ed) / ed) * 100.0, 2)
 
     # Calcular antigüedad de la posición en minutos para proteger entradas recién abiertas (< 15 min)
     pos_age_min = 999.0
