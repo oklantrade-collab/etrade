@@ -543,7 +543,8 @@ async def get_stocks_journal(limit: int = 100):
             .execute()
         for t in (t_res.data or []):
             ticker_str = str(t.get("ticker", "")).upper()
-            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or t.get("group_name") == "OPTIONS":
+            tt_str = str(t.get("trade_type") or t.get("group_name") or "").upper()
+            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or tt_str.startswith("OPT") or "OPTION" in tt_str:
                 continue
 
             entry_p = float(t.get("entry_price") or 0.0)
@@ -596,7 +597,8 @@ async def get_stocks_journal(limit: int = 100):
         seen_keys = {f"{e['ticker']}_{e['first_buy_at']}" for e in entries}
         for p in (p_res.data or []):
             ticker_str = str(p.get("ticker", "")).upper()
-            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or p.get("group_name") == "OPTIONS":
+            grp_str = str(p.get("group_name") or "").upper()
+            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or grp_str.startswith("OPT") or "OPTION" in grp_str:
                 continue
 
             avg_p = float(p.get("avg_price") or 0.0)
