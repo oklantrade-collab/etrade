@@ -567,14 +567,17 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
         log_info(MODULE, f"Watchlist para cola obtenida de hoy: {len(tickers_set)} tickers")
 
     # 3. Inyectar Top Gainers y Alpha Runners en tiempo real (Rallies del día)
+    live_gainers_map = {}
     try:
         from app.stocks.alpha_runner_scanner import scan_top_gainers_live
         live_gainers = scan_top_gainers_live(limit=25)
         for g in (live_gainers or []):
             tg = g.get('ticker')
-            if tg and tg not in tickers_set:
-                tickers_set.add(tg)
-                log_info(MODULE, f"🚀 Inyectando Top Gainer en vivo a la cola: {tg} ({g.get('change_pct',0):+.1f}%, BF={g.get('buying_force_5m',0)})")
+            if tg:
+                live_gainers_map[tg] = g
+                if tg not in tickers_set:
+                    tickers_set.add(tg)
+                    log_info(MODULE, f"🚀 Inyectando Top Gainer en vivo a la cola: {tg} ({g.get('change_pct',0):+.1f}%, BF={g.get('buying_force_5m',0)})")
     except Exception as e_live:
         log_warning(MODULE, f"Bypass inyección live gainers a cola: {e_live}")
 
@@ -664,18 +667,33 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             if not snap or not snap.get('price'):
                 try:
                     import yfinance as yf
-                    p_curr = float(yf.Ticker(ticker).fast_info.last_price or 0.0)
+                    fi = yf.Ticker(ticker).fast_info
+                    p_curr = float(fi.last_price or 0.0)
+                    prev_c = float(getattr(fi, 'previous_close', 0.0) or getattr(fi, 'regular_market_previous_close', 0.0) or 0.0)
+                    calc_chg = round(((p_curr - prev_c) / prev_c) * 100.0, 2) if (p_curr > 0 and prev_c > 0) else 0.0
                     if p_curr > 0:
                         snap = {
                             'symbol': ticker,
                             'price': p_curr,
-                            'change_pct': float(snap.get('change_pct') or 0.0) if isinstance(snap, dict) else 0.0,
-                            'gap_pct': float(snap.get('gap_pct') or 0.0) if isinstance(snap, dict) else 0.0,
+                            'change_pct': float(snap.get('change_pct') or calc_chg) if isinstance(snap, dict) else calc_chg,
+                            'gap_pct': float(snap.get('gap_pct') or calc_chg) if isinstance(snap, dict) else calc_chg,
                         }
                     else:
                         continue
                 except Exception:
                     continue
+
+            # Enriquecer con métricas en vivo de Top Gainers si estaban ausentes en market_snapshot
+            if ticker in live_gainers_map:
+                lg = live_gainers_map[ticker]
+                if not snap.get('change_pct'):
+                    snap['change_pct'] = float(lg.get('change_pct') or 0.0)
+                if not snap.get('gap_pct'):
+                    snap['gap_pct'] = float(lg.get('change_pct') or 0.0)
+                if not snap.get('buying_force_5m'):
+                    snap['buying_force_5m'] = float(lg.get('buying_force_5m') or 0.0)
+                if not snap.get('rvol'):
+                    snap['rvol'] = float(lg.get('rvol') or 1.5)
 
             # Enriquecer snap con signals_json de technical_scores (para disponer de pullback_triggered, pool_type, etc.)
             try:
@@ -918,6 +936,8 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 entry_reason = 'breakout_5m_Aa30_STK'
             elif enters_by_rule:
                 entry_reason = f'rule_{rule_signal.get("rule_code", "")}'
+            else:
+                entry_reason = 'apex_auto'
 
             group_val = str(snap.get('pool_type') or fund.get('pool_type', '') or '')
             if is_intraday_alpha and 'ALPHA_RUNNER' not in group_val:
@@ -934,7 +954,8 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 'is_overbought':     False if (enters_by_pullback or enters_by_expansion or is_open_gap_runner) else overbought['blocked'],
                 'is_expansion_runner': enters_by_expansion,
                 'is_gap_runner':     is_open_gap_runner,
-                'gap_pct':           eff_gap if is_open_gap_runner else float(snap.get('gap_pct') or 0.0),
+                'gap_pct':           eff_gap if is_open_gap_runner else float(snap.get('gap_pct') or snap.get('change_pct') or 0.0),
+                'change_pct':        change_p_val,
                 'overbought_reason': overbought.get('reason', ''),
                 'rsi':               overbought['rsi'],
                 'fib_zone':          overbought['fib_zone'],
@@ -1053,8 +1074,13 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
                 else:
                     log_info(MODULE, f"⚡ {ticker}: EXCEPCIÓN concedida en RISK-OFF por alto RVOL ({rvol_val:.1f}x) / Gap ({candidate.get('gap_pct')}%)")
 
-            # Evaluar Fuerza Relativa (RS vs SPY)
-            asset_chg = float(candidate.get('gap_pct') or candidate.get('snap', {}).get('change_pct', 0.0) or 0.0)
+            # Evaluar Fuerza Relativa (RS vs SPY) tomando el mejor avance entre gap_pct y change_pct intradía
+            gap_v = float(candidate.get('gap_pct') or candidate.get('snap', {}).get('gap_pct', 0.0) or 0.0)
+            chg_v = float(candidate.get('change_pct') or candidate.get('snap', {}).get('change_pct', 0.0) or 0.0)
+            if gap_v != 0.0 and chg_v != 0.0:
+                asset_chg = max(gap_v, chg_v)
+            else:
+                asset_chg = chg_v if chg_v != 0.0 else gap_v
             rs_res = evaluate_relative_strength_qualification(asset_chg, spy_chg, macro_regime)
             if not rs_res.get("qualified", True):
                 log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por Fuerza Relativa ({rs_res.get('reason')})")
@@ -1484,20 +1510,49 @@ async def process_priority_queue_buys(supabase=None, cfg=None) -> list:
             continue
 
         price = float(item.get('price_at_rank') or item.get('price') or 0.0)
-        if price <= 0:
+        snap_q = {}
+        try:
+            snap_res_q = supabase.table('market_snapshot').select('*').eq('symbol', t).limit(1).execute()
+            if snap_res_q.data:
+                snap_q = snap_res_q.data[0]
+                if float(snap_q.get('price') or 0.0) > 0:
+                    price = float(snap_q['price'])
+        except Exception:
+            pass
+
+        calc_chg_q = float(snap_q.get('change_pct') or 0.0)
+        calc_gap_q = float(snap_q.get('gap_pct') or 0.0)
+
+        if price <= 0 or (calc_chg_q == 0.0 and calc_gap_q == 0.0):
             try:
                 import yfinance as yf
                 fast = yf.Ticker(t).fast_info
-                price = float(fast.get('last_price') or fast.get('regular_market_previous_close') or 0.0)
+                p_fast = float(getattr(fast, 'last_price', 0.0) or 0.0)
+                prev_fast = float(getattr(fast, 'previous_close', 0.0) or getattr(fast, 'regular_market_previous_close', 0.0) or 0.0)
+                if p_fast > 0:
+                    price = p_fast
+                if p_fast > 0 and prev_fast > 0 and calc_chg_q == 0.0:
+                    calc_chg_q = round(((p_fast - prev_fast) / prev_fast) * 100.0, 2)
+                    if calc_gap_q == 0.0:
+                        calc_gap_q = calc_chg_q
             except Exception:
-                price = 0.0
+                pass
 
         if price <= 0:
             continue
 
+        snap_q['price'] = price
+        snap_q['close'] = price
+        snap_q['change_pct'] = calc_chg_q
+        snap_q['gap_pct'] = calc_gap_q if calc_gap_q != 0.0 else calc_chg_q
+        if not snap_q.get('rvol'):
+            snap_q['rvol'] = 2.0
+
         c_dict = {
             'ticker': t,
             'price': price,
+            'gap_pct': snap_q['gap_pct'],
+            'change_pct': calc_chg_q,
             'composite_rank': float(item.get('composite_rank') or 0.0),
             'apex_score_4h': float(item.get('apex_score_4h') or 90.0),
             'apex_score_1d': float(item.get('apex_score_1d') or 90.0),
@@ -1514,7 +1569,7 @@ async def process_priority_queue_buys(supabase=None, cfg=None) -> list:
             'is_vme_runner': 'VME' in str(item.get('triggered_rule', '')) or 'VOLATILITY' in str(item.get('group_name', '')),
             'is_intraday_alpha': 'ALPHA' in str(item.get('group_name', '')) or 'ALPHA' in str(item.get('triggered_rule', '')),
             'rule_signal': {'has_signal': True, 'rule_code': item.get('triggered_rule')},
-            'snap': {'price': price, 'close': price, 'rvol': 2.0}
+            'snap': snap_q
         }
         candidates.append(c_dict)
 

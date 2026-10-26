@@ -65,7 +65,7 @@ def save_circuit_breaker_state(state: Dict[str, Any]) -> None:
             "value": json.dumps(state) if not isinstance(state, str) else state,
             "description": "Estado del disyuntor diario y cooldowns por ticker",
             "updated_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
+        }, on_conflict="key").execute()
     except Exception as e:
         log_warning(MODULE, f"Error guardando circuit_breaker_state: {e}")
 

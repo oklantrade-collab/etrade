@@ -73,8 +73,8 @@ def _get_config() -> dict:
         res = sb.table("stocks_config").select("key, value").execute()
         cfg = {r["key"]: r["value"] for r in (res.data or [])}
         
-        pct_trade = float(cfg.get("max_pct_per_trade", 0.02))
-        if pct_trade > 1: pct_trade = pct_trade / 100.0 # 2 -> 0.02
+        pct_trade = max(float(cfg.get("pct_per_operation", 10.0)), float(cfg.get("max_pct_per_trade", 10.0)))
+        if pct_trade > 1: pct_trade = pct_trade / 100.0 # 10 -> 0.10
 
         pct_max_total = float(cfg.get("max_total_risk_pct", 0.30))
         if pct_max_total > 1: pct_max_total = pct_max_total / 100.0 # 30 -> 0.30
@@ -98,20 +98,24 @@ def _get_config() -> dict:
 
 def _calculate_shares(capital: float, max_pct: float, price: float) -> int:
     """
-    Calcula la cantidad de acciones basada en riesgo, redondeando a múltiplos de 5.
-    Mínimo 5 acciones.
+    Calcula la cantidad de acciones basada en riesgo, redondeando a múltiplos de 5
+    cuando el precio lo permite, o mínimo 1 acción para acciones de mayor precio ($50-$100).
     """
     if price <= 0: return 0
     
     target_usd = capital * max_pct
     raw_shares = target_usd / price
     
-    # Redondear al múltiplo de 5 inferior más cercano
+    # Redondear al múltiplo de 5 inferior más cercano si alcanza para >= 5 acciones
     shares = int(raw_shares // 5) * 5
     
-    # Mínimo absoluto de 5 acciones si el capital lo permite
-    if shares < 5 and target_usd >= (5 * price):
-        shares = 5
+    if shares < 5:
+        if target_usd >= (5 * price):
+            shares = 5
+        elif int(raw_shares) >= 1:
+            shares = int(raw_shares)
+        elif (capital * 0.10) >= price:
+            shares = 1
         
     return shares
 
@@ -364,15 +368,14 @@ def execute_market_order(
         shares = max(5, int((shares * 0.35) // 5) * 5)
 
     # HARD CAP DE SEGURIDAD POR ACCIÓN: Máximo 10% del capital total en una sola acción
-    max_trade_cap_usd = capital * min(max_pct, 0.10)
+    max_trade_cap_usd = capital * max(min(max_pct, 0.10), 0.10)
     if (shares * price) > max_trade_cap_usd:
-        shares = int(max_trade_cap_usd // (price * 5)) * 5
-        if shares < 5 and max_trade_cap_usd >= (5 * price):
-            shares = 5
+        shares_5 = int(max_trade_cap_usd // (price * 5)) * 5
+        shares = shares_5 if shares_5 >= 5 else max(1, int(max_trade_cap_usd // price))
     
-    if shares < 5:
-        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Insufficient capital for min batch of 5 (Target: ${capital * max_pct:.0f} vs Need: ${5*price:.0f})")
-        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital * max_pct:.0f} vs {5*price:.0f} p/lote)"}
+    if shares < 1:
+        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Insufficient capital for 1 share (Target: ${capital * max_pct:.0f} vs Price: ${price:.2f})")
+        return {"success": False, "reason": f"Capital insuficiente para 1 acción (${capital * max_pct:.0f} vs ${price:.2f})"}
     
     # Validar que no superemos el riesgo total con esta nueva compra
     if current_investment + (shares * price) > max_allowed_investment:
@@ -675,8 +678,8 @@ def place_limit_order(
     # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
     shares = _calculate_shares(capital, config["max_pct_per_trade"], limit_price)
     
-    if direction == "buy" and shares < 5:
-        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 (${capital * config['max_pct_per_trade']:.0f} vs {5*limit_price:.0f} p/lote)"}
+    if direction == "buy" and shares < 1:
+        return {"success": False, "reason": f"Capital insuficiente para 1 acción (${capital * config['max_pct_per_trade']:.0f} vs ${limit_price:.2f})"}
     
     if direction == "buy" and current_investment + (shares * limit_price) > max_allowed_investment:
         remaining_cap = max_allowed_investment - current_investment
@@ -821,14 +824,13 @@ def place_stop_order(
     if rule_code == "GAP_TRANCHE_1" or str(rule_code).startswith("GAP_"):
         shares = max(5, int((shares * 0.33) // 5) * 5)
 
-    max_trade_cap_usd = capital * min(max_pct, 0.10)
+    max_trade_cap_usd = capital * max(min(max_pct, 0.10), 0.10)
     if (shares * trigger_price) > max_trade_cap_usd:
-        shares = int(max_trade_cap_usd // (trigger_price * 5)) * 5
-        if shares < 5 and max_trade_cap_usd >= (5 * trigger_price):
-            shares = 5
+        shares_5 = int(max_trade_cap_usd // (trigger_price * 5)) * 5
+        shares = shares_5 if shares_5 >= 5 else max(1, int(max_trade_cap_usd // trigger_price))
 
-    if direction == "buy" and shares < 5:
-        return {"success": False, "reason": f"Capital insuficiente para lote mínimo de 5 @ ${trigger_price:.2f}"}
+    if direction == "buy" and shares < 1:
+        return {"success": False, "reason": f"Capital insuficiente para 1 acción @ ${trigger_price:.2f}"}
 
     if direction == "buy" and current_investment + (shares * trigger_price) > max_allowed_investment:
         remaining_cap = max_allowed_investment - current_investment
