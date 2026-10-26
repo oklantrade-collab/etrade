@@ -909,7 +909,7 @@ class IBBridgeWorker:
                                 "max_loss_total": total_invested,
                                 "exit_time": None,
                                 "exit_credit": None,
-                                "exit_fills": None,
+                                "exit_fills": [],
                                 "exit_reason": None,
                                 "realized_pnl": None,
                                 "updated_at": now_iso
