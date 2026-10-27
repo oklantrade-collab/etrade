@@ -81,7 +81,8 @@ def select_best_option_contract(
     max_spread_pct: float = 8.0,
     min_open_interest: float = 50.0,
     min_volume: float = 20.0,
-    now_date: Optional[date] = None
+    now_date: Optional[date] = None,
+    selection_mode: str = "GAP_RUNNER"
 ) -> Tuple[Optional[SelectedContract], List[str]]:
     """
     Evalúa la cadena de opciones y selecciona el contrato óptimo para el Gap Runner.
@@ -91,7 +92,9 @@ def select_best_option_contract(
     is_call = direction.upper() in ("CALL", "BULLISH")
     target_right = "C" if is_call else "P"
 
-    target_delta = 0.50 if is_call else -0.50
+    # En modo OTM_MOMENTUM se busca delta ~0.35 para capturar explosión de Gamma al cruzar a ITM
+    is_otm_momentum = (selection_mode.upper() == "OTM_MOMENTUM")
+    target_delta = (0.35 if is_call else -0.35) if is_otm_momentum else (0.50 if is_call else -0.50)
     rejection_reasons = []
     candidates: List[SelectedContract] = []
 
@@ -115,17 +118,20 @@ def select_best_option_contract(
 
         dte = (exp_date - ref_date).days
 
-        # Weekend Theta Shield:
-        # Los jueves (weekday 3) y viernes (weekday 4), prohibir contratos que expiren en fin de semana o lunes inmediato (DTE <= 4)
-        # Exigir vencimiento a partir de la siguiente semana para evitar decaimiento sin mercado
-        weekday = ref_date.weekday()
-        if weekday in (3, 4) and dte <= 4:
-            rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): Rechazado por Weekend Theta Shield (DTE={dte} <= 4 en fin de semana)")
-            continue
+        if is_otm_momentum:
+            # En OTM Momentum scalping/daytrading queremos contratos semanales inmediatos (0 a 8 DTE)
+            if dte < 0 or dte > 8:
+                continue
+        else:
+            # Weekend Theta Shield para Swing / Gap Runner:
+            weekday = ref_date.weekday()
+            if weekday in (3, 4) and dte <= 4:
+                rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): Rechazado por Weekend Theta Shield (DTE={dte} <= 4 en fin de semana)")
+                continue
 
-        # Filtro DTE general: entre 3 y 21 días (evitar 0DTE y evitar meses lejanos con delta dragging)
-        if dte < 3 or dte > 21:
-            continue
+            # Filtro DTE general para Gap Runner: entre 3 y 21 días
+            if dte < 3 or dte > 21:
+                continue
 
         # Obtener cotizaciones latest
         ql = c.get("opt_quotes_latest") or c
@@ -167,13 +173,28 @@ def select_best_option_contract(
                 delta = -0.50 - (1.0 - moneyness) * 2.0
                 delta = max(-0.95, min(-0.05, delta))
 
-        # Filtro de Delta: entre 0.38 y 0.68
-        if is_call:
-            if delta < 0.45 or delta > 0.65:
-                continue
+        # Filtro de Delta según modo
+        if is_otm_momentum:
+            # Rango Delta OTM institucional: 0.25 a 0.42 (para CALL) / -0.42 a -0.25 (para PUT)
+            if is_call:
+                if delta < 0.25 or delta > 0.42:
+                    continue
+                # Strike debe ser OTM o ligeramente ATM (strike >= underlying_price * 0.995)
+                if underlying_price > 0 and strike < underlying_price * 0.995:
+                    continue
+            else:
+                if delta > -0.25 or delta < -0.42:
+                    continue
+                # Strike debe ser OTM o ligeramente ATM (strike <= underlying_price * 1.005)
+                if underlying_price > 0 and strike > underlying_price * 1.005:
+                    continue
         else:
-            if delta > -0.45 or delta < -0.65:
-                continue
+            if is_call:
+                if delta < 0.45 or delta > 0.65:
+                    continue
+            else:
+                if delta > -0.45 or delta < -0.65:
+                    continue
 
         cost_per_contract = mid * 100.0
         if cost_per_contract <= 0.0:
@@ -182,9 +203,15 @@ def select_best_option_contract(
         target_total = max(1, int(budget_usd / cost_per_contract))
         t1, t2, t3, model = calculate_tranche_allocation(target_total)
 
-        # Scoring: proximidad a delta target 0.50, menor spread, mayor liquidez
+        # Scoring: proximidad a delta target, menor spread, mayor liquidez y óptimo moneyness OTM
         delta_dist = abs(delta - target_delta)
-        score = 100.0 - (delta_dist * 60.0) - (spread_rel * 2.0) + min(15.0, math.log1p(oi + vol))
+        if is_otm_momentum:
+            otm_dist_pct = (abs(strike - underlying_price) / max(0.01, underlying_price)) * 100.0
+            # Preferencia: strikes a 1.0% - 3.5% OTM (sweet spot de Gamma explosion)
+            moneyness_penalty = min(20.0, abs(otm_dist_pct - 2.0) * 4.0)
+            score = 100.0 - (delta_dist * 80.0) - (spread_rel * 2.0) - moneyness_penalty + min(15.0, math.log1p(oi + vol))
+        else:
+            score = 100.0 - (delta_dist * 60.0) - (spread_rel * 2.0) + min(15.0, math.log1p(oi + vol))
 
         candidates.append(SelectedContract(
             contract_id=cid,
@@ -226,7 +253,8 @@ def fetch_and_select_best_option_contract(
     direction: str = "CALL",
     budget_usd: float = 1000.0,
     supabase: Any = None,
-    now_date: Optional[date] = None
+    now_date: Optional[date] = None,
+    selection_mode: str = "GAP_RUNNER"
 ) -> Tuple[Optional[SelectedContract], List[str]]:
     """
     Selecciona de forma inteligente el mejor contrato de opción para Gap Runner:
@@ -266,7 +294,8 @@ def fetch_and_select_best_option_contract(
                             underlying_price=underlying_price,
                             direction=direction,
                             budget_usd=budget_usd,
-                            now_date=ref_date
+                            now_date=ref_date,
+                            selection_mode=selection_mode
                         )
                         if best_db is not None:
                             log_info("OPT_PICKER", f"🎯 Contrato seleccionado desde Supabase DB: {best_db.symbol} Strike ${best_db.strike} {best_db.right} (Exp: {best_db.expiry})")
@@ -286,14 +315,21 @@ def fetch_and_select_best_option_contract(
             rejection_reasons.append(f"{sym}: No tiene opciones disponibles en mercado.")
             return None, rejection_reasons
 
-        # Filtrar vencimientos: preferir entre 2 y 21 días (o entre 1 y 25 si es necesario)
-        valid_exps = [e for e in all_exps if 2 <= (date.fromisoformat(e) - ref_date).days <= 21]
-        if not valid_exps:
-            valid_exps = [e for e in all_exps if 1 <= (date.fromisoformat(e) - ref_date).days <= 30]
-
-        if not valid_exps:
-            rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango DTE (2-21d).")
-            return None, rejection_reasons
+        # Filtrar vencimientos según selection_mode
+        if selection_mode.upper() == "OTM_MOMENTUM":
+            valid_exps = [e for e in all_exps if 0 <= (date.fromisoformat(e) - ref_date).days <= 8]
+            if not valid_exps:
+                valid_exps = [e for e in all_exps if 0 <= (date.fromisoformat(e) - ref_date).days <= 14]
+            if not valid_exps:
+                rejection_reasons.append(f"{sym}: No hay vencimientos semanales disponibles en rango DTE (0-8d).")
+                return None, rejection_reasons
+        else:
+            valid_exps = [e for e in all_exps if 2 <= (date.fromisoformat(e) - ref_date).days <= 21]
+            if not valid_exps:
+                valid_exps = [e for e in all_exps if 1 <= (date.fromisoformat(e) - ref_date).days <= 30]
+            if not valid_exps:
+                rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango DTE (2-21d).")
+                return None, rejection_reasons
 
         is_call = direction.upper() in ("CALL", "BULLISH")
         target_right = "C" if is_call else "P"
@@ -356,7 +392,8 @@ def fetch_and_select_best_option_contract(
             underlying_price=underlying_price,
             direction=direction,
             budget_usd=budget_usd,
-            now_date=ref_date
+            now_date=ref_date,
+            selection_mode=selection_mode
         )
 
         if best_live is not None:

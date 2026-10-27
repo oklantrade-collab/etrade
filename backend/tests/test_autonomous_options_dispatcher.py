@@ -22,6 +22,13 @@ class TestAutonomousOptionsDispatcher(unittest.TestCase):
         self.mock_sb.table().select().like().in_().execute.return_value.data = []
         self.mock_sb.table().insert().execute.return_value.data = [{"id": "ord_mock_123"}]
 
+        # Patch Gatekeeper para pruebas deterministas sin depender de red o datos en vivo
+        self.gate_patcher = patch("app.options.aduana_gap_runner_options.fetch_and_evaluate_options_gatekeeper", return_value={"approved": True, "stage": "ALL", "reason": "Mocked Approved"})
+        self.gate_patcher.start()
+
+    def tearDown(self):
+        self.gate_patcher.stop()
+
     @patch("app.options.autonomous_options_dispatcher.send_telegram_alert")
     @patch("app.options.autonomous_options_dispatcher.fetch_and_select_best_option_contract")
     def test_dispatch_call_success(self, mock_picker, mock_alert):

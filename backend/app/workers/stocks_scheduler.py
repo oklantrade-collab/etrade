@@ -2974,12 +2974,14 @@ async def run_options_gap_defense_cycle():
 
 
 _LAST_STOCK_DRIVEN_OPTIONS_TS = 0.0
+_LAST_INTRADAY_MOMENTUM_OPTIONS_TS = 0.0
 
 
 async def run_options_auto_execution_cycle():
     """
     Supervisión y ejecución autónoma de candidatas de opciones seleccionadas:
     0. Escaneo Stock-First periódico (cada 5m) para mantener Opportunities siempre actualizado.
+    0.1 Escaneo Intraday Momentum OTM -> ITM en líderes con opciones líquidas (cada 5 min).
     1. Carga candidatas con status 'selected' en opt_candidates.
     2. Comprueba si ya tienen posición abierta en opt_paper_trades.
     3. Si no están abiertas, las ejecuta inmediatamente:
@@ -2987,7 +2989,7 @@ async def run_options_auto_execution_cycle():
        - Despacha las órdenes de piernas a stocks_orders para ejecución TWS por ib_bridge_worker.
        - Emite alerta Telegram institucional.
     """
-    global _LAST_STOCK_DRIVEN_OPTIONS_TS
+    global _LAST_STOCK_DRIVEN_OPTIONS_TS, _LAST_INTRADAY_MOMENTUM_OPTIONS_TS
     from app.core.market_hours import is_options_market_open
     is_open, reason_open = is_options_market_open()
     if not is_open:
@@ -3008,6 +3010,16 @@ async def run_options_auto_execution_cycle():
                 await run_stock_driven_options_pipeline(supabase=sb, limit_per_direction=3)
             except Exception as pipe_err:
                 log_warning(MODULE, f"Aviso en ciclo periódico de opciones Stock-First: {pipe_err}")
+
+        # 0.1 Escaneo Intraday Momentum OTM -> ITM (cada 5 minutos en mercado)
+        if now_ts - _LAST_INTRADAY_MOMENTUM_OPTIONS_TS >= 300.0:
+            _LAST_INTRADAY_MOMENTUM_OPTIONS_TS = now_ts
+            try:
+                from app.options.intraday_momentum_options_scanner import run_intraday_momentum_options_scan
+                log_info(MODULE, "⚡ Ejecutando ciclo Intraday Momentum OTM -> ITM Options Scanner (cada 5 min)...")
+                await run_intraday_momentum_options_scan(supabase=sb, budget_usd=1000.0, auto_dispatch=True)
+            except Exception as intra_err:
+                log_warning(MODULE, f"Aviso en ciclo Intraday Momentum OTM -> ITM: {intra_err}")
 
         rows = sb.table("opt_settings").select("key,value").execute().data or []
         stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}

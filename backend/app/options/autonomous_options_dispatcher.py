@@ -102,16 +102,18 @@ def dispatch_autonomous_option_trade(
         except Exception as e_gate:
             log_warning(MODULE, f"Aviso evaluando Gatekeeper ADUANA Opciones para {ticker}: {e_gate}")
 
-        # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO (ATM, DELTA ~0.50, DTE 14-28d) ──
+        # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO ──
+        selection_mode = str(candidate.get("selection_mode", "GAP_RUNNER"))
         budget_usd = float(cfg.get("options_trade_budget_usd", 1000.0))
-        log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} (Spot: ${underlying_price:.2f}, Budget: ${budget_usd:.0f})...")
+        log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} [Modo: {selection_mode}] (Spot: ${underlying_price:.2f}, Budget: ${budget_usd:.0f})...")
 
         best_contract, rej_reasons = fetch_and_select_best_option_contract(
             symbol=ticker,
             underlying_price=underlying_price,
             direction=opt_dir,
             budget_usd=budget_usd,
-            supabase=sb
+            supabase=sb,
+            selection_mode=selection_mode
         )
 
         if not best_contract:
@@ -151,10 +153,14 @@ def dispatch_autonomous_option_trade(
             "last_mark_at": now_iso,
             "unrealized_pnl": 0.0,
             "exit_plan": {
-                "initial_sl": candidate.get("stop_loss_trigger") or round(underlying_price * 0.96, 2),
+                "initial_sl": candidate.get("stop_loss_trigger") or (round(underlying_price * 0.985, 2) if opt_dir == "CALL" else round(underlying_price * 1.015, 2)),
                 "target_ceiling": candidate.get("tactical_target_ceiling"),
                 "target_floor": candidate.get("tactical_target_floor"),
                 "rule_code": rule_code,
+                "selection_mode": selection_mode,
+                "tp1_target_premium": round(opt_price * 1.50, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
+                "tp2_target_premium": round(opt_price * 2.00, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
+                "hard_sl_premium": round(opt_price * 0.65, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
                 "entry_reason": candidate.get("entry_reason", f"Autonomous {opt_dir}"),
                 "last_eval_at": now_iso
             },
