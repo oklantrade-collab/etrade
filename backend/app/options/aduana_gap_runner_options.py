@@ -69,6 +69,261 @@ def get_min_gap_threshold(ticker: str) -> float:
     return DEFAULT_GAP_THRESHOLDS.get(ac, 3.00)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ADUANA OPCIONES: Daily Runway 1D (con excepción por volumen), anti-agotamiento
+# RSI multi-timeframe y alineación tendencial EMA3/EMA9 en 1H (CALLs y PUTs).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Runway mínimo (%) del Open diario hacia la banda de Bollinger 1D de la dirección
+# (BB_UPPER para CALLs / BB_LOWER para PUTs). Los ETFs tienen un rango diario natural
+# mucho menor; toda acción individual exige 20%.
+OPT_RUNWAY_MIN_PCT_BY_CLASS = {"ETF": 2.5}
+OPT_RUNWAY_MIN_PCT_DEFAULT = 20.0
+
+# Excepción por volumen masivo: bajo el umbral sólo entra con RVOL >= 3.0x y presión
+# unidireccional; el volumen proyecta una expansión de banda de 3.5 pp por cada 1.0x
+# de RVOL sobre 1.0x (tope 25 pp).
+OPT_RUNWAY_MASSIVE_RVOL = 3.0
+OPT_RUNWAY_DELTA_PP_PER_RVOL = 3.5
+OPT_RUNWAY_MAX_DELTA_PP = 25.0
+
+# Anti-agotamiento RSI: techos para CALLs, pisos para PUTs.
+OPT_RSI_LIMITS = {
+    "CALL": {"5m": 72.0, "15m": 75.0, "1h": 75.0},
+    "PUT": {"5m": 28.0, "15m": 30.0, "1h": 40.0},
+}
+
+
+def get_options_runway_threshold(ticker: str) -> float:
+    """Runway mínimo (%) exigido al subyacente según su clase de activo."""
+    return OPT_RUNWAY_MIN_PCT_BY_CLASS.get(get_asset_class(ticker), OPT_RUNWAY_MIN_PCT_DEFAULT)
+
+
+def evaluate_options_daily_runway(
+    ticker: str,
+    direction: str,
+    open_price: float,
+    bb_upper_1d: float,
+    bb_lower_1d: float,
+    rvol: float = 1.0,
+    pressure_ok: bool = True,
+) -> Dict[str, Any]:
+    """
+    Evalúa el espacio diario disponible antes de chocar con la banda de Bollinger 1D.
+
+    Base_Runway:
+        CALL = (BB_UPPER_1D - Open) / Open * 100
+        PUT  = (Open - BB_LOWER_1D) / Open * 100
+
+    - Base_Runway >= umbral (20% acciones / 2.5% ETFs) -> aprobado (modo BASE).
+    - Base_Runway <  umbral -> EXCLUIDO, salvo ignición por volumen masivo
+      (RVOL >= 3.0x y presión unidireccional), caso en que se proyecta:
+        Runway_Proyectado = Base_Runway + min(25, 3.5 * (RVOL - 1.0))
+      y debe alcanzar el umbral (modo VOLUME_IGNITION).
+    """
+    is_call = str(direction).upper() in ("CALL", "BULLISH", "LONG")
+    band = float(bb_upper_1d or 0.0) if is_call else float(bb_lower_1d or 0.0)
+    threshold = get_options_runway_threshold(ticker)
+
+    if open_price is None or open_price <= 0 or band <= 0:
+        return {
+            "approved": True, "mode": "NO_DATA", "base_runway_pct": None,
+            "projected_runway_pct": None, "delta_rvol_pp": 0.0, "threshold_pct": threshold,
+            "reason": "Sin datos de Open o banda 1D para evaluar Runway (no se bloquea)."
+        }
+
+    base = ((band - open_price) / open_price * 100.0) if is_call else ((open_price - band) / open_price * 100.0)
+    band_name = "BB_UPPER_1D" if is_call else "BB_LOWER_1D"
+    dir_name = "CALL" if is_call else "PUT"
+
+    out = {
+        "approved": False, "mode": "BLOCKED", "base_runway_pct": round(base, 2),
+        "projected_runway_pct": round(base, 2), "delta_rvol_pp": 0.0,
+        "threshold_pct": threshold, "reason": ""
+    }
+
+    if base >= threshold:
+        out.update({
+            "approved": True, "mode": "BASE",
+            "reason": f"Runway 1D {dir_name} aprobado: +{base:.1f}% a {band_name} (${band:.2f}) >= {threshold:.1f}%."
+        })
+        return out
+
+    pressure_word = "compradora" if is_call else "vendedora"
+    if rvol < OPT_RUNWAY_MASSIVE_RVOL or not pressure_ok:
+        out["reason"] = (
+            f"{dir_name} EXCLUIDO por Runway 1D: espacio base +{base:.1f}% a {band_name} (${band:.2f}) "
+            f"< {threshold:.1f}% y sin ignición de volumen (RVOL {rvol:.1f}x, requiere >= "
+            f"{OPT_RUNWAY_MASSIVE_RVOL:.1f}x con presión {pressure_word})."
+        )
+        return out
+
+    delta_pp = min(OPT_RUNWAY_MAX_DELTA_PP, OPT_RUNWAY_DELTA_PP_PER_RVOL * (rvol - 1.0))
+    projected = base + delta_pp
+    out["delta_rvol_pp"] = round(delta_pp, 2)
+    out["projected_runway_pct"] = round(projected, 2)
+
+    if projected >= threshold:
+        out.update({
+            "approved": True, "mode": "VOLUME_IGNITION",
+            "reason": (
+                f"Excepción por volumen: base +{base:.1f}% + Delta RVOL {rvol:.1f}x (+{delta_pp:.1f} pp) = "
+                f"+{projected:.1f}% proyectado >= {threshold:.1f}%."
+            )
+        })
+    else:
+        out["reason"] = (
+            f"{dir_name} EXCLUIDO por Runway 1D: aun con RVOL {rvol:.1f}x el espacio proyectado "
+            f"+{projected:.1f}% (base +{base:.1f}% + {delta_pp:.1f} pp) < {threshold:.1f}%."
+        )
+    return out
+
+
+def evaluate_options_rsi_exhaustion(
+    direction: str,
+    rsi_5m: Optional[float] = None,
+    rsi_15m: Optional[float] = None,
+    rsi_1h: Optional[float] = None,
+) -> Dict[str, Any]:
+    """CALLs: RSI no puede superar el techo. PUTs: RSI no puede estar bajo el piso. None = sin dato (omitido)."""
+    is_call = str(direction).upper() in ("CALL", "BULLISH", "LONG")
+    limits = OPT_RSI_LIMITS["CALL" if is_call else "PUT"]
+    for label, key, val in (("5m", "5m", rsi_5m), ("15m", "15m", rsi_15m), ("1H", "1h", rsi_1h)):
+        if val is None:
+            continue
+        lim = limits[key]
+        if is_call and val > lim:
+            return {"approved": False, "reason": f"CALL bloqueado por agotamiento: RSI {label} ({val:.1f}) > {lim:.0f}."}
+        if (not is_call) and val < lim:
+            return {"approved": False, "reason": f"PUT bloqueado por agotamiento vendedor: RSI {label} ({val:.1f}) < {lim:.0f}."}
+    return {"approved": True, "reason": "RSI sin agotamiento."}
+
+
+def evaluate_options_1h_trend(direction: str, ema3: float, ema9: float, ema3_prev: float) -> Dict[str, Any]:
+    """
+    Alineación tendencial estricta en 1H, sin bypass de apertura.
+    CALL: EMA3 > EMA9 con EMA3 ascendente. PUT: EMA3 < EMA9 con EMA3 descendente.
+    """
+    is_call = str(direction).upper() in ("CALL", "BULLISH", "LONG")
+    if is_call:
+        if not ema3 > ema9:
+            return {"approved": False, "reason": f"CALL bloqueado: EMA3 1H (${ema3:.2f}) <= EMA9 1H (${ema9:.2f})."}
+        if not ema3 > ema3_prev:
+            return {"approved": False, "reason": f"CALL bloqueado: pendiente EMA3 1H no ascendente (${ema3:.2f} <= ${ema3_prev:.2f})."}
+    else:
+        if not ema3 < ema9:
+            return {"approved": False, "reason": f"PUT bloqueado: EMA3 1H (${ema3:.2f}) >= EMA9 1H (${ema9:.2f})."}
+        if not ema3 < ema3_prev:
+            return {"approved": False, "reason": f"PUT bloqueado: pendiente EMA3 1H no descendente (${ema3:.2f} >= ${ema3_prev:.2f})."}
+    return {"approved": True, "reason": "Tendencia 1H alineada."}
+
+
+def _compute_day_open_and_rvol(df_5m: Optional[pd.DataFrame]) -> Tuple[float, float]:
+    """Open de la sesión actual (primera vela del último día) y RVOL 5m (última vela vs. media de hasta 20 previas)."""
+    if df_5m is None or df_5m.empty:
+        return 0.0, 1.0
+    df_day = df_5m
+    try:
+        if isinstance(df_5m.index, pd.DatetimeIndex):
+            last_date = df_5m.index[-1].date()
+            df_day = df_5m[df_5m.index.date == last_date]
+    except Exception:
+        df_day = df_5m
+    o = _safe_col(df_day, "open")
+    day_open = float(o.iloc[0]) if len(o) > 0 else 0.0
+    v = _safe_col(df_day, "volume")
+    rvol = 1.0
+    if len(v) >= 2:
+        prior_avg = float(v.iloc[:-1].tail(20).mean())
+        if prior_avg > 0:
+            rvol = float(v.iloc[-1]) / prior_avg
+    return day_open, rvol
+
+
+def _directional_pressure_ok(df_5m: Optional[pd.DataFrame], is_call: bool) -> bool:
+    """CALL: última vela 5m verde y sin caída vs. cierre previo. PUT: espejo."""
+    if df_5m is None or df_5m.empty:
+        return False
+    c = _safe_col(df_5m, "close")
+    o = _safe_col(df_5m, "open")
+    last_c, last_o = float(c.iloc[-1]), float(o.iloc[-1])
+    prev_c = float(c.iloc[-2]) if len(c) >= 2 else last_o
+    return (last_c >= last_o and last_c >= prev_c) if is_call else (last_c <= last_o and last_c <= prev_c)
+
+
+def _get_daily_bb_bounds(ticker: str, price: float) -> Tuple[float, float]:
+    """(BB_UPPER_1D, BB_LOWER_1D) reutilizando el cache diario del escáner Alpha Runner."""
+    from app.stocks import alpha_runner_scanner as ars
+    _, bb_upper, _ = ars.get_daily_bollinger_metrics(ticker, price)
+    clean = ticker.replace("/", "").replace(".", "").upper().strip()
+    cached = ars._DAILY_BB_CACHE.get(clean)
+    bb_lower = float(cached[3]) if cached else price * 0.7
+    return float(bb_upper), bb_lower
+
+
+def evaluate_options_entry_gatekeeper(
+    ticker: str,
+    direction: str,
+    df_5m: Optional[pd.DataFrame],
+    df_15m: Optional[pd.DataFrame],
+    df_1h: Optional[pd.DataFrame],
+    bb_upper_1d: float,
+    bb_lower_1d: float,
+    rvol: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Gatekeeper ADUANA Opciones de última milla: Daily Runway -> RSI MTF -> tendencia 1H.
+    Devuelve {'approved', 'stage', 'reason', 'runway'}.
+    """
+    is_call = str(direction).upper() in ("CALL", "BULLISH", "LONG")
+    day_open, rvol_calc = _compute_day_open_and_rvol(df_5m)
+    rvol_eff = float(rvol) if rvol is not None else rvol_calc
+
+    runway = evaluate_options_daily_runway(
+        ticker, direction, day_open, bb_upper_1d, bb_lower_1d,
+        rvol=rvol_eff, pressure_ok=_directional_pressure_ok(df_5m, is_call)
+    )
+    if not runway["approved"]:
+        return {"approved": False, "stage": "RUNWAY", "reason": runway["reason"], "runway": runway}
+
+    rsi_5m = rsi_15m = rsi_1h = None
+    if df_5m is not None and len(df_5m) >= 15:
+        rsi_5m = float(compute_rsi(_safe_col(df_5m, "close"), 14).iloc[-1])
+    if df_15m is not None and len(df_15m) >= 15:
+        rsi_15m = float(compute_rsi(_safe_col(df_15m, "close"), 14).iloc[-1])
+    if df_1h is not None and len(df_1h) >= 15:
+        rsi_1h = float(compute_rsi(_safe_col(df_1h, "close"), 14).iloc[-1])
+    rsi_res = evaluate_options_rsi_exhaustion(direction, rsi_5m, rsi_15m, rsi_1h)
+    if not rsi_res["approved"]:
+        return {"approved": False, "stage": "RSI", "reason": rsi_res["reason"], "runway": runway}
+
+    if df_1h is not None and len(df_1h) >= 10:
+        c1h = _safe_col(df_1h, "close")
+        ema3_s = c1h.ewm(span=3, adjust=False).mean()
+        ema9_s = c1h.ewm(span=9, adjust=False).mean()
+        trend = evaluate_options_1h_trend(direction, float(ema3_s.iloc[-1]), float(ema9_s.iloc[-1]), float(ema3_s.iloc[-2]))
+        if not trend["approved"]:
+            return {"approved": False, "stage": "TREND_1H", "reason": trend["reason"], "runway": runway}
+
+    return {"approved": True, "stage": "OK", "reason": "ADUANA Opciones: Runway, RSI y tendencia 1H aprobados.", "runway": runway}
+
+
+def fetch_and_evaluate_options_gatekeeper(ticker: str, direction: str, price: float) -> Dict[str, Any]:
+    """Descarga datos (yfinance) y ejecuta el gatekeeper. Usado por el dispatcher autónomo."""
+    import yfinance as yf
+    clean = ticker.replace("/", "").replace(".", "").upper().strip()
+    t = yf.Ticker(clean)
+    df_5m = t.history(period="5d", interval="5m")
+    df_1h = t.history(period="1mo", interval="1h")
+    df_15m = None
+    if df_5m is not None and not df_5m.empty:
+        df_15m = df_5m.resample("15min").agg(
+            {"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}
+        ).dropna()
+    bb_upper, bb_lower = _get_daily_bb_bounds(clean, price)
+    return evaluate_options_entry_gatekeeper(clean, direction, df_5m, df_15m, df_1h, bb_upper, bb_lower)
+
+
 def _safe_col(df: pd.DataFrame, col_name: str) -> pd.Series:
     """Retorna la serie de la columna en minúscula o mayúscula de forma segura."""
     if df is None or df.empty:
@@ -279,6 +534,21 @@ def evaluate_options_gap_entry_tranches(
     # CASO A: TRANCHE 1 (Entrada Inicial)
     # ─────────────────────────────────────────────────────────────
     if not is_open_pos:
+        # ── PILAR 1 ADUANA OPCIONES: Daily Runway 1D (exclusión preventiva + excepción por volumen) ──
+        try:
+            bb_up_1d, bb_lo_1d = _get_daily_bb_bounds(ticker, cur_p)
+            day_open_v, rvol_v = _compute_day_open_and_rvol(df_5m)
+            runway_res = evaluate_options_daily_runway(
+                ticker, direction, day_open_v, bb_up_1d, bb_lo_1d,
+                rvol=rvol_v, pressure_ok=_directional_pressure_ok(df_5m, is_call)
+            )
+            res["runway"] = runway_res
+            if not runway_res["approved"]:
+                res["reason"] = runway_res["reason"]
+                return res
+        except Exception as e_runway_opt:
+            log_warning(MODULE, f"Aviso evaluando Daily Runway de opciones para {ticker}: {e_runway_opt}")
+
         # Filtro Macro 1H
         if df_1h is None or len(df_1h) < 15:
             res["reason"] = "Falta historial de 1H para validar filtros macro de Opciones"
@@ -297,6 +567,18 @@ def evaluate_options_gap_entry_tranches(
         bb_upper_1h = float(bb_1h["upper"].iloc[-1])
         bb_lower_1h = float(bb_1h["lower"].iloc[-1])
         bb_basis_1h = float(bb_1h["basis"].iloc[-1])
+
+        # ── PILAR 2 ADUANA OPCIONES: Anti-agotamiento RSI multi-timeframe (5m / 15m / 1H) ──
+        rsi_5m_opt = None
+        if df_5m is not None and len(df_5m) >= 15:
+            rsi_5m_opt = float(compute_rsi(_safe_col(df_5m, "close"), period=14).iloc[-1])
+        rsi_15m_opt = None
+        if df_15m is not None and len(df_15m) >= 15:
+            rsi_15m_opt = float(compute_rsi(_safe_col(df_15m, "close"), period=14).iloc[-1])
+        rsi_gate = evaluate_options_rsi_exhaustion(direction, rsi_5m_opt, rsi_15m_opt, cur_rsi_1h)
+        if not rsi_gate["approved"]:
+            res["reason"] = rsi_gate["reason"]
+            return res
 
         delta_bb = 0.10 * (bb_upper_1h - bb_basis_1h)
 
@@ -324,24 +606,12 @@ def evaluate_options_gap_entry_tranches(
         prev_ema3 = float(ema3_1h.iloc[-2]) if len(ema3_1h) >= 2 else cur_ema3
         cur_ema9 = float(ema9_1h.iloc[-1])
 
-        if is_call:
-            is_breakout_ema9 = (cur_open_1h >= cur_ema9)
-            is_trend_ok = (cur_ema3 >= cur_ema9) or is_breakout_ema9
-            if not is_trend_ok:
-                res["reason"] = f"CALL bloqueado: EMA3 1H (${cur_ema3:.2f}) < EMA9 (${cur_ema9:.2f}) y Open (${cur_open_1h:.2f}) < EMA9"
-                return res
-            if not is_breakout_ema9 and cur_ema3 < prev_ema3:
-                res["reason"] = f"CALL bloqueado: Pendiente EMA3 1H no ascendente (${cur_ema3:.2f} < ${prev_ema3:.2f})"
-                return res
-        else:
-            is_breakdown_ema9 = (cur_open_1h <= cur_ema9)
-            is_trend_ok = (cur_ema3 <= cur_ema9) or is_breakdown_ema9
-            if not is_trend_ok:
-                res["reason"] = f"PUT bloqueado: EMA3 1H (${cur_ema3:.2f}) > EMA9 (${cur_ema9:.2f}) y Open (${cur_open_1h:.2f}) > EMA9"
-                return res
-            if not is_breakdown_ema9 and cur_ema3 > prev_ema3:
-                res["reason"] = f"PUT bloqueado: Pendiente EMA3 1H no descendente (${cur_ema3:.2f} > ${prev_ema3:.2f})"
-                return res
+        # Candado estricto 1H sin bypass por Open vs EMA9:
+        # CALL exige EMA3 > EMA9 con EMA3 ascendente; PUT exige EMA3 < EMA9 con EMA3 descendente.
+        trend_gate = evaluate_options_1h_trend(direction, cur_ema3, cur_ema9, prev_ema3)
+        if not trend_gate["approved"]:
+            res["reason"] = trend_gate["reason"]
+            return res
 
         # Filtro Micro 5m (Vela 1 y Vela 2)
         if df_5m is None or len(df_5m) < 2:

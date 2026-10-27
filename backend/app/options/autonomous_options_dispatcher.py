@@ -90,6 +90,18 @@ def dispatch_autonomous_option_trade(
             log_info(MODULE, f"⏸️ Omitiendo despacho para {ticker}: Ya hay una orden de opción en vuelo ({len(orders_check.data)} pendientes).")
             return {"success": False, "reason": f"Orden de opción ya en vuelo para {ticker}"}
 
+        # ── 1.5 GATEKEEPER ADUANA OPCIONES (Daily Runway 1D + RSI MTF + EMA3/EMA9 en 1H) ──
+        # Ante un error de datos/red no se bloquea (fail-open con aviso); ante una decisión clara sí.
+        try:
+            from app.options.aduana_gap_runner_options import fetch_and_evaluate_options_gatekeeper
+            gate = fetch_and_evaluate_options_gatekeeper(ticker, opt_dir, underlying_price)
+            if not gate.get("approved", True):
+                log_info(MODULE, f"⛔ {ticker} ({opt_dir}) BLOQUEADO por ADUANA Opciones [{gate.get('stage')}]: {gate.get('reason')}")
+                return {"success": False, "reason": f"ADUANA Opciones [{gate.get('stage')}]: {gate.get('reason')}"}
+            log_info(MODULE, f"✅ {ticker} ({opt_dir}) ADUANA Opciones: {gate.get('runway', {}).get('reason', gate.get('reason'))}")
+        except Exception as e_gate:
+            log_warning(MODULE, f"Aviso evaluando Gatekeeper ADUANA Opciones para {ticker}: {e_gate}")
+
         # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO (ATM, DELTA ~0.50, DTE 14-28d) ──
         budget_usd = float(cfg.get("options_trade_budget_usd", 1000.0))
         log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} (Spot: ${underlying_price:.2f}, Budget: ${budget_usd:.0f})...")

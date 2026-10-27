@@ -163,6 +163,7 @@ files_to_sync = [
     "tests/test_aduana_gap_runner.py",
     "tests/test_aduana_gap_runner_options.py",
     "tests/test_daily_runway_and_rsi_seal.py",
+    "tests/test_options_aduana_runway_rsi_ema.py",
     "app/core/config.py",
     "app/core/safety_manager.py",
     "app/strategy/swing_orders.py",
