@@ -292,13 +292,18 @@ def evaluate_daily_runway_feasibility(
     dynamic_ceiling = bb_upper_1d * (1.0 + delta_rvol)
     runway_pct = ((dynamic_ceiling - open_price) / open_price) * 100.0
 
-    is_approved = runway_pct >= min_required_runway_pct
+    # Regla Calibrada Institucional: Si RVOL >= 2.0x, la fuerte demanda institucional relaja el runway exigido a 11.0%
+    effective_min_runway = min_required_runway_pct
+    if rvol >= 2.0 and min_required_runway_pct > 11.0:
+        effective_min_runway = 11.0
+
+    is_approved = runway_pct >= effective_min_runway
 
     reason = (
         f"ADUANA Runway 1D Aprobado: Autopista de +{runway_pct:.1f}% al techo dinámico "
-        f"(${dynamic_ceiling:.2f} con BB_Upper=${bb_upper_1d:.2f} y Delta RVOL=+{delta_rvol*100:.1f}%)"
+        f"(${dynamic_ceiling:.2f} con BB_Upper=${bb_upper_1d:.2f} y Delta RVOL=+{delta_rvol*100:.1f}%, Requerido: {effective_min_runway:.0f}%)"
         if is_approved else
-        f"ADUANA Runway 1D Rechazado: Espacio de +{runway_pct:.1f}% es insuficiente (< {min_required_runway_pct:.0f}%). "
+        f"ADUANA Runway 1D Rechazado: Espacio de +{runway_pct:.1f}% es insuficiente (< {effective_min_runway:.0f}%). "
         f"Techo dinámico=${dynamic_ceiling:.2f} (BB_Upper=${bb_upper_1d:.2f}, Delta RVOL=+{delta_rvol*100:.1f}%). Sin autopista técnica."
     )
 
