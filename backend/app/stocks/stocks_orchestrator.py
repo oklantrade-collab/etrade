@@ -914,6 +914,8 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             # Requisito Mínimo en 1H: (EMA3 > EMA9) Y (EMA3 ascendente) Y (RSI < 80)
             h1_snap = get_live_1h_candle_and_sipv(ticker, float(snap.get('price') or 0.0))
             is_ema3_above_ema9 = bool(h1_snap.get('is_ema3_above_ema9', False))
+            is_ema3_above_ema9_15m = bool(h1_snap.get('is_ema3_above_ema9_15m', False))
+            is_1h_trend_aligned = is_ema3_above_ema9 or is_ema3_above_ema9_15m
             rsi_1h_snap = float(h1_snap.get('rsi_1h') or snap.get('rsi') or 50.0)
             meets_1h_req = is_ema3_above_ema9 and is_ema3_asc and (rsi_1h_snap < 80.0)
 
@@ -943,8 +945,8 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
             elif enters_by_growth:
                 log_info(MODULE, f'🔥 {ticker}: High Growth Swing 1H ({snap.get("entry_route_1h")} en {snap.get("entry_support_1h")}) | BF Score={bf_score}')
 
-            # Definir estado inicial
-            status = 'pending' if (enters_by_expansion or enters_by_pullback or enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout) else 'watching'
+            # Definir estado inicial (Exige alineación tendencial EMA3 > EMA9 en 1H o 15m)
+            status = 'pending' if (is_1h_trend_aligned and (enters_by_expansion or enters_by_pullback or enters_by_alpha or enters_by_growth or enters_by_apex or enters_by_rule or enters_by_breakout)) else 'watching'
 
             if is_open_gap_runner:
                 rank = max(rank + 25.0, 99.8)   # Prioridad 1 Absoluta para el BOT
@@ -1233,6 +1235,27 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
                 log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por RSI AGOTADO ({c_rsi:.1f} >= 75.0). Prohibido comprar en clímax.")
                 await _upsert_queue(supabase, candidate, status='blocked')
                 continue
+
+            # 2.D CANDADO UNIVERSAL EMA3 > EMA9 EN 1 HORA (Alineación Tendencial Intermedia 1H)
+            is_ema3_gt_ema9_1h = bool(live_intraday.get('is_ema3_above_ema9', False))
+            ema3_1h_val = float(live_intraday.get('ema3_1h_live', 0.0))
+            ema9_1h_val = float(live_intraday.get('ema9_1h', 0.0))
+            status_1h_reason = str(live_intraday.get('status_reason', ''))
+
+            # Fallback para IPOs jóvenes sin historial suficiente de 1H
+            if ema9_1h_val <= 0 or 'Sin datos 1H' in status_1h_reason:
+                is_ema3_gt_ema9_15m = bool(live_intraday.get('is_ema3_above_ema9_15m', False))
+                ema3_15_v = float(live_intraday.get('ema3_15m', 0.0))
+                ema9_15_v = float(live_intraday.get('ema9_15m', 0.0))
+                if not is_ema3_gt_ema9_15m:
+                    log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por EMA3 <= EMA9 en 15m (Fallback IPO: EMA3 ${ema3_15_v:.2f} <= EMA9 ${ema9_15_v:.2f}). Falta cruce alcista.")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+            else:
+                if not is_ema3_gt_ema9_1h:
+                    log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por EMA3 <= EMA9 EN 1H (EMA3 ${ema3_1h_val:.2f} <= EMA9 ${ema9_1h_val:.2f}). Tendencia horaria no confirmada.")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
 
             # 3. CANDADO GAP SIN CATALIZADOR NI MOMENTUM 15M (Anti Gap & Crap)
             if c_gap_pct >= 5.0 and not c_has_catalyst and c_cat_tier > 2:

@@ -94,10 +94,13 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         "is_ema3_1h_ascending": False,
         "is_ema3_1h_descending": True,
         "is_ema3_above_ema9": False,
+        "is_ema3_above_ema9_15m": False,
         "ema3_1h_live": current_price or 0.0,
         "ema3_1h_prev": current_price or 0.0,
         "ema3_slope_1h": 0.0,
         "ema9_1h": current_price or 0.0,
+        "ema3_15m": current_price or 0.0,
+        "ema9_15m": current_price or 0.0,
         "rsi_1h": 50.0,
         "candle_open_1h": current_price or 0.0,
         "candle_high_1h": current_price or 0.0,
@@ -160,7 +163,7 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
 
         # Fallback a 1h directo si falló 5m
         if df_1h is None or df_1h.empty or len(df_1h) < 2:
-            df_1h = t.history(period="3d", interval="1h")
+            df_1h = t.history(period="5d", interval="1h")
 
         if df_1h is None or df_1h.empty or len(df_1h) < 2:
             _1H_CACHE[clean_ticker] = {"timestamp": now_ts, "data": fallback_data}
@@ -308,6 +311,9 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         bb_lo_slope_15m = 0.0
         vol_decay_ratio_15m = 1.0
         is_vol_decay_trap = False
+        is_ema3_above_ema9_15m = False
+        ema3_15m_val = float(eff_price)
+        ema9_15m_val = float(eff_price)
 
         if df_5m is not None and not df_5m.empty and len(df_5m) >= 6:
             try:
@@ -363,6 +369,12 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                     prev_vol_15 = float(v15.iloc[-2]) if len(v15) >= 2 else cur_vol_15
                     vol_decay_ratio_15m = round(cur_vol_15 / max(1.0, prev_vol_15), 2)
                     is_vol_decay_trap = bool(vol_decay_ratio_15m < 0.40 and not is_15m_high_growing)
+                    # e) EMAs 15m (Fallback para IPOs)
+                    ema3_15_s = c15.ewm(span=3, adjust=False).mean()
+                    ema9_15_s = c15.ewm(span=9, adjust=False).mean()
+                    ema3_15m_val = float(ema3_15_s.iloc[-1])
+                    ema9_15m_val = float(ema9_15_s.iloc[-1])
+                    is_ema3_above_ema9_15m = bool(ema3_15m_val > ema9_15m_val)
             except Exception as e_15m:
                 log_debug(MODULE, f"Error calculando métricas 15m para {clean_ticker}: {e_15m}")
 
@@ -371,6 +383,9 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "is_ema3_1h_ascending": is_ascending,
             "is_ema3_1h_descending": is_descending,
             "is_ema3_above_ema9": is_ema3_above_ema9,
+            "is_ema3_above_ema9_15m": is_ema3_above_ema9_15m,
+            "ema3_15m": round(ema3_15m_val, 4),
+            "ema9_15m": round(ema9_15m_val, 4),
             "ema3_1h_live": round(ema3_live, 4),
             "ema3_1h_prev": round(ema3_prev, 4),
             "ema3_slope_1h": round(ema3_slope, 4),

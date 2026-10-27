@@ -213,7 +213,23 @@ def evaluate_fast_track_entry(
             res['reason'] = f"Volumen 5m insuficiente ({cur_v:,.0f} sh, RVOL={rvol_5m:.1f}x < 2.0x)"
             return res
 
-        # 3. Tendencia 1H / 15m (ADX y EMAs)
+        # 3. Requisito Mandatorio 1H / 15m: EMA3 > EMA9 (Alineación Tendencial Horaria)
+        if df_1h is not None and len(df_1h) >= 5:
+            c1h = _safe_col(df_1h, 'close')
+            ema3_1h = float(c1h.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_1h = float(c1h.ewm(span=9, adjust=False).mean().iloc[-1])
+            if ema3_1h <= ema9_1h:
+                res['reason'] = f"Filtro 1H bajista/neutral: EMA3 (${ema3_1h:.2f}) <= EMA9 (${ema9_1h:.2f}). Exige cruce alcista EMA3 > EMA9 en 1H."
+                return res
+        elif df_15m is not None and len(df_15m) >= 5:
+            c15 = _safe_col(df_15m, 'close')
+            ema3_15 = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_15 = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+            if ema3_15 <= ema9_15:
+                res['reason'] = f"Filtro 15m bajista/neutral (Fallback IPO): EMA3 (${ema3_15:.2f}) <= EMA9 (${ema9_15:.2f}). Exige cruce alcista EMA3 > EMA9."
+                return res
+
+        # Tendencia ADX complementaria en 1H / 15m
         adx_bullish = False
         target_df = df_1h if (df_1h is not None and len(df_1h) >= 28) else df_15m
         if target_df is not None and len(target_df) >= 28:
@@ -231,10 +247,8 @@ def evaluate_fast_track_entry(
                 log_debug(MODULE, f"ADX calculation skipped: {e_adx}")
                 adx_bullish = True
         else:
-            # En datos jóvenes (IPOs sin historial amplio), el momentum de apertura manda
             adx_bullish = True
 
-        # Si es IPO joven (menos de 15 velas en 1D), el momentum de apertura de 5m manda
         is_young_ipo = (df_1d is not None and len(df_1d) <= 15)
         if not adx_bullish and not is_young_ipo:
             res['reason'] = "Filtro ADX macro sin alineación alcista confirmada"
@@ -807,13 +821,20 @@ def evaluate_leg2_reversal_entry(
             except Exception as e_run_leg:
                 log_debug(MODULE, f"Error evaluando daily runway en Leg-2: {e_run_leg}")
 
-        # 1. Macro-Tendencia en 1H: EMA3_1h > EMA9_1h
+        # 1. Macro-Tendencia en 1H: EMA3_1h > EMA9_1h (con fallback 15m para IPOs)
         if df_1h is not None and len(df_1h) >= 2:
             c1h = _safe_col(df_1h, 'close')
             ema3_1h = float(c1h.ewm(span=3, adjust=False).mean().iloc[-1])
             ema9_1h = float(c1h.ewm(span=9, adjust=False).mean().iloc[-1])
             if ema3_1h <= ema9_1h:
                 res['reason'] = f"Macro 1H bajista o neutral (EMA3 ${ema3_1h:.2f} <= EMA9 ${ema9_1h:.2f}). No califica para Leg-2 Reversal."
+                return res
+        elif df_15m is not None and len(df_15m) >= 5:
+            c15_s = _safe_col(df_15m, 'close')
+            ema3_15 = float(c15_s.ewm(span=3, adjust=False).mean().iloc[-1])
+            ema9_15 = float(c15_s.ewm(span=9, adjust=False).mean().iloc[-1])
+            if ema3_15 <= ema9_15:
+                res['reason'] = f"Macro 15m bajista o neutral (Fallback IPO: EMA3 ${ema3_15:.2f} <= EMA9 ${ema9_15:.2f}). No califica para Leg-2 Reversal."
                 return res
 
         # 2. Volteo en 15m: EMA3 cruza por encima de EMA9 tras haber estado por debajo

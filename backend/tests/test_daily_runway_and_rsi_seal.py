@@ -108,3 +108,66 @@ class TestDailyRunwayAndRSISeal:
         )
         assert res['should_enter'] is False
         assert "Anti-Agotamiento" in res['reason'] or "RSI" in res['reason']
+
+
+    def test_aduana_blocks_when_ema3_le_ema9_in_1h(self):
+        """Valida que Aduana rechace si en 1H la EMA3 <= EMA9."""
+        # 5m velas normales (RSI moderado ~57)
+        c5 = [10.0, 10.2, 10.1, 10.3, 10.2, 10.1, 10.25, 10.15, 10.2, 10.1, 10.2, 10.15, 10.25, 10.18, 10.22]
+        df_5m = pd.DataFrame({
+            'open': [c - 0.05 for c in c5],
+            'high': [c + 0.10 for c in c5],
+            'low': [c - 0.10 for c in c5],
+            'close': c5,
+            'volume': [50_000 for _ in range(len(c5))]
+        })
+        # 1H en caída donde EMA3 < EMA9 (ej. de 15.0 bajando a 10.4)
+        c1h = [15.0, 14.5, 14.0, 13.5, 13.0, 12.5, 12.0, 11.5, 11.0, 10.5, 10.22]
+        df_1h = pd.DataFrame({
+            'open': [c + 0.2 for c in c1h],
+            'high': [c + 0.4 for c in c1h],
+            'low': [c - 0.2 for c in c1h],
+            'close': c1h,
+            'volume': [500_000 for _ in range(len(c1h))]
+        })
+        res = evaluate_gap_runner_entry_tranches(
+            ticker="BEAR1H",
+            df_5m=df_5m,
+            df_15m=None,
+            df_1h=df_1h,
+            gap_pct=15.0,
+            config={'skip_time_window_check': True, 'skip_vwap_check': True, 'skip_daily_runway_check': True}
+        )
+        assert res['should_enter'] is False
+        assert "EMA3" in res['reason'] and "EMA9" in res['reason']
+
+    def test_fast_track_blocks_when_ema3_le_ema9_in_1h(self):
+        """Valida que Fast Track rechace si en 1H la EMA3 <= EMA9."""
+        c5 = [10.0, 10.2, 10.1, 10.3, 10.2, 10.1, 10.25, 10.15, 10.2, 10.1, 10.2, 10.15, 10.25, 10.18, 10.22]
+        df_5m = pd.DataFrame({
+            'open': [c - 0.05 for c in c5],
+            'high': [c + 0.10 for c in c5],
+            'low': [c - 0.10 for c in c5],
+            'close': c5,
+            'volume': [300_000 for _ in range(len(c5))]
+        })
+        # 1H en caída
+        c1h = [15.0, 14.5, 14.0, 13.5, 13.0, 12.5, 12.0, 11.5, 11.0, 10.5, 10.22]
+        df_1h = pd.DataFrame({
+            'open': [c + 0.2 for c in c1h],
+            'high': [c + 0.4 for c in c1h],
+            'low': [c - 0.2 for c in c1h],
+            'close': c1h,
+            'volume': [500_000 for _ in range(len(c1h))]
+        })
+        res = evaluate_fast_track_entry(
+            ticker="BEAR_FT",
+            df_5m=df_5m,
+            df_15m=None,
+            df_1h=df_1h,
+            df_1d=None,
+            gap_pct=15.0,
+            config={'skip_daily_runway_check': True}
+        )
+        assert res['is_valid'] is False
+        assert "EMA3" in res['reason'] and "EMA9" in res['reason']
