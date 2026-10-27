@@ -162,6 +162,7 @@ files_to_sync = [
     "app/stocks/aduana_gap_runner_engine.py",
     "tests/test_aduana_gap_runner.py",
     "tests/test_aduana_gap_runner_options.py",
+    "tests/test_daily_runway_and_rsi_seal.py",
     "app/core/config.py",
     "app/core/safety_manager.py",
     "app/strategy/swing_orders.py",

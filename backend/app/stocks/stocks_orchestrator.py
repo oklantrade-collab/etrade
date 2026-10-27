@@ -197,8 +197,8 @@ def is_overbought(snap: dict, cfg: dict) -> dict:
         if upper_3 > 0 and price > upper_3:
             reasons.append(f'Precio sobre Upper_3 (${price:.2f} > ${upper_3:.2f})')
     else:
-        if rsi >= 78.0:
-            reasons.append(f'RSI Agotamiento Alpha Runner ({rsi:.0f} ≥ 78)')
+        if rsi >= 75.0:
+            reasons.append(f'RSI Agotamiento Alpha Runner ({rsi:.0f} ≥ 75)')
         if upper_3 > 0 and price > upper_3 * 1.02:
             reasons.append(f'Precio excesivamente sobre Upper_3 (${price:.2f} > ${upper_3 * 1.02:.2f})')
 
@@ -995,7 +995,7 @@ async def build_priority_queue(cfg: dict, supabase, macro: dict) -> list:
                 'return_expected':   ret_exp,
                 'confidence':        conf,
                 'composite_rank':    rank,
-                'is_overbought':     False if (enters_by_pullback or enters_by_expansion or is_open_gap_runner) else overbought['blocked'],
+                'is_overbought':     overbought['blocked'],
                 'is_expansion_runner': enters_by_expansion,
                 'is_gap_runner':     is_open_gap_runner,
                 'gap_pct':           eff_gap if is_open_gap_runner else float(snap.get('gap_pct') or snap.get('change_pct') or 0.0),
@@ -1205,6 +1205,32 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
             # 2. CANDADO VELA ROJA INTRADÍA (Precio < Open del Día)
             if c_day_open > 0 and price < c_day_open * 0.995:
                 log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VELA ROJA INTRADÍA (Precio ${price:.2f} < Open ${c_day_open:.2f}). Sesión vendedora.")
+                await _upsert_queue(supabase, candidate, status='blocked')
+                continue
+
+            # 2.B CANDADO ADUANA DAILY RUNWAY (BB_UPPER_1D + Delta(RVOL))
+            try:
+                from app.stocks.aduana_gap_runner_engine import evaluate_daily_runway_feasibility
+                from app.stocks.alpha_runner_scanner import get_daily_bollinger_metrics
+                _, bb_up_1d_exec, _ = get_daily_bollinger_metrics(ticker, price)
+                c_open_eval = c_day_open if c_day_open > 0 else price
+                runway_res = evaluate_daily_runway_feasibility(
+                    open_price=c_open_eval,
+                    bb_upper_1d=bb_up_1d_exec,
+                    rvol=c_rvol,
+                    min_required_runway_pct=25.0
+                )
+                if not runway_res['approved']:
+                    log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por ADUANA DAILY RUNWAY ({runway_res['reason']}).")
+                    await _upsert_queue(supabase, candidate, status='blocked')
+                    continue
+            except Exception as e_runway:
+                log_warning(MODULE, f"Aviso evaluando Daily Runway para {ticker}: {e_runway}")
+
+            # 2.C CANDADO BLINDAJE RSI INTRADÍA UNIVERSAL (Anti-Agotamiento RSI <= 75.0)
+            c_rsi = float(candidate.get('rsi') or candidate.get('snap', {}).get('rsi_14') or 50.0)
+            if c_rsi >= 75.0:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por RSI AGOTADO ({c_rsi:.1f} >= 75.0). Prohibido comprar en clímax.")
                 await _upsert_queue(supabase, candidate, status='blocked')
                 continue
 

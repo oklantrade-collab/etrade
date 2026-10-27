@@ -137,6 +137,44 @@ def evaluate_fast_track_entry(
         cur_l = float(l5.iloc[-1])
         cur_v = float(v5.iloc[-1])
 
+        # 0. BLINDAJE ANTI-AGOTAMIENTO RSI 5m / 15m (RSI <= 75.0)
+        from app.stocks.aduana_gap_runner_engine import compute_rsi, evaluate_daily_runway_feasibility
+        rsi_5m_series_ft = compute_rsi(c5, period=min(14, len(c5) - 1))
+        rsi_5m_val = float(rsi_5m_series_ft.iloc[-1]) if len(rsi_5m_series_ft) > 0 else 50.0
+        if rsi_5m_val > 75.0:
+            res['reason'] = f"Anti-Agotamiento 5m: RSI 5m ({rsi_5m_val:.1f} > 75.0). Prohibido comprar clímax de apertura."
+            return res
+
+        if df_15m is not None and len(df_15m) >= 5:
+            c15_ft = _safe_col(df_15m, 'close')
+            rsi_15m_series_ft = compute_rsi(c15_ft, period=min(14, len(c15_ft) - 1))
+            rsi_15m_val = float(rsi_15m_series_ft.iloc[-1]) if len(rsi_15m_series_ft) > 0 else 50.0
+            if rsi_15m_val > 75.0:
+                res['reason'] = f"Anti-Agotamiento 15m: RSI 15m ({rsi_15m_val:.1f} > 75.0). Prohibido comprar en agotamiento."
+                return res
+
+        # 0.B CANDADO ADUANA DAILY RUNWAY CON DELTA RVOL (Runway >= 25.0%)
+        skip_runway = bool(config and config.get("skip_daily_runway_check"))
+        if not skip_runway:
+            try:
+                from app.stocks.alpha_runner_scanner import get_daily_bollinger_metrics
+                _, bb_up_1d_ft, _ = get_daily_bollinger_metrics(ticker, cur_c)
+                open_today_val = float(o5.iloc[0])
+                vol_ma_run = float(v5.rolling(10, min_periods=2).mean().iloc[-1]) if len(v5) >= 2 else cur_v
+                rvol_run = (cur_v / vol_ma_run) if vol_ma_run > 0 else 1.0
+
+                runway_res = evaluate_daily_runway_feasibility(
+                    open_price=open_today_val,
+                    bb_upper_1d=bb_up_1d_ft,
+                    rvol=rvol_run,
+                    min_required_runway_pct=25.0
+                )
+                if not runway_res['approved']:
+                    res['reason'] = runway_res['reason']
+                    return res
+            except Exception as e_run:
+                log_debug(MODULE, f"Error evaluando daily runway en fast track entry: {e_run}")
+
         # 1. Filtro de Gap de Apertura
         if gap_pct < 10.0:
             res['reason'] = f"Gap {gap_pct:.1f}% insuficiente para Super-Runner (mínimo +10.0%)"
@@ -728,6 +766,47 @@ def evaluate_leg2_reversal_entry(
         return res
 
     try:
+        # 0. BLINDAJE ANTI-AGOTAMIENTO RSI 5m / 15m Y DAILY RUNWAY
+        from app.stocks.aduana_gap_runner_engine import compute_rsi, evaluate_daily_runway_feasibility
+        c5_l2 = _safe_col(df_5m, 'close')
+        rsi_5m_s_l2 = compute_rsi(c5_l2, period=min(14, len(c5_l2) - 1))
+        rsi_5m_val_l2 = float(rsi_5m_s_l2.iloc[-1]) if len(rsi_5m_s_l2) > 0 else 50.0
+        if rsi_5m_val_l2 > 75.0:
+            res['reason'] = f"Leg-2 Reversal bloqueado: RSI 5m ({rsi_5m_val_l2:.1f} > 75.0) en agotamiento."
+            return res
+
+        if df_15m is not None and len(df_15m) >= 5:
+            c15_l2 = _safe_col(df_15m, 'close')
+            rsi_15m_s_l2 = compute_rsi(c15_l2, period=min(14, len(c15_l2) - 1))
+            rsi_15m_val_l2 = float(rsi_15m_s_l2.iloc[-1]) if len(rsi_15m_s_l2) > 0 else 50.0
+            if rsi_15m_val_l2 > 75.0:
+                res['reason'] = f"Leg-2 Reversal bloqueado: RSI 15m ({rsi_15m_val_l2:.1f} > 75.0) en agotamiento."
+                return res
+
+        skip_runway = bool(config and config.get("skip_daily_runway_check"))
+        if not skip_runway:
+            try:
+                from app.stocks.alpha_runner_scanner import get_daily_bollinger_metrics
+                _, bb_up_1d_l2, _ = get_daily_bollinger_metrics(ticker, current_price)
+                o5_l2 = _safe_col(df_5m, 'open')
+                v5_l2 = _safe_col(df_5m, 'volume')
+                open_today_l2 = float(o5_l2.iloc[0])
+                cur_v_l2 = float(v5_l2.iloc[-1])
+                vol_ma5_l2 = float(v5_l2.rolling(10, min_periods=2).mean().iloc[-1]) if len(v5_l2) >= 2 else cur_v_l2
+                rvol_leg2 = (cur_v_l2 / vol_ma5_l2) if vol_ma5_l2 > 0 else 1.0
+
+                runway_res = evaluate_daily_runway_feasibility(
+                    open_price=open_today_l2,
+                    bb_upper_1d=bb_up_1d_l2,
+                    rvol=rvol_leg2,
+                    min_required_runway_pct=25.0
+                )
+                if not runway_res['approved']:
+                    res['reason'] = runway_res['reason']
+                    return res
+            except Exception as e_run_leg:
+                log_debug(MODULE, f"Error evaluando daily runway en Leg-2: {e_run_leg}")
+
         # 1. Macro-Tendencia en 1H: EMA3_1h > EMA9_1h
         if df_1h is not None and len(df_1h) >= 2:
             c1h = _safe_col(df_1h, 'close')

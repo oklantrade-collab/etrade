@@ -255,6 +255,62 @@ def _check_15m_rebuy_filters(
 
 
 
+
+def evaluate_daily_runway_feasibility(
+    open_price: float,
+    bb_upper_1d: float,
+    rvol: float = 1.0,
+    min_required_runway_pct: float = 25.0,
+    beta_expansion: float = 0.025,
+    max_delta_pct: float = 0.25
+) -> Dict[str, Any]:
+    """
+    Evalúa la viabilidad de recorrido alcista antes de chocar con la resistencia
+    institucional diaria (Banda Superior de Bollinger 1D + Delta dinámico por RVOL).
+
+    Fórmula:
+        Delta_RVOL = min(max_delta_pct, max(0.0, (rvol - 1.5) * beta_expansion)) si rvol > 1.5 sino 0.0
+        Techo_Dinamico_1D = bb_upper_1d * (1.0 + Delta_RVOL)
+        Runway_Pct = ((Techo_Dinamico_1D - open_price) / open_price) * 100.0
+
+    Criterio:
+        Si Runway_Pct < min_required_runway_pct (25%), RECHAZADO por falta de espacio para dar un rally de +30%.
+    """
+    if open_price <= 0 or bb_upper_1d <= 0:
+        return {
+            "approved": True,
+            "runway_pct": 50.0,
+            "delta_rvol_pct": 0.0,
+            "dynamic_ceiling": bb_upper_1d,
+            "reason": "Sin datos de precio u open diario para evaluar"
+        }
+
+    delta_rvol = 0.0
+    if rvol > 1.5:
+        delta_rvol = min(max_delta_pct, (rvol - 1.5) * beta_expansion)
+
+    dynamic_ceiling = bb_upper_1d * (1.0 + delta_rvol)
+    runway_pct = ((dynamic_ceiling - open_price) / open_price) * 100.0
+
+    is_approved = runway_pct >= min_required_runway_pct
+
+    reason = (
+        f"ADUANA Runway 1D Aprobado: Autopista de +{runway_pct:.1f}% al techo dinámico "
+        f"(${dynamic_ceiling:.2f} con BB_Upper=${bb_upper_1d:.2f} y Delta RVOL=+{delta_rvol*100:.1f}%)"
+        if is_approved else
+        f"ADUANA Runway 1D Rechazado: Espacio de +{runway_pct:.1f}% es insuficiente (< {min_required_runway_pct:.0f}%). "
+        f"Techo dinámico=${dynamic_ceiling:.2f} (BB_Upper=${bb_upper_1d:.2f}, Delta RVOL=+{delta_rvol*100:.1f}%). Sin autopista técnica."
+    )
+
+    return {
+        "approved": is_approved,
+        "runway_pct": round(runway_pct, 2),
+        "delta_rvol_pct": round(delta_rvol * 100.0, 2),
+        "dynamic_ceiling": round(dynamic_ceiling, 2),
+        "reason": reason
+    }
+
+
 def calculate_gap_velocity_ranking(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Regla 1: Recalcular el ranking de las posiciones alcistas (Open Gap Up).
@@ -405,6 +461,45 @@ def evaluate_gap_runner_entry_tranches(
         if cur_vwap_init > 0 and cur_p < (cur_vwap_init * 0.999):
             res["reason"] = f"Filtro Maestro VWAP: Precio actual (${cur_p:.2f}) cotiza por debajo del VWAP (${cur_vwap_init:.2f}). Compras en largo bloqueadas bajo VWAP."
             return res
+
+    # ── PILAR 2.B: Filtro Anti-Agotamiento RSI 5m y 15m (RSI <= 75.0) ──
+    rsi_5m_series_tr = compute_rsi(c5, period=min(14, len(c5) - 1))
+    rsi_5m_now_tr = float(rsi_5m_series_tr.iloc[-1]) if len(rsi_5m_series_tr) > 0 else 50.0
+    if rsi_5m_now_tr > 75.0:
+        res["reason"] = f"Aduana Anti-Agotamiento 5m: RSI 5m ({rsi_5m_now_tr:.1f} > 75.0). Prohibido comprar clímax de apertura."
+        return res
+
+    if df_15m is not None and len(df_15m) >= 5:
+        c15_s = _safe_col(df_15m, "close")
+        rsi_15m_s = compute_rsi(c15_s, period=min(14, len(c15_s) - 1))
+        rsi_15m_now_tr = float(rsi_15m_s.iloc[-1]) if len(rsi_15m_s) > 0 else 50.0
+        if rsi_15m_now_tr > 75.0:
+            res["reason"] = f"Aduana Anti-Agotamiento 15m: RSI 15m ({rsi_15m_now_tr:.1f} > 75.0). Prohibido comprar en agotamiento."
+            return res
+
+    # ── PILAR 2.C: Filtro ADUANA Daily Runway con Delta RVOL ──
+    skip_runway = bool(config and config.get("skip_daily_runway_check"))
+    if not skip_runway and not is_open_pos:
+        try:
+            from app.stocks.alpha_runner_scanner import get_daily_bollinger_metrics
+            _, bb_up_1d_eval, _ = get_daily_bollinger_metrics(ticker, cur_p)
+            open_day_val = float(o5.iloc[0])
+            v5_s = _safe_col(df_5m, "volume")
+            v_ma_val = float(v5_s.rolling(20, min_periods=1).mean().iloc[-1]) if len(v5_s) > 0 else 1.0
+            rvol_tr_val = float(v5_s.iloc[-1] / max(1.0, v_ma_val)) if len(v5_s) > 0 else 1.0
+
+            runway_eval = evaluate_daily_runway_feasibility(
+                open_price=open_day_val,
+                bb_upper_1d=bb_up_1d_eval,
+                rvol=rvol_tr_val,
+                min_required_runway_pct=25.0
+            )
+            if not runway_eval["approved"]:
+                res["reason"] = runway_eval["reason"]
+                return res
+        except Exception as e_runway:
+            log_warning(MODULE, f"Aviso evaluando daily runway en entry tranches: {e_runway}")
+
 
     # ─────────────────────────────────────────────────────────────
     # PASO 1: Validación Macro 1H (Regla 2.a)
