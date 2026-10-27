@@ -165,10 +165,35 @@ def execute_market_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
-        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO / EMA3<=EMA9 ──
+        # ── VALIDACIÓN 0.1: CHOKE POINT INVIOLABLE ADUANA 1H (EMA3 > EMA9) ──
+        # Principio Fail-Closed: Sin excepciones para ninguna regla o estrategia.
         try:
             from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
             live_1h = get_live_1h_candle_and_sipv(ticker, price)
+            is_ema3_above_ema9 = bool(live_1h.get("is_ema3_above_ema9", False))
+            ema3_val = float(live_1h.get("ema3_1h_live", 0.0))
+            ema9_val = float(live_1h.get("ema9_1h", 0.0))
+            status_1h_reason = str(live_1h.get("status_reason", ""))
+
+            # Fallback para IPOs jóvenes sin historial suficiente de 1H
+            if (ema9_val <= 0 or "Sin datos 1H" in status_1h_reason or "insuficientes" in status_1h_reason) and live_1h.get("is_ema3_above_ema9_15m") is not None:
+                is_ema3_gt_15m = bool(live_1h.get("is_ema3_above_ema9_15m", False))
+                ema3_15 = float(live_1h.get("ema3_15m", 0.0))
+                ema9_15 = float(live_1h.get("ema9_15m", 0.0))
+                if not is_ema3_gt_15m:
+                    log_warning(MODULE, f"⛔ [CHOKE POINT ADUANA] Aborting BUY for {ticker}: Fallback IPO sin cruce 15m (EMA3 ${ema3_15:.2f} <= EMA9 ${ema9_15:.2f}).")
+                    return {
+                        "success": False,
+                        "reason": f"Aduana Choke Point (Fallback IPO): EMA3 15m (${ema3_15:.2f}) <= EMA9 15m (${ema9_15:.2f}). Compra bloqueada."
+                    }
+            else:
+                if not is_ema3_above_ema9:
+                    log_warning(MODULE, f"⛔ [CHOKE POINT ADUANA] Aborting BUY for {ticker} ({rule_code}): EMA3 1H (${ema3_val:.2f}) <= EMA9 1H (${ema9_val:.2f}). Tendencia horaria bajista o neutral.")
+                    return {
+                        "success": False,
+                        "reason": f"Aduana Choke Point Inviolable: Requiere EMA3 1H (${ema3_val:.2f}) > EMA9 1H (${ema9_val:.2f}). Falta cruce alcista en 1 hora."
+                    }
+
             is_gap_strategy = (
                 str(rule_code).startswith('GAP_') or
                 str(rule_code).startswith('FT_') or
@@ -187,14 +212,6 @@ def execute_market_order(
                     return {
                         "success": False,
                         "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
-                    }
-                if not live_1h.get("is_ema3_above_ema9", True):
-                    ema3_val = live_1h.get("ema3_1h_live", 0.0)
-                    ema9_val = live_1h.get("ema9_1h", 0.0)
-                    log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). Falta cruce alcista en 1 hora.")
-                    return {
-                        "success": False,
-                        "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
                     }
 
             # ── VALIDACIÓN 0.15: GUARDIA ADUANA DE IMPULSO COMPRADOR (ADX >= 18 & +DI > -DI & Anti-Falling Knife) ──
@@ -528,24 +545,41 @@ def place_limit_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
-        # ── VALIDACIÓN 0.1: BLOQUEO UNIVERSAL EMA3 1H DESCENDENTE / AGOTAMIENTO / EMA3<=EMA9 ──
+        # ── VALIDACIÓN 0.1: CHOKE POINT INVIOLABLE ADUANA 1H (EMA3 > EMA9) ──
+        # Principio Fail-Closed: Sin excepciones para ninguna regla o estrategia.
         try:
             from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
             live_1h = get_live_1h_candle_and_sipv(ticker, limit_price)
+            is_ema3_above_ema9 = bool(live_1h.get("is_ema3_above_ema9", False))
+            ema3_val = float(live_1h.get("ema3_1h_live", 0.0))
+            ema9_val = float(live_1h.get("ema9_1h", 0.0))
+            status_1h_reason = str(live_1h.get("status_reason", ""))
+
+            # Fallback para IPOs jóvenes sin historial suficiente de 1H
+            if (ema9_val <= 0 or "Sin datos 1H" in status_1h_reason or "insuficientes" in status_1h_reason) and live_1h.get("is_ema3_above_ema9_15m") is not None:
+                is_ema3_gt_15m = bool(live_1h.get("is_ema3_above_ema9_15m", False))
+                ema3_15 = float(live_1h.get("ema3_15m", 0.0))
+                ema9_15 = float(live_1h.get("ema9_15m", 0.0))
+                if not is_ema3_gt_15m:
+                    log_warning(MODULE, f"⛔ [CHOKE POINT ADUANA] Aborting LIMIT BUY for {ticker}: Fallback IPO sin cruce 15m (EMA3 ${ema3_15:.2f} <= EMA9 ${ema9_15:.2f}).")
+                    return {
+                        "success": False,
+                        "reason": f"Aduana Choke Point (Fallback IPO): EMA3 15m (${ema3_15:.2f}) <= EMA9 15m (${ema9_15:.2f}). Compra LIMIT bloqueada."
+                    }
+            else:
+                if not is_ema3_above_ema9:
+                    log_warning(MODULE, f"⛔ [CHOKE POINT ADUANA] Aborting LIMIT BUY for {ticker} ({rule_code}): EMA3 1H (${ema3_val:.2f}) <= EMA9 1H (${ema9_val:.2f}).")
+                    return {
+                        "success": False,
+                        "reason": f"Aduana Choke Point Inviolable: Requiere EMA3 1H (${ema3_val:.2f}) > EMA9 1H (${ema9_val:.2f}). Falta cruce alcista en 1 hora."
+                    }
+
             if not live_1h.get("is_ema3_1h_ascending", True):
                 slope = live_1h.get("ema3_slope_1h", 0.0)
                 log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: EMA3 1H es descendente/plana ({slope:+.4f}). No se compran acciones en modo descendente.")
                 return {
                     "success": False,
                     "reason": f"Bloqueo de seguridad: EMA3 1H descendente/plana ({slope:+.4f}). Acción en modo agotamiento o distribución."
-                }
-            if not live_1h.get("is_ema3_above_ema9", True):
-                ema3_val = live_1h.get("ema3_1h_live", 0.0)
-                ema9_val = live_1h.get("ema9_1h", 0.0)
-                log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). Falta cruce alcista en 1 hora.")
-                return {
-                    "success": False,
-                    "reason": f"Bloqueo de seguridad: EMA3 1H ({ema3_val:.2f}) <= EMA9 1H ({ema9_val:.2f}). No permitida compra sin confirmación alcista en 1H."
                 }
 
             # ── VALIDACIÓN 0.15: GUARDIA ADUANA DE IMPULSO COMPRADOR (ADX >= 18 & +DI > -DI & Anti-Falling Knife) ──

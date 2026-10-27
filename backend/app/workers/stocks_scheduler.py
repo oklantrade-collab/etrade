@@ -647,6 +647,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         ind_15m["entry_route_1h"] = entry_1h_info.get('route')
         ind_15m["entry_support_1h"] = entry_1h_info.get('support_level')
         ind_15m["entry_reason_1h"] = entry_1h_info.get('reason')
+        ind_15m["ema_3_1h"] = float(entry_1h_info.get('ema3', 0.0) or 0.0)
+        ind_15m["ema_9_1h"] = float(entry_1h_info.get('ema9', 0.0) or 0.0)
 
         # ── NUEVO: TRAP SHIELD & INTRADAY ALPHA CANDIDATE ──
         from app.stocks.trap_shield import evaluate_trap_shield
@@ -1626,6 +1628,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
         rule_ctx['ema_200_1d'] = float(ind_1d.get("ema_200") or 999999.0)
         
         rule_ctx['open_1d'] = open_price_today
+        rule_ctx['ema_3_1h'] = float(ind_15m.get("ema_3_1h") or (entry_1h_info.get("ema3") if 'entry_1h_info' in locals() else 0.0) or 0.0)
+        rule_ctx['ema_9_1h'] = float(ind_15m.get("ema_9_1h") or (entry_1h_info.get("ema9") if 'entry_1h_info' in locals() else 0.0) or 0.0)
         rule_ctx['ema_3_4h'] = float(ind_4h.get("ema_3") or 0.0)
         rule_ctx['ema_9_4h'] = float(ind_4h.get("ema_9") or 0.0)
         rule_ctx['ema_20_4h'] = float(ind_4h.get("ema_20") or 0.0)

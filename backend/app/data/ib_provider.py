@@ -62,6 +62,8 @@ class IBConnection(EWrapper, EClient):
         self.accounts: list[str] = []
         self._positions: Dict[str, dict] = {}
         self._positions_event = threading.Event()
+        self._hist_bars: dict = {}
+        self._hist_events: dict = {}
         self._thread: threading.Thread | None = None
 
     # ── Connection ────────────────────────────────────────
@@ -259,6 +261,80 @@ class IBConnection(EWrapper, EClient):
             log_warning(MODULE, f"Error requesting positions from TWS: {e}")
             return dict(self._last_valid_positions)
         return self._positions
+
+    # ── Historical Data Callbacks & Requester ──────────────
+
+    def historicalData(self, reqId: int, bar):
+        """Called when an individual historical bar arrives from TWS."""
+        if reqId not in self._hist_bars:
+            self._hist_bars[reqId] = []
+        self._hist_bars[reqId].append({
+            "date": bar.date,
+            "open": float(bar.open),
+            "high": float(bar.high),
+            "low": float(bar.low),
+            "close": float(bar.close),
+            "volume": float(bar.volume)
+        })
+
+    def historicalDataEnd(self, reqId: int, start: str, end: str):
+        """Called when historical data stream completes."""
+        n_bars = len(self._hist_bars.get(reqId, []))
+        log_info(MODULE, f"[IB HistoricalDataEnd] reqId={reqId} loaded {n_bars} bars ({start} to {end})")
+        if reqId in self._hist_events:
+            self._hist_events[reqId].set()
+
+    def request_historical_1h_bars(
+        self,
+        ticker: str,
+        duration_str: str = "30 D",
+        timeout: float = 6.0
+    ):
+        """
+        Request historical 1-hour candles directly from TWS broker.
+        Returns pd.DataFrame with index=date and columns ['open', 'high', 'low', 'close', 'volume']
+        or None if not connected / timeout.
+        """
+        if not self.connected or not IB_AVAILABLE:
+            return None
+
+        try:
+            import pandas as pd
+            req_id = self.get_next_order_id()
+            event = threading.Event()
+            self._hist_bars[req_id] = []
+            self._hist_events[req_id] = event
+
+            contract = self.us_stock_contract(ticker)
+            self.reqHistoricalData(
+                reqId=req_id,
+                contract=contract,
+                endDateTime="",
+                durationStr=duration_str,
+                barSizeSetting="1 hour",
+                whatToShow="TRADES",
+                useRTH=1,
+                formatDate=1,
+                keepUpToDate=False,
+                chartOptions=[]
+            )
+
+            finished = event.wait(timeout=timeout)
+            bars = self._hist_bars.pop(req_id, [])
+            self._hist_events.pop(req_id, None)
+
+            if not finished or not bars:
+                log_warning(MODULE, f"[IB History] Timeout ({timeout}s) or empty 1h bars from TWS for {ticker}")
+                return None
+
+            df = pd.DataFrame(bars)
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.set_index("date").sort_index()
+            return df
+        except Exception as e:
+            log_warning(MODULE, f"Error requesting historical bars from TWS for {ticker}: {e}")
+            return None
 
     # ── Contract Builder ──────────────────────────────────
 
@@ -552,3 +628,9 @@ class IBProvider:
                     break
         
         return {t.upper(): self.conn._prices.get(t.upper(), 0.0) for t in tickers}
+
+    def get_historical_1h_bars(self, ticker: str, duration_str: str = "30 D", timeout: float = 6.0):
+        """Request 1H candles from TWS broker connection."""
+        if not self.conn or not self.conn.connected:
+            return None
+        return self.conn.request_historical_1h_bars(ticker, duration_str=duration_str, timeout=timeout)

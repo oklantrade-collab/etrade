@@ -1123,6 +1123,12 @@ class StocksRuleEngine:
             if entry_route != "PULLBACK" or entry_sup not in ("EMA3", "EMA9", "EMA20"):
                 failures.append(f"Sin Pullback activo en 1H: Route={entry_route}, Support={entry_sup} (Se requiere EMA3, EMA9 o EMA20 en 1H).")
 
+            # 4. Tendencia Horaria 1H: EMA3 > EMA9
+            ema3_1h = float(context.get("ema_3_1h") or context.get("ema3_1h") or 0.0)
+            ema9_1h = float(context.get("ema_9_1h") or context.get("ema9_1h") or 0.0)
+            if ema9_1h > 0 and ema3_1h <= ema9_1h:
+                failures.append(f"Aduana 1H: EMA3 (${ema3_1h:.2f}) <= EMA9 (${ema9_1h:.2f}). Falta cruce alcista en 1H.")
+
         # ── CHECK 15: LONG_CLIMAX_1H (Rebote Clímax LOWER_5/6 en 1 HORA) ──
         if "climax_1h" in normalized_code.lower() or normalized_code in ("LONG_CLIMAX_1H", "HOT_CLIMAX_1H", "PRO_CLIMAX_1H"):
             # 1. Macro 1D estricta
@@ -1139,6 +1145,12 @@ class StocksRuleEngine:
             entry_sup = str(context.get("entry_support_1h") or "").upper()
             if entry_route != "CLIMAX" or entry_sup not in ("LOWER_5", "LOWER_6"):
                 failures.append(f"Sin Clímax activo en 1H: Route={entry_route}, Support={entry_sup} (Se requiere LOWER_5 o LOWER_6 en 1H).")
+
+            # 4. Tendencia Horaria 1H: EMA3 > EMA9
+            ema3_1h = float(context.get("ema_3_1h") or context.get("ema3_1h") or 0.0)
+            ema9_1h = float(context.get("ema_9_1h") or context.get("ema9_1h") or 0.0)
+            if ema9_1h > 0 and ema3_1h <= ema9_1h:
+                failures.append(f"Aduana 1H: EMA3 (${ema3_1h:.2f}) <= EMA9 (${ema9_1h:.2f}). Falta cruce alcista en 1H.")
 
         # ── RESULTADO FINAL ───────────────────────────────
         triggered = len(failures) == 0

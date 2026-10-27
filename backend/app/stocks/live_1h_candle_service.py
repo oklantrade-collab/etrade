@@ -145,29 +145,43 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         df_5m = None
         df_1h = None
 
-        # 1. Obtener 2 días de velas de 5m
+        # 1. Broker-First: Intentar obtener velas 1H nativas de Interactive Brokers TWS si está conectado
         try:
-            df_5m = t.history(period="2d", interval="5m")
-            if df_5m is not None and not df_5m.empty and len(df_5m) >= 6:
-                df_resampled = df_5m.resample("1h").agg({
-                    "Open": "first",
-                    "High": "max",
-                    "Low": "min",
-                    "Close": "last",
-                    "Volume": "sum"
-                }).dropna()
-                if len(df_resampled) >= 2:
-                    df_1h = df_resampled
-        except Exception as e_resample:
-            log_debug(MODULE, f"No se pudo resamplear 5m a 1h para {clean_ticker}: {e_resample}")
+            from app.data.ib_provider import get_ib_connection
+            ib = get_ib_connection()
+            if ib and ib.connected:
+                df_ib = ib.request_historical_1h_bars(clean_ticker, duration_str="30 D", timeout=2.5)
+                if df_ib is not None and len(df_ib) >= 30:
+                    df_1h = df_ib
+                    log_debug(MODULE, f"Using IB TWS 1H candles for {clean_ticker} ({len(df_1h)} bars)")
+        except Exception as e_ib:
+            log_debug(MODULE, f"Aviso consultando histórico 1h en Broker TWS para {clean_ticker}: {e_ib}")
 
-        # Fallback a 1h directo si falló 5m
-        if df_1h is None or df_1h.empty or len(df_1h) < 2:
-            df_1h = t.history(period="5d", interval="1h")
+        # 2. Respaldo verificado con histórico nativo completo de 1H (60 días, ~350 velas)
+        # NUNCA resamplear 2 días de 5m: provoca sesgo por falta de burn-in en EMA9
+        if df_1h is None or len(df_1h) < 30:
+            try:
+                df_1h = t.history(period="60d", interval="1h")
+            except Exception as e_yf_1h:
+                log_debug(MODULE, f"Error descargando 1h para {clean_ticker}: {e_yf_1h}")
 
-        if df_1h is None or df_1h.empty or len(df_1h) < 2:
+        # 3. Obtener velas 5m (para métricas intradía: VWAP, Open del Día, ADX 5m)
+        try:
+            df_5m = t.history(period="5d", interval="5m")
+        except Exception as e_5m:
+            log_debug(MODULE, f"Error descargando 5m para {clean_ticker}: {e_5m}")
+
+        # ── GUARDIA INVIOLABLE FAIL-CLOSED: MÍNIMO 30 VELAS HORARIAS REALES ──
+        # Una EMA9 requiere matemáticamente al menos 30 velas para converger.
+        # Si hay menos de 30 velas, FAIL-CLOSED (bloqueo preventivo por datos insuficientes).
+        if df_1h is None or df_1h.empty or len(df_1h) < 30:
+            fallback_data["status_reason"] = f"Datos 1H insuficientes ({len(df_1h) if df_1h is not None else 0} < 30 velas). Bloqueo preventivo Fail-Closed."
+            fallback_data["is_ema3_above_ema9"] = False
             _1H_CACHE[clean_ticker] = {"timestamp": now_ts, "data": fallback_data}
             return fallback_data
+
+        # Normalizar nombres de columnas a Capitalized ('Open', 'High', 'Low', 'Close', 'Volume')
+        df_1h.columns = [c.capitalize() for c in df_1h.columns]
 
         # Enriquecer la última vela (en formación) con el precio actual live si se proporcionó
         if current_price and current_price > 0:

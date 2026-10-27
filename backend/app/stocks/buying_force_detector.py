@@ -284,8 +284,8 @@ def detect_pullback_and_climax_1h(
         absorption = detect_candle_absorption(last_open, last_high, last_low, last_close)
 
         # ── RUTA B: REBOTE CLÍMAX (LOWER_5 / LOWER_6 en 1H) ─────────────
-        # Toque o perforación de bandas inferiores extremas en 1H
-        if lower_5 > 0:
+        # Toque o perforación de bandas inferiores extremas en 1H con filtro obligatorio EMA3 > EMA9
+        if lower_5 > 0 and ema3 > ema9:
             is_touch_lower_6 = (lower_6 > 0 and (last_low <= lower_6 or current_price <= lower_6 * 1.002))
             is_touch_lower_5 = (last_low <= lower_5 or current_price <= lower_5 * 1.002)
 
@@ -314,8 +314,8 @@ def detect_pullback_and_climax_1h(
             ("EMA20", ema20, 0.0045)
         ]
 
-        # Condición de tendencia en 1H: EMA3 > EMA9 o EMA3 >= EMA20
-        trend_1h_bullish = (ema3 >= ema9 * 0.998) or (current_price >= ema20)
+        # Condición estricta de tendencia en 1H: Exige EMA3 > EMA9 sin excepción
+        trend_1h_bullish = bool(ema3 > ema9)
 
         # Análisis de velas 15m para evitar "cuchillos cayendo"
         knife_falling_15m = False
