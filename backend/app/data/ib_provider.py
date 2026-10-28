@@ -64,6 +64,7 @@ class IBConnection(EWrapper, EClient):
         self._positions_event = threading.Event()
         self._hist_bars: dict = {}
         self._hist_events: dict = {}
+        self._realtime_bar_callbacks: dict = {}
         self._thread: threading.Thread | None = None
 
     # ── Connection ────────────────────────────────────────
@@ -335,6 +336,76 @@ class IBConnection(EWrapper, EClient):
         except Exception as e:
             log_warning(MODULE, f"Error requesting historical bars from TWS for {ticker}: {e}")
             return None
+
+    # ── Realtime 5-Second Bars Callbacks & Requester ──────
+
+    def realtimeBar(
+        self,
+        reqId: int,
+        time: int,
+        open_: float,
+        high: float,
+        low: float,
+        close: float,
+        volume: int,
+        wap: float,
+        count: int
+    ):
+        """Called by TWS every 5 seconds with a new 5s bar."""
+        bar_data = {
+            "req_id": reqId,
+            "time": time,
+            "open": float(open_),
+            "high": float(high),
+            "low": float(low),
+            "close": float(close),
+            "volume": int(volume),
+            "wap": float(wap),
+            "count": int(count)
+        }
+        cb = self._realtime_bar_callbacks.get(reqId)
+        if cb:
+            try:
+                cb(reqId, bar_data)
+            except Exception as e:
+                log_error(MODULE, f"Error in realtimeBar callback (reqId={reqId}): {e}")
+
+    def request_realtime_5s_bars(
+        self,
+        ticker: str,
+        callback: Callable,
+        what_to_show: str = "TRADES",
+        use_rth: bool = False
+    ) -> int:
+        """
+        Subscribes to 5-second real-time bars from TWS.
+        Returns reqId, or -1 if not connected.
+        """
+        if not self.connected or not IB_AVAILABLE:
+            log_warning(MODULE, f"Cannot request 5s bars for {ticker}: TWS not connected")
+            return -1
+
+        try:
+            req_id = self.get_next_order_id()
+            self._realtime_bar_callbacks[req_id] = callback
+            contract = self.us_stock_contract(ticker)
+            self.reqRealTimeBars(req_id, contract, 5, what_to_show, use_rth, [])
+            log_info(MODULE, f"Subscribed to 5s real-time bars for {ticker} (reqId={req_id})")
+            return req_id
+        except Exception as e:
+            log_error(MODULE, f"Error requesting 5s bars for {ticker}: {e}")
+            return -1
+
+    def cancel_realtime_5s_bars(self, req_id: int):
+        """Cancels an active 5-second real-time bar stream."""
+        if not self.connected or not IB_AVAILABLE:
+            return
+        try:
+            self.cancelRealTimeBars(req_id)
+            self._realtime_bar_callbacks.pop(req_id, None)
+            log_info(MODULE, f"Cancelled 5s real-time bars stream (reqId={req_id})")
+        except Exception as e:
+            log_warning(MODULE, f"Error cancelling 5s bars (reqId={req_id}): {e}")
 
     # ── Contract Builder ──────────────────────────────────
 

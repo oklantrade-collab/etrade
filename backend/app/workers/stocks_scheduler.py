@@ -3464,6 +3464,17 @@ async def start_stocks_scheduler(force=False):
     asyncio.create_task(run_stocks_tp_v2_cycle())
     asyncio.create_task(run_options_gap_defense_cycle())
     asyncio.create_task(run_options_auto_execution_cycle())
+
+    # Iniciar Motor In-Memory de Micro-Pullbacks para capturar rallies exponenciales en 5s
+    try:
+        from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
+        scalp_scanner = get_micro_pullback_scanner()
+        if is_open or force:
+            scalp_scanner.start()
+            log_info(MODULE, '⚡ Motor In-Memory Micro-Pullback ACTIVADO en stocks_scheduler.')
+    except Exception as e_scalp:
+        log_warning(MODULE, f'Aviso al iniciar micro-pullback scanner: {e_scalp}')
+
     await run_stocks_cycle(force=force)
 
     # Keep running
@@ -3471,6 +3482,11 @@ async def start_stocks_scheduler(force=False):
         while True:
             await asyncio.sleep(60)
     except (KeyboardInterrupt, SystemExit):
+        try:
+            from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
+            get_micro_pullback_scanner().stop()
+        except Exception:
+            pass
         scheduler.shutdown()
         log_info(MODULE, "Stocks scheduler stopped")
 
