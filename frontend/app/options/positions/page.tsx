@@ -364,9 +364,9 @@ export default function OptionsPositions() {
                       </>
                     ) : (
                       <>
-                        <td style={td}>${n(p.exit_credit)}</td>
-                        <td style={{ ...td, color: (p.realized_pnl || 0) >= 0 ? '#26A69A' : '#EF5350', fontWeight: 700 }}>
-                          ${n(p.realized_pnl)}
+                        <td style={td}>${n(p.exit_credit ?? p.last_mark_price ?? p.entry_debit)}</td>
+                        <td style={{ ...td, color: ((p.realized_pnl ?? 0) >= 0) ? '#26A69A' : '#EF5350', fontWeight: 700 }}>
+                          ${n(p.realized_pnl ?? ((Number(p.exit_credit || p.last_mark_price || 0) - Number(p.entry_debit || 0)) * 100 * Number(p.qty || 1)))}
                         </td>
                         <td style={td}>
                           {p.exit_reason && EXIT_REASONS[p.exit_reason] ? (

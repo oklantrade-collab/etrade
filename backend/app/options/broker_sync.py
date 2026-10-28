@@ -331,13 +331,22 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                     sb.table("opt_paper_trades").delete().eq("id", opt_t["id"]).execute()
                     log_info(MODULE, f"🧹 [BROKER SYNC] Opción fantasma (no ejecutada en TWS) eliminada: {sym} {tb_match}")
                 else:
+                    last_m = float(opt_t.get("last_mark_price") or opt_t.get("entry_debit") or 0.0)
+                    e_deb = float(opt_t.get("entry_debit") or last_m)
+                    t_qty = int(opt_t.get("qty") or 1)
+                    t_rec = round(last_m * 100.0 * t_qty, 2)
+                    r_pnl = round((last_m - e_deb) * 100.0 * t_qty, 2)
                     sb.table("opt_paper_trades").update({
                         "status": "closed",
                         "exit_reason": "manual_simulated",
+                        "exit_credit": last_m,
+                        "exit_total_recovered": t_rec,
+                        "realized_pnl": r_pnl,
+                        "unrealized_pnl": 0.0,
                         "exit_time": now_iso,
                         "updated_at": now_iso,
                     }).eq("id", opt_t["id"]).execute()
-                    log_info(MODULE, f"📤 [BROKER SYNC] Opción cerrada por confirmación TWS: {sym} {tb_match}")
+                    log_info(MODULE, f"📤 [BROKER SYNC] Opción cerrada por confirmación TWS: {sym} {tb_match} (Crédito: ${last_m:.2f}, PnL: ${r_pnl:.2f})")
                 opt_closed += 1
 
     except Exception as e_opt:
