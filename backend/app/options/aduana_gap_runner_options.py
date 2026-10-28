@@ -258,7 +258,12 @@ def _get_daily_bb_bounds(ticker: str, price: float) -> Tuple[float, float]:
     clean = ticker.replace("/", "").replace(".", "").upper().strip()
     cached = ars._DAILY_BB_CACHE.get(clean)
     bb_lower = float(cached[3]) if cached else price * 0.7
-    return float(bb_upper), bb_lower
+    bb_up = float(bb_upper)
+    bb_lo = float(bb_lower)
+    if price > 0 and (bb_lo > price * 1.25 or bb_up < price * 0.75):
+        bb_up = round(price * 1.30, 2)
+        bb_lo = round(price * 0.70, 2)
+    return bb_up, bb_lo
 
 
 def evaluate_options_entry_gatekeeper(
@@ -1209,21 +1214,34 @@ def evaluate_options_gap_aduana_exit(
             })
             return res
 
+    # Identificación temprana de modo OTM_MOMENTUM / GAMMA_IGNITION
+    exit_p = position.get("exit_plan") or {}
+    sel_mode = str(position.get("selection_mode") or exit_p.get("selection_mode") or "").upper()
+    rule_cd = str(position.get("rule_code") or exit_p.get("rule_code") or "").upper()
+    is_otm_momentum = (
+        (sel_mode == "OTM_MOMENTUM")
+        or ("MOMENTUM_OTM" in rule_cd)
+        or ("GAMMA_IGNITION" in rule_cd)
+        or bool(position.get("use_momentum_exhaustion_exit", False))
+    )
+
     # PILAR 3 (OPCIONES): BLINDAJE RÁPIDO BREAKEVEN PARA CALLs Y PUTs (+5.0% subyacente o prima -> BE + 1% Lock)
     und_entry_p = float(position.get("entry_underlying_price") or position.get("entry_price") or 0.0)
     und_pnl_pct = 0.0
     if und_entry_p > 0:
         und_pnl_pct = ((current_underlying_price - und_entry_p) / und_entry_p * 100.0) if is_call else ((und_entry_p - current_underlying_price) / und_entry_p * 100.0)
 
-    # Regla Institucional: Al avanzar +5% en subyacente o prima, blindar en (precio compra + 1%)
-    if (peak_pnl_pct >= 5.0 or und_pnl_pct >= 5.0) and peak_pnl_pct < 25.0:
+    # Regla Institucional: Al avanzar en subyacente o prima, blindar en (precio compra + 1%)
+    # En OTM_MOMENTUM se calibra a +12% de avance en prima para evitar ruido de bid-ask spread
+    be_threshold = 12.0 if is_otm_momentum else 5.0
+    if (peak_pnl_pct >= be_threshold or und_pnl_pct >= 5.0) and peak_pnl_pct < 25.0:
         if current_option_premium <= entry_premium * 1.01:
             res.update({
                 "should_exit": True,
                 "exit_type": "trailing_stop",
                 "contracts_ratio_to_exit": 1.0,
                 "rule_code": "OPT_GAP_BE_LOCK_PLUS_1PCT",
-                "reason": f"Breakeven Lock (+1% Protegido) {'CALL' if is_call else 'PUT'}: Ganancia previa superó +5% (prima +{peak_pnl_pct:.1f}%, subyacente +{und_pnl_pct:.2f}%). Prima protege compra + 1% (${entry_premium*1.01:.2f})"
+                "reason": f"Breakeven Lock (+1% Protegido) {'CALL' if is_call else 'PUT'}: Ganancia previa superó +{be_threshold:.0f}% (prima +{peak_pnl_pct:.1f}%, subyacente +{und_pnl_pct:.2f}%). Prima protege compra + 1% (${entry_premium*1.01:.2f})"
             })
             return res
 

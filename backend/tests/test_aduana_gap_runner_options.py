@@ -466,28 +466,31 @@ def test_score_boost_gap_runner_call_and_put():
     legs = [{'bid': 2.0, 'ask': 2.1, 'iv': 0.35, 'delta': 0.50, 'side': 'buy'}]
 
     # Candidata regular (sin gap runner)
+    from unittest.mock import patch
     cand_reg = {
         'id': 10, 'strategy_type': 'long_call', 'direction': 'CALL',
         'ev_ratio': 0.20, 'ev_view_net': 15.0, 'max_loss_contract': 100.0,
         'legs': legs
     }
     und_reg = {'symbol': 'AMZN', 'direction': 'CALL', 'apex_score': 60.0}
-    res_reg = score_candidate(cand_reg, und_reg, eff)
-    assert res_reg['score_breakdown']['is_gap_runner'] is False
-    assert res_reg['score_breakdown']['gap_runner_boost'] == 0.0
+    with patch('app.core.structural_regime_engine.evaluate_structural_regime') as mock_reg:
+        mock_reg.return_value = {'is_dead_stock': False, 'setup_bonus': 0.0, 'regime_code': 'BULL_TREND', 'setup_name': 'NORMAL', 'setup_label': 'NORMAL', 'key_levels_1d': {}}
+        res_reg = score_candidate(cand_reg, und_reg, eff)
+        assert res_reg['score_breakdown']['is_gap_runner'] is False
+        assert res_reg['score_breakdown']['gap_runner_boost'] == 0.0
 
-    # Misma candidata pero calificada como OPEN GAP UP Runner
-    cand_gap = dict(cand_reg)
-    cand_gap['id'] = 11
-    cand_gap['is_gap_runner'] = True
-    cand_gap['gap_type'] = 'OPEN_GAP_UP'
-    cand_gap['gap_pct'] = 3.5
-    res_gap = score_candidate(cand_gap, und_reg, eff)
+        # Misma candidata pero calificada como OPEN GAP UP Runner
+        cand_gap = dict(cand_reg)
+        cand_gap['id'] = 11
+        cand_gap['is_gap_runner'] = True
+        cand_gap['gap_type'] = 'OPEN_GAP_UP'
+        cand_gap['gap_pct'] = 3.5
+        res_gap = score_candidate(cand_gap, und_reg, eff)
 
-    assert res_gap['score_breakdown']['is_gap_runner'] is True
-    assert res_gap['score_breakdown']['gap_runner_boost'] == 25.0
-    # El score final debe ser mayor por el boost de 25 pts (hasta 100 máx)
-    assert res_gap['score'] >= res_reg['score'] + 15.0
+        assert res_gap['score_breakdown']['is_gap_runner'] is True
+        assert res_gap['score_breakdown']['gap_runner_boost'] == 25.0
+        # El score final debe ser mayor por el boost de 25 pts (hasta 100 máx)
+        assert res_gap['score'] >= res_reg['score'] + 15.0
 
 
 def test_portfolio_selector_gap_runner_first_priority():

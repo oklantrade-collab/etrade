@@ -396,3 +396,8 @@ def fetch_stock_news(ticker: str, max_items: int = 5) -> Dict[str, Any]:
     except Exception as e:
         log_warning(MODULE, f"Error obteniendo noticias para {clean_ticker}: {e}")
         return empty_result
+
+
+# Alias para integración institucional con escáneres de opciones
+get_news_catalyst = fetch_stock_news
+

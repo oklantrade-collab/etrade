@@ -14,7 +14,14 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.options.opt_contract_picker import select_best_option_contract
-from app.options.intraday_momentum_options_scanner import evaluate_intraday_momentum_breakout
+from app.options.intraday_momentum_options_scanner import (
+    evaluate_intraday_momentum_breakout,
+    is_institutional_golden_window,
+    evaluate_options_universe_eligibility,
+    is_symbol_protected_by_win,
+    evaluate_options_catalyst_status,
+    CORE_MOMENTUM_OPTION_SYMBOLS
+)
 from app.options.autonomous_options_dispatcher import dispatch_autonomous_option_trade
 
 
@@ -384,6 +391,189 @@ class TestIntradayMomentumOptions(unittest.TestCase):
         )
         self.assertTrue(res_put_15m["should_exit"])
         self.assertEqual(res_put_15m["rule_code"], "OPT_MOMENTUM_15M_EMA3_GE_EMA9")
+
+
+
+    def test_is_institutional_golden_window(self):
+        """Valida la Ventana de Oro Institucional (09:45 a 11:45 ET)."""
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        # 10:15 ET (Dentro de ventana)
+        dt_in = datetime(2026, 10, 27, 10, 15, tzinfo=ZoneInfo("America/New_York"))
+        is_ok, msg = is_institutional_golden_window(dt_in)
+        self.assertTrue(is_ok)
+        self.assertIn("activa", msg)
+
+        # 09:35 ET (Antes de 09:45 ET)
+        dt_pre = datetime(2026, 10, 27, 9, 35, tzinfo=ZoneInfo("America/New_York"))
+        is_ok_pre, msg_pre = is_institutional_golden_window(dt_pre)
+        self.assertFalse(is_ok_pre)
+        self.assertIn("09:45 ET", msg_pre)
+
+        # 12:30 ET (Bloqueo de mediodía)
+        dt_lunch = datetime(2026, 10, 27, 12, 30, tzinfo=ZoneInfo("America/New_York"))
+        is_ok_lunch, msg_lunch = is_institutional_golden_window(dt_lunch)
+        self.assertFalse(is_ok_lunch)
+        self.assertIn("11:45 ET", msg_lunch)
+
+    def test_evaluate_options_universe_eligibility(self):
+        """Valida reglas cuantitativas de exclusión de universo."""
+        # Miembros de la Canasta Élite aprobados
+        self.assertTrue(evaluate_options_universe_eligibility("AMD")[0])
+        self.assertTrue(evaluate_options_universe_eligibility("AAPL")[0])
+        self.assertTrue(evaluate_options_universe_eligibility("NVDA")[0])
+
+        # Exclusiones automáticas comprobadas
+        is_spy, msg_spy = evaluate_options_universe_eligibility("SPY")
+        self.assertFalse(is_spy)
+        self.assertIn("Excluido", msg_spy)
+
+        is_mara, msg_mara = evaluate_options_universe_eligibility("MARA")
+        self.assertFalse(is_mara)
+
+        is_msft, msg_msft = evaluate_options_universe_eligibility("MSFT")
+        self.assertFalse(is_msft)
+
+        # Símbolo custom con Beta < 1.35 rechazado
+        is_slow, msg_slow = evaluate_options_universe_eligibility("XYZ", beta=1.10, adr_pct=3.0, spread_pct=2.0, price=50.0)
+        self.assertFalse(is_slow)
+        self.assertIn("Beta insuficiente", msg_slow)
+
+        # Símbolo custom con Spread > 3.5% rechazado
+        is_wide, msg_wide = evaluate_options_universe_eligibility("ABC", beta=1.50, adr_pct=3.5, spread_pct=4.2, price=60.0)
+        self.assertFalse(is_wide)
+        self.assertIn("Spread", msg_wide)
+
+    @patch("app.core.supabase_client.get_supabase")
+    def test_protect_the_win_locks_symbol_with_prior_gain(self, mock_get_sb):
+        """Valida regla 'Protect the Win': 1 ganador y candado para el resto del día."""
+        mock_sb = MagicMock()
+        mock_get_sb.return_value = mock_sb
+
+        # Caso A: Activo ya cerró trade hoy con +25% de ganancia -> Bloqueado
+        mock_sb.table().select().eq().eq().gte().execute.return_value = MagicMock(data=[
+            {"id": "opt-1", "symbol": "AMD", "pnl_pct": 25.0, "realized_pnl": 500.0}
+        ])
+        is_prot, msg = is_symbol_protected_by_win("AMD", mock_sb)
+        self.assertTrue(is_prot)
+        self.assertIn("Protect the Win", msg)
+
+        # Caso B: Activo sin trades cerrados hoy -> Permitido
+        mock_sb.table().select().eq().eq().gte().execute.return_value = MagicMock(data=[])
+        is_prot_b, _ = is_symbol_protected_by_win("NVDA", mock_sb)
+        self.assertFalse(is_prot_b)
+
+    @patch("app.stocks.news_catalyst_service.get_news_catalyst")
+    def test_evaluate_options_catalyst_status(self, mock_news):
+        """Valida bloqueo anti-earnings (IV Crush) y bonificación post-earnings/noticias."""
+        # 1. Bloqueo anti-earnings si reporta hoy After-Hours
+        mock_news.return_value = {
+            "has_earnings_event": True,
+            "earnings_timing": "today_after_market",
+            "tier": "tier_2",
+            "headline": "Reports Q3 Earnings Today After Market Close"
+        }
+        res_blocked = evaluate_options_catalyst_status("NVDA")
+        self.assertTrue(res_blocked["is_blocked"])
+        self.assertIn("IV Crush", res_blocked["block_reason"])
+
+        # 2. Bonificación post-earnings si reportó ayer en la tarde (día de reacción)
+        mock_news.return_value = {
+            "has_earnings_event": True,
+            "earnings_timing": "yesterday_after_market",
+            "tier": "tier_2",
+            "headline": "Q3 Revenue Beat by 15%, Guidance Raised"
+        }
+        res_reaction = evaluate_options_catalyst_status("AMD")
+        self.assertFalse(res_reaction["is_blocked"])
+        self.assertEqual(res_reaction["score_bonus"], 20.0)
+        self.assertEqual(res_reaction["catalyst_tag"], "POST_EARNINGS_MOMENTUM")
+
+        # 3. Noticia Tier 1 (FDA / Gran Contrato)
+        mock_news.return_value = {
+            "has_earnings_event": False,
+            "tier": "tier_1",
+            "category": "Contrato Mayor",
+            "headline": "Awarded Pentagon AI Deal"
+        }
+        res_tier1 = evaluate_options_catalyst_status("PLTR")
+        self.assertFalse(res_tier1["is_blocked"])
+        self.assertEqual(res_tier1["score_bonus"], 20.0)
+        self.assertIn("TIER_1_NEWS", res_tier1["catalyst_tag"])
+
+    def test_calibrated_be_lock_requires_12pct_peak(self):
+        """Valida que en modo OTM_MOMENTUM el Breakeven Lock exija avance >= +12% de prima."""
+        from app.options.aduana_gap_runner_options import evaluate_options_gap_aduana_exit
+
+        pos = {
+            "symbol": "AMD",
+            "direction": "CALL",
+            "avg_price": 2.00,
+            "entry_underlying_price": 100.0,
+            "selection_mode": "OTM_MOMENTUM",
+            "rule_code": "GAMMA_IGNITION_OTM_ITM"
+        }
+
+        # Caso A: Pico fue solo +7% (ruido normal de spread). No debe disparar BE Lock
+        pos["highest_premium_seen"] = 2.14 # +7.0% pico
+        res_a = evaluate_options_gap_aduana_exit(
+            position=pos,
+            current_underlying_price=100.2,
+            current_option_premium=2.01,
+            position_age_minutes=5.0
+        )
+        self.assertFalse(res_a["should_exit"])
+
+        # Caso B: Pico superó +13% (avance institucional real) y retrocede a compra + 1% ($2.02)
+        pos["highest_premium_seen"] = 2.28 # +14.0% pico
+        res_b = evaluate_options_gap_aduana_exit(
+            position=pos,
+            current_underlying_price=100.3,
+            current_option_premium=2.02,
+            position_age_minutes=10.0
+        )
+        self.assertTrue(res_b["should_exit"])
+        self.assertEqual(res_b["rule_code"], "OPT_GAP_BE_LOCK_PLUS_1PCT")
+
+    def test_opt_contract_picker_enforces_strict_spread_in_otm_momentum(self):
+        """Valida que en OTM_MOMENTUM se aplique spread estricto <= 3.5%."""
+        exp = self.today + timedelta(days=3)
+        contracts = [
+            # Contrato con spread del 5.0% ($2.00 / $2.10, mid $2.05) -> Rechazado en OTM
+            {
+                "contract_id": 301, "conid": 301, "symbol": "NVDA", "right": "C",
+                "strike": 103.0, "expiry": exp.isoformat(), "bid": 2.00, "ask": 2.10,
+                "delta": 0.35, "open_interest": 3000, "volume": 1500
+            },
+            # Contrato con spread del 2.0% ($2.00 / $2.04, mid $2.02) -> Aprobado
+            {
+                "contract_id": 302, "conid": 302, "symbol": "NVDA", "right": "C",
+                "strike": 103.0, "expiry": exp.isoformat(), "bid": 2.00, "ask": 2.04,
+                "delta": 0.35, "open_interest": 4000, "volume": 2500
+            }
+        ]
+
+        # Con el spread del 5%, es rechazado
+        best_wide, rej_wide = select_best_option_contract(
+            contracts=[contracts[0]],
+            underlying_price=100.0,
+            direction="CALL",
+            selection_mode="OTM_MOMENTUM",
+            now_date=self.today
+        )
+        self.assertIsNone(best_wide)
+        self.assertTrue(any("Spread excesivo" in r for r in rej_wide))
+
+        # Con el spread del 2%, es aprobado
+        best_tight, _ = select_best_option_contract(
+            contracts=[contracts[1]],
+            underlying_price=100.0,
+            direction="CALL",
+            selection_mode="OTM_MOMENTUM",
+            now_date=self.today
+        )
+        self.assertIsNotNone(best_tight)
 
 
 if __name__ == "__main__":

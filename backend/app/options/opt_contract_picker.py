@@ -152,9 +152,13 @@ def select_best_option_contract(
         mid = round((bid + ask) / 2.0, 4)
         spread_rel = ((ask - bid) / mid) * 100.0
 
-        if spread_rel > max_spread_pct:
-            rejection_reasons.append(f"Strike {strike} {right}: Spread excesivo {spread_rel:.1f}% > {max_spread_pct}%")
-            continue
+        # En modo OTM_MOMENTUM se aplica spread institucional estricto <= 3.5%
+        eff_max_spread = 3.5 if is_otm_momentum else max_spread_pct
+        if spread_rel > eff_max_spread:
+            # Si la prima es económica (< $2.00) y el spread absoluto es <= $0.05, tolerar
+            if not (mid < 2.0 and round(ask - bid, 4) <= 0.05):
+                rejection_reasons.append(f"Strike {strike} {right}: Spread excesivo {spread_rel:.1f}% > {eff_max_spread}%")
+                continue
 
         if oi < min_open_interest and vol < min_volume:
             rejection_reasons.append(f"Strike {strike} {right}: Poca liquidez (OI={oi}, Vol={vol})")
