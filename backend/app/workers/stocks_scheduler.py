@@ -808,6 +808,14 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
                 active_pos = pos_res.data[0] if (pos_res.data and len(pos_res.data) > 0) else None
 
+                from zoneinfo import ZoneInfo
+                live_et = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+                sched_cfg = dict(config or {})
+                sched_cfg["current_et_time"] = live_et
+
+                has_news_cat = bool(ind_15m.get("catalyst_name") or ind_15m.get("catalyst_headline") or (int(ind_15m.get("catalyst_tier", 3) or 3) < 3))
+                cat_tier_val = int(ind_15m.get("catalyst_tier", 3) or 3)
+
                 gap_eval = evaluate_gap_runner_entry_tranches(
                     ticker=ticker,
                     df_5m=df_5m,
@@ -815,7 +823,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                     df_1h=df_1h,
                     gap_pct=gap_val,
                     active_position=active_pos,
-                    config=config
+                    config=sched_cfg,
+                    has_news=has_news_cat,
+                    catalyst_tier=cat_tier_val
                 )
 
                 if gap_eval.get('should_enter'):

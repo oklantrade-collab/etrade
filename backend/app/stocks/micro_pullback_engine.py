@@ -59,6 +59,7 @@ class ScalpCandidateState:
         # Telemetría de la posición activa
         self.in_trade: bool = False
         self.entry_price: float = 0.0
+        self.initial_shares: int = 0
         self.shares: int = 0
         self.entry_bar_idx: int = 0
         self.bars_in_trade: int = 0
@@ -66,6 +67,12 @@ class ScalpCandidateState:
         self.target_hod: float = 0.0
         self.order_id: int = 0
         self.db_order_id: str = ""
+
+        # Cascada Escalonada y Recompras (Dips)
+        self.rebuys_count: int = 0          # Máximo 3 recompras
+        self.last_rebuy_ts: float = 0.0
+        self.highest_price_reached: float = 0.0
+        self.realized_scalp_profit: float = 0.0
 
 
 class MicroPullbackEngine:
@@ -328,8 +335,13 @@ class MicroPullbackEngine:
 
         # Actualizar estado de posición
         cand.in_trade = True
+        cand.phase = "IN_TRADE"
         cand.entry_price = entry_price
+        cand.initial_shares = shares
         cand.shares = shares
+        cand.highest_price_reached = entry_price
+        cand.rebuys_count = 0
+        cand.realized_scalp_profit = 0.0
         cand.entry_bar_idx = len(cand.bars)
         cand.bars_in_trade = 0
         cand.stop_loss = stop_loss_price
@@ -341,32 +353,212 @@ class MicroPullbackEngine:
         self._safe_create_task(self._async_log_order_to_supabase(cand, limit_exec_price))
 
     # ──────────────────────────────────────────────────────────
-    # ESTADO 4: Gestión de Salida "Breakout or Bailout" (9 barras = 45s)
+    # ESTADO 4: Gestión de Salida en Cascada (3 Tramos + Recompras Dips)
     # ──────────────────────────────────────────────────────────
     def _manage_active_trade(self, cand: ScalpCandidateState, bar: dict):
-        """Monitorea Stop Loss, Take Profit HOD y la regla estricta de 9 barras."""
-        cand.bars_in_trade += 1
+        """
+        Monitorea la posición en 3 fases continuas:
+        Fase 1 (IN_TRADE): Scalp inicial hacia HOD con límite de 9 barras (45s).
+                           Al romper HOD -> Venta del 50%, Stop a Breakeven ($0 riesgo) y pasa a Runner 15m.
+        Fase 2 (RUNNER_15M_MODE): Corredor de 15m. Al aplanarse/caer EMA3 15m -> Venta del 60% del runner
+                                  (30% del total inicial) y pasa el 40% a Golden Runner 1H.
+        Fase 3 (GOLDEN_RUNNER_1H_MODE): Corredor de 1H (20% del total inicial). Venta final cuando
+                                        EMA3 1H se aplana o pierde EMA9 1H.
+        Recompras en Dips: Hasta 3 recompras escalonadas en retrocesos a EMA9/20 si 15m/1H es alcista.
+        """
         current_p = bar["close"]
+        if current_p > cand.highest_price_reached:
+            cand.highest_price_reached = current_p
 
-        # A) SALIDA POR STOP LOSS TÉCNICO
+        # A) SALIDA POR STOP LOSS COMÚN (Milimétrico o Breakeven Protegido)
         if current_p <= cand.stop_loss:
-            log_warning(MODULE, f"🛑 [{cand.ticker}] STOP LOSS ALCANZADO (${current_p:.2f} <= ${cand.stop_loss:.2f}). Cerrando posición.")
-            self._close_scalp(cand, reason="STOP_LOSS")
+            is_be = (cand.stop_loss >= cand.entry_price)
+            sl_reason = "BREAKEVEN_PROTECTED" if is_be else "STOP_LOSS"
+            log_warning(MODULE, f"🛑 [{cand.ticker}] {sl_reason} ALCANZADO (${current_p:.2f} <= ${cand.stop_loss:.2f}). Cerrando posición restante ({cand.shares} acc).")
+            self._close_scalp(cand, reason=sl_reason)
             return
 
-        # B) SALIDA POR TAKE PROFIT (Ruptura de High of Day)
-        if current_p >= cand.target_hod * 1.002:
-            log_info(MODULE, f"🎉 [{cand.ticker}] TAKE PROFIT: Ruptura HOD alcanzada (${current_p:.2f} >= ${cand.target_hod:.2f}). Asegurando ganancia.")
-            self._close_scalp(cand, reason="TAKE_PROFIT_HOD")
-            return
+        # ── FASE 1: IN_TRADE (SCALP INICIAL HACIA HOD) ──
+        if cand.phase == "IN_TRADE":
+            cand.bars_in_trade += 1
 
-        # C) REGLA 'BREAKOUT OR BAILOUT' (9 BARRAS DE 5s = 45s)
-        # Si han pasado 9 barras y el precio no ha logrado romper el máximo anterior y muestra debilidad:
-        if cand.bars_in_trade >= MAX_BAILOUT_BARS:
-            if current_p < cand.target_hod:
-                log_info(MODULE, f"⏳ [{cand.ticker}] BREAKOUT OR BAILOUT: Cumplidas {MAX_BAILOUT_BARS} barras (45s) sin romper HOD. Saliendo de inmediato (${current_p:.2f}).")
-                self._close_scalp(cand, reason="BREAKOUT_OR_BAILOUT")
+            # RUPTURA HOD -> TRAMO 1: VENTA DEL 50% Y PASE A RUNNER 15M
+            if current_p >= cand.target_hod * 1.002:
+                self._execute_tramo_1_hod(cand, current_p)
                 return
+
+            # REGLA 'BREAKOUT OR BAILOUT' (9 BARRAS DE 5s = 45s)
+            if cand.bars_in_trade >= MAX_BAILOUT_BARS:
+                if current_p < cand.target_hod:
+                    log_info(MODULE, f"⏳ [{cand.ticker}] BREAKOUT OR BAILOUT: Cumplidas {MAX_BAILOUT_BARS} barras (45s) sin romper HOD. Saliendo de inmediato (${current_p:.2f}).")
+                    self._close_scalp(cand, reason="BREAKOUT_OR_BAILOUT")
+                    return
+
+        # ── FASE 2: RUNNER_15M_MODE (60% DEL RUNNER VENDIDO EN GIRO DE 15M) ──
+        elif cand.phase == "RUNNER_15M_MODE":
+            # 1. Evaluar si hay dip para recompra (máximo 3)
+            self._check_rebuys_on_dip(cand, bar)
+
+            # 2. Evaluar agotamiento en 15m
+            if self._is_15m_trend_exhausted(cand, current_p):
+                self._execute_tramo_2_15m(cand, current_p)
+                return
+
+        # ── FASE 3: GOLDEN_RUNNER_1H_MODE (40% RESTANTE DEL RUNNER VENDIDO EN GIRO DE 1H) ──
+        elif cand.phase == "GOLDEN_RUNNER_1H_MODE":
+            # 1. Evaluar si hay dip para recompra (máximo 3)
+            self._check_rebuys_on_dip(cand, bar)
+
+            # 2. Evaluar agotamiento en 1H
+            if self._is_1h_trend_exhausted(cand, current_p):
+                log_info(MODULE, f"👑 [{cand.ticker}] GOLDEN RUNNER 1H: Giro bajista/plano de EMA3 1H detectado. Cierre final del 100% remanente (${current_p:.2f}).")
+                self._close_scalp(cand, reason="GOLDEN_RUNNER_1H_EXIT")
+                return
+
+    def _execute_tramo_1_hod(self, cand: ScalpCandidateState, current_p: float):
+        """Tramo 1: Vende 50% en la ruptura HOD, bloquea Breakeven y pasa a Runner 15m."""
+        shares_to_sell = max(1, cand.shares // 2)
+        shares_runner = cand.shares - shares_to_sell
+
+        self._send_partial_sell_to_tws(cand, shares_to_sell, "TRAMO_1_HOD_50PCT")
+
+        profit_leg1 = round((current_p - cand.entry_price) * shares_to_sell, 2)
+        cand.realized_scalp_profit += profit_leg1
+        self.daily_cushion_usd += profit_leg1
+
+        if shares_runner > 0:
+            cand.shares = shares_runner
+            cand.stop_loss = round(cand.entry_price + 0.02, 2)  # Breakeven asegurado
+            cand.phase = "RUNNER_15M_MODE"
+            log_info(MODULE, f"🎉 [{cand.ticker}] TRAMO 1 EJECUTADO: 50% vendido ({shares_to_sell} acc @ ${current_p:.2f}). Profit: +${profit_leg1:.2f}. "
+                             f"Stop Loss protegido en Breakeven (${cand.stop_loss:.2f}). Pasando a RUNNER 15m ({shares_runner} acc).")
+        else:
+            self._close_scalp(cand, reason="TAKE_PROFIT_HOD")
+
+    def _execute_tramo_2_15m(self, cand: ScalpCandidateState, current_p: float):
+        """Tramo 2: Vende 60% del runner en giro de 15m y pasa el 40% restante a Golden Runner 1H."""
+        shares_to_sell = max(1, int(round(cand.shares * 0.60)))
+        shares_golden = cand.shares - shares_to_sell
+
+        self._send_partial_sell_to_tws(cand, shares_to_sell, "TRAMO_2_15M_60PCT")
+
+        profit_leg2 = round((current_p - cand.entry_price) * shares_to_sell, 2)
+        cand.realized_scalp_profit += profit_leg2
+        self.daily_cushion_usd += profit_leg2
+
+        if shares_golden > 0:
+            cand.shares = shares_golden
+            cand.phase = "GOLDEN_RUNNER_1H_MODE"
+            log_info(MODULE, f"🏆 [{cand.ticker}] TRAMO 2 EJECUTADO: 60% del runner vendido ({shares_to_sell} acc @ ${current_p:.2f}). Profit: +${profit_leg2:.2f}. "
+                             f"Pasando a GOLDEN RUNNER 1H ({shares_golden} acc restantes).")
+        else:
+            self._close_scalp(cand, reason="RUNNER_15M_EXIT")
+
+    def _send_partial_sell_to_tws(self, cand: ScalpCandidateState, shares: int, reason: str):
+        """Envía una orden parcial de venta a TWS."""
+        ib = get_ib_connection()
+        if ib and ib.connected and shares > 0:
+            from ibapi.order import Order
+            sell_ord = Order()
+            sell_ord.action = "SELL"
+            sell_ord.totalQuantity = shares
+            sell_ord.orderType = "MKT"
+            sell_ord.transmit = True
+
+            sell_id = ib.get_next_order_id()
+            contract = ib.us_stock_contract(cand.ticker)
+            ib.placeOrder(sell_id, contract, sell_ord)
+            log_info(MODULE, f"🔻 [VENTA PARCIAL TWS] SELL {shares}x {cand.ticker} (Razón: {reason})")
+
+    def _is_15m_trend_exhausted(self, cand: ScalpCandidateState, current_p: float) -> bool:
+        """Determina si la tendencia en 15m se agotó (EMA3 plana/descendente o precio bajo EMA9)."""
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            snap = get_live_1h_candle_and_sipv(cand.ticker, current_p)
+            ema9_15m = float(snap.get("ema9_15m_val") or snap.get("ema9_15m") or 0.0)
+            is_above_15m = bool(snap.get("is_ema3_above_ema9_15m", True))
+            if ema9_15m > 0 and current_p < ema9_15m * 0.998:
+                log_info(MODULE, f"📉 [{cand.ticker}] Agotamiento 15m: Precio (${current_p:.2f}) cayó bajo EMA9 15m (${ema9_15m:.2f}).")
+                return True
+            if not is_above_15m:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _is_1h_trend_exhausted(self, cand: ScalpCandidateState, current_p: float) -> bool:
+        """Determina si la tendencia en 1H se agotó (EMA3 1H plana/descendente o precio bajo EMA9 1H)."""
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            snap = get_live_1h_candle_and_sipv(cand.ticker, current_p)
+            is_ema3_asc = bool(snap.get("is_ema3_1h_ascending", True))
+            is_above_ema9 = bool(snap.get("is_ema3_above_ema9", True))
+            ema9_1h = float(snap.get("ema9_1h") or 0.0)
+            slope = float(snap.get("ema3_slope_1h") or 0.0)
+
+            if slope <= 0 or not is_ema3_asc:
+                log_info(MODULE, f"📉 [{cand.ticker}] Agotamiento 1H: EMA3 1H plana o descendente ({slope:+.4f}).")
+                return True
+            if ema9_1h > 0 and current_p < ema9_1h * 0.998:
+                log_info(MODULE, f"📉 [{cand.ticker}] Agotamiento 1H: Precio (${current_p:.2f}) perforó EMA9 1H (${ema9_1h:.2f}).")
+                return True
+            if not is_above_ema9:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _check_rebuys_on_dip(self, cand: ScalpCandidateState, bar: dict):
+        """Evalúa recompras (Scaling-In) en caídas limpias hacia EMA9/20 si la tendencia 15m/1H es alcista."""
+        if cand.rebuys_count >= 3:
+            return
+
+        now_ts = time.time()
+        # Cooldown de 60 segundos entre recompras
+        if now_ts - cand.last_rebuy_ts < 60.0:
+            return
+
+        current_p = bar["close"]
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            snap = get_live_1h_candle_and_sipv(cand.ticker, current_p)
+            
+            is_1h_bull = bool(snap.get("is_ema3_above_ema9", False) and snap.get("is_ema3_1h_ascending", False))
+            is_15m_bull = bool(snap.get("is_ema3_above_ema9_15m", False))
+            
+            # Solo permitir recompra si ambas temporalidades mayores son alcistas
+            if not (is_1h_bull and is_15m_bull):
+                return
+
+            ema9_15 = float(snap.get("ema9_15m_val") or snap.get("ema9_15m") or 0.0)
+            # Rebote en soporte: cerca de EMA9 15m (dentro de 1.5%) y barra 5s verde con mecha inferior
+            is_near_ema9 = (ema9_15 > 0 and abs(current_p - ema9_15) / current_p <= 0.015)
+            is_reversal_bar = bar["is_green"] and (bar["lower_wick_ratio"] >= MIN_LOWER_WICK_RATIO)
+
+            if is_near_ema9 and is_reversal_bar:
+                rebuy_shares = max(1, cand.initial_shares // 4)
+                ib = get_ib_connection()
+                if ib and ib.connected:
+                    limit_p = round(current_p + 0.02, 2)
+                    from ibapi.order import Order
+                    ord_b = Order()
+                    ord_b.action = "BUY"
+                    ord_b.totalQuantity = rebuy_shares
+                    ord_b.orderType = "LMT"
+                    ord_b.lmtPrice = limit_p
+                    ord_b.transmit = True
+
+                    bid = ib.get_next_order_id()
+                    contract = ib.us_stock_contract(cand.ticker)
+                    ib.placeOrder(bid, contract, ord_b)
+
+                    cand.shares += rebuy_shares
+                    cand.rebuys_count += 1
+                    cand.last_rebuy_ts = now_ts
+                    log_info(MODULE, f"🔥 [{cand.ticker}] RECOMPRA EN DIP ({cand.rebuys_count}/3): BUY {rebuy_shares}x @ ${limit_p:.2f} "
+                                     f"(Rebote en EMA9 15m ${ema9_15:.2f}). Total acciones vivas: {cand.shares}.")
+        except Exception as e:
+            log_debug(MODULE, f"Error evaluando recompra para {cand.ticker}: {e}")
 
     def _close_scalp(self, cand: ScalpCandidateState, reason: str):
         """Envía orden de venta de cierre a TWS y resetea estado."""
@@ -386,6 +578,7 @@ class MicroPullbackEngine:
 
         cand.in_trade = False
         cand.phase = "IDLE"
+        cand.shares = 0
         self.active_scalps.pop(cand.ticker, None)
 
         # Actualizar journal y colchón en background

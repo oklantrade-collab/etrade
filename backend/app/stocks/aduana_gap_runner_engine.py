@@ -402,7 +402,9 @@ def evaluate_gap_runner_entry_tranches(
     df_1h: Optional[pd.DataFrame],
     gap_pct: float,
     active_position: Optional[Dict[str, Any]] = None,
-    config: Optional[Dict[str, Any]] = None
+    config: Optional[Dict[str, Any]] = None,
+    has_news: bool = False,
+    catalyst_tier: int = 3
 ) -> Dict[str, Any]:
     """
     Regla 2: Seleccionar solo los OPEN GAP UP del día y evaluar entrada en 3 Tranches.
@@ -431,11 +433,14 @@ def evaluate_gap_runner_entry_tranches(
         "macro_1h_ok": False,
         "rsi_1h": 50.0,
         "room_to_bb_upper_1h": 0.0,
+        "catalyst_priority_pass": False,
     }
 
     if df_5m is None or len(df_5m) < 2:
         res["reason"] = "Datos insuficientes en 5m (mínimo 2 velas requeridas)"
         return res
+
+    is_open_pos = active_position is not None and active_position.get("status") == "open"
 
     c5 = _safe_col(df_5m, "close")
     o5 = _safe_col(df_5m, "open")
@@ -443,19 +448,49 @@ def evaluate_gap_runner_entry_tranches(
     l5 = _safe_col(df_5m, "low")
     v5 = _safe_col(df_5m, "volume")
 
+    # Sincronizar parámetros de catalizador / noticias
+    if config:
+        if "has_news" in config:
+            has_news = bool(config["has_news"])
+        if "catalyst_tier" in config:
+            catalyst_tier = int(config["catalyst_tier"])
+
+    is_tier1_catalyst = bool(
+        (has_news and catalyst_tier in (1, 2))
+        or (config and config.get("is_tier1_catalyst", False))
+    )
+
     cur_p = float(c5.iloc[-1])
     res["entry_price"] = cur_p
 
-    # ── PILAR 1: Ventana Horaria Estricta de Apertura (09:30 - 11:15 ET) ──
+    # ── PILAR 1: Ventana Horaria Estricta de Apertura (09:31 - 11:15 ET) ──
     skip_window = bool(config and config.get("skip_time_window_check"))
     if not skip_window:
+        cfg_et = config.get("current_et_time") if config else None
         et_time = _get_et_hour_min(df_5m)
-        if et_time:
+
+        if cfg_et is not None:
+            if isinstance(cfg_et, tuple):
+                et_h, et_m = cfg_et[0], cfg_et[1]
+            elif hasattr(cfg_et, "hour") and hasattr(cfg_et, "minute"):
+                et_h, et_m = cfg_et.hour, cfg_et.minute
+            else:
+                et_h, et_m = et_time if et_time else (None, None)
+        elif et_time is not None:
             et_h, et_m = et_time
+        else:
+            et_h, et_m = None, None
+
+        if et_h is not None and et_m is not None:
+            # Pausa de Asentamiento de Apertura: 09:30:00 a 09:30:59 ET (Minuto 30)
+            if et_h == 9 and et_m == 30:
+                res["reason"] = "Pausa de Asentamiento de Apertura (09:30 ET): Esperando al minuto 09:31 ET para asentar spreads del Opening Cross..."
+                return res
+
             is_late = (et_h > 11) or (et_h == 11 and et_m > 15)
-            is_early = (et_h < 9) or (et_h == 9 and et_m < 30)
+            is_early = (et_h < 9) or (et_h == 9 and et_m < 31)
             if is_late or is_early:
-                res["reason"] = f"Fuera de ventana de apertura institucional ({et_h:02d}:{et_m:02d} ET no está en 09:30 - 11:15 ET). Entradas en Gaps bloqueadas."
+                res["reason"] = f"Fuera de ventana de apertura institucional ({et_h:02d}:{et_m:02d} ET no está en 09:31 - 11:15 ET). Entradas en Gaps bloqueadas."
                 return res
 
     # ── PILAR 2: Filtro Maestro Sobre VWAP en Entrada (Compras estrictamente sobre VWAP) ──
@@ -463,27 +498,30 @@ def evaluate_gap_runner_entry_tranches(
     if not skip_vwap:
         vwap_series_init = compute_vwap(df_5m)
         cur_vwap_init = float(vwap_series_init.iloc[-1]) if len(vwap_series_init) > 0 else 0.0
-        if cur_vwap_init > 0 and cur_p < (cur_vwap_init * 0.999):
+        if cur_vwap_init > 0 and cur_p < (cur_vwap_init * 0.998):
             res["reason"] = f"Filtro Maestro VWAP: Precio actual (${cur_p:.2f}) cotiza por debajo del VWAP (${cur_vwap_init:.2f}). Compras en largo bloqueadas bajo VWAP."
             return res
 
-    # ── PILAR 2.B: Filtro Anti-Agotamiento RSI 5m y 15m (RSI <= 75.0) ──
-    rsi_5m_series_tr = compute_rsi(c5, period=min(14, len(c5) - 1))
-    rsi_5m_now_tr = float(rsi_5m_series_tr.iloc[-1]) if len(rsi_5m_series_tr) > 0 else 50.0
-    if rsi_5m_now_tr > 75.0:
-        res["reason"] = f"Aduana Anti-Agotamiento 5m: RSI 5m ({rsi_5m_now_tr:.1f} > 75.0). Prohibido comprar clímax de apertura."
-        return res
+    # ── PILAR 2.B: Filtro Anti-Agotamiento RSI 5m y 15m ──
+    if len(df_5m) >= 5:
+        max_rsi_5m = 85.0 if is_tier1_catalyst else 75.0
+        rsi_5m_series_tr = compute_rsi(c5, period=min(14, len(c5) - 1))
+        rsi_5m_now_tr = float(rsi_5m_series_tr.iloc[-1]) if len(rsi_5m_series_tr) > 0 else 50.0
+        if rsi_5m_now_tr > max_rsi_5m:
+            res["reason"] = f"Aduana Anti-Agotamiento 5m: RSI 5m ({rsi_5m_now_tr:.1f} > {max_rsi_5m:.1f}). Prohibido comprar clímax de apertura."
+            return res
 
     if df_15m is not None and len(df_15m) >= 5:
         c15_s = _safe_col(df_15m, "close")
         rsi_15m_s = compute_rsi(c15_s, period=min(14, len(c15_s) - 1))
         rsi_15m_now_tr = float(rsi_15m_s.iloc[-1]) if len(rsi_15m_s) > 0 else 50.0
-        if rsi_15m_now_tr > 75.0:
-            res["reason"] = f"Aduana Anti-Agotamiento 15m: RSI 15m ({rsi_15m_now_tr:.1f} > 75.0). Prohibido comprar en agotamiento."
+        max_rsi_15m = 85.0 if is_tier1_catalyst else 75.0
+        if rsi_15m_now_tr > max_rsi_15m:
+            res["reason"] = f"Aduana Anti-Agotamiento 15m: RSI 15m ({rsi_15m_now_tr:.1f} > {max_rsi_15m:.1f}). Prohibido comprar en agotamiento."
             return res
 
     # ── PILAR 2.C: Filtro ADUANA Daily Runway con Delta RVOL ──
-    skip_runway = bool(config and config.get("skip_daily_runway_check"))
+    skip_runway = bool(config and config.get("skip_daily_runway_check")) or is_tier1_catalyst
     if not skip_runway and not is_open_pos:
         try:
             from app.stocks.alpha_runner_scanner import get_daily_bollinger_metrics
@@ -543,9 +581,15 @@ def evaluate_gap_runner_entry_tranches(
         ema3_above_ema9 = bool(ema3_1h > ema9_1h)
 
         # Regla 2.a: Requisito Mínimo Institucional 1H: (EMA3 > EMA9) Y (RSI < 80.0)
-        # Candado Inviolable 1H: Exige EMA3 > EMA9 estrictamente en 1H
-        meets_1h_req = bool(ema3_above_ema9 and rsi_1h_val < 80.0)
-        has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9
+        # Pase prioritario con catalizador Tier 1/2: Inmune a la inercia de velas 1H previas
+        if is_tier1_catalyst:
+            meets_1h_req = bool(rsi_1h_val < 85.0)
+            res["catalyst_priority_pass"] = True
+            log_info(MODULE, f"🚀 [{ticker}] CATALIZADOR PRIORITARIO (Tier {catalyst_tier}): Pase de ejecución concedido.")
+        else:
+            meets_1h_req = bool(ema3_above_ema9 and rsi_1h_val < 80.0)
+
+        has_bb_room = (open_1h_now < (bb_upper_1h - delta)) or (room_to_bb_upper_pct >= 3.0) or ema3_above_ema9 or is_tier1_catalyst
 
         macro_1h_ok = meets_1h_req
         res["macro_1h_ok"] = macro_1h_ok
@@ -561,7 +605,7 @@ def evaluate_gap_runner_entry_tranches(
             c15_s = _safe_col(df_15m, "close")
             ema3_15 = float(c15_s.ewm(span=3, adjust=False).mean().iloc[-1])
             ema9_15 = float(c15_s.ewm(span=9, adjust=False).mean().iloc[-1])
-            macro_1h_ok = bool(ema3_15 > ema9_15)
+            macro_1h_ok = bool(ema3_15 > ema9_15) if not is_tier1_catalyst else True
             if not macro_1h_ok:
                 res["reason"] = f"Filtro mínimo 15m (Fallback IPO): Requiere EMA3 15m (${ema3_15:.2f}) > EMA9 15m (${ema9_15:.2f})."
                 return res
