@@ -15,6 +15,7 @@ Escanea y clasifica en tiempo real los Top Gainers del mercado estadounidense:
 import time
 import math
 from typing import List, Dict, Any, Optional
+from app.core.market_hours import get_lima_now, get_nyc_now
 from datetime import datetime, timezone
 import pandas as pd
 
@@ -491,7 +492,7 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "articles_count": len(news_info.get("articles", [])),
                 "pool_type": "ALPHA_RUNNER",
                 "source": "live_top_gainers",
-                "last_scan_time": datetime.now(timezone.utc).strftime("%H:%M UTC")
+                "last_scan_time": f"{get_lima_now().strftime('%H:%M')} Lima ({get_nyc_now().strftime('%H:%M')} ET) · {get_lima_now().strftime('%d/%m/%Y')}"
             })
 
     except Exception as e:

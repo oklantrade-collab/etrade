@@ -177,14 +177,21 @@ def universe():
 
 
 @router.post("/catalysts/scan")
-def trigger_catalyst_scan(payload: dict | None = None, user: dict = ceo_only):
-    """Ejecuta el escaneo y arbitraje de los 4 catalizadores (CALL/PUT) para el universo."""
+async def trigger_catalyst_scan(payload: dict | None = None, user: dict = ceo_only):
+    """Ejecuta el escaneo y arbitraje de los 4 catalizadores (CALL/PUT) y pobla opt_candidates."""
     from app.options.catalysts.service import run_catalyst_scan
+    from app.options.stock_driven_options_scanner import run_stock_driven_options_pipeline
+    from app.options.candidates import run_portfolio_selection
     sb = get_supabase()
     stored, _, _ = _load_stored()
     eff = sd.effective_settings(stored)
     custom_tickers = (payload or {}).get("symbols")
     res = run_catalyst_scan(sb, eff=eff, custom_tickers=custom_tickers)
+    try:
+        await run_stock_driven_options_pipeline(symbols=custom_tickers, supabase=sb)
+        run_portfolio_selection(sb, eff, 0)
+    except Exception as pipe_err:
+        log_warning("OPTIONS_API", f"Aviso al ejecutar pipeline de contratos: {pipe_err}")
     return res
 
 
@@ -477,6 +484,36 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
     max_open_risk = float(eff.get("max_open_risk_usd") or 100.0)
     remaining_budget = max(0.0, max_open_risk - allocated_risk)
 
+    from app.core.market_hours import get_lima_now, get_nyc_now, is_market_open, convert_to_lima
+    now_lima = get_lima_now()
+    now_nyc = get_nyc_now()
+    is_open, status_text = is_market_open()
+
+    latest_ts = None
+    if items:
+        latest_ts = items[0].get("created_at") or items[0].get("updated_at")
+
+    if latest_ts:
+        try:
+            dt = datetime.fromisoformat(str(latest_ts).replace("Z", "+00:00"))
+            dt_l = convert_to_lima(dt)
+            dt_ny = dt.astimezone(timezone(timedelta(hours=-4)))
+            last_scan_str = f"{dt_l.strftime('%H:%M')} Lima ({dt_ny.strftime('%H:%M')} ET) · {dt_l.strftime('%d/%m/%Y')}"
+        except Exception:
+            last_scan_str = f"{now_lima.strftime('%H:%M')} Lima ({now_nyc.strftime('%H:%M')} ET) · {now_lima.strftime('%d/%m/%Y')}"
+    else:
+        try:
+            cat_row = sb.table("universe_catalyst_state").select("updated_at").order("updated_at", desc=True).limit(1).execute().data
+            if cat_row and cat_row[0].get("updated_at"):
+                dt = datetime.fromisoformat(str(cat_row[0]["updated_at"]).replace("Z", "+00:00"))
+                dt_l = convert_to_lima(dt)
+                dt_ny = dt.astimezone(timezone(timedelta(hours=-4)))
+                last_scan_str = f"{dt_l.strftime('%H:%M')} Lima ({dt_ny.strftime('%H:%M')} ET) · {dt_l.strftime('%d/%m/%Y')}"
+            else:
+                last_scan_str = f"{now_lima.strftime('%H:%M')} Lima ({now_nyc.strftime('%H:%M')} ET) · {now_lima.strftime('%d/%m/%Y')}"
+        except Exception:
+            last_scan_str = f"{now_lima.strftime('%H:%M')} Lima ({now_nyc.strftime('%H:%M')} ET) · {now_lima.strftime('%d/%m/%Y')}"
+
     return {
         "items": items,
         "summary": {
@@ -498,6 +535,12 @@ def list_opportunities(strategy: str | None = None, direction: str | None = None
             "min_score_setting": eff.get("min_score", 60),
             "max_candidates_per_direction": eff.get("max_candidates_per_direction", 25),
         },
+        "market_status": {
+            "is_open": is_open,
+            "status": status_text,
+            "nyc_time": now_nyc.strftime("%H:%M:%S")
+        },
+        "last_scan_time": last_scan_str,
     }
 
 

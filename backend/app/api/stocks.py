@@ -148,7 +148,8 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                         try:
                             dt = parse_dt(ts)
                             dt_lima = convert_to_lima(dt)
-                            merged["last_scan_time"] = dt_lima.strftime("%H:%M %d/%m/%Y")
+                            dt_nyc = get_nyc_now()
+                            merged["last_scan_time"] = f"{dt_lima.strftime('%H:%M')} Lima ({dt_nyc.strftime('%H:%M')} ET) · {dt_lima.strftime('%d/%m/%Y')}"
                         except:
                             if not merged.get("last_scan_time"):
                                 merged["last_scan_time"] = "--:--"
@@ -484,6 +485,12 @@ async def get_stocks_positions():
                 continue
             log_error("stocks_api", f"Error in get_stocks_positions: {e}")
             return {"positions": [], "error": str(e)}
+
+@router.get("/market-status")
+async def get_market_status_endpoint():
+    """Get precise market status, NYC time and open/close schedule."""
+    from app.core.market_hours import get_market_status_dict
+    return get_market_status_dict()
 
 @router.get("/status")
 async def get_stocks_status():

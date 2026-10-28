@@ -2,6 +2,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import Link from 'next/link'
 import { OptionsShell, optCard } from '@/components/options/OptionsShell'
+import MarketBellButton from '@/components/MarketBellButton'
 
 const STRAT: Record<string, string> = {
   long_call: 'Long Call',
@@ -390,7 +391,7 @@ function Payoff({ data, be }: { data: { price: number; pnl: number }[]; be: numb
 }
 
 export default function OpportunitiesPage() {
-  const [data, setData] = useState<{ items: any[]; summary: any } | null>(null)
+  const [data, setData] = useState<{ items: any[]; summary: any; last_scan_time?: string; market_status?: any } | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
@@ -407,9 +408,30 @@ export default function OpportunitiesPage() {
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped')
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({})
 
+  const getDisplayScanTime = () => {
+    if (data?.last_scan_time) return data.last_scan_time;
+    if (data?.items && data.items.length > 0) {
+      const ts = data.items[0]?.created_at || data.items[0]?.updated_at;
+      if (ts) {
+        try {
+          const d = new Date(ts);
+          const limaStr = d.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Lima' });
+          const nyStr = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
+          const dateStr = d.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Lima' });
+          return `${limaStr} Lima (${nyStr} ET) · ${dateStr}`;
+        } catch (e) {}
+      }
+    }
+    const now = new Date();
+    const limaStr = now.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Lima' });
+    const nyStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'America/New_York' });
+    const dateStr = now.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'America/Lima' });
+    return `${limaStr} Lima (${nyStr} ET) · ${dateStr}`;
+  };
+
   const toggleSymbol = (sym: string) => {
     setExpandedSymbols(prev => ({ ...prev, [sym]: !prev[sym] }))
-  }
+  };
 
   const loadData = async () => {
     setLoading(true)
@@ -577,6 +599,15 @@ export default function OpportunitiesPage() {
             </h1>
             <span style={{ fontSize: 10, padding: '3px 10px', borderRadius: 20, background: 'rgba(34,197,94,0.15)', color: '#22C55E', fontWeight: 800, border: '1px solid rgba(34,197,94,0.3)' }}>
               ARBITRAJE ADX & SIPV 1H
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '10px', background: (data?.market_status?.is_open ?? true) ? '#22C55E' : '#EF4444', color: '#000', padding: '1px 8px', borderRadius: '4px', fontWeight: 950, textTransform: 'uppercase' }}>
+              {(data?.market_status?.is_open ?? true) ? '🟢' : '🔴'} MERCADO {data?.market_status?.status || 'ABIERTO'}
+            </span>
+            <MarketBellButton />
+            <span style={{ fontSize: '10px', color: '#888', fontWeight: 700 }}>
+              ÚLTIMO PROCESO: <span style={{ color: '#22C55E' }}>{getDisplayScanTime()}</span>
             </span>
           </div>
           <p style={{ color: '#777', fontSize: 12, margin: '4px 0 0 0' }}>

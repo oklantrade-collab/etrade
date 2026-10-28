@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import TradeMarkerChart from '@/components/TradeMarkerChart'
 import toast from 'react-hot-toast'
+import MarketBellButton from '@/components/MarketBellButton'
 
 // ════════════════════════════════════════════
 // APEX Priority Queue Panel
@@ -1372,6 +1373,22 @@ function TabButton({ label, active, onClick, count }: any) {
     return ( <button onClick={onClick} style={{ background: active ? '#161922' : 'transparent', color: active ? '#22C55E' : '#666', border: active ? '1px solid rgba(34,197,94,0.3)' : 'none', padding: '8px 20px', borderRadius: '10px', cursor: 'pointer', fontSize: '12px', fontWeight: 900, display: 'flex', alignItems: 'center', gap: '8px' }}>{label}<span style={{ fontSize: '9px', background: active ? 'rgba(34,197,94,0.2)' : 'rgba(255,255,255,0.05)', padding: '2px 6px', borderRadius: '4px', color: active ? '#22C55E' : '#555' }}>{count}</span></button> )
 }
 
+
+function formatLastScanTime(raw?: string): string {
+  if (!raw || raw === '--:--' || raw === 'RECIBIENDO...') return raw || 'RECIBIENDO...';
+  if (raw.includes('UTC')) {
+    const match = raw.match(/(\d{1,2}):(\d{2})/);
+    if (match) {
+      const utcHours = parseInt(match[1], 10);
+      const utcMins = parseInt(match[2], 10);
+      const limaHours = (utcHours - 5 + 24) % 24;
+      const nycHours = (utcHours - 4 + 24) % 24;
+      const today = new Date().toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' });
+      return `${String(limaHours).padStart(2, '0')}:${String(utcMins).padStart(2, '0')} Lima (${String(nycHours).padStart(2, '0')}:${String(utcMins).padStart(2, '0')} ET) · ${today}`;
+    }
+  }
+  return raw;
+}
 export default function OpportunitiesIntelligence() {
   const [opportunities, setOpportunities] = useState<any[]>([])
   const [total, setTotal] = useState(0)
@@ -1603,9 +1620,10 @@ export default function OpportunitiesIntelligence() {
                <span style={{ fontSize: '10px', background: marketStatus.is_open ? '#22C55E' : '#EF4444', color: '#000', padding: '1px 8px', borderRadius: '4px', fontWeight: 950, textTransform: 'uppercase' }}>
                 {marketStatus.is_open ? '🟢' : '🔴'} MERCADO {marketStatus.status}
               </span>
+              <MarketBellButton />
               {opportunities.length > 0 && (
                 <span style={{ fontSize: '10px', color: '#888', fontWeight: 700 }}>
-                  ÚLTIMO PROCESO: <span style={{ color: '#22C55E' }}>{opportunities[0].last_scan_time || 'RECIBIENDO...'}</span>
+                  ÚLTIMO PROCESO: <span style={{ color: '#22C55E' }}>{formatLastScanTime(opportunities[0].last_scan_time)}</span>
                 </span>
               )}
           </div>

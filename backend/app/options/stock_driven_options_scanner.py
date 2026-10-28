@@ -87,11 +87,6 @@ def evaluate_stock_for_options_triggers(
         return res
 
     # ─────────────────────────────────────────────────────────────
-    # 1. STRUCTURAL REGIME ENGINE & NIVELES ESTRUCTURALES
-    # ─────────────────────────────────────────────────────────────
-    st_reg = evaluate_structural_regime(df_1d, df_15m, df_5m)
-    regime_code = st_reg.get("regime_code", "UNKNOWN")
-
     c15 = _safe_col(df_15m, "close")
     o15 = _safe_col(df_15m, "open")
     h15 = _safe_col(df_15m, "high")
@@ -104,6 +99,11 @@ def evaluate_stock_for_options_triggers(
     v5 = _safe_col(df_5m, "volume")
 
     cur_price = float(c5.iloc[-1])
+
+    # 1. STRUCTURAL REGIME ENGINE & NIVELES ESTRUCTURALES
+    # ─────────────────────────────────────────────────────────────
+    st_reg = evaluate_structural_regime(symbol, cur_price, df_1d=df_1d, df_intraday=df_15m)
+    regime_code = st_reg.get("regime_code", "UNKNOWN")
     c5_last = float(c5.iloc[-1])
     o5_last = float(o5.iloc[-1])
     is_candle_green_5m = c5_last >= o5_last

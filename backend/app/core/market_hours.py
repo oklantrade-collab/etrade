@@ -1,11 +1,17 @@
+from zoneinfo import ZoneInfo
 from datetime import datetime, time, timezone, timedelta
 
+try:
+    NYC_TZ = ZoneInfo("America/New_York")
+except Exception:
+    NYC_TZ = None
+
 def get_nyc_now():
-    # UTC Now
+    if NYC_TZ:
+        return datetime.now(NYC_TZ)
+    # Fallback to UTC-4
     utc_now = datetime.now(timezone.utc)
-    # Estimate NYC time (UTC-4 for EDT)
-    nyc_now = utc_now - timedelta(hours=4)
-    return nyc_now
+    return utc_now - timedelta(hours=4)
 
 def get_lima_now():
     """Returns current time in Lima (UTC-5)."""
@@ -75,11 +81,15 @@ def get_market_status_dict():
     is_open, status_text = is_market_open()
     now = get_nyc_now()
     
+    # Calculate regular market open and close times today
     return {
         "is_open": is_open,
         "status": status_text,
         "nyc_time": now.strftime("%H:%M:%S"),
-        "date": now.strftime("%Y-%m-%d")
+        "date": now.strftime("%Y-%m-%d"),
+        "open_time": "09:30:00",
+        "close_time": "16:00:00",
+        "is_trading_day": now.weekday() <= 4 and ("Feriado" not in status_text)
     }
 
 def is_forex_market_open() -> bool:

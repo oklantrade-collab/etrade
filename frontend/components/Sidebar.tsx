@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { logoutUser } from '@/lib/api-client'
 import toast from 'react-hot-toast'
+import MarketBellButton from './MarketBellButton'
 import { useState, useEffect } from 'react'
 
 
@@ -127,6 +128,9 @@ export default function Sidebar({ isOpen, onClose }: { isOpen?: boolean, onClose
       </nav>
 
       <div className="mt-auto border-t border-[var(--border-color)] p-5 bg-[var(--bg-secondary)]">
+        <div className="mb-3">
+          <MarketBellButton />
+        </div>
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-3">
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />

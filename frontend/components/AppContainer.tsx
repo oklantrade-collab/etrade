@@ -2,6 +2,8 @@
 import React from 'react'
 import { usePathname } from 'next/navigation'
 import Sidebar from './Sidebar'
+import { MarketBellProvider } from '@/context/MarketBellContext'
+import MarketBellModal from './MarketBellModal'
 
 export default function AppContainer({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
@@ -21,7 +23,7 @@ export default function AppContainer({ children }: { children: React.ReactNode }
   }
 
   return (
-    <>
+    <MarketBellProvider>
       <div className="mobile-top-nav md:hidden">
         <h1 className="text-xl font-black italic tracking-tighter bg-linear-to-r from-indigo-400 to-purple-500 bg-clip-text text-transparent">eTrader</h1>
         <button 
@@ -46,6 +48,7 @@ export default function AppContainer({ children }: { children: React.ReactNode }
       <main className="main-content">
         {children}
       </main>
-    </>
+      <MarketBellModal />
+    </MarketBellProvider>
   )
 }
