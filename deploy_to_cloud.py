@@ -313,10 +313,26 @@ files_to_sync = [
     "sql/opt_010_complementary_architecture.sql",
     "apply_migration_opt_010.py",
     "app/tests/test_options_complementary_architecture.py",
+    # MICRO PULLBACKS SCALPER & STOCKS
+    "app/stocks/micro_pullback_engine.py",
+    "app/stocks/micro_pullback_scanner.py",
+    "app/options/broker_sync.py",
+    "app/core/market_hours.py",
+    "app/api/stocks.py",
+    "tests/test_micro_pullback_engine.py",
 ]
 
 # Archivos frontend para sincronizar (relativos a root)
 frontend_files = [
+    ("frontend/components/AppContainer.tsx", "frontend/components/AppContainer.tsx"),
+    ("frontend/components/MarketBellButton.tsx", "frontend/components/MarketBellButton.tsx"),
+    ("frontend/components/MarketBellModal.tsx", "frontend/components/MarketBellModal.tsx"),
+    ("frontend/context/MarketBellContext.tsx", "frontend/context/MarketBellContext.tsx"),
+    ("frontend/lib/audio/marketBell.ts", "frontend/lib/audio/marketBell.ts"),
+    ("frontend/lib/marketSchedule.ts", "frontend/lib/marketSchedule.ts"),
+    ("frontend/public/sounds/market-bell-chime.wav", "frontend/public/sounds/market-bell-chime.wav"),
+    ("frontend/public/sounds/market-bell-close.wav", "frontend/public/sounds/market-bell-close.wav"),
+    ("frontend/public/sounds/market-bell-open.wav", "frontend/public/sounds/market-bell-open.wav"),
     ("frontend/app/halcon/page.tsx", "frontend/app/halcon/page.tsx"),
     ("frontend/components/HalconConfigModal.tsx", "frontend/components/HalconConfigModal.tsx"),
     ("frontend/components/widgets/CascadaWidget.tsx", "frontend/components/widgets/CascadaWidget.tsx"),
@@ -394,7 +410,10 @@ def ensure_remote_directories():
         f"{ROOT_REMOTE_PATH}/frontend/app/options/positions",
         f"{ROOT_REMOTE_PATH}/frontend/app/options/universe",
         f"{ROOT_REMOTE_PATH}/frontend/components/options",
-        f"{ROOT_REMOTE_PATH}/frontend/components/widgets"
+        f"{ROOT_REMOTE_PATH}/frontend/components/widgets",
+        f"{ROOT_REMOTE_PATH}/frontend/context",
+        f"{ROOT_REMOTE_PATH}/frontend/lib/audio",
+        f"{ROOT_REMOTE_PATH}/frontend/public/sounds"
     ]
     mkdir_cmd = f"mkdir -p {' '.join(dirs)}"
     cmd = [
