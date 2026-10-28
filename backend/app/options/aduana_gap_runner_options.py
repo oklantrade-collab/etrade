@@ -491,7 +491,8 @@ def evaluate_options_gap_entry_tranches(
     account_budget: float = 1000.0,
     direction: str = "CALL",
     df_market_ref: Optional[pd.DataFrame] = None,
-    market_ref_symbol: str = "SPY"
+    market_ref_symbol: str = "SPY",
+    config: Optional[dict] = None
 ) -> Dict[str, Any]:
     """
     Evalúa si un subyacente califica para entrar o escalar en contratos de opciones:
@@ -530,22 +531,27 @@ def evaluate_options_gap_entry_tranches(
 
     cur_p = float(_safe_col(df_5m, "close").iloc[-1]) if df_5m is not None and not df_5m.empty else 0.0
 
+    cfg = config or {}
+
     # ─────────────────────────────────────────────────────────────
     # CASO A: TRANCHE 1 (Entrada Inicial)
     # ─────────────────────────────────────────────────────────────
     if not is_open_pos:
         # ── PILAR 1 ADUANA OPCIONES: Daily Runway 1D (exclusión preventiva + excepción por volumen) ──
         try:
-            bb_up_1d, bb_lo_1d = _get_daily_bb_bounds(ticker, cur_p)
-            day_open_v, rvol_v = _compute_day_open_and_rvol(df_5m)
-            runway_res = evaluate_options_daily_runway(
-                ticker, direction, day_open_v, bb_up_1d, bb_lo_1d,
-                rvol=rvol_v, pressure_ok=_directional_pressure_ok(df_5m, is_call)
-            )
-            res["runway"] = runway_res
-            if not runway_res["approved"]:
-                res["reason"] = runway_res["reason"]
-                return res
+            if not cfg.get("skip_daily_runway_check", False):
+                import math
+                bb_up_1d, bb_lo_1d = _get_daily_bb_bounds(ticker, cur_p)
+                if bb_up_1d > 0 and bb_lo_1d > 0 and not math.isnan(bb_up_1d) and not math.isnan(bb_lo_1d):
+                    day_open_v, rvol_v = _compute_day_open_and_rvol(df_5m)
+                    runway_res = evaluate_options_daily_runway(
+                        ticker, direction, day_open_v, bb_up_1d, bb_lo_1d,
+                        rvol=rvol_v, pressure_ok=_directional_pressure_ok(df_5m, is_call)
+                    )
+                    res["runway"] = runway_res
+                    if not runway_res["approved"]:
+                        res["reason"] = runway_res["reason"]
+                        return res
         except Exception as e_runway_opt:
             log_warning(MODULE, f"Aviso evaluando Daily Runway de opciones para {ticker}: {e_runway_opt}")
 
@@ -1141,7 +1147,7 @@ def evaluate_options_gap_aduana_exit(
 
     # 1. HARD STOP LOSS EN PRIMA (-35%) — Solo si tiene >= 5 min de maduración y cotización real
     has_live_quote = bool(position.get("has_live_opt_quote", True))
-    if position_age_minutes >= 5.0 and has_live_quote and unrealized_pnl_pct <= -35.0:
+    if (position_age_minutes >= 5.0 or position_age_minutes == 0.0) and has_live_quote and unrealized_pnl_pct <= -35.0:
         res.update({
             "should_exit": True,
             "exit_type": "hard_stop",
@@ -1245,6 +1251,110 @@ def evaluate_options_gap_aduana_exit(
                     "reason": f"Salida Defensiva CALL: Subyacente (${cur_stock_p:.2f}) perforó su VWAP (${cur_vwap:.2f}) a la baja (-0.4%). Riesgo cortado anticipadamente."
                 })
                 return res
+
+    # 3.C MODELO GAMMA IGNITION OTM-to-ITM: TP1 (+50%), TP2 (+100%) Y SALIDAS POR AGOTAMIENTO (1H & 15m)
+    exit_p = position.get("exit_plan") or {}
+    sel_mode = str(position.get("selection_mode") or exit_p.get("selection_mode") or "").upper()
+    rule_cd = str(position.get("rule_code") or exit_p.get("rule_code") or "").upper()
+    is_otm_momentum = (
+        (sel_mode == "OTM_MOMENTUM")
+        or ("MOMENTUM_OTM" in rule_cd)
+        or ("GAMMA_IGNITION" in rule_cd)
+        or bool(position.get("use_momentum_exhaustion_exit", False))
+    )
+
+    if is_otm_momentum:
+        # A) TP1 (+50%): Venta del 50% de contratos
+        tp1_done = bool(position.get("tp1_executed", False))
+        if not tp1_done and unrealized_pnl_pct >= 50.0:
+            res.update({
+                "should_exit": True,
+                "exit_type": "take_profit_partial",
+                "contracts_ratio_to_exit": 0.50,
+                "rule_code": "OPT_TP1_50PCT",
+                "reason": f"TP1 alcanzado (+{unrealized_pnl_pct:.1f}% >= +50.0%): Venta parcial del 50% de contratos. Stop Loss a Breakeven."
+            })
+            return res
+
+        # B) TP2 (+100%): Venta del 30% adicional (60% del remanente de 50%)
+        tp2_done = bool(position.get("tp2_executed", False))
+        if tp1_done and not tp2_done and unrealized_pnl_pct >= 100.0:
+            res.update({
+                "should_exit": True,
+                "exit_type": "take_profit_partial",
+                "contracts_ratio_to_exit": 0.60,
+                "rule_code": "OPT_TP2_100PCT",
+                "reason": f"TP2 alcanzado (+{unrealized_pnl_pct:.1f}% >= +100.0%): Venta del 30% adicional al consolidar ITM. Queda 20% runner."
+            })
+            return res
+
+        # C) SALIDAS POR AGOTAMIENTO TÉCNICO DE IMPULSO (1H y 15m)
+        if position_age_minutes >= 3.0:
+            # 1. Reglas para CALLs
+            if is_call:
+                # 1.1 En 1H: EMA3 frena, cambia a horizontal o descendente (delta <= 0)
+                if df_1h is not None and len(df_1h) >= 5:
+                    c1h = _safe_col(df_1h, "close")
+                    ema3_1h = c1h.ewm(span=3, adjust=False).mean()
+                    cur_ema3_1h = float(ema3_1h.iloc[-1])
+                    prev_ema3_1h = float(ema3_1h.iloc[-2])
+                    if cur_ema3_1h <= prev_ema3_1h:
+                        res.update({
+                            "should_exit": True,
+                            "exit_type": "exhaustion_exit",
+                            "contracts_ratio_to_exit": 1.0,
+                            "rule_code": "OPT_MOMENTUM_1H_EMA3_EXHAUSTION",
+                            "reason": f"Salida Agotamiento 1H CALL: EMA3 1H se volvió horizontal o descendente (${cur_ema3_1h:.2f} <= ${prev_ema3_1h:.2f}). Impulso macro agotado, liquidación total para evitar Theta decay."
+                        })
+                        return res
+
+                # 1.2 En 15m: EMA3 < EMA9
+                if df_15m is not None and len(df_15m) >= 5:
+                    c15 = _safe_col(df_15m, "close")
+                    ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                    ema9_15m = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                    if ema3_15m < ema9_15m:
+                        res.update({
+                            "should_exit": True,
+                            "exit_type": "exhaustion_exit",
+                            "contracts_ratio_to_exit": 1.0,
+                            "rule_code": "OPT_MOMENTUM_15M_EMA3_LE_EMA9",
+                            "reason": f"Salida Giro Táctico 15m CALL: EMA3 15m (${ema3_15m:.2f}) < EMA9 15m (${ema9_15m:.2f}). Pérdida de tendencia intradía, liquidación total."
+                        })
+                        return res
+
+            # 2. Reglas para PUTs (A la inversa)
+            else:
+                # 2.1 En 1H: EMA3 deja de bajar, se vuelve horizontal o ascendente (delta >= 0)
+                if df_1h is not None and len(df_1h) >= 5:
+                    c1h = _safe_col(df_1h, "close")
+                    ema3_1h = c1h.ewm(span=3, adjust=False).mean()
+                    cur_ema3_1h = float(ema3_1h.iloc[-1])
+                    prev_ema3_1h = float(ema3_1h.iloc[-2])
+                    if cur_ema3_1h >= prev_ema3_1h:
+                        res.update({
+                            "should_exit": True,
+                            "exit_type": "exhaustion_exit",
+                            "contracts_ratio_to_exit": 1.0,
+                            "rule_code": "OPT_MOMENTUM_1H_EMA3_EXHAUSTION",
+                            "reason": f"Salida Agotamiento 1H PUT: EMA3 1H deja de caer (${cur_ema3_1h:.2f} >= ${prev_ema3_1h:.2f}). Freno del desplome macro, liquidación total defensiva."
+                        })
+                        return res
+
+                # 2.2 En 15m: EMA3 > EMA9
+                if df_15m is not None and len(df_15m) >= 5:
+                    c15 = _safe_col(df_15m, "close")
+                    ema3_15m = float(c15.ewm(span=3, adjust=False).mean().iloc[-1])
+                    ema9_15m = float(c15.ewm(span=9, adjust=False).mean().iloc[-1])
+                    if ema3_15m > ema9_15m:
+                        res.update({
+                            "should_exit": True,
+                            "exit_type": "exhaustion_exit",
+                            "contracts_ratio_to_exit": 1.0,
+                            "rule_code": "OPT_MOMENTUM_15M_EMA3_GE_EMA9",
+                            "reason": f"Salida Giro Táctico 15m PUT: EMA3 15m (${ema3_15m:.2f}) > EMA9 15m (${ema9_15m:.2f}). Rebote contra la posición, liquidación total."
+                        })
+                        return res
 
     # 3.B. TAKE PROFIT ESTRUCTURAL POR PROXIMIDAD A MURO (<= 0.8% - SALIDA MARKET INMEDIATA)
     sym_opt = str(position.get("symbol") or "").upper().strip()

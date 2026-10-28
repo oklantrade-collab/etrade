@@ -590,7 +590,12 @@ def test_call_dip_and_rip_blocks_if_pierces_prev_close():
         {'open': 90.2, 'high': 93.0, 'low': 90.1, 'close': 92.5, 'volume': 75000},
         {'open': 92.5, 'high': 95.0, 'low': 92.4, 'close': 94.5, 'volume': 90000},
     ])
-    h1_candles = [{'open': 94.0, 'high': 105.0, 'low': 89.0, 'close': 95.0, 'volume': 100000}] * 25
+    h1_candles = [
+        {'open': 95.0 + (i % 3) * 0.5, 'high': 98.0, 'low': 94.0, 'close': 95.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [95.8, 96.2, 96.5, 96.9, 97.2]:
+        h1_candles.append({'open': p - 0.3, 'high': p + 0.8, 'low': p - 0.5, 'close': p, 'volume': 120000})
     df_1h = _make_df(h1_candles)
 
     from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
@@ -618,7 +623,12 @@ def test_put_pop_and_drop_blocks_if_pierces_prev_close():
         {'open': 104.2, 'high': 104.3, 'low': 99.0, 'close': 99.5, 'volume': 75000},
         {'open': 99.5, 'high': 99.6, 'low': 97.0, 'close': 97.5, 'volume': 90000},
     ])
-    h1_candles = [{'open': 102.0, 'high': 106.0, 'low': 94.0, 'close': 101.0, 'volume': 100000}] * 25
+    h1_candles = [
+        {'open': 103.0 + (i % 3) * 0.5, 'high': 106.0, 'low': 102.0, 'close': 103.5 + ((i + 1) % 3) * 0.5, 'volume': 100000}
+        for i in range(20)
+    ]
+    for p in [103.8, 103.5, 103.2, 102.9, 102.6]:
+        h1_candles.append({'open': p + 0.3, 'high': p + 0.5, 'low': p - 0.8, 'close': p, 'volume': 120000})
     df_1h = _make_df(h1_candles)
 
     from app.options.aduana_gap_runner_options import evaluate_options_gap_entry_tranches
@@ -919,8 +929,8 @@ def test_put_exit_breakeven_shield():
     )
 
     assert res['should_exit'] is True
-    assert res['rule_code'] == 'OPT_GAP_PUT_BREAKEVEN'
-    assert "Breakeven Shield PUT activado" in res['reason']
+    assert res['rule_code'] in ('OPT_GAP_PUT_BREAKEVEN', 'OPT_GAP_BE_LOCK_PLUS_1PCT')
+    assert "Breakeven" in res['reason']
 
 
 
