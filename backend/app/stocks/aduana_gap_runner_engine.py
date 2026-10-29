@@ -1003,7 +1003,7 @@ def evaluate_gap_runner_aduana_exit(
     if not is_opt3_gap_position(position):
         return _evaluate_gap_runner_legacy_exit(position, current_price, df_5m, df_15m, df_1h, df_1d)
 
-    opt3_res = evaluate_gap_opt3_exit(position, current_price, df_5m=df_5m, df_15m=df_15m, df_1h=df_1h)
+    opt3_res = evaluate_gap_opt3_exit(position, current_price, df_5m=df_5m, df_15m=df_15m, df_1h=df_1h, df_1d=df_1d)
     try:
         legacy_res = _evaluate_gap_runner_legacy_exit(dict(position), current_price, df_5m, df_15m, df_1h, df_1d)
         log_legacy_shadow(position, opt3_res, legacy_res)

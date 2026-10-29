@@ -1387,6 +1387,61 @@ def evaluate_aduana_stocks_exit(
             'reason': f"Hard-Exit EOD (15:50 ET): Liquidación forzosa incondicional del 100% para erradicar riesgo nocturno/dilución ({gain_pct:+.2f}% / ${pnl_usd:+.2f} USD)."
         }
 
+    # ── 0.02 PROTOCOLO GOLDEN HOUR EOD (15:00 a 15:50 ET) PARA GANANCIA >= +5.0% ──
+    try:
+        from datetime import time as dt_time
+        from zoneinfo import ZoneInfo
+        ref_dt = now_dt or datetime.now(timezone.utc)
+        ny_dt = ref_dt.astimezone(ZoneInfo('America/New_York')) if getattr(ref_dt, 'tzinfo', None) else ref_dt
+        cur_t = ny_dt.time() if hasattr(ny_dt, 'time') else None
+        is_wkday = getattr(ny_dt, 'weekday', lambda: 0)() < 5 if callable(getattr(ny_dt, 'weekday', None)) else True
+
+        if is_wkday and cur_t is not None and gain_pct >= 5.0 and dt_time(15, 0) <= cur_t < dt_time(15, 50):
+            gh_tp_done = bool(position.get("golden_hour_tp_executed") or position.get("tp_block1_executed"))
+            # Fase 1: 15:00 a 15:30 ET -> Toma parcial 50%
+            if dt_time(15, 0) <= cur_t < dt_time(15, 30) and not gh_tp_done:
+                shares_50 = max(1, int(shares * 0.50))
+                return {
+                    'should_close': True,
+                    'action': 'CLOSE_PARTIAL_50',
+                    'shares_to_close': shares_50,
+                    'pct_to_close': 50,
+                    'rule_code': 'ADUANA_STK_GOLDEN_HOUR_TP50',
+                    'gain_pct': round(gain_pct, 2),
+                    'pnl_usd': round(pnl_usd, 2),
+                    'reason': f"Golden Hour Fase 1 (15:00-15:30 ET): Venta parcial 50% asegurando +{gain_pct:.2f}% (>= +5.0%). Remanente con trailing ceñido."
+                }
+            # Fase 2: 15:30 a 15:50 ET -> Debilidad en 5m
+            elif dt_time(15, 30) <= cur_t < dt_time(15, 50):
+                is_weak = False
+                weak_msg = ""
+                if df_5m is not None and len(df_5m) >= 3:
+                    c5 = _safe_col(df_5m, 'close')
+                    if len(c5) >= 3:
+                        e3_5 = c5.ewm(span=3, adjust=False).mean()
+                        cur_e3 = float(e3_5.iloc[-1])
+                        prev_e3 = float(e3_5.iloc[-2])
+                        c_last = float(c5.iloc[-1])
+                        if cur_e3 <= prev_e3:
+                            is_weak = True
+                            weak_msg = f"EMA3(5m) descendente/plana (${cur_e3:.2f} <= ${prev_e3:.2f})"
+                        elif c_last < cur_e3:
+                            is_weak = True
+                            weak_msg = f"Close(5m) ${c_last:.2f} < EMA3 ${cur_e3:.2f}"
+                if is_weak:
+                    return {
+                        'should_close': True,
+                        'action': 'CLOSE_TOTAL',
+                        'shares_to_close': shares,
+                        'pct_to_close': 100,
+                        'rule_code': 'ADUANA_STK_GOLDEN_HOUR_WEAKNESS',
+                        'gain_pct': round(gain_pct, 2),
+                        'pnl_usd': round(pnl_usd, 2),
+                        'reason': f"Golden Hour Fase 2 (15:30-15:50 ET): {weak_msg} con profit +{gain_pct:.2f}%. Liquidando remanente."
+                    }
+    except Exception as e_gh:
+        log_warning(MODULE, f"Error en Golden Hour EOD evaluation: {e_gh}")
+
     # ── 0.05 EVALUACIÓN PRIORITARIA FAST-TRACK IPO SUPER-RUNNER & ALPHA RUNNERS ──
     group_name = str(position.get('group_name', '') or position.get('pool_type', '')).upper()
     rule_pos = str(position.get('rule_code', '') or position.get('strategy', '')).upper()

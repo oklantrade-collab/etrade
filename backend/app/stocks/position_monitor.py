@@ -84,11 +84,8 @@ class PositionMonitor:
         stocks_config = {r["key"]: r["value"] for r in (config_res.data or [])}
 
         for trade in active.data:
-            group = str(trade.get("group_name", "") or trade.get("pool_type", "")).upper()
-            rule = str(trade.get("rule_code", "") or trade.get("strategy", "")).upper()
-            pnl_pct = safe_float(trade.get("unrealized_pnl_pct", 0.0))
-            if "ALPHA" in group or "ALPHA" in rule or "PULLBACK" in rule or pnl_pct >= 1.5 or pnl_pct <= -1.5:
-                await self._check_position(trade, stocks_config)
+            # Universal: monitorear TODAS las posiciones abiertas sin sesgo de filtros para ejecutar salidas intraminuto
+            await self._check_position(trade, stocks_config)
 
     async def _check_position(self, trade: dict, stocks_config: dict):
         """Check a single position for exit conditions."""
@@ -140,16 +137,64 @@ class PositionMonitor:
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", trade["id"]).execute()
 
-            # ── 1. PROTECCIÓN EOD (Fin de Día a las 15:50 ET - Cero Retención Nocturna) ──
+            # ── 1. PROTECCIÓN EOD GOLDEN HOUR (15:00 a 15:55 ET) & CIERRE DURO (15:50 ET) ──
             from app.core.market_hours import get_nyc_now
+            from datetime import time as dt_time
             nyc_now = get_nyc_now()
-            is_eod_window = nyc_now.weekday() < 5 and (nyc_now.hour > 15 or (nyc_now.hour == 15 and nyc_now.minute >= 50))
+            is_weekday = nyc_now.weekday() < 5
+            cur_t = nyc_now.time()
+
+            # 1.1 HARD-EXIT INCONDICIONAL 15:50+ ET (Cero Retención Nocturna)
+            is_eod_window = is_weekday and (nyc_now.hour > 15 or (nyc_now.hour == 15 and nyc_now.minute >= 50))
             if is_eod_window:
                 allow_ah = str(stocks_config.get("allow_after_hours", "false")).lower() == "true"
-                if not allow_ah or pnl_pct < 0 or trade.get('erep_active'):
+                if not allow_ah or pnl_pct >= 0 or pnl_pct < 0 or trade.get('erep_active'):
                     log_warning(MODULE, f"⏰ EOD HARD-EXIT (15:50+ ET): {ticker} cerrando al 100% para evitar riesgo nocturno. PnL: {pnl_pct:+.2f}%")
                     await self._close_position(trade, current_price, "eod_hard_exit_1550")
                     return
+
+            # 1.2 GOLDEN HOUR HARVEST (15:00 a 15:50 ET) PARA POSICIONES CON GANANCIA >= +5.0%
+            if is_weekday and pnl_pct >= 5.0 and dt_time(15, 0) <= cur_t < dt_time(15, 50):
+                gh_tp_done = bool(trade.get("golden_hour_tp_executed") or trade.get("tp_block1_executed"))
+                if dt_time(15, 0) <= cur_t < dt_time(15, 30) and not gh_tp_done:
+                    shares_total = int(safe_float(trade.get("shares") or 0))
+                    rem_sh = int(safe_float(trade.get("shares_remaining") or shares_total))
+                    shares_to_sell = max(1, int(shares_total * 0.50))
+                    if rem_sh - shares_to_sell >= 1:
+                        log_warning(MODULE, f"🌅 [GOLDEN HOUR FASE 1] {ticker}: Tomando 50% de ganancia (+{pnl_pct:.2f}% >= +5.0%). Venta de {shares_to_sell} acciones.")
+                        await self._execute_partial_close(trade, current_price, shares_to_sell, "golden_hour_tp50", f"Golden Hour 15:00-15:30 ET (+{pnl_pct:.2f}%)")
+                        sb.table("stocks_positions").update({
+                            "tp_block1_executed": True,
+                            "golden_hour_tp_executed": True,
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", trade["id"]).execute()
+                        trade["tp_block1_executed"] = True
+                        trade["golden_hour_tp_executed"] = True
+
+                elif dt_time(15, 30) <= cur_t < dt_time(15, 50):
+                    # Fase 2: liquidar ante debilidad en última media hora
+                    import yfinance as yf_gh
+                    gh_t = yf_gh.Ticker(ticker)
+                    gh_5m = gh_t.history(period="1d", interval="5m")
+                    is_weak = False
+                    weak_msg = ""
+                    if not gh_5m.empty and len(gh_5m) >= 3:
+                        c5_gh = _safe_col(gh_5m, 'close')
+                        if len(c5_gh) >= 3:
+                            e3_5_gh = c5_gh.ewm(span=3, adjust=False).mean()
+                            cur_e3 = float(e3_5_gh.iloc[-1])
+                            prev_e3 = float(e3_5_gh.iloc[-2])
+                            c_last = float(c5_gh.iloc[-1])
+                            if cur_e3 <= prev_e3:
+                                is_weak = True
+                                weak_msg = f"EMA3(5m) descendente/plana (${cur_e3:.2f} <= ${prev_e3:.2f})"
+                            elif c_last < cur_e3:
+                                is_weak = True
+                                weak_msg = f"Close(5m) ${c_last:.2f} < EMA3 ${cur_e3:.2f}"
+                    if is_weak:
+                        log_warning(MODULE, f"🌅 [GOLDEN HOUR FASE 2] {ticker}: Debilidad ({weak_msg}) con profit +{pnl_pct:.2f}%. Liquidando remanente antes del cierre.")
+                        await self._close_position(trade, current_price, "golden_hour_weakness_exit")
+                        return
 
             # ── 1.2 AUTO-REPAIR / AUTO-ESTABLECER PARÁMETROS DE RIESGO SI FALTAN ──
             sl_val = safe_float(trade.get("stop_loss"))
@@ -457,9 +502,13 @@ class PositionMonitor:
 
             # Si el nivel propuesto supera el SL actual y está por debajo del precio actual:
             if opt3_gap:
-                # OPT3: anula los ratchets universales (+10%/+25%/+50%, BB floor, régimen 1H, alpha TSL, 1H);
-                # el SL solo lo mueve gap_exit_opt3 (Ratchet BE +1% y trailing EMA9 15m).
-                proposed_sl = cur_sl
+                # OPT3: gap_exit_opt3 maneja los tramos y ratchets; si hubo un pico explosivo (>=25% o 40%), asegurar al menos el piso protegido
+                if peak_gain_pct >= 40.0:
+                    proposed_sl = max(cur_sl, round(highest * 0.80, 2))
+                elif peak_gain_pct >= 25.0:
+                    proposed_sl = max(cur_sl, round(entry_price * 1.15, 2))
+                else:
+                    proposed_sl = cur_sl
             if proposed_sl > cur_sl and proposed_sl < current_price:
                 sb.table("stocks_positions").update({
                     "stop_loss": proposed_sl,
@@ -637,6 +686,7 @@ class PositionMonitor:
                         df_5m=hist_5m,
                         df_1h=hist_1h,
                         df_4h=hist_4h,
+                        df_1d=hist_1d,
                         rvol=rvol,
                         sar_15m=snap_val.get('sar_trend_15m', 1)
                     )

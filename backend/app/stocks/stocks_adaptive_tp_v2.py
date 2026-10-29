@@ -480,6 +480,7 @@ def evaluate_stock_tp_v2(
     df_5m:         pd.DataFrame = None,
     df_1h:         pd.DataFrame = None,
     df_4h:         pd.DataFrame = None,
+    df_1d:         pd.DataFrame = None,
     rvol:          float = 1.0,
     sar_15m:       int   = 1,
 ) -> dict:
@@ -496,7 +497,7 @@ def evaluate_stock_tp_v2(
             from app.stocks.aduana_gap_runner_engine import evaluate_gap_runner_aduana_exit
             o3 = evaluate_gap_runner_aduana_exit(
                 position=position, current_price=current_price,
-                df_5m=df_5m, df_15m=df_15m, df_1h=df_1h, df_1d=None
+                df_5m=df_5m, df_15m=df_15m, df_1h=df_1h, df_1d=df_1d
             )
             new_sl = o3.get('new_stop_loss')
             if new_sl:

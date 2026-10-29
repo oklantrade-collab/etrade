@@ -32,17 +32,18 @@ MODULE = "GAP_EXIT_OPT3"
 
 T1_PCT = 0.25
 T2_PCT = 0.50
-T1_RSI_1H = 85.0
-T2_RSI_1H = 90.0
-TSL_GRACE_MINUTES = 30      # velas elegibles: las que abren >= 30 min tras la vela de entrada
+T1_RSI_1H = 75.0        # Calibrado a sobrecompra institucional real (antes 85.0)
+T2_RSI_1H = 80.0        # Calibrado a clímax macro (antes 90.0)
+CLIMAX_RSI_15M = 80.0   # Clímax agudo de sobrecompra en 15m
+TSL_GRACE_MINUTES = 30  # velas elegibles: las que abren >= 30 min tras la vela de entrada
 BE_TRIGGER_PCT = 4.0
 BE_LOCK_MULT = 1.01
 CANDLE_MINUTES = 15
 
 
 def get_gap_exit_model() -> str:
-    """Modelo de salida activo para posiciones GAP: 'OPT3' (por defecto) o 'LEGACY'."""
-    return str(os.getenv("GAP_EXIT_MODEL", "OPT3")).strip().upper()
+    """Modelo de salida activo para posiciones GAP: 'OPT3' o 'LEGACY' (por defecto 'LEGACY')."""
+    return str(os.getenv("GAP_EXIT_MODEL", "LEGACY")).strip().upper()
 
 
 def is_opt3_gap_position(position: Dict[str, Any]) -> bool:
@@ -54,9 +55,9 @@ def is_opt3_gap_position(position: Dict[str, Any]) -> bool:
         group_nm = str(position.get("group_name") or position.get("pool_type") or "").upper()
         if any(k in strat or k in group_nm for k in ("GAP", "ALPHA", "RUNNER", "IPO", "HOT", "FAST", "IB_PAPER")):
             return True
-        return int(position.get("reentry_count") or 0) > 0 or True
+        return int(position.get("reentry_count") or 0) > 0
     except Exception:
-        return True
+        return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -177,6 +178,7 @@ def evaluate_gap_opt3_exit(
     df_5m: Optional[pd.DataFrame] = None,
     df_15m: Optional[pd.DataFrame] = None,
     df_1h: Optional[pd.DataFrame] = None,
+    df_1d: Optional[pd.DataFrame] = None,
     now: Optional[pd.Timestamp] = None,
 ) -> Dict[str, Any]:
     """
@@ -197,6 +199,72 @@ def evaluate_gap_opt3_exit(
     cur_sl = float(position.get("stop_loss") or 0.0)
     if remaining <= 0 or avg_price <= 0:
         return res
+
+    # ── PROTOCOLO GOLDEN HOUR EOD (15:00 a 15:55 ET) ──
+    # Para cualquier posición con ganancia >= +5.0%: asegurar ganancias y cero retención overnight.
+    pnl_pct = ((current_price - avg_price) / avg_price) * 100.0 if avg_price > 0 else 0.0
+    from app.core.market_hours import get_nyc_now
+    nyc_now = get_nyc_now() if now is None else (now.tz_convert("America/New_York") if getattr(now, "tzinfo", None) else now)
+    is_weekday = getattr(nyc_now, "weekday", lambda: 0)() < 5 if callable(getattr(nyc_now, "weekday", None)) else True
+    t_cur = getattr(nyc_now, "time", lambda: None)() if callable(getattr(nyc_now, "time", None)) else None
+
+    if is_weekday and t_cur is not None and pnl_pct >= 5.0:
+        from datetime import time as dt_time
+        # Fase 3: 15:50 a 16:05 ET -> Cierre forzoso 100% incondicional
+        if dt_time(15, 50) <= t_cur <= dt_time(16, 5):
+            res.update({
+                "should_exit": True, "exit_type": "full", "action": "sell",
+                "rule_code": "ADUANA_GOLDEN_HOUR_EOD_HARD100",
+                "shares_to_exit": remaining, "pct": 100,
+                "reason": f"Golden Hour EOD (15:50+ ET): Liquidación 100% (+{pnl_pct:.2f}% >= +5.0%). Cero retención overnight.",
+            })
+            return res
+
+        # Fase 2: 15:30 a 15:50 ET -> Debilidad en 5m liquida el remanente
+        elif dt_time(15, 30) <= t_cur < dt_time(15, 50):
+            is_weak_5m = False
+            weak_reason = ""
+            if df_5m is not None and len(df_5m) >= 3:
+                c5 = _col(df_5m, "close")
+                if len(c5) >= 3:
+                    e3_5 = c5.ewm(span=3, adjust=False).mean()
+                    e9_5 = c5.ewm(span=9, adjust=False).mean()
+                    cur_e3_5 = float(e3_5.iloc[-1])
+                    prev_e3_5 = float(e3_5.iloc[-2])
+                    cur_e9_5 = float(e9_5.iloc[-1])
+                    c_5_last = float(c5.iloc[-1])
+                    if cur_e3_5 <= prev_e3_5:
+                        is_weak_5m = True
+                        weak_reason = f"EMA3(5m) descendente/plana (${cur_e3_5:.2f} <= ${prev_e3_5:.2f})"
+                    elif c_5_last < cur_e3_5:
+                        is_weak_5m = True
+                        weak_reason = f"Close(5m) ${c_5_last:.2f} < EMA3 ${cur_e3_5:.2f}"
+                    elif cur_e3_5 < cur_e9_5:
+                        is_weak_5m = True
+                        weak_reason = f"EMA3(5m) < EMA9(5m)"
+
+            if is_weak_5m:
+                res.update({
+                    "should_exit": True, "exit_type": "full", "action": "sell",
+                    "rule_code": "ADUANA_GOLDEN_HOUR_EXIT_WEAKNESS",
+                    "shares_to_exit": remaining, "pct": 100,
+                    "reason": f"Golden Hour Fase 2 (15:30-15:50 ET): {weak_reason} con profit +{pnl_pct:.2f}%. Liquidando remanente.",
+                })
+                return res
+
+        # Fase 1: 15:00 a 15:30 ET -> Toma parcial 50% inmediata si no se ha ejecutado
+        elif dt_time(15, 0) <= t_cur < dt_time(15, 30):
+            gh_done = bool(position.get("golden_hour_tp_executed") or position.get("tp_block1_executed"))
+            if not gh_done:
+                n = max(1, int(shares0 * 0.50))
+                if remaining - n >= 1:
+                    res.update({
+                        "should_exit": True, "exit_type": "partial", "action": "sell",
+                        "rule_code": "ADUANA_GOLDEN_HOUR_TP50", "tp_block": "block1",
+                        "shares_to_exit": n, "pct": 50,
+                        "reason": f"Golden Hour Fase 1 (15:00-15:30 ET): Asegurando 50% de ganancia (+{pnl_pct:.2f}% >= +5.0%).",
+                    })
+                    return res
 
     # Si df_5m tiene una vela en vivo más reciente y current_price venía de un snapshot desactualizado,
     # priorizar el cierre real de 5m para jamás disparar un falso Stop Loss con un precio viejo.
@@ -248,17 +316,54 @@ def evaluate_gap_opt3_exit(
         })
         return res
 
-    # 3/4) Tramos por RSI 1H / Clímax Macro (1H derivada de las 15m cerradas)
+    # 3/4) Tramos por RSI 1H / Clímax Macro / Bandas Fibonacci
     h1 = live_1h_from_15m(d15)
     rsi1h = _rsi_wilder(h1["close"]) if len(h1) >= 2 else 50.0
     res["rsi_1h"] = round(rsi1h, 1)
+    rsi15m = _rsi_wilder(d15["close"]) if len(d15) >= 2 else 50.0
+    res["rsi_15m"] = round(rsi15m, 1)
+
     bb1h_up = float(_bb_upper(h1["close"]).iloc[-1]) if len(h1) >= 1 else float("inf")
     h1_high = float(h1["high"].iloc[-1]) if len(h1) >= 1 else 0.0
-    climax = (rsi1h >= T2_RSI_1H) and (h1_high >= bb1h_up)
+    climax_macro = (rsi1h >= T2_RSI_1H) and (h1_high >= bb1h_up)
+
+    # Evaluación de Bandas Fibonacci UPPER_5 / UPPER_6 (15m y 1D)
+    from app.strategy.panic_recovery_gate import calculate_fibonacci_bands
+    fib_15m = calculate_fibonacci_bands(d15, current_price) if len(d15) >= 15 else {}
+    u5_15m = float(fib_15m.get("upper_5", float("inf")))
+    u6_15m = float(fib_15m.get("upper_6", float("inf")))
+
+    u5_1d = float("inf")
+    u6_1d = float("inf")
+    if df_1d is not None and len(df_1d) >= 15:
+        fib_1d = calculate_fibonacci_bands(df_1d, current_price)
+        u5_1d = float(fib_1d.get("upper_5", float("inf")))
+        u6_1d = float(fib_1d.get("upper_6", float("inf")))
+
+    hit_upper6 = (current_price >= u6_15m * 0.998) or (current_price >= u6_1d * 0.998)
+    hit_upper5 = (current_price >= u5_15m * 0.998) or (current_price >= u5_1d * 0.998)
+    hit_rsi15_climax = (rsi15m >= CLIMAX_RSI_15M)
 
     t1_done = bool(position.get("tp_block1_executed"))
     t2_done = bool(position.get("tp_block2_executed"))
 
+    # Gatillo Clímax Mayor (UPPER_6 o Clímax Macro 1H) -> Toma 50%
+    if (not t2_done) and (climax_macro or (hit_upper6 and pnl_pct >= 5.0)):
+        n = max(1, int(shares0 * T2_PCT))
+        if remaining - n >= 1:
+            climax_reason = (
+                f"Clímax Fibonacci UPPER_6: precio ${current_price:.2f}" if hit_upper6 else
+                f"Clímax Macro 1H: RSI 1H={rsi1h:.1f} >= {T2_RSI_1H:.0f} y High 1H ${h1_high:.2f} >= BB sup ${bb1h_up:.2f}"
+            )
+            res.update({
+                "should_exit": True, "exit_type": "partial", "action": "sell",
+                "rule_code": "ADUANA_GAP_OPT3_T2_50_CLIMAX", "tp_block": "block2",
+                "shares_to_exit": n, "pct": int(T2_PCT * 100),
+                "reason": f"OPT3 Tramo 2 (50%): {climax_reason} (+{pnl_pct:.2f}%).",
+            })
+            return res
+
+    # Gatillo Tramo 1 Clásico (RSI 1H >= 75) -> Toma 25%
     if (not t1_done) and rsi1h >= T1_RSI_1H:
         n = max(1, int(shares0 * T1_PCT))
         if remaining - n >= 1:
@@ -269,28 +374,53 @@ def evaluate_gap_opt3_exit(
                 "reason": f"OPT3 Tramo 1 (25%): RSI 1H = {rsi1h:.1f} >= {T1_RSI_1H:.0f}",
             })
             return res
-    if (not t2_done) and climax:
-        n = max(1, int(shares0 * T2_PCT))
+
+    # Gatillo Clímax Intradía (UPPER_5 o RSI 15m >= 80) -> Toma Clímax 50%
+    if (not t1_done) and (hit_upper5 or hit_rsi15_climax):
+        pct_take = 0.50
+        n = max(1, int(shares0 * pct_take))
         if remaining - n >= 1:
+            t1_reason = (
+                f"RSI 15m Clímax ({rsi15m:.1f} >= {CLIMAX_RSI_15M:.0f})" if hit_rsi15_climax else
+                f"Toque Fibonacci UPPER_5 (${current_price:.2f})"
+            )
             res.update({
                 "should_exit": True, "exit_type": "partial", "action": "sell",
-                "rule_code": "ADUANA_GAP_OPT3_T2_50_CLIMAX", "tp_block": "block2",
-                "shares_to_exit": n, "pct": int(T2_PCT * 100),
-                "reason": (f"OPT3 Tramo 2 (50%) Clímax Macro 1H: RSI 1H = {rsi1h:.1f} >= {T2_RSI_1H:.0f} "
-                           f"y High 1H ${h1_high:.2f} >= BB sup. 1H ${bb1h_up:.2f}"),
+                "rule_code": "ADUANA_GAP_OPT3_T1_CLIMAX", "tp_block": "block1",
+                "shares_to_exit": n, "pct": int(pct_take * 100),
+                "reason": f"OPT3 Tramo Clímax ({int(pct_take*100)}%): {t1_reason} (+{pnl_pct:.2f}%).",
             })
             return res
 
-    # 5) Actualización de stops: Ratchet BE + trailing EMA9 15m
+    # 5) Actualización de stops: Ratchet BE + trailing EMA9 15m + Ratchets Progresivos
     best_sl, best_rule, best_reason = cur_sl, "", ""
     highest = float(position.get("highest_price_reached") or current_price)
     highest = max(highest, current_price)
     gain_peak = (highest - avg_price) / avg_price * 100.0
+
     if gain_peak >= BE_TRIGGER_PCT:
         be = round(avg_price * BE_LOCK_MULT, 2)
         if be > best_sl and be < current_price:
             best_sl, best_rule = be, "ADUANA_GAP_OPT3_BE_RATCHET"
             best_reason = f"OPT3 Ratchet BE: pico +{gain_peak:.1f}% >= +{BE_TRIGGER_PCT:.0f}% => SL entrada +1% (${be:.2f})"
+
+    if gain_peak >= 10.0:
+        lock10 = round(avg_price * 1.05, 2)
+        if lock10 > best_sl and lock10 < current_price:
+            best_sl, best_rule = lock10, "ADUANA_GAP_OPT3_RATCHET_10"
+            best_reason = f"OPT3 Ratchet +10%: pico +{gain_peak:.1f}% => SL +5% (${lock10:.2f})"
+
+    if gain_peak >= 25.0:
+        lock25 = round(avg_price * 1.15, 2)
+        if lock25 > best_sl and lock25 < current_price:
+            best_sl, best_rule = lock25, "ADUANA_GAP_OPT3_RATCHET_25"
+            best_reason = f"OPT3 Ratchet +25%: pico +{gain_peak:.1f}% => SL +15% (${lock25:.2f})"
+
+    if gain_peak >= 40.0:
+        lock80 = round(highest * 0.80, 2)
+        if lock80 > best_sl and lock80 < current_price:
+            best_sl, best_rule = lock80, "ADUANA_GAP_OPT3_RATCHET_40"
+            best_reason = f"OPT3 Ratchet +40%: pico +{gain_peak:.1f}% => SL 80% del pico (${lock80:.2f})"
 
     ema9 = d15["close"].ewm(span=9, adjust=False).mean()
     if len(ema9) >= 2 and float(ema9.iloc[-1]) > float(ema9.iloc[-2]):
