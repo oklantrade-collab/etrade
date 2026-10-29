@@ -22,7 +22,9 @@ from typing import Dict, Any, Optional
 
 from app.core.logger import log_info, log_warning, log_error
 from app.core.supabase_client import get_supabase
+from app.core.structural_regime_engine import evaluate_structural_regime
 from app.options.opt_contract_picker import fetch_and_select_best_option_contract
+from app.options.exit_engine import is_ticker_in_options_cooldown
 
 MODULE = "AUTONOMOUS_OPT_DISPATCHER"
 
@@ -90,6 +92,25 @@ def dispatch_autonomous_option_trade(
             log_info(MODULE, f"⏸️ Omitiendo despacho para {ticker}: Ya hay una orden de opción en vuelo ({len(orders_check.data)} pendientes).")
             return {"success": False, "reason": f"Orden de opción ya en vuelo para {ticker}"}
 
+        # c) Verificar Cooldown Dinámico tras Stop Loss (evita re-comprar de inmediato en el ciclo fallido)
+        in_cd, cd_msg = is_ticker_in_options_cooldown(ticker, opt_dir)
+        if in_cd:
+            log_info(MODULE, f"⏸️ Omitiendo despacho para {ticker} ({opt_dir}): {cd_msg}")
+            return {"success": False, "reason": f"Cooldown tras Stop Loss: {cd_msg}"}
+
+        # ── 1.2 EVALUACIÓN SISTÉMICA DE RÉGIMEN ESTRUCTURAL (REGLAS 1, 2, 3, 4) ──
+        st_reg = evaluate_structural_regime(ticker, underlying_price)
+        if opt_dir == "CALL":
+            if not st_reg.get("can_enter_call", True):
+                veto_reason = st_reg.get("call_veto_reason") or "Filtro 1D no superado para CALL"
+                log_info(MODULE, f"⛔ {ticker} (CALL) BLOQUEADO por Régimen Estructural: {veto_reason}")
+                return {"success": False, "reason": f"Régimen Estructural: {veto_reason}"}
+        else:
+            if not st_reg.get("can_enter_put", True):
+                veto_reason = st_reg.get("put_veto_reason") or "Filtro 1D no superado para PUT"
+                log_info(MODULE, f"⛔ {ticker} (PUT) BLOQUEADO por Régimen Estructural: {veto_reason}")
+                return {"success": False, "reason": f"Régimen Estructural: {veto_reason}"}
+
         # ── 1.5 GATEKEEPER ADUANA OPCIONES (Daily Runway 1D + RSI MTF + EMA3/EMA9 en 1H) ──
         # Ante un error de datos/red no se bloquea (fail-open con aviso); ante una decisión clara sí.
         try:
@@ -102,16 +123,17 @@ def dispatch_autonomous_option_trade(
         except Exception as e_gate:
             log_warning(MODULE, f"Aviso evaluando Gatekeeper ADUANA Opciones para {ticker}: {e_gate}")
 
-        # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO ──
+        # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO (TRANCHE 1: 30% DEL PRESUPUESTO) ──
         selection_mode = str(candidate.get("selection_mode", "GAP_RUNNER"))
-        budget_usd = float(cfg.get("options_trade_budget_usd", 1000.0))
-        log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} [Modo: {selection_mode}] (Spot: ${underlying_price:.2f}, Budget: ${budget_usd:.0f})...")
+        total_budget_usd = float(cfg.get("options_trade_budget_usd", 1000.0))
+        budget_tranche_1 = round(total_budget_usd * 0.30, 2)
+        log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} [Modo: {selection_mode}] (Spot: ${underlying_price:.2f}, Tranche 1 (30%): ${budget_tranche_1:.0f} de ${total_budget_usd:.0f})...")
 
         best_contract, rej_reasons = fetch_and_select_best_option_contract(
             symbol=ticker,
             underlying_price=underlying_price,
             direction=opt_dir,
-            budget_usd=budget_usd,
+            budget_usd=budget_tranche_1,
             supabase=sb,
             selection_mode=selection_mode
         )
@@ -158,6 +180,11 @@ def dispatch_autonomous_option_trade(
                 "target_floor": candidate.get("tactical_target_floor"),
                 "rule_code": rule_code,
                 "selection_mode": selection_mode,
+                "total_budget_usd": total_budget_usd,
+                "tranche_1_budget_usd": budget_tranche_1,
+                "rebuys_count": 0,
+                "regime_code": st_reg.get("regime_code"),
+                "structural_setup_type": st_reg.get("call_setup_type" if opt_dir == "CALL" else "put_setup_type"),
                 "tp1_target_premium": round(opt_price * 1.50, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
                 "tp2_target_premium": round(opt_price * 2.00, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
                 "hard_sl_premium": round(opt_price * 0.65, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,

@@ -43,6 +43,7 @@ import numpy as np
 from app.core.logger import log_info, log_warning, log_error
 from app.core.supabase_client import get_supabase
 from app.core.market_hours import is_market_open
+from app.core.structural_regime_engine import evaluate_structural_regime
 from app.data.yfinance_provider import YFinanceProvider
 from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
 from app.options.opt_contract_picker import fetch_and_select_best_option_contract
@@ -201,13 +202,14 @@ def evaluate_intraday_momentum_breakout(
     df_5m: pd.DataFrame,
     df_15m: pd.DataFrame,
     df_1h: Optional[pd.DataFrame] = None,
+    df_1d: Optional[pd.DataFrame] = None,
     is_ema3_above_ema9_1h: Optional[bool] = None,
     catalyst_bonus: float = 0.0,
     catalyst_tag: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Evalúa si un activo presenta ruptura de momentum intradía (ORB + VWAP + Volumen)
-    con alineación de tendencia 1H (Fail-Closed).
+    con alineación de tendencia 1H y validación de Reglas Maestras Estructurales 1D.
     """
     sym = symbol.strip().upper()
     res: Dict[str, Any] = {
@@ -242,6 +244,9 @@ def evaluate_intraday_momentum_breakout(
     open_last_5m = float(o5.iloc[-1])
     is_green_5m = current_price >= open_last_5m
     is_red_5m = current_price <= open_last_5m
+
+    # 0. Validación de Régimen Estructural (Reglas Maestras 1, 2, 3, 4)
+    st_reg = evaluate_structural_regime(sym, current_price, df_1d=df_1d, df_1h=df_1h)
 
     # 1. Rango de Apertura 15M (ORB)
     orb_high_15m = float(h15.iloc[0])
@@ -278,6 +283,7 @@ def evaluate_intraday_momentum_breakout(
     # b) Ruptura o test firme de ORB High (Precio >= ORB High * 0.998)
     # c) Sobre VWAP
     # d) Vela 5m verde y volumen acelerando
+    # e) Reglas Maestras Estructurales 1D aprobadas
     if (
         ema_1h_state is True
         and current_price >= (orb_high_15m * 0.998)
@@ -285,6 +291,11 @@ def evaluate_intraday_momentum_breakout(
         and is_green_5m
         and (volume_burst_5m or rvol_est >= 1.4 or catalyst_bonus > 0.0)
     ):
+        if not st_reg.get("can_enter_call", True):
+            call_veto = st_reg.get("call_veto_reason") or "Bloqueado por Reglas Maestras Estructurales 1D"
+            res["reason"] = f"{sym}: CALL bloqueado por Régimen Estructural ({call_veto})"
+            return res
+
         score = 70.0
         triggers = ["ORB_15M_BREAKOUT", "VWAP_SUPPORT", "1H_EMA3_GT_EMA9"]
         if current_price > orb_high_15m:
@@ -308,6 +319,7 @@ def evaluate_intraday_momentum_breakout(
             "direction": "CALL",
             "score": round(score, 1),
             "triggers": triggers,
+            "regime_info": st_reg,
             "reason": f"Impulso Alcista ORB 15M + VWAP ($ {current_price:.2f} >= ORB ${orb_high_15m:.2f}) con 1H EMA3>EMA9 y RVOL={rvol_est:.1f}x",
             "metrics": {
                 "price": current_price,
@@ -326,6 +338,7 @@ def evaluate_intraday_momentum_breakout(
     # b) Ruptura o test firme de ORB Low (Precio <= ORB Low * 1.002)
     # c) Bajo VWAP
     # d) Vela 5m roja y volumen acelerando
+    # e) Reglas Maestras Estructurales 1D aprobadas
     if (
         ema_1h_state is False
         and current_price <= (orb_low_15m * 1.002)
@@ -333,6 +346,11 @@ def evaluate_intraday_momentum_breakout(
         and is_red_5m
         and (volume_burst_5m or rvol_est >= 1.4 or catalyst_bonus > 0.0)
     ):
+        if not st_reg.get("can_enter_put", True):
+            put_veto = st_reg.get("put_veto_reason") or "Bloqueado por Reglas Maestras Estructurales 1D"
+            res["reason"] = f"{sym}: PUT bloqueado por Régimen Estructural ({put_veto})"
+            return res
+
         score = 70.0
         triggers = ["ORB_15M_BREAKDOWN", "VWAP_RESISTANCE", "1H_EMA3_LE_EMA9"]
         if current_price < orb_low_15m:

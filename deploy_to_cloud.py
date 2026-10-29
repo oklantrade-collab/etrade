@@ -39,6 +39,7 @@ files_to_sync = [
     "tests/test_radar_service.py",
     "tests/test_cascada_engine.py",
     "tests/test_panic_recovery_and_shield.py",
+    "tests/test_options_regime_and_exit_overhaul.py",
 
     # REBOTE / ADUANA
     "app/rebote_aduana/__init__.py",

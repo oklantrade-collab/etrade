@@ -57,20 +57,33 @@ class SelectedContract:
 
 def calculate_tranche_allocation(target_contracts: int) -> Tuple[int, int, int, str]:
     """
-    Calcula la distribución de contratos en tranches según la cantidad total disponible.
-    - >= 3 contratos: 3 Tranches (33.3%, 33.3%, 33.4%).
+    Calcula la distribución de contratos en tranches según la cantidad total disponible:
+    - >= 3 contratos: 3 Tranches (30% T1, 40% T2, 30% T3).
     - 2 contratos: 2 Tranches del 50% (1 en T1, 1 en T2).
     - 1 contrato: Single Tranche (1 en T1).
     """
     if target_contracts >= 3:
-        t1 = max(1, target_contracts // 3)
-        t2 = max(1, target_contracts // 3)
-        t3 = target_contracts - t1 - t2
-        return t1, t2, t3, "3_TRANCHES"
+        t1 = max(1, round(target_contracts * 0.30))
+        t2 = max(1, round(target_contracts * 0.40))
+        t3 = max(0, target_contracts - t1 - t2)
+        return t1, t2, t3, "3_TRANCHES_30_40_30"
     elif target_contracts == 2:
         return 1, 1, 0, "2_TRANCHES"
     else:
         return 1, 0, 0, "SINGLE"
+
+
+def calculate_3tranche_allocation(total_budget: float) -> Tuple[float, float, float]:
+    """
+    Distribuye el presupuesto monetario total en 3 tranches:
+    - Tranche 1: 30% (Entrada inicial)
+    - Tranche 2: 40% (Recompra en soporte / retroceso con tendencia intacta)
+    - Tranche 3: 30% (Recompra secundaria en soporte estructural)
+    """
+    t1 = round(total_budget * 0.30, 2)
+    t2 = round(total_budget * 0.40, 2)
+    t3 = round(total_budget - t1 - t2, 2)
+    return t1, t2, t3
 
 
 def select_best_option_contract(
@@ -118,20 +131,11 @@ def select_best_option_contract(
 
         dte = (exp_date - ref_date).days
 
-        if is_otm_momentum:
-            # En OTM Momentum scalping/daytrading queremos contratos semanales inmediatos (0 a 8 DTE)
-            if dte < 0 or dte > 8:
-                continue
-        else:
-            # Weekend Theta Shield para Swing / Gap Runner:
-            weekday = ref_date.weekday()
-            if weekday in (3, 4) and dte <= 4:
-                rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): Rechazado por Weekend Theta Shield (DTE={dte} <= 4 en fin de semana)")
-                continue
-
-            # Filtro DTE general para Gap Runner: entre 3 y 21 días
-            if dte < 3 or dte > 21:
-                continue
+        # ── FILTRO DTE INSTITUCIONAL (10 a 21-25 DÍAS) ──
+        # Se erradican contratos de 0 a 7 DTE que se desangran por Theta decay en retrocesos normales.
+        if dte < 10 or dte > 25:
+            rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): DTE={dte} fuera del rango institucional blindado (10 a 21-25 días)")
+            continue
 
         # Obtener cotizaciones latest
         ql = c.get("opt_quotes_latest") or c
@@ -152,16 +156,16 @@ def select_best_option_contract(
         mid = round((bid + ask) / 2.0, 4)
         spread_rel = ((ask - bid) / mid) * 100.0
 
-        # En modo OTM_MOMENTUM se aplica spread institucional estricto <= 3.5%
-        eff_max_spread = 3.5 if is_otm_momentum else max_spread_pct
+        # Spread institucional blindado: <= 5.0% (o <= $0.10 si prima < $2.00)
+        eff_max_spread = min(5.0, max_spread_pct)
         if spread_rel > eff_max_spread:
-            # Si la prima es económica (< $2.00) y el spread absoluto es <= $0.05, tolerar
-            if not (mid < 2.0 and round(ask - bid, 4) <= 0.05):
+            if not (mid < 2.0 and round(ask - bid, 4) <= 0.10):
                 rejection_reasons.append(f"Strike {strike} {right}: Spread excesivo {spread_rel:.1f}% > {eff_max_spread}%")
                 continue
 
-        if oi < min_open_interest and vol < min_volume:
-            rejection_reasons.append(f"Strike {strike} {right}: Poca liquidez (OI={oi}, Vol={vol})")
+        # Liquidez de contratos: Open Interest >= 100 (o >= 50 con volumen >= 20)
+        if oi < 100 and (oi < min_open_interest or vol < min_volume):
+            rejection_reasons.append(f"Strike {strike} {right}: Poca liquidez (OI={oi} < 100, Vol={vol} < {min_volume})")
             continue
 
         # 2. Delta estimado o provisto
@@ -319,21 +323,13 @@ def fetch_and_select_best_option_contract(
             rejection_reasons.append(f"{sym}: No tiene opciones disponibles en mercado.")
             return None, rejection_reasons
 
-        # Filtrar vencimientos según selection_mode
-        if selection_mode.upper() == "OTM_MOMENTUM":
-            valid_exps = [e for e in all_exps if 0 <= (date.fromisoformat(e) - ref_date).days <= 8]
-            if not valid_exps:
-                valid_exps = [e for e in all_exps if 0 <= (date.fromisoformat(e) - ref_date).days <= 14]
-            if not valid_exps:
-                rejection_reasons.append(f"{sym}: No hay vencimientos semanales disponibles en rango DTE (0-8d).")
-                return None, rejection_reasons
-        else:
-            valid_exps = [e for e in all_exps if 2 <= (date.fromisoformat(e) - ref_date).days <= 21]
-            if not valid_exps:
-                valid_exps = [e for e in all_exps if 1 <= (date.fromisoformat(e) - ref_date).days <= 30]
-            if not valid_exps:
-                rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango DTE (2-21d).")
-                return None, rejection_reasons
+        # Filtrar vencimientos institucionales blindados: DTE entre 10 y 21 días (máx 25)
+        valid_exps = [e for e in all_exps if 10 <= (date.fromisoformat(e) - ref_date).days <= 25]
+        if not valid_exps:
+            valid_exps = [e for e in all_exps if 8 <= (date.fromisoformat(e) - ref_date).days <= 30]
+        if not valid_exps:
+            rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango institucional DTE (10-25d).")
+            return None, rejection_reasons
 
         is_call = direction.upper() in ("CALL", "BULLISH")
         target_right = "C" if is_call else "P"

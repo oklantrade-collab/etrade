@@ -36,6 +36,7 @@ def _calculate_indicators_from_df(df: pd.DataFrame, current_price: float) -> Dic
     c = df["Close"] if "Close" in df.columns else (df["close"] if "close" in df.columns else df.iloc[:, -2])
     h = df["High"] if "High" in df.columns else (df["high"] if "high" in df.columns else c)
     l = df["Low"] if "Low" in df.columns else (df["low"] if "low" in df.columns else c)
+    o = df["Open"] if "Open" in df.columns else (df["open"] if "open" in df.columns else c)
 
     # EMAs
     ema3 = float(c.ewm(span=3, adjust=False).mean().iloc[-1])
@@ -78,6 +79,10 @@ def _calculate_indicators_from_df(df: pd.DataFrame, current_price: float) -> Dic
         "atr_1d": round(atr14, 2),
         "ema200_slope": round(ema200_slope, 4),
         "candles_count": len(df),
+        "high_1d": round(float(h.iloc[-1]), 2),
+        "low_1d": round(float(l.iloc[-1]), 2),
+        "close_1d": round(float(c.iloc[-1]), 2),
+        "open_1d": round(float(o.iloc[-1]), 2),
     }
 
 
@@ -123,21 +128,211 @@ def fetch_daily_metrics(ticker: str, current_price: float, df_1d: Optional[pd.Da
     return fallback
 
 
+def validate_macro_1d_alignment(direction: str, metrics: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Regla Maestra 1: Tendencia Limpia 1D
+    - CALL: EMA3 > EMA9 > EMA20 en gráfico de 1 Día.
+    - PUT:  EMA3 < EMA9 < EMA20 en gráfico de 1 Día.
+    """
+    ema3 = float(metrics.get("ema3") or 0.0)
+    ema9 = float(metrics.get("ema9") or 0.0)
+    ema20 = float(metrics.get("ema20") or 0.0)
+
+    if ema3 <= 0 or ema9 <= 0 or ema20 <= 0:
+        return False, "Métricas 1D incompletas para validar alineación macro"
+
+    d = direction.upper()
+    if d in ("CALL", "BULLISH", "LONG"):
+        if ema3 > ema9 > ema20:
+            return True, f"Regla 1 CALL Válida: EMA3 (${ema3:.2f}) > EMA9 (${ema9:.2f}) > EMA20 (${ema20:.2f}) en 1D"
+        return False, f"Regla 1 CALL No Cumplida: EMA3 (${ema3:.2f}), EMA9 (${ema9:.2f}), EMA20 (${ema20:.2f}) no alineadas al alza"
+    else:
+        if ema3 < ema9 < ema20:
+            return True, f"Regla 1 PUT Válida: EMA3 (${ema3:.2f}) < EMA9 (${ema9:.2f}) < EMA20 (${ema20:.2f}) en 1D"
+        return False, f"Regla 1 PUT No Cumplida: EMA3 (${ema3:.2f}), EMA9 (${ema9:.2f}), EMA20 (${ema20:.2f}) no alineadas a la baja"
+
+
+def check_bollinger_reversal_trigger(
+    direction: str,
+    metrics: Dict[str, Any],
+    df_1h: Optional[pd.DataFrame] = None
+) -> Tuple[bool, str]:
+    """
+    Regla Maestra 2: Quiebre por Reversión en Banda Extrema de Bollinger (1D -> 1H)
+    - CALL: Precio toca/perfora Banda Inferior 1D y aparece vela de giro alcista en 1H.
+    - PUT:  Precio toca/perfora Banda Superior 1D y aparece vela de rechazo bajista en 1H.
+    """
+    bb_lower = float(metrics.get("bb_lower") or 0.0)
+    bb_upper = float(metrics.get("bb_upper") or 0.0)
+    low_1d = float(metrics.get("low_1d") or metrics.get("close_1d") or 0.0)
+    high_1d = float(metrics.get("high_1d") or metrics.get("close_1d") or 0.0)
+    close_1d = float(metrics.get("close_1d") or 0.0)
+
+    d = direction.upper()
+    if d in ("CALL", "BULLISH", "LONG"):
+        # Toca o está a <= 1.5% de la Banda Inferior de 1D
+        touches_lower = (low_1d <= bb_lower * 1.015) or (close_1d <= bb_lower * 1.015)
+        if not touches_lower:
+            return False, f"Regla 2 CALL: Precio (${close_1d:.2f}) no toca Banda Inferior 1D (${bb_lower:.2f})"
+
+        # Si hay DataFrame 1H disponible, verificar vela de cambio de tendencia (giro)
+        if df_1h is not None and len(df_1h) >= 2:
+            c1h = df_1h["Close"] if "Close" in df_1h.columns else df_1h["close"]
+            o1h = df_1h["Open"] if "Open" in df_1h.columns else df_1h["open"]
+            l1h = df_1h["Low"] if "Low" in df_1h.columns else df_1h["low"]
+            last_c = float(c1h.iloc[-1])
+            last_o = float(o1h.iloc[-1])
+            last_l = float(l1h.iloc[-1])
+            body = abs(last_c - last_o)
+            lower_wick = (min(last_c, last_o) - last_l) if min(last_c, last_o) > last_l else 0.0
+            is_green_1h = last_c >= last_o
+            is_hammer = lower_wick >= (body * 1.5) and lower_wick > 0
+
+            if is_green_1h or is_hammer:
+                return True, f"Regla 2 CALL Válida: Toca BB Inferior 1D (${bb_lower:.2f}) + Vela de giro alcista en 1H (${last_c:.2f})"
+            return False, f"Regla 2 CALL: Toca BB Inferior 1D pero 1H aún no confirma vela de giro verde"
+
+        return True, f"Regla 2 CALL Válida: Precio (${close_1d:.2f}) en zona de sobreventa Banda Inferior 1D (${bb_lower:.2f})"
+
+    else:
+        # Toca o está a <= 1.5% de la Banda Superior de 1D
+        touches_upper = (high_1d >= bb_upper * 0.985) or (close_1d >= bb_upper * 0.985)
+        if not touches_upper:
+            return False, f"Regla 2 PUT: Precio (${close_1d:.2f}) no toca Banda Superior 1D (${bb_upper:.2f})"
+
+        # Si hay DataFrame 1H disponible, verificar vela de rechazo bajista
+        if df_1h is not None and len(df_1h) >= 2:
+            c1h = df_1h["Close"] if "Close" in df_1h.columns else df_1h["close"]
+            o1h = df_1h["Open"] if "Open" in df_1h.columns else df_1h["open"]
+            h1h = df_1h["High"] if "High" in df_1h.columns else df_1h["high"]
+            last_c = float(c1h.iloc[-1])
+            last_o = float(o1h.iloc[-1])
+            last_h = float(h1h.iloc[-1])
+            body = abs(last_c - last_o)
+            upper_wick = (last_h - max(last_c, last_o)) if last_h > max(last_c, last_o) else 0.0
+            is_red_1h = last_c <= last_o
+            is_shooting_star = upper_wick >= (body * 1.5) and upper_wick > 0
+
+            if is_red_1h or is_shooting_star:
+                return True, f"Regla 2 PUT Válida: Toca BB Superior 1D (${bb_upper:.2f}) + Vela de rechazo bajista en 1H (${last_c:.2f})"
+            return False, f"Regla 2 PUT: Toca BB Superior 1D pero 1H aún no confirma vela de rechazo roja"
+
+        return True, f"Regla 2 PUT Válida: Precio (${close_1d:.2f}) en zona de sobrecompra Banda Superior 1D (${bb_upper:.2f})"
+
+
+def check_ema20_pullback_trigger(
+    direction: str,
+    metrics: Dict[str, Any],
+    df_1h: Optional[pd.DataFrame] = None
+) -> Tuple[bool, str]:
+    """
+    Regla Maestra 3: Rebote o Retesteo en EMA20 Diaria
+    - CALL: En tendencia alcista (EMA20 >= EMA50), retroceso a EMA20 con vela de soporte en 1H.
+    - PUT:  En tendencia bajista (EMA20 <= EMA50), rebote a EMA20 con vela de rechazo en 1H.
+    """
+    ema20 = float(metrics.get("ema20") or 0.0)
+    ema50 = float(metrics.get("ema50") or 0.0)
+    close_1d = float(metrics.get("close_1d") or metrics.get("ema3") or 0.0)
+
+    if ema20 <= 0:
+        return False, "EMA20 no disponible"
+
+    dist_pct = abs(close_1d - ema20) / ema20 * 100.0
+    d = direction.upper()
+
+    if d in ("CALL", "BULLISH", "LONG"):
+        # Contexto alcista: EMA20 >= EMA50 o precio sobre EMA50
+        is_bull_context = (ema20 >= ema50) or (close_1d >= ema50 * 0.98)
+        is_at_ema20 = dist_pct <= 1.8 and close_1d >= ema20 * 0.985
+        if is_bull_context and is_at_ema20:
+            if df_1h is not None and len(df_1h) >= 2:
+                c1h = df_1h["Close"] if "Close" in df_1h.columns else df_1h["close"]
+                o1h = df_1h["Open"] if "Open" in df_1h.columns else df_1h["open"]
+                if float(c1h.iloc[-1]) >= float(o1h.iloc[-1]):
+                    return True, f"Regla 3 CALL Válida: Soporte en EMA20 Diaria (${ema20:.2f}) con vela verde en 1H"
+                return False, f"Regla 3 CALL: En EMA20 Diaria (${ema20:.2f}) pero 1H aún no muestra rebote"
+            return True, f"Regla 3 CALL Válida: Soporte en EMA20 Diaria (${ema20:.2f})"
+        return False, f"Regla 3 CALL No Cumplida (Dist EMA20: {dist_pct:.1f}%)"
+
+    else:
+        # Contexto bajista: EMA20 <= EMA50 o precio bajo EMA50
+        is_bear_context = (ema20 <= ema50) or (close_1d <= ema50 * 1.02)
+        is_at_ema20 = dist_pct <= 1.8 and close_1d <= ema20 * 1.015
+        if is_bear_context and is_at_ema20:
+            if df_1h is not None and len(df_1h) >= 2:
+                c1h = df_1h["Close"] if "Close" in df_1h.columns else df_1h["close"]
+                o1h = df_1h["Open"] if "Open" in df_1h.columns else df_1h["open"]
+                if float(c1h.iloc[-1]) <= float(o1h.iloc[-1]):
+                    return True, f"Regla 3 PUT Válida: Rechazo en resistencia EMA20 Diaria (${ema20:.2f}) con vela roja en 1H"
+                return False, f"Regla 3 PUT: En EMA20 Diaria (${ema20:.2f}) pero 1H aún no confirma rechazo"
+            return True, f"Regla 3 PUT Válida: Retesteo a resistencia EMA20 Diaria (${ema20:.2f})"
+        return False, f"Regla 3 PUT No Cumplida (Dist EMA20: {dist_pct:.1f}%)"
+
+
+def check_structural_veto_zones(
+    direction: str,
+    metrics: Dict[str, Any],
+    current_price: float
+) -> Tuple[bool, str]:
+    """
+    Regla Maestra 4: Zonas de Veto Estructural (No-Trade Veto Zones)
+    - VETO CALL: Precio cotiza debajo de EMA20 diaria y a <= 1.5% de ella (resistencia de alto riesgo de reversión).
+    - VETO PUT:  Precio cotiza encima de EMA20 diaria y a <= 1.5% de ella (soporte de alto riesgo de rebote).
+    - VETO CALL: Deep Bear Winter (Precio << EMA50 < EMA200).
+    - VETO AMBOS: Compresión lateral extrema (Squeeze / Chop sin tendencia).
+    """
+    p = current_price if current_price > 0 else float(metrics.get("close_1d") or 1.0)
+    ema20 = float(metrics.get("ema20") or 0.0)
+    ema50 = float(metrics.get("ema50") or 0.0)
+    ema200 = float(metrics.get("ema200") or 0.0)
+    bandwidth = float(metrics.get("bb_bandwidth_pct") or 20.0)
+
+    # Veto Compresión Lateral
+    if bandwidth < 10.0 and ema20 > 0 and abs(p - ema20) / ema20 * 100.0 < 1.0:
+        return True, f"VETO ESTRUCTURAL: Squeeze/Compresión Lateral extrema ({bandwidth:.1f}% bandwidth). Prohibido comprar opciones direccionales (Theta decay)."
+
+    d = direction.upper()
+    if d in ("CALL", "BULLISH", "LONG"):
+        # Veto 1: Bajo EMA20 a <= 1.5% (muro de resistencia diario de reversión)
+        if ema20 > 0 and p < ema20:
+            dist_to_ema20_pct = ((ema20 - p) / p) * 100.0
+            if dist_to_ema20_pct <= 1.5:
+                return True, f"VETO CALL: Precio (${p:.2f}) inmediatamente bajo EMA20 Diaria (${ema20:.2f}, -{dist_to_ema20_pct:.2f}%). Alto riesgo de rechazo en resistencia."
+
+        # Veto 2: Deep Bear Winter
+        if ema50 < ema200 and p < ema200 and ema200 > 0:
+            dist_200 = ((ema200 - p) / p) * 100.0
+            if dist_200 >= 15.0 or (p < ema50 and ema20 < ema50):
+                return True, f"VETO CALL: DEEP_BEAR_WINTER secular (-{dist_200:.1f}% vs EMA200). Prohibido comprar CALLs en activos en caída libre institucional."
+
+        return False, ""
+
+    else:
+        # Veto 1: Sobre EMA20 a <= 1.5% (piso de soporte diario de rebote)
+        if ema20 > 0 and p > ema20:
+            dist_to_ema20_pct = ((p - ema20) / p) * 100.0
+            if dist_to_ema20_pct <= 1.5:
+                return True, f"VETO PUT: Precio (${p:.2f}) inmediatamente sobre EMA20 Diaria (${ema20:.2f}, +{dist_to_ema20_pct:.2f}%). Alto riesgo de rebote en soporte."
+
+        return False, ""
+
+
 def evaluate_structural_regime(
     ticker: str,
     current_price: float,
     df_1d: Optional[pd.DataFrame] = None,
     df_intraday: Optional[pd.DataFrame] = None,
-    vwap_intraday: Optional[float] = None
+    vwap_intraday: Optional[float] = None,
+    df_1h: Optional[pd.DataFrame] = None
 ) -> Dict[str, Any]:
     """
     Función Universal de Evaluación de Régimen Estructural (Universal para Stocks y Opciones).
     
-    Clasifica en los 4 Regímenes Maestros:
-    1. BULL_TREND_EXPANSION (Caso DIS): EMA3 > EMA9 > EMA20 y Precio > EMA50. Vía libre hacia BB Superior.
-    2. COUNTER_TREND_BOUNCE (Caso AAL): Precio < EMA20 < EMA50 < EMA200 rebotando. Muro rígido en EMA20.
-    3. DEEP_BEAR_WINTER: Precio << EMA50 < EMA200 (>15% bajo EMA200). Exclusión total de Swing y Calls.
-    4. COMPRESSION_CHOP: Bandas comprimidas (< 10% ancho) sin tendencia definida.
+    Clasifica en los 4 Regímenes Maestros e integra las 4 Reglas Maestras de Opciones:
+    - Regla 1: Tendencia Limpia 1D (CALL: EMA3>EMA9>EMA20 / PUT: EMA3<EMA9<EMA20).
+    - Regla 2: Quiebre por Reversión en Bandas de Bollinger (1D -> 1H).
+    - Regla 3: Pullback o Retesteo a EMA20 Diaria con confirmación 1H.
+    - Regla 4: Zonas de Veto Estructural (muro EMA20 a <=1.5%, Deep Bear Winter, Squeeze).
     """
     m = fetch_daily_metrics(ticker, current_price, df_1d)
     price = current_price if current_price > 0 else m.get("ema3", 10.0)
@@ -262,6 +457,61 @@ def evaluate_structural_regime(
         target_wall = ema20
         action_note = "Estructura intermedia sin señal pura. Monitorear catalizadores."
 
+    df_1h_to_use = df_1h if df_1h is not None else df_intraday
+
+    # ─────────────────────────────────────────────────────────────
+    # EVALUACIÓN SISTÉMICA DE REGLAS MAESTRAS DE ENTRADA (1, 2, 3, 4)
+    # ─────────────────────────────────────────────────────────────
+    # 1. CALLs:
+    is_call_vetoed, call_veto_reason = check_structural_veto_zones("CALL", m, price)
+    call_setup_type = "NONE"
+    can_enter_call = False
+
+    if is_call_vetoed:
+        can_enter_call = False
+    else:
+        is_r1_call, r1_call_msg = validate_macro_1d_alignment("CALL", m)
+        is_r2_call, r2_call_msg = check_bollinger_reversal_trigger("CALL", m, df_1h=df_1h_to_use)
+        is_r3_call, r3_call_msg = check_ema20_pullback_trigger("CALL", m, df_1h=df_1h_to_use)
+
+        if is_r1_call:
+            can_enter_call = True
+            call_setup_type = "RULE_1_TREND_EXPANSION"
+        elif is_r2_call:
+            can_enter_call = True
+            call_setup_type = "RULE_2_BOLLINGER_REVERSAL"
+        elif is_r3_call:
+            can_enter_call = True
+            call_setup_type = "RULE_3_EMA20_PULLBACK"
+        else:
+            can_enter_call = False
+            call_veto_reason = "CALL bloqueado: Sin alineación 1D (EMA3>EMA9>EMA20) ni setup de quiebre (BB Inferior / EMA20)"
+
+    # 2. PUTs:
+    is_put_vetoed, put_veto_reason = check_structural_veto_zones("PUT", m, price)
+    put_setup_type = "NONE"
+    can_enter_put = False
+
+    if is_put_vetoed:
+        can_enter_put = False
+    else:
+        is_r1_put, r1_put_msg = validate_macro_1d_alignment("PUT", m)
+        is_r2_put, r2_put_msg = check_bollinger_reversal_trigger("PUT", m, df_1h=df_1h_to_use)
+        is_r3_put, r3_put_msg = check_ema20_pullback_trigger("PUT", m, df_1h=df_1h_to_use)
+
+        if is_r1_put:
+            can_enter_put = True
+            put_setup_type = "RULE_1_TREND_EXPANSION"
+        elif is_r2_put:
+            can_enter_put = True
+            put_setup_type = "RULE_2_BOLLINGER_REVERSAL"
+        elif is_r3_put:
+            can_enter_put = True
+            put_setup_type = "RULE_3_EMA20_REJECTION"
+        else:
+            can_enter_put = False
+            put_veto_reason = "PUT bloqueado: Sin alineación 1D (EMA3<EMA9<EMA20) ni setup de quiebre (BB Superior / EMA20)"
+
     return {
         "ticker": ticker.upper(),
         "current_price": round(price, 2),
@@ -272,6 +522,16 @@ def evaluate_structural_regime(
         "tactical_action": tactical_action,
         "recommended_option_strategy": recommended_strategy,
         "action_note": action_note,
+        "can_enter_call": can_enter_call,
+        "can_enter_put": can_enter_put,
+        "call_veto_reason": call_veto_reason if not can_enter_call else None,
+        "put_veto_reason": put_veto_reason if not can_enter_put else None,
+        "call_setup_type": call_setup_type,
+        "put_setup_type": put_setup_type,
+        "is_call_vetoed_by_ema20": (price < ema20 and ((ema20 - price) / price) <= 0.015),
+        "is_put_vetoed_by_ema20": (price > ema20 and ((price - ema20) / price) <= 0.015),
+        "macro_1d_aligned_call": (ema3 > ema9 and ema9 > ema20),
+        "macro_1d_aligned_put": (ema3 < ema9 and ema9 < ema20),
         "key_levels_1d": {
             "ema3": ema3,
             "ema9": ema9,

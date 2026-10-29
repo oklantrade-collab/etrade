@@ -67,6 +67,8 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
         res["ema3_slope_15m"] = (cur_ema3_15m - prev_ema3_15m) / (prev_ema3_15m + 1e-6) * 100.0
         res["ema9_15m"] = float(ema9_15m_s.iloc[-1])
         res["prev_ema9_15m"] = float(ema9_15m_s.iloc[-2]) if len(ema9_15m_s) >= 2 else res["ema9_15m"]
+        ema20_15m_s = c15.ewm(span=20, adjust=False).mean()
+        res["ema20_15m"] = float(ema20_15m_s.iloc[-1])
 
         fib_15m = calculate_fibonacci_bands(df_15m, cur_p)
         res["upper_5_15m"] = float(fib_15m.get("upper_5") or 0.0)
@@ -116,6 +118,10 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
             prev_ema3_1h = float(ema3_1h_s.iloc[-2]) if len(ema3_1h_s) >= 2 else cur_ema3_1h
             res["ema3_1h"] = cur_ema3_1h
             res["ema3_slope_1h"] = (cur_ema3_1h - prev_ema3_1h) / (prev_ema3_1h + 1e-6) * 100.0
+            ema9_1h_s = c1h.ewm(span=9, adjust=False).mean()
+            ema20_1h_s = c1h.ewm(span=20, adjust=False).mean()
+            res["ema9_1h"] = float(ema9_1h_s.iloc[-1])
+            res["ema20_1h"] = float(ema20_1h_s.iloc[-1])
 
             rsi_1h_s = compute_rsi(c1h, period=14)
             res["rsi_1h"] = float(rsi_1h_s.iloc[-1])
@@ -187,6 +193,154 @@ DB_EXIT_REASONS_MAP = {
 }
 
 
+# Registro global de cooldown tras Stop Loss: { symbol: { "direction": opt_dir, "stopped_at": timestamp_float, "stopped_price": float, "sl_price": float, "status": "active" } }
+_OPTIONS_STOPPED_OUT_COOLDOWN: dict[str, dict[str, Any]] = {}
+
+
+def record_options_sl_cooldown(symbol: str, direction: str, stopped_price: float, sl_price: float) -> None:
+    """Registra un activo en enfriamiento tras tocar Stop Loss técnico."""
+    clean_sym = symbol.strip().upper()
+    _OPTIONS_STOPPED_OUT_COOLDOWN[clean_sym] = {
+        "direction": direction.upper(),
+        "stopped_at": time.time(),
+        "stopped_price": stopped_price,
+        "sl_price": sl_price,
+        "status": "active"
+    }
+    log_info(MODULE, f"❄️ COOLDOWN ACTIVADO: {clean_sym} ({direction.upper()}) bloqueado tras Stop Loss (${stopped_price:.2f} vs SL ${sl_price:.2f})")
+
+
+def is_ticker_in_options_cooldown(symbol: str, direction: str, df_15m: Optional[pd.DataFrame] = None) -> tuple[bool, str]:
+    """
+    Verifica si un ticker está en cooldown tras un Stop Loss:
+    - CALLs: Bloqueado mientras dure la condición EMA3 > EMA9 > EMA20 en 15m del ciclo fallido o hasta que el ciclo resetee (mínimo 15-45 min).
+    - PUTs: Bloqueado mientras dure la condición EMA3 < EMA9 < EMA20 en 15m del ciclo fallido o hasta que el ciclo resetee.
+    """
+    clean_sym = symbol.strip().upper()
+    cd = _OPTIONS_STOPPED_OUT_COOLDOWN.get(clean_sym)
+    if not cd or cd.get("status") != "active":
+        return False, ""
+
+    target_dir = "CALL" if direction.upper() in ("CALL", "BULLISH", "LONG") else "PUT"
+    if cd.get("direction") != target_dir:
+        return False, ""  # Solo bloquea la misma dirección que falló
+
+    elapsed_min = (time.time() - cd.get("stopped_at", 0)) / 60.0
+
+    # Si pasaron más de 120 minutos (2 horas), el ciclo intradía definitivamente caducó
+    if elapsed_min > 120.0:
+        cd["status"] = "expired"
+        return False, ""
+
+    # Evaluación técnica en 15m
+    if df_15m is not None and len(df_15m) >= 20:
+        c15 = _safe_col(df_15m, "close")
+        ema3_s = c15.ewm(span=3, adjust=False).mean()
+        ema9_s = c15.ewm(span=9, adjust=False).mean()
+        ema20_s = c15.ewm(span=20, adjust=False).mean()
+
+        e3 = float(ema3_s.iloc[-1])
+        e9 = float(ema9_s.iloc[-1])
+        e20 = float(ema20_s.iloc[-1])
+
+        if target_dir == "CALL":
+            # Si el ciclo 15m aún sigue en la misma inercia alcista en la que se compró y falló, bloquear
+            if e3 > e9 and e9 > e20:
+                return True, f"Ticker en Cooldown tras Stop Loss: Ciclo alcista 15m aún activo ({elapsed_min:.1f}m transcurridos). Esperando reseteo estructural."
+            else:
+                cd["status"] = "reset_cleared"
+                return False, ""
+        else:
+            if e3 < e9 and e9 < e20:
+                return True, f"Ticker en Cooldown tras Stop Loss: Ciclo bajista 15m aún activo ({elapsed_min:.1f}m transcurridos). Esperando reseteo estructural."
+            else:
+                cd["status"] = "reset_cleared"
+                return False, ""
+
+    # Fallback si no hay df_15m: bloqueo mínimo de 45 minutos
+    if elapsed_min < 45.0:
+        return True, f"Ticker en Cooldown técnico tras Stop Loss ({elapsed_min:.1f}m / 45m restantes)"
+
+    cd["status"] = "expired"
+    return False, ""
+
+
+def check_options_dip_rebuy_opportunity(
+    position: dict[str, Any],
+    tech: dict[str, Any],
+    current_price: float
+) -> Optional[dict[str, Any]]:
+    """
+    Evalúa si una posición de opciones abierta califica para una recompra en retroceso (Centro de Costo):
+    - Tranche 2 (40% de capital) en el 1er retroceso a soporte clave (EMA20 15m/1H).
+    - Tranche 3 (30% de capital) en el 2do retroceso estructural a soporte.
+    - Máximo 3 compras totales (1 inicial + 2 recompras).
+    - Exige que la tendencia 1H se mantenga favorable y precio por encima del Stop Loss técnico.
+    """
+    if not position or position.get("status") != "open":
+        return None
+
+    exit_plan = position.get("exit_plan") or {}
+    rebuys_done = int(exit_plan.get("rebuys_count", 0))
+    if rebuys_done >= 2:
+        return None
+
+    opt_dir = "CALL" if str(position.get("direction", "")).lower() in ("bullish", "call") or position.get("strategy_type") == "long_call" else "PUT"
+    stop_loss = float(exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0)
+
+    ema3_1h = float(tech.get("ema3_1h") or 0.0)
+    ema9_1h = float(tech.get("ema9_1h") or 0.0)
+    ema3_slope_1h = float(tech.get("ema3_slope_1h") or 0.0)
+    ema20_15m = float(tech.get("ema20_15m") or 0.0)
+    ema20_1h = float(tech.get("ema20_1h") or 0.0)
+
+    support_level = max(ema20_15m, ema20_1h) if (ema20_15m > 0 and ema20_1h > 0) else (ema20_15m or ema20_1h)
+    resistance_level = min(ema20_15m, ema20_1h) if (ema20_15m > 0 and ema20_1h > 0) else (ema20_15m or ema20_1h)
+
+    if opt_dir == "CALL":
+        is_trend_favorable = (ema3_1h >= ema9_1h) or (ema3_slope_1h > 0.0)
+        if stop_loss > 0 and current_price <= stop_loss:
+            return None
+        if not is_trend_favorable:
+            return None
+
+        # Retroceso a zona de soporte EMA20 (a <= 1.5% de distancia)
+        is_pullback = support_level > 0 and abs(current_price - support_level) / support_level <= 0.015 and current_price >= support_level * 0.985
+        if is_pullback:
+            next_tranche_num = rebuys_done + 2
+            pct_alloc = 0.40 if next_tranche_num == 2 else 0.30
+            return {
+                "action": "DIP_REBUY",
+                "tranche_num": next_tranche_num,
+                "pct_allocation": pct_alloc,
+                "direction": "CALL",
+                "support_level": support_level,
+                "reason": f"Recompra Tranche {next_tranche_num} ({int(pct_alloc*100)}%): Retroceso a soporte EMA20 (${support_level:.2f}) con tendencia 1H intacta"
+            }
+    else:
+        is_trend_favorable = (ema3_1h <= ema9_1h) or (ema3_slope_1h < 0.0)
+        if stop_loss > 0 and current_price >= stop_loss:
+            return None
+        if not is_trend_favorable:
+            return None
+
+        # Retesteo a zona de resistencia EMA20 (a <= 1.5% de distancia)
+        is_retest = resistance_level > 0 and abs(current_price - resistance_level) / resistance_level <= 0.015 and current_price <= resistance_level * 1.015
+        if is_retest:
+            next_tranche_num = rebuys_done + 2
+            pct_alloc = 0.40 if next_tranche_num == 2 else 0.30
+            return {
+                "action": "DIP_REBUY",
+                "tranche_num": next_tranche_num,
+                "pct_allocation": pct_alloc,
+                "direction": "PUT",
+                "resistance_level": resistance_level,
+                "reason": f"Recompra Tranche {next_tranche_num} ({int(pct_alloc*100)}%): Rebote a resistencia EMA20 (${resistance_level:.2f}) con tendencia 1H intacta"
+            }
+
+    return None
+
+
 def evaluate_technical_rules_and_stops(
     position: dict[str, Any],
     tech: dict[str, Any],
@@ -201,6 +355,7 @@ def evaluate_technical_rules_and_stops(
 
     stype = str(position.get("strategy_type") or "").lower()
     direction = str(position.get("direction") or "").lower()
+    symbol = str(position.get("symbol") or tech.get("symbol") or "").upper()
     is_call = ("call" in stype) or (direction in ("bullish", "call"))
     is_put = ("put" in stype) or (direction in ("bearish", "put"))
 
@@ -348,21 +503,18 @@ def evaluate_technical_rules_and_stops(
     # (Con colchón mínimo de 5 min tras la apertura para evitar cierres a los 15 segundos)
     # ─────────────────────────────────────────────────────────────
     if pos_age_min >= 5.0:
-        # En opciones que vencen la próxima semana o posteriores (Swing Multi-Semana),
-        # NO se permite cerrar en pérdida por micro-perforaciones técnicas intradía
-        if is_swing_multiweek and unr_pnl_pct < 1.0:
-            pass  # Protegido por regla de negocio Swing: solo salir con ganancia >= +1%
-        else:
-            if is_call and new_sl > 0.0 and current_price <= new_sl:
-                return True, "sl_underlying_pierced", {
-                    "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} <= SL ${new_sl:.2f} ({new_sl_type})",
-                    "exit_plan": exit_plan
-                }
-            elif is_put and new_sl > 0.0 and current_price >= new_sl:
-                return True, "sl_underlying_pierced", {
-                    "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} >= SL ${new_sl:.2f} ({new_sl_type})",
-                    "exit_plan": exit_plan
-                }
+        if is_call and new_sl > 0.0 and current_price <= new_sl:
+            record_options_sl_cooldown(symbol, "CALL", current_price, new_sl)
+            return True, "sl_underlying_pierced", {
+                "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} <= SL ${new_sl:.2f} ({new_sl_type})",
+                "exit_plan": exit_plan
+            }
+        elif is_put and new_sl > 0.0 and current_price >= new_sl:
+            record_options_sl_cooldown(symbol, "PUT", current_price, new_sl)
+            return True, "sl_underlying_pierced", {
+                "detail": f"Stop Loss Técnico en Subyacente perforado: ${current_price:.2f} >= SL ${new_sl:.2f} ({new_sl_type})",
+                "exit_plan": exit_plan
+            }
 
     # ─────────────────────────────────────────────────────────────
     # FASE 3: EVALUACIÓN DE LAS 5 REGLAS INSTITUCIONALES (ESCALONADO AGRESIVO)
@@ -379,6 +531,8 @@ def evaluate_technical_rules_and_stops(
     lower_6_15m = float(tech.get("lower_6_15m") or 0.0)
     lower_5_1h = float(tech.get("lower_5_1h") or 0.0)
     lower_6_1h = float(tech.get("lower_6_1h") or 0.0)
+    ema3_1h = float(tech.get("ema3_1h") or 0.0)
+    ema9_1h = float(tech.get("ema9_1h") or 0.0)
     ema3_slope_1h = float(tech.get("ema3_slope_1h") or 0.0)
     is_sipv_sell_15m = bool(tech.get("is_sipv_sell_15m", False))
     is_sipv_buy_15m = bool(tech.get("is_sipv_buy_15m", False))
@@ -415,36 +569,32 @@ def evaluate_technical_rules_and_stops(
             }
 
         # Reglas de invalidación técnica requieren al menos 15 minutos de maduración
-        # y NO aplican para cerrar en pérdida contratos que vencen la próxima semana o posteriores (Swing)
-        if pos_age_min >= 15.0 and (not is_swing_multiweek or unr_pnl_pct >= 1.0):
-            # Regla 1: Ángulo EMA3 1H horizontal o descendente (slope <= 0.0%) -> Cierre Total
-            if ema3_slope_1h <= 0.0:
-                return True, "ema3_flat_descending_1h", {
-                    "detail": f"Cierre defensivo CALL: Ángulo EMA3 1H plano o descendente ({ema3_slope_1h:+.4f}%)",
+        if pos_age_min >= 15.0:
+            # Regla 1: Custodia Institucional en 1H
+            # Se erradica el cierre destructivo por ruido en 15m (ema_cross_15m).
+            # Mientras EMA3 1H >= EMA9 1H o pendiente EMA3 1H > 0%, SE MANTIENE LA POSICIÓN y se busca rebote.
+            # Salida defensiva técnica ÚNICAMENTE si la macro en 1H se invierte de forma irreversible:
+            # EMA3 1H < EMA9 1H Y pendiente EMA3 1H descendente (slope <= 0.0%)
+            ema9_1h = float(tech.get("ema9_1h") or 0.0)
+            if ema3_1h > 0 and ema9_1h > 0 and ema3_1h < ema9_1h and ema3_slope_1h <= 0.0:
+                return True, "trend_flip_macro_1h", {
+                    "detail": f"Cierre defensivo CALL: Estructura 1H invertida (EMA3 1H ${ema3_1h:.2f} < EMA9 1H ${ema9_1h:.2f} y pendiente {ema3_slope_1h:+.4f}%)",
                     "exit_plan": exit_plan,
                     "exit_ratio": 1.0,
                 }
 
-            # Regla 2: EMA3 < EMA9 en 15m (Pérdida de inercia a medio plazo) -> Cierre Total
-            if ema3_15m > 0 and ema9_15m > 0 and ema3_15m < ema9_15m:
-                return True, "ema_cross_15m", {
-                    "detail": f"Cierre de CALL: EMA3 15m (${ema3_15m:.2f}) < EMA9 15m (${ema9_15m:.2f})",
-                    "exit_plan": exit_plan,
-                    "exit_ratio": 1.0,
-                }
-
-            # Regla 5: SIPV marca SELL o cambio de tendencia en 1H/15m -> Cierre Total
+            # Regla 5: SIPV marca SELL o cambio de tendencia en 1H -> Cierre Total
             if is_sipv_sell_1h:
                 return True, "sipv_trend_flip_1h", {
                     "detail": "Cierre de CALL: SIPV marca SELL / Giro bajista en 1H",
                     "exit_plan": exit_plan,
                     "exit_ratio": 1.0,
                 }
-            elif is_sipv_sell_15m:
+            elif is_sipv_sell_15m and unr_pnl_pct >= 15.0:
                 return True, "sipv_trend_flip_15m", {
-                    "detail": "Cierre de CALL: SIPV Clímax 15m (High > Banda Bollinger Superior con mecha de rechazo)",
+                    "detail": "Take Profit CALL: SIPV Clímax 15m (High > Banda Bollinger Superior)",
                     "exit_plan": exit_plan,
-                    "exit_ratio": 1.0,
+                    "exit_ratio": 0.5 if pos_qty >= 2 else 1.0,
                 }
 
     elif is_put:
@@ -477,36 +627,32 @@ def evaluate_technical_rules_and_stops(
             }
 
         # Reglas de invalidación técnica requieren al menos 15 minutos de maduración
-        # y NO aplican para cerrar en pérdida contratos que vencen la próxima semana o posteriores (Swing)
-        if pos_age_min >= 15.0 and (not is_swing_multiweek or unr_pnl_pct >= 1.0):
-            # Regla 1 (Inversa): Ángulo EMA3 1H horizontal o ascendente (slope >= 0.0%) -> Cierre Total
-            if ema3_slope_1h >= 0.0:
-                return True, "ema3_flat_ascending_1h", {
-                    "detail": f"Cierre defensivo PUT: Ángulo EMA3 1H plano o ascendente ({ema3_slope_1h:+.4f}%)",
+        if pos_age_min >= 15.0:
+            # Regla 1 (Inversa): Custodia Institucional en 1H
+            # Se erradica el cierre destructivo por rebote menor en 15m (ema_cross_15m).
+            # Mientras EMA3 1H <= EMA9 1H o pendiente EMA3 1H < 0%, SE MANTIENE LA POSICIÓN.
+            # Salida defensiva técnica ÚNICAMENTE si la macro en 1H se invierte de forma irreversible:
+            # EMA3 1H > EMA9 1H Y pendiente EMA3 1H ascendente (slope >= 0.0%)
+            ema9_1h = float(tech.get("ema9_1h") or 0.0)
+            if ema3_1h > 0 and ema9_1h > 0 and ema3_1h > ema9_1h and ema3_slope_1h >= 0.0:
+                return True, "trend_flip_macro_1h", {
+                    "detail": f"Cierre defensivo PUT: Estructura 1H invertida (EMA3 1H ${ema3_1h:.2f} > EMA9 1H ${ema9_1h:.2f} y pendiente {ema3_slope_1h:+.4f}%)",
                     "exit_plan": exit_plan,
                     "exit_ratio": 1.0,
                 }
 
-            # Regla 2 (Inversa): EMA3 > EMA9 en 15m (Recuperación contra el PUT) -> Cierre Total
-            if ema3_15m > 0 and ema9_15m > 0 and ema3_15m > ema9_15m:
-                return True, "ema_cross_15m", {
-                    "detail": f"Cierre de PUT: EMA3 15m (${ema3_15m:.2f}) > EMA9 15m (${ema9_15m:.2f})",
-                    "exit_plan": exit_plan,
-                    "exit_ratio": 1.0,
-                }
-
-            # Regla 5 (Inversa): SIPV marca BUY o cambio de tendencia en 1H/15m -> Cierre Total
+            # Regla 5 (Inversa): SIPV marca BUY o cambio de tendencia en 1H -> Cierre Total
             if is_sipv_buy_1h:
                 return True, "sipv_trend_flip_1h", {
                     "detail": "Cierre de PUT: SIPV marca BUY / Giro alcista en 1H",
                     "exit_plan": exit_plan,
                     "exit_ratio": 1.0,
                 }
-            elif is_sipv_buy_15m:
+            elif is_sipv_buy_15m and unr_pnl_pct >= 15.0:
                 return True, "sipv_trend_flip_15m", {
-                    "detail": "Cierre de PUT: SIPV Clímax 15m (Low < Banda Bollinger Inferior con mecha de absorción)",
+                    "detail": "Take Profit PUT: SIPV Clímax 15m (Low < Banda Bollinger Inferior)",
                     "exit_plan": exit_plan,
-                    "exit_ratio": 1.0,
+                    "exit_ratio": 0.5 if pos_qty >= 2 else 1.0,
                 }
 
     return False, None, {"exit_plan": exit_plan}

@@ -282,7 +282,15 @@ def evaluate_stock_for_options_triggers(
     # ─────────────────────────────────────────────────────────────
     # 6. DECISIÓN DE CALIFICACIÓN
     # ─────────────────────────────────────────────────────────────
+    can_enter_call = bool(st_reg.get("can_enter_call", True))
+    can_enter_put = bool(st_reg.get("can_enter_put", True))
+
     if final_score_call >= 60.0 and final_score_call >= final_score_put and not is_toxic_dilution:
+        if not can_enter_call:
+            call_veto = st_reg.get("call_veto_reason") or "Bloqueado por Reglas Maestras Estructurales 1D"
+            res["reason"] = f"CALL bloqueado por Régimen Estructural ({call_veto})"
+            return res
+
         res.update({
             "is_qualified": True,
             "recommended_direction": "CALL",
@@ -311,6 +319,11 @@ def evaluate_stock_for_options_triggers(
         return res
 
     elif final_score_put >= 60.0 and final_score_put > final_score_call:
+        if not can_enter_put:
+            put_veto = st_reg.get("put_veto_reason") or "Bloqueado por Reglas Maestras Estructurales 1D"
+            res["reason"] = f"PUT bloqueado por Régimen Estructural ({put_veto})"
+            return res
+
         res.update({
             "is_qualified": True,
             "recommended_direction": "PUT",
