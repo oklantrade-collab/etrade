@@ -34,7 +34,11 @@ class MicroPullbackScanner:
         self.is_running = True
         engine = get_micro_pullback_engine()
         engine.start()
-        self._task = asyncio.create_task(self._scan_loop())
+        try:
+            loop = asyncio.get_running_loop()
+            self._task = loop.create_task(self._scan_loop())
+        except RuntimeError:
+            self._task = asyncio.ensure_future(self._scan_loop())
         log_info(MODULE, "🔎 Escáner de Momentum Micro-Pullbacks INICIADO (Refresco cada 15s).")
 
     def stop(self):

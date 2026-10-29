@@ -423,11 +423,16 @@ class IBBridgeWorker:
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
-                scanner = get_micro_pullback_scanner()
-                scanner.start()
-                log_info(MODULE, "⚡ Motor In-Memory Micro-Pullback ACTIVADO en APOLO (TWS Local).")
-                loop.run_forever()
+
+                async def _runner():
+                    from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
+                    scanner = get_micro_pullback_scanner()
+                    scanner.start()
+                    log_info(MODULE, "⚡ Motor In-Memory Micro-Pullback ACTIVADO en APOLO (TWS Local).")
+                    while getattr(scanner, "is_running", True):
+                        await asyncio.sleep(1)
+
+                loop.run_until_complete(_runner())
             except Exception as e:
                 log_error(MODULE, f"Error en thread de Micro-Pullback Scalper: {e}")
 
