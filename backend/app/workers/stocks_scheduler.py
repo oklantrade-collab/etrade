@@ -3491,6 +3491,14 @@ async def start_stocks_scheduler(force=False):
     try:
         while True:
             await asyncio.sleep(60)
+            try:
+                m_open, _ = is_market_open()
+                if m_open and not scalp_scanner.is_running:
+                    scalp_scanner.start()
+                elif not m_open and scalp_scanner.is_running:
+                    scalp_scanner.stop()
+            except Exception:
+                pass
     except (KeyboardInterrupt, SystemExit):
         try:
             from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner

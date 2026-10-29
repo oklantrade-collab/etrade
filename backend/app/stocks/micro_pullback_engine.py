@@ -469,6 +469,7 @@ class MicroPullbackEngine:
             contract = ib.us_stock_contract(cand.ticker)
             ib.placeOrder(sell_id, contract, sell_ord)
             log_info(MODULE, f"🔻 [VENTA PARCIAL TWS] SELL {shares}x {cand.ticker} (Razón: {reason})")
+            self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, shares, reason))
 
     def _is_15m_trend_exhausted(self, cand: ScalpCandidateState, current_p: float) -> bool:
         """Determina si la tendencia en 15m se agotó (EMA3 plana/descendente o precio bajo EMA9)."""
@@ -575,6 +576,7 @@ class MicroPullbackEngine:
             contract = ib.us_stock_contract(cand.ticker)
             ib.placeOrder(sell_id, contract, sell_ord)
             log_info(MODULE, f"🔻 [CIERRE ENVIADO A TWS] SELL {cand.shares}x {cand.ticker} (Razón: {reason})")
+            self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, cand.shares, reason))
 
         cand.in_trade = False
         cand.phase = "IDLE"
@@ -646,14 +648,65 @@ class MicroPullbackEngine:
                 "shares": cand.shares,
                 "limit_price": limit_price,
                 "market_price": cand.entry_price,
-                "status": "pending",
+                "status": "processing",
                 "created_at": now_iso,
             }
             res = sb.table("stocks_orders").insert(order_data).execute()
             if res.data:
                 cand.db_order_id = res.data[0].get("id")
+                try:
+                    from app.workers.ib_bridge_worker import PENDING_IB_ORDERS
+                    PENDING_IB_ORDERS[cand.order_id] = {
+                        "id": cand.db_order_id,
+                        "ticker": cand.ticker,
+                        "direction": "buy",
+                        "shares": cand.shares,
+                        "market_price": cand.entry_price,
+                        "limit_price": limit_price,
+                        "group_name": "HOT_MICRO_PULLBACK",
+                        "rule_code": "SCALP_MICRO_PULLBACK",
+                    }
+                except Exception:
+                    pass
         except Exception as e:
             log_warning(MODULE, f"Aviso al guardar orden de scalp en Supabase: {e}")
+
+    async def _async_log_sell_order_to_supabase(self, cand: ScalpCandidateState, sell_order_id: int, shares: int, reason: str):
+        """Registra la orden de venta en Supabase y enlaza con PENDING_IB_ORDERS para que el callback de TWS reconcilie el fill."""
+        try:
+            sb = get_supabase()
+            now_iso = datetime.now(timezone.utc).isoformat()
+            curr_p = cand.bars[-1]["close"] if cand.bars else cand.entry_price
+            order_data = {
+                "ticker": cand.ticker,
+                "group_name": "HOT_MICRO_PULLBACK",
+                "rule_code": f"SCALP_EXIT_{reason}",
+                "order_type": "market",
+                "direction": "sell",
+                "shares": shares,
+                "market_price": curr_p,
+                "limit_price": curr_p,
+                "status": "processing",
+                "created_at": now_iso,
+            }
+            res = sb.table("stocks_orders").insert(order_data).execute()
+            db_sell_id = res.data[0].get("id") if (res and res.data) else str(sell_order_id)
+            try:
+                from app.workers.ib_bridge_worker import PENDING_IB_ORDERS
+                PENDING_IB_ORDERS[sell_order_id] = {
+                    "id": db_sell_id,
+                    "ticker": cand.ticker,
+                    "direction": "sell",
+                    "shares": shares,
+                    "market_price": curr_p,
+                    "limit_price": curr_p,
+                    "group_name": "HOT_MICRO_PULLBACK",
+                    "rule_code": f"SCALP_EXIT_{reason}",
+                }
+            except Exception:
+                pass
+        except Exception as e:
+            log_warning(MODULE, f"Aviso al guardar orden de venta de scalp en Supabase: {e}")
 
     async def _async_log_trade_close(self, cand: ScalpCandidateState, reason: str):
         """Registra el resultado de la operación en Supabase y actualiza colchón."""

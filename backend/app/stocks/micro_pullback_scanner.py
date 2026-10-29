@@ -62,33 +62,49 @@ class MicroPullbackScanner:
 
     async def _fetch_rapid_top_gainers(self) -> List[str]:
         """
-        Descubre los Top Gainers con volumen > 500k de forma no bloqueante.
-        Usa TWS Scanner primario si está activo, o screener ligero como respaldo.
+        Descubre los Top Gainers con volumen > 300k de forma no bloqueante.
+        Usa Yahoo Finance Screener rápido en thread pool (sin llamadas de AI/noticias).
         """
         try:
-            # 1. Intentar con Yahoo Finance Screener rápido en thread pool (sin llamadas de AI/noticias)
-            import yfinance as yf
+            # Si no hay conexión con TWS en este nodo, pausar escaneo
+            from app.data.ib_provider import get_ib_connection
+            ib = get_ib_connection()
+            if not ib or not ib.connected:
+                return []
+
             loop = asyncio.get_running_loop()
             
             def get_screener_sync():
                 try:
-                    s = yf.Screen('day_gainers')
-                    quotes = (s.response or {}).get("quotes", [])
+                    from yfinance.screener import EquityQuery, screen
+                    q = EquityQuery('and', [
+                        EquityQuery('gt', ['percentchange', 3.0]),
+                        EquityQuery('gt', ['dayvolume', 300000]),
+                        EquityQuery('gte', ['intradayprice', 1.0]),
+                        EquityQuery('lte', ['intradayprice', 80.0]),
+                        EquityQuery('eq', ['region', 'us'])
+                    ])
+                    res = screen(q, sortField='percentchange', sortAsc=False, size=15)
+                    quotes = res.get("quotes", [])
                     filtered = []
-                    for q in quotes:
-                        sym = str(q.get("symbol") or "").upper().strip()
-                        chg = float(q.get("regularMarketChangePercent") or 0.0)
-                        vol = int(q.get("regularMarketVolume") or 0)
-                        price = float(q.get("regularMarketPrice") or 0.0)
+                    for q_item in quotes:
+                        sym = str(q_item.get("symbol") or "").upper().strip()
+                        chg = float(q_item.get("regularMarketChangePercent") or 0.0)
+                        vol = int(q_item.get("regularMarketVolume") or 0)
+                        price = float(q_item.get("regularMarketPrice") or 0.0)
                         
+                        # Excluir warrants, preferred shares y símbolos raros
+                        if '.' in sym or '-' in sym or len(sym) > 5:
+                            continue
                         # Filtro de candidatos viables para micro-pullbacks:
-                        # Precio $1.00 a $80.00, Volumen >= 500k, Ganancia del día >= +4.0%
-                        if 1.0 <= price <= 80.0 and vol >= 500_000 and chg >= 4.0:
+                        # Precio $1.00 a $80.00, Volumen >= 300k, Ganancia del día >= +3.0%
+                        if 1.0 <= price <= 80.0 and vol >= 300_000 and chg >= 3.0:
                             filtered.append({"ticker": sym, "change": chg, "volume": vol, "price": price})
                     
                     filtered.sort(key=lambda x: x["change"], reverse=True)
                     return [x["ticker"] for x in filtered[:MAX_TRACKED_TICKERS]]
-                except Exception:
+                except Exception as ex:
+                    log_warning(MODULE, f"Aviso al obtener gainers rápidos: {ex}")
                     return []
 
             top_syms = await loop.run_in_executor(None, get_screener_sync)

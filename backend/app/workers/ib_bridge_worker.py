@@ -402,6 +402,7 @@ class IBBridgeWorker:
             connected = self.ib.connect_tws(host=self.host, port=self.port, client_id=self.client_id)
             if connected:
                 log_info(MODULE, f"✅ ¡Conexión exitosa con Interactive Brokers TWS! (Cuentas: {self.ib.accounts or 'Detectando...'})")
+                self._start_micro_pullback_scalper_if_needed()
                 return True
             else:
                 log_warning(MODULE, "⚠️ No se pudo conectar a TWS. Asegúrate de que TWS esté abierto en modo PAPER (puerto 7497).")
@@ -409,6 +410,29 @@ class IBBridgeWorker:
         except Exception as e:
             log_error(MODULE, f"❌ Error conectando a TWS: {e}")
             return False
+
+    def _start_micro_pullback_scalper_if_needed(self):
+        """Inicia el escáner y motor de micro-pullbacks en APOLO (hilo con event loop dedicado)."""
+        if getattr(self, "_scalp_scanner_started", False):
+            return
+        self._scalp_scanner_started = True
+
+        import threading
+
+        def _run_scanner_loop():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
+                scanner = get_micro_pullback_scanner()
+                scanner.start()
+                log_info(MODULE, "⚡ Motor In-Memory Micro-Pullback ACTIVADO en APOLO (TWS Local).")
+                loop.run_forever()
+            except Exception as e:
+                log_error(MODULE, f"Error en thread de Micro-Pullback Scalper: {e}")
+
+        th = threading.Thread(target=_run_scanner_loop, daemon=True, name="micro-pullback-apolo")
+        th.start()
 
     def update_heartbeat(self):
         """Actualiza el estado de vida del puente en Supabase."""
