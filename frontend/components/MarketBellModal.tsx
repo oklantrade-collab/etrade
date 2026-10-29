@@ -16,6 +16,7 @@ export default function MarketBellModal() {
     nycTime,
     nextBell,
     testBell,
+    playOrderSound,
     isUnlocked,
     unlockAudio,
     lastTriggered,
@@ -277,12 +278,12 @@ export default function MarketBellModal() {
           />
         </div>
 
-        {/* Test Buttons */}
+        {/* Test Buttons for Bells and Thinkorswim Orders */}
         <div style={{ marginBottom: '14px' }}>
           <div style={{ fontSize: '11px', fontWeight: 800, color: '#64748B', textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.08em' }}>
-            Probar Campanas Oficiales
+            Probar Campanas Oficiales (Wall Street)
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
             <button
               onClick={() => testBell('open')}
               style={{
@@ -322,6 +323,52 @@ export default function MarketBellModal() {
               }}
             >
               <span>🛎️</span> Probar Cierre (TOS)
+            </button>
+          </div>
+
+          <div style={{ fontSize: '11px', fontWeight: 800, color: '#64748B', textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.08em' }}>
+            Sonidos de Ejecución Broker (Thinkorswim)
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <button
+              onClick={() => playOrderSound('buy', { symbol: 'AAPL', shares: 50, price: 232.50 })}
+              style={{
+                background: 'rgba(6, 182, 212, 0.12)',
+                border: '1px solid rgba(6, 182, 212, 0.4)',
+                color: '#22D3EE',
+                padding: '9px 12px',
+                borderRadius: '10px',
+                fontSize: '12px',
+                fontWeight: 800,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>🛒</span> Compra (Ding)
+            </button>
+            <button
+              onClick={() => playOrderSound('close', { symbol: 'AAPL', shares: 50, price: 236.80 })}
+              style={{
+                background: 'rgba(245, 158, 11, 0.12)',
+                border: '1px solid rgba(245, 158, 11, 0.4)',
+                color: '#FBBF24',
+                padding: '9px 12px',
+                borderRadius: '10px',
+                fontSize: '12px',
+                fontWeight: 800,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>💰</span> Venta / Cierre (Chimes)
             </button>
           </div>
         </div>

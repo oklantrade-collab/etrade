@@ -3487,16 +3487,18 @@ async def start_stocks_scheduler(force=False):
 
     await run_stocks_cycle(force=force)
 
-    # Keep running
+    # Keep running - Comprobación cada 15 segundos para activación inmediata al toque de campana (08:30 Lima / 09:30 ET)
     try:
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(15)
             try:
                 m_open, _ = is_market_open()
                 if m_open and not scalp_scanner.is_running:
                     scalp_scanner.start()
+                    log_info(MODULE, '⚡ [08:30 AM Lima / 09:30 AM ET] Campana de mercado detectada: Micro-Pullback Scanner INICIADO.')
                 elif not m_open and scalp_scanner.is_running:
                     scalp_scanner.stop()
+                    log_info(MODULE, '🛑 [15:00 PM Lima / 16:00 PM ET] Cierre de mercado detectado: Micro-Pullback Scanner DETENIDO.')
             except Exception:
                 pass
     except (KeyboardInterrupt, SystemExit):

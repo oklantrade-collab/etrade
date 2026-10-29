@@ -118,18 +118,18 @@ class MicroPullbackEngine:
             self.daily_cushion_usd = 0.0
 
     def register_ticker(self, ticker: str):
-        """Suscribe un ticker de alta volatilidad al feed de 5 segundos de TWS."""
+        """Suscribe un ticker de alta volatilidad al feed de 5 segundos de TWS o Finnhub fallback."""
         ticker = ticker.upper().strip()
         if ticker in self.candidates:
-            return
-        
-        ib = get_ib_connection()
-        if not ib or not ib.connected:
-            log_warning(MODULE, f"No se puede suscribir {ticker}: TWS no conectado.")
             return
 
         cand = ScalpCandidateState(ticker)
         self.candidates[ticker] = cand
+
+        ib = get_ib_connection()
+        if not ib or not ib.connected:
+            log_info(MODULE, f"📡 [{ticker}] TWS no conectado en este nodo. Alimentador Finnhub 5s activo.")
+            return
 
         def on_bar_received(req_id: int, bar: dict):
             self.process_5s_bar(ticker, bar)
@@ -648,7 +648,7 @@ class MicroPullbackEngine:
                 "shares": cand.shares,
                 "limit_price": limit_price,
                 "market_price": cand.entry_price,
-                "status": "processing",
+                "status": "pending",
                 "created_at": now_iso,
             }
             res = sb.table("stocks_orders").insert(order_data).execute()
@@ -686,7 +686,7 @@ class MicroPullbackEngine:
                 "shares": shares,
                 "market_price": curr_p,
                 "limit_price": curr_p,
-                "status": "processing",
+                "status": "pending",
                 "created_at": now_iso,
             }
             res = sb.table("stocks_orders").insert(order_data).execute()

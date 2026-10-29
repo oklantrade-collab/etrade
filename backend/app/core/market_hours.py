@@ -79,17 +79,80 @@ def is_market_open():
 
 def get_market_status_dict():
     is_open, status_text = is_market_open()
-    now = get_nyc_now()
+    now_nyc = get_nyc_now()
+    now_lima = get_lima_now()
     
-    # Calculate regular market open and close times today
+    total_sec_today = now_nyc.hour * 3600 + now_nyc.minute * 60 + now_nyc.second
+    open_sec = 9 * 3600 + 30 * 60  # 09:30:00 (34200)
+    close_sec = 16 * 3600           # 16:00:00 (57600)
+
+    active_time_str = ""
+    remaining_time_str = ""
+    time_to_open_str = ""
+    summary_str = ""
+
+    if is_open:
+        elapsed_sec = max(0, total_sec_today - open_sec)
+        remain_sec = max(0, close_sec - total_sec_today)
+        
+        h_el, rem = divmod(elapsed_sec, 3600)
+        m_el, s_el = divmod(rem, 60)
+        active_time_str = f"{h_el}h {m_el:02d}m"
+        
+        h_rem, rem = divmod(remain_sec, 3600)
+        m_rem, s_rem = divmod(rem, 60)
+        if h_rem > 0:
+            remaining_time_str = f"{h_rem}h {m_rem:02d}m"
+        else:
+            remaining_time_str = f"{m_rem}m {s_rem:02d}s"
+            
+        summary_str = f"Activo {active_time_str} • Cierra en {remaining_time_str}"
+    else:
+        # Calculate time until next market open
+        if now_nyc.weekday() <= 4 and total_sec_today < open_sec:
+            # Pre-market on a trading day
+            diff_sec = open_sec - total_sec_today
+            h_diff, rem = divmod(diff_sec, 3600)
+            m_diff, s_diff = divmod(rem, 60)
+            if h_diff > 0:
+                time_to_open_str = f"{h_diff}h {m_diff:02d}m"
+            else:
+                time_to_open_str = f"{m_diff}m {s_diff:02d}s"
+            summary_str = f"Abre en {time_to_open_str}"
+        else:
+            # Post-market or weekend
+            days_ahead = 1
+            wd = now_nyc.weekday()
+            if wd == 4:    # Friday after close -> Monday
+                days_ahead = 3
+            elif wd == 5:  # Saturday -> Monday
+                days_ahead = 2
+            elif wd == 6:  # Sunday -> Monday
+                days_ahead = 1
+            sec_left_today = max(0, 86400 - total_sec_today)
+            sec_future = (days_ahead - 1) * 86400 + open_sec
+            total_wait_sec = sec_left_today + sec_future
+            h_w, rem = divmod(total_wait_sec, 3600)
+            m_w, _ = divmod(rem, 60)
+            time_to_open_str = f"{h_w}h {m_w:02d}m"
+            if wd >= 4:
+                summary_str = f"Abre el lunes en {time_to_open_str}"
+            else:
+                summary_str = f"Abre mañana en {time_to_open_str}"
+
     return {
         "is_open": is_open,
         "status": status_text,
-        "nyc_time": now.strftime("%H:%M:%S"),
-        "date": now.strftime("%Y-%m-%d"),
+        "nyc_time": now_nyc.strftime("%H:%M:%S"),
+        "lima_time": now_lima.strftime("%H:%M:%S"),
+        "date": now_nyc.strftime("%Y-%m-%d"),
         "open_time": "09:30:00",
         "close_time": "16:00:00",
-        "is_trading_day": now.weekday() <= 4 and ("Feriado" not in status_text)
+        "is_trading_day": now_nyc.weekday() <= 4 and ("Feriado" not in status_text),
+        "active_time_str": active_time_str,
+        "remaining_time_str": remaining_time_str,
+        "time_to_open_str": time_to_open_str,
+        "summary_str": summary_str
     }
 
 def is_forex_market_open() -> bool:

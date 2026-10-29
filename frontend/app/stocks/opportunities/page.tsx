@@ -4,6 +4,7 @@ import Link from 'next/link'
 import TradeMarkerChart from '@/components/TradeMarkerChart'
 import toast from 'react-hot-toast'
 import MarketBellButton from '@/components/MarketBellButton'
+import { useMarketBell } from '@/context/MarketBellContext'
 
 // ════════════════════════════════════════════
 // APEX Priority Queue Panel
@@ -1390,6 +1391,7 @@ function formatLastScanTime(raw?: string): string {
   return raw;
 }
 export default function OpportunitiesIntelligence() {
+  const { nextBell, nycTime } = useMarketBell()
   const [opportunities, setOpportunities] = useState<any[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -1617,9 +1619,26 @@ export default function OpportunitiesIntelligence() {
           <h1 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0', letterSpacing: '-0.02em' }}>🎯 AI Stock Scanner</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <p style={{ color: '#555', fontSize: '12px' }}>{total} monitoreados · NYC Live Tracking</p>
-               <span style={{ fontSize: '10px', background: marketStatus.is_open ? '#22C55E' : '#EF4444', color: '#000', padding: '1px 8px', borderRadius: '4px', fontWeight: 950, textTransform: 'uppercase' }}>
-                {marketStatus.is_open ? '🟢' : '🔴'} MERCADO {marketStatus.status}
-              </span>
+               <span 
+                title={`Wall Street (NYSE/NASDAQ) • NYC: ${nycTime.timeStr} ET • ${nextBell.summaryStr}`}
+                style={{ 
+                  fontSize: '11px', 
+                  background: nextBell.isOpen ? '#22C55E' : (nextBell.statusText === 'PRE-MERCADO' ? '#EAB308' : '#EF4444'), 
+                  color: nextBell.isOpen ? '#000' : '#FFF', 
+                  padding: '2px 10px', 
+                  borderRadius: '6px', 
+                  fontWeight: 950, 
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.03em',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  boxShadow: nextBell.isOpen ? '0 0 10px rgba(34, 197, 94, 0.25)' : 'none'
+                }}
+               >
+                <span>{nextBell.isOpen ? '🟢' : (nextBell.statusText === 'PRE-MERCADO' ? '🟡' : '🔴')}</span>
+                <span>{nextBell.detailedBadge}</span>
+               </span>
               <MarketBellButton />
               {opportunities.length > 0 && (
                 <span style={{ fontSize: '10px', color: '#888', fontWeight: 700 }}>

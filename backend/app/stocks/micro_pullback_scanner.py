@@ -182,11 +182,7 @@ class MicroPullbackScanner:
         Usa Yahoo Finance Screener rápido en thread pool (sin llamadas de AI/noticias).
         """
         try:
-            # Si no hay conexión con TWS en este nodo, pausar escaneo
-            from app.data.ib_provider import get_ib_connection
-            ib = get_ib_connection()
-            if not ib or not ib.connected:
-                return []
+            # Screening continuo en paralelo
 
             loop = asyncio.get_running_loop()
             

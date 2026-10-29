@@ -5,6 +5,13 @@ import { marketBell, BellSoundProfile, SoundOption, AVAILABLE_SOUNDS } from '@/l
 import { getNYCDateTime, getNextMarketBellInfo, NYCTimeInfo, MarketBellEvent, isMarketHoliday, isEarlyCloseDay } from '@/lib/marketSchedule';
 import toast from 'react-hot-toast';
 
+export interface OrderFillDetails {
+  symbol?: string;
+  shares?: number;
+  price?: number;
+  isOption?: boolean;
+}
+
 interface MarketBellContextType {
   enabled: boolean;
   setEnabled: (enabled: boolean) => void;
@@ -19,6 +26,7 @@ interface MarketBellContextType {
   isUnlocked: boolean;
   unlockAudio: () => void;
   testBell: (type: 'open' | 'close', specificProfile?: BellSoundProfile) => void;
+  playOrderSound: (type: 'buy' | 'sell' | 'close', details?: OrderFillDetails) => Promise<void>;
   lastTriggered: string | null;
   showModal: boolean;
   setShowModal: (show: boolean) => void;
@@ -37,6 +45,8 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
   const [showModal, setShowModal] = useState<boolean>(false);
 
   const prevIsOpenRef = useRef<boolean | null>(null);
+  const knownFilledOrdersRef = useRef<Set<string>>(new Set());
+  const isFirstOrdersCheckRef = useRef<boolean>(true);
 
   // Initialize saved preferences
   useEffect(() => {
@@ -60,6 +70,28 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
       // ignore
     }
     setIsUnlocked(marketBell.getIsUnlocked());
+  }, []);
+
+  // Global window listeners: Auto-unlock audio on ANY user click, touch, or keypress anywhere on screen
+  useEffect(() => {
+    const handleUserInteraction = () => {
+      const ok = marketBell.unlockAudio();
+      if (ok) {
+        setIsUnlocked(true);
+      }
+    };
+
+    window.addEventListener('click', handleUserInteraction, { capture: true, passive: true });
+    window.addEventListener('touchstart', handleUserInteraction, { capture: true, passive: true });
+    window.addEventListener('keydown', handleUserInteraction, { capture: true, passive: true });
+    window.addEventListener('mousedown', handleUserInteraction, { capture: true, passive: true });
+
+    return () => {
+      window.removeEventListener('click', handleUserInteraction);
+      window.removeEventListener('touchstart', handleUserInteraction);
+      window.removeEventListener('keydown', handleUserInteraction);
+      window.removeEventListener('mousedown', handleUserInteraction);
+    };
   }, []);
 
   const setEnabled = useCallback((value: boolean) => {
@@ -117,7 +149,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
               <span className="text-3xl animate-bounce">🔔</span>
               <div>
                 <p className="text-sm font-black text-emerald-400 uppercase tracking-wider">¡Apertura de Wall Street (NYSE/NASDAQ)!</p>
-                <p className="text-xs text-slate-300 mt-0.5">Campana Thinkorswim reproducida. Sesión regular abierta (09:30 AM ET).</p>
+                <p className="text-xs text-slate-300 mt-0.5">Campana Thinkorswim reproducida. Sesión regular abierta (09:30 AM ET / 08:30 AM Lima).</p>
               </div>
             </div>
           </div>
@@ -132,7 +164,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
               <span className="text-3xl animate-pulse">🛎️</span>
               <div>
                 <p className="text-sm font-black text-rose-400 uppercase tracking-wider">¡Cierre de la Bolsa (NYSE/NASDAQ)!</p>
-                <p className="text-xs text-slate-300 mt-0.5">Campana Thinkorswim reproducida. Sesión regular finalizada (04:00 PM ET).</p>
+                <p className="text-xs text-slate-300 mt-0.5">Campana Thinkorswim reproducida. Sesión regular finalizada (04:00 PM ET / 03:00 PM Lima).</p>
               </div>
             </div>
           </div>
@@ -140,6 +172,42 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
         { duration: 8000 }
       );
     }
+  }, [enabled]);
+
+  // Play Thinkorswim Order Confirmation Sounds (Ding for Buy, Chimes for Sell/Close)
+  const playOrderSound = useCallback(async (
+    type: 'buy' | 'sell' | 'close', 
+    details?: OrderFillDetails
+  ) => {
+    if (!enabled) return;
+    marketBell.unlockAudio();
+    setIsUnlocked(true);
+    await marketBell.playOrderSound(type);
+
+    const isBuy = type === 'buy';
+    const sym = details?.symbol || 'ACTIVO';
+    const shares = details?.shares ? `${details.shares}x ` : '';
+    const priceStr = details?.price ? ` @ $${details.price.toFixed(2)}` : '';
+    const assetKind = details?.isOption ? 'OPCIÓN' : 'STOCK';
+
+    toast.custom(
+      (t) => (
+        <div className={`${t.visible ? 'animate-enter' : 'animate-leave'} max-w-md w-full bg-[#111622] border-2 ${isBuy ? 'border-cyan-500/80' : 'border-amber-500/80'} shadow-2xl rounded-2xl pointer-events-auto flex p-3.5 text-white ring-1 ring-black ring-opacity-5`}>
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">{isBuy ? '🛒' : '💰'}</span>
+            <div>
+              <p className={`text-xs font-black uppercase tracking-wider ${isBuy ? 'text-cyan-400' : 'text-amber-400'}`}>
+                {isBuy ? `¡COMPRA ${assetKind} CONFIRMADA!` : `¡VENTA / CIERRE ${assetKind} CONFIRMADA!`}
+              </p>
+              <p className="text-xs text-slate-200 mt-0.5">
+                {shares}{sym}{priceStr} • Ejecutado en broker Interactive Brokers (TWS).
+              </p>
+            </div>
+          </div>
+        </div>
+      ),
+      { duration: 6000 }
+    );
   }, [enabled]);
 
   // Public test trigger
@@ -166,24 +234,24 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
 
       // Seconds elapsed today in New York
       const totalSec = hours * 3600 + minutes * 60 + seconds;
-      const openSec = 9 * 3600 + 30 * 60; // 34200 (09:30:00 ET)
-      const closeSec = closeHour * 3600;   // 57600 (16:00:00 ET) or 46800 (13:00 ET)
+      const openSec = 9 * 3600 + 30 * 60; // 34200 (09:30:00 ET / 08:30 Lima)
+      const closeSec = closeHour * 3600;   // 57600 (16:00:00 ET / 15:00 Lima) or 46800 (13:00 ET)
 
-      // 1. Check Market Open: 09:30:00 ET (resilient 120s window survives background tab throttling)
-      if (totalSec >= openSec && totalSec < openSec + 120) {
+      // 1. Check Market Open: 09:30:00 ET (resilient 300s window so it rings even if tab is opened at 09:31)
+      if (totalSec >= openSec && totalSec < openSec + 300) {
         const key = `etrade_bell_${dateStr}_open`;
         if (typeof window !== 'undefined' && !localStorage.getItem(key)) {
           localStorage.setItem(key, 'true');
-          triggerBell('open', '09:30 AM ET Apertura Oficial');
+          triggerBell('open', '09:30 AM ET Apertura Oficial (08:30 Lima)');
         }
       }
 
-      // 2. Check Market Close: 16:00:00 ET (resilient 120s window)
-      if (totalSec >= closeSec && totalSec < closeSec + 120) {
+      // 2. Check Market Close: 16:00:00 ET (resilient 300s window)
+      if (totalSec >= closeSec && totalSec < closeSec + 300) {
         const key = `etrade_bell_${dateStr}_close`;
         if (typeof window !== 'undefined' && !localStorage.getItem(key)) {
           localStorage.setItem(key, 'true');
-          triggerBell('close', `${closeHour}:00 PM ET Cierre Oficial`);
+          triggerBell('close', `${closeHour}:00 PM ET Cierre Oficial (15:00 Lima)`);
         }
       }
     }, 1000);
@@ -238,6 +306,51 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     return () => clearInterval(interval);
   }, [triggerBell]);
 
+  // Real-time Order Fill Audio Listener (Every 5 seconds checks latest filled orders from TWS)
+  useEffect(() => {
+    const checkOrderExecutions = async () => {
+      try {
+        const res = await fetch('/api/v1/stocks/orders?limit=15');
+        if (!res.ok) return;
+        const orders = await res.json();
+        if (!Array.isArray(orders)) return;
+
+        const filledOrders = orders.filter((o: any) => o.status === 'filled');
+
+        if (isFirstOrdersCheckRef.current) {
+          // First run: Seed known IDs so historical orders do not trigger sound on page load
+          isFirstOrdersCheckRef.current = false;
+          filledOrders.forEach((o: any) => knownFilledOrdersRef.current.add(String(o.id)));
+          return;
+        }
+
+        // Check for any newly filled orders
+        for (const order of filledOrders) {
+          const idStr = String(order.id);
+          if (!knownFilledOrdersRef.current.has(idStr)) {
+            knownFilledOrdersRef.current.add(idStr);
+
+            const isBuy = String(order.direction || '').toLowerCase() === 'buy';
+            const isOption = Boolean(order.target_band?.startsWith('OPT:') || order.rule_code?.includes('OPTION'));
+            
+            await playOrderSound(isBuy ? 'buy' : 'close', {
+              symbol: order.ticker,
+              shares: order.shares,
+              price: order.filled_price || order.market_price,
+              isOption
+            });
+          }
+        }
+      } catch (e) {
+        // quiet
+      }
+    };
+
+    checkOrderExecutions();
+    const orderInterval = setInterval(checkOrderExecutions, 5000);
+    return () => clearInterval(orderInterval);
+  }, [playOrderSound]);
+
   return (
     <MarketBellContext.Provider
       value={{
@@ -254,6 +367,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
         isUnlocked,
         unlockAudio,
         testBell,
+        playOrderSound,
         lastTriggered,
         showModal,
         setShowModal,

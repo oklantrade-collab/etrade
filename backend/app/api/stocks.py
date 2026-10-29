@@ -3,6 +3,7 @@ import asyncio
 import time
 import os
 import json
+import math
 from pydantic import BaseModel
 from typing import Optional
 import traceback
@@ -11,8 +12,22 @@ from datetime import datetime, date, timezone, timedelta
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase, reset_supabase
 from dateutil.parser import parse as parse_dt
-from app.core.market_hours import is_market_open, get_nyc_now, convert_to_lima
+from app.core.market_hours import is_market_open, get_nyc_now, convert_to_lima, get_market_status_dict
 from app.data.ib_provider import IBProvider
+
+def clean_nan_values(obj):
+    """Recursively replaces NaN, Inf, and -Inf with safe JSON-serializable values (0.0)."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return 0.0
+        return obj
+    elif isinstance(obj, dict):
+        return {k: clean_nan_values(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan_values(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(clean_nan_values(v) for v in obj)
+    return obj
 
 # Initialize router
 router = APIRouter()
@@ -39,12 +54,7 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
         try:
             sb = get_supabase()
             # 1. Market Status
-            is_open, status_text = is_market_open()
-            market_status = {
-                "is_open": is_open,
-                "status": status_text,
-                "nyc_now": get_nyc_now().isoformat()
-            }
+            market_status = get_market_status_dict()
 
             # 2. Get today's date in Lima/NYC
             today = get_nyc_now().date().isoformat()
@@ -333,17 +343,19 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 "has_gap_runners": len(gap_runners) > 0,
                 "market_status": market_status
             }
+            clean_res = clean_nan_values(res_obj)
             if not gap_runner_only:
-                LAST_DATA_CACHE["data"] = res_obj
+                LAST_DATA_CACHE["data"] = clean_res
                 LAST_DATA_CACHE["timestamp"] = time.time()
-            return res_obj
+            return clean_res
         except Exception as e:
             if attempt < max_retries - 1 and ("10061" in str(e) or "disconnected" in str(e)):
                 reset_supabase()
                 await asyncio.sleep(1)
                 continue
             log_error("stocks_api", f"Error in get_stocks_opportunities: {e}")
-            return {"opportunities": [], "total": 0, "market_status": {"is_open": False, "status": "ERROR"}}
+            from app.core.market_hours import get_market_status_dict
+            return {"opportunities": [], "total": 0, "market_status": get_market_status_dict()}
 
 @router.get("/news/{ticker}")
 async def get_ticker_news_endpoint(ticker: str):

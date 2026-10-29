@@ -311,6 +311,86 @@ class MarketBellAudioEngine {
       return false;
     }
   }
+
+  /**
+   * Play Thinkorswim confirmation sound when an order is executed by broker (Stock or Option)
+   * @param type 'buy' (Ding) or 'sell'/'close' (Chimes)
+   */
+  public async playOrderSound(type: 'buy' | 'sell' | 'close' = 'buy'): Promise<boolean> {
+    if (this.volume <= 0) return false;
+    this.unlockAudio();
+
+    const isBuy = type === 'buy';
+    const soundPath = isBuy ? '/sounds/tos-ding.wav' : '/sounds/tos-chimes.wav';
+
+    // 1. Try HTML5 Audio asset
+    try {
+      const audio = new Audio(soundPath);
+      audio.volume = this.volume;
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        await playPromise;
+        return true;
+      }
+    } catch (err) {
+      console.warn(`[MarketBell] Order sound playback blocked (${type}), using synthesizer fallback:`, err);
+    }
+
+    // 2. Synthesizer fallback tuned to Thinkorswim's Ding / Chimes
+    return this.synthesizeOrderFill(isBuy);
+  }
+
+  /**
+   * Synthesize Thinkorswim Ding (Buy) or Chimes (Close/Sell)
+   */
+  public synthesizeOrderFill(isBuy: boolean): boolean {
+    try {
+      this.unlockAudio();
+      if (!this.audioCtx) return false;
+
+      const ctx = this.audioCtx;
+      const now = ctx.currentTime;
+
+      const masterGain = ctx.createGain();
+      masterGain.gain.setValueAtTime(this.volume * 0.9, now);
+      masterGain.connect(ctx.destination);
+
+      if (isBuy) {
+        // Thinkorswim BUY Ding: 1318.5 Hz (E6) with rapid decay
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1318.5, now);
+        gain.gain.setValueAtTime(0.5, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.85);
+
+        osc.connect(gain);
+        gain.connect(masterGain);
+        osc.start(now);
+        osc.stop(now + 0.9);
+      } else {
+        // Thinkorswim SELL Chimes: Descending melodic chord (880Hz -> 659Hz)
+        [880, 659.25].forEach((freq, idx) => {
+          const t = now + idx * 0.18;
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, t);
+          gain.gain.setValueAtTime(0.4, t);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+
+          osc.connect(gain);
+          gain.connect(masterGain);
+          osc.start(t);
+          osc.stop(t + 0.95);
+        });
+      }
+      return true;
+    } catch (e) {
+      console.error('[MarketBell] Order synthesis failed:', e);
+      return false;
+    }
+  }
 }
 
 export const marketBell = new MarketBellAudioEngine();

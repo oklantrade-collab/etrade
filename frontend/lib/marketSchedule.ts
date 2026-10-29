@@ -24,6 +24,11 @@ export interface MarketBellEvent {
   countdownStr: string;
   isToday: boolean;
   statusText: string;
+  isOpen: boolean;
+  activeSeconds: number;
+  activeStr: string;
+  summaryStr: string;
+  detailedBadge: string;
 }
 
 /**
@@ -182,11 +187,8 @@ export function isMarketHoliday(year: number, month: number, day: number, dayOfW
  * Check if the date is an early close day (market closes at 1:00 PM ET / 13:00)
  */
 export function isEarlyCloseDay(year: number, month: number, day: number, dayOfWeek: number): boolean {
-  // Day before Independence Day (July 3 if weekday)
   if (month === 7 && day === 3 && dayOfWeek >= 1 && dayOfWeek <= 4) return true;
-  // Black Friday (Day after Thanksgiving, 4th Friday of November)
   if (month === 11 && dayOfWeek === 5 && day >= 23 && day <= 29) return true;
-  // Christmas Eve (Dec 24 if weekday)
   if (month === 12 && day === 24 && dayOfWeek >= 1 && dayOfWeek <= 4) return true;
   return false;
 }
@@ -195,7 +197,7 @@ export function isEarlyCloseDay(year: number, month: number, day: number, dayOfW
  * Format remaining seconds into "HHh MMm SSs" or "MMm SSs"
  */
 export function formatCountdown(totalSeconds: number): string {
-  if (totalSeconds <= 0) return '00s';
+  if (totalSeconds <= 0) return '00m 00s';
   const h = Math.floor(totalSeconds / 3600);
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = totalSeconds % 60;
@@ -207,7 +209,69 @@ export function formatCountdown(totalSeconds: number): string {
 }
 
 /**
- * Returns upcoming bell schedule and details based on current NYC time
+ * Format duration into compact "Xh Ym"
+ */
+export function formatDurationCompact(totalSeconds: number): string {
+  if (totalSeconds <= 0) return '0m';
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  if (h > 0) {
+    return `${h}h ${String(m).padStart(2, '0')}m`;
+  }
+  return `${m}m`;
+}
+
+/**
+ * Calculate seconds and label to the next regular market open session (09:30 ET)
+ */
+export function getSecondsToNextMarketOpen(nowNYC: NYCTimeInfo = getNYCDateTime()): { secondsRemaining: number, label: string } {
+  const { year, month, day, dayOfWeek, totalSecondsToday } = nowNYC;
+  const openSeconds = 9 * 3600 + 30 * 60; // 09:30:00 (34200)
+
+  // Pre-market on a regular trading day
+  const holidayToday = isMarketHoliday(year, month, day, dayOfWeek);
+  if (!holidayToday.isHoliday && totalSecondsToday < openSeconds) {
+    const rem = openSeconds - totalSecondsToday;
+    return { secondsRemaining: rem, label: `Abre en ${formatCountdown(rem)}` };
+  }
+
+  // Advance day by day until finding the next non-holiday weekday
+  let daysAhead = 1;
+  const refDate = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+
+  while (daysAhead <= 10) {
+    const nextDate = new Date(refDate.getTime() + daysAhead * 24 * 3600 * 1000);
+    const nYear = nextDate.getUTCFullYear();
+    const nMonth = nextDate.getUTCMonth() + 1;
+    const nDay = nextDate.getUTCDate();
+    const nDayOfWeek = nextDate.getUTCDay();
+
+    const h = isMarketHoliday(nYear, nMonth, nDay, nDayOfWeek);
+    if (!h.isHoliday) {
+      break;
+    }
+    daysAhead++;
+  }
+
+  const secondsLeftToday = Math.max(0, 86400 - totalSecondsToday);
+  const totalSeconds = secondsLeftToday + (daysAhead - 1) * 86400 + openSeconds;
+
+  const dayNameMap = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+  const nextDayIndex = (dayOfWeek + daysAhead) % 7;
+  const nextDayName = dayNameMap[nextDayIndex];
+
+  let label = '';
+  if (daysAhead === 1) {
+    label = `Abre mañana en ${formatDurationCompact(totalSeconds)}`;
+  } else {
+    label = `Abre el ${nextDayName} en ${formatDurationCompact(totalSeconds)}`;
+  }
+
+  return { secondsRemaining: totalSeconds, label };
+}
+
+/**
+ * Returns upcoming bell schedule, live elapsed/remaining counters and formatted badges
  */
 export function getNextMarketBellInfo(nowNYC: NYCTimeInfo = getNYCDateTime()): MarketBellEvent {
   const { year, month, day, dayOfWeek, totalSecondsToday } = nowNYC;
@@ -215,58 +279,85 @@ export function getNextMarketBellInfo(nowNYC: NYCTimeInfo = getNYCDateTime()): M
   const isEarlyClose = isEarlyCloseDay(year, month, day, dayOfWeek);
 
   const openSeconds = 9 * 3600 + 30 * 60; // 09:30:00 (34200)
-  const closeSeconds = isEarlyClose ? (13 * 3600) : (16 * 3600); // 16:00:00 (57600) or 13:00:00 (46800)
+  const closeSeconds = isEarlyClose ? (13 * 3600) : (16 * 3600); // 16:00:00 (57600)
   const closeTimeStr = isEarlyClose ? '13:00:00' : '16:00:00';
 
   // Case 1: Today is a weekend or holiday
   if (holiday.isHoliday) {
+    const nextInfo = getSecondsToNextMarketOpen(nowNYC);
     return {
       type: 'open',
       targetTimeStr: '09:30:00',
       targetSeconds: openSeconds,
-      secondsRemaining: 0,
-      countdownStr: holiday.name || 'Mercado Cerrado',
+      secondsRemaining: nextInfo.secondsRemaining,
+      countdownStr: formatCountdown(nextInfo.secondsRemaining),
       isToday: false,
-      statusText: `CERRADO (${holiday.name})`
+      statusText: `CERRADO (${holiday.name})`,
+      isOpen: false,
+      activeSeconds: 0,
+      activeStr: '',
+      summaryStr: nextInfo.label,
+      detailedBadge: `CERRADO (${nextInfo.label})`
     };
   }
 
-  // Case 2: Today is a trading day, before 09:30 AM ET
+  // Case 2: Today is a trading day, before 09:30 AM ET (PRE-MERCADO)
   if (totalSecondsToday < openSeconds) {
     const diff = openSeconds - totalSecondsToday;
+    const cdStr = formatCountdown(diff);
     return {
       type: 'open',
       targetTimeStr: '09:30:00',
       targetSeconds: openSeconds,
       secondsRemaining: diff,
-      countdownStr: formatCountdown(diff),
+      countdownStr: cdStr,
       isToday: true,
-      statusText: 'PRE-MERCADO (Esperando Apertura 09:30 ET)'
+      statusText: 'PRE-MERCADO',
+      isOpen: false,
+      activeSeconds: 0,
+      activeStr: '',
+      summaryStr: `Abre en ${cdStr}`,
+      detailedBadge: `PRE-MERCADO (Abre en ${cdStr})`
     };
   }
 
-  // Case 3: Today is a trading day, during regular market hours (09:30 - 16:00)
+  // Case 3: Today is a trading day, during regular market hours (09:30 - 16:00 ET) (MERCADO ABIERTO)
   if (totalSecondsToday >= openSeconds && totalSecondsToday < closeSeconds) {
     const diff = closeSeconds - totalSecondsToday;
+    const activeSec = totalSecondsToday - openSeconds;
+    const activeCompact = formatDurationCompact(activeSec);
+    const cdStr = formatCountdown(diff);
+
     return {
       type: 'close',
       targetTimeStr: closeTimeStr,
       targetSeconds: closeSeconds,
       secondsRemaining: diff,
-      countdownStr: formatCountdown(diff),
+      countdownStr: cdStr,
       isToday: true,
-      statusText: 'MERCADO ABIERTO (En curso)'
+      statusText: 'MERCADO ABIERTO',
+      isOpen: true,
+      activeSeconds: activeSec,
+      activeStr: activeCompact,
+      summaryStr: `Activo ${activeCompact} • Cierra en ${cdStr}`,
+      detailedBadge: `ABIERTO (Activo ${activeCompact} • Cierra en ${cdStr})`
     };
   }
 
-  // Case 4: Today is a trading day, after market close (> 16:00)
+  // Case 4: Today is a trading day, after market close (> 16:00 ET) (POST-CIERRE / CERRADO)
+  const nextInfo = getSecondsToNextMarketOpen(nowNYC);
   return {
     type: 'open',
     targetTimeStr: '09:30:00',
     targetSeconds: openSeconds,
-    secondsRemaining: 0,
-    countdownStr: 'Sesión Finalizada',
+    secondsRemaining: nextInfo.secondsRemaining,
+    countdownStr: formatCountdown(nextInfo.secondsRemaining),
     isToday: false,
-    statusText: 'POST-CIERRE (Mercado Cerrado)'
+    statusText: 'MERCADO CERRADO',
+    isOpen: false,
+    activeSeconds: 0,
+    activeStr: '',
+    summaryStr: nextInfo.label,
+    detailedBadge: `CERRADO (${nextInfo.label})`
   };
 }
