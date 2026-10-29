@@ -1226,6 +1226,13 @@ def calculate_alpha_escalating_trailing_stop(
             if atr15 > 0:
                 delta = max(0.01, min(current_price * 0.0035, 0.15 * atr15))
 
+        # ── Determinación previa de High Máximo alcanzado ──
+        highest_seen = float(position.get('trail_high') or position.get('highest_price_reached') or current_price)
+        if df_5m is not None and len(df_5m) > 0:
+            h5_series = _safe_col(df_5m, 'high')
+            if len(h5_series) > 0:
+                highest_seen = max(highest_seen, float(h5_series.max()))
+
         # ── RATCHET A BREAKEVEN (CENTRO DE COSTO + 1%) AL ALCANZAR +4.0% ──
         if entry_p > 0 and highest_seen >= (entry_p * 1.04):
             be_sl_plus1 = round(entry_p * 1.01, 2)
@@ -1243,12 +1250,6 @@ def calculate_alpha_escalating_trailing_stop(
             open_day = float(_safe_col(df_5m, 'open').iloc[0])
         if open_day <= 0:
             open_day = entry_p
-
-        highest_seen = float(position.get('trail_high') or position.get('highest_price_reached') or current_price)
-        if df_5m is not None and len(df_5m) > 0:
-            h5_series = _safe_col(df_5m, 'high')
-            if len(h5_series) > 0:
-                highest_seen = max(highest_seen, float(h5_series.max()))
 
         if open_day > 0 and highest_seen >= (open_day * 1.08):
             ratchet_sl_80 = round(open_day + 0.80 * (highest_seen - open_day), 2)

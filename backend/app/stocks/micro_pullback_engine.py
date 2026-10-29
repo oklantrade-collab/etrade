@@ -680,7 +680,7 @@ class MicroPullbackEngine:
             order_data = {
                 "ticker": cand.ticker,
                 "group_name": "HOT_MICRO_PULLBACK",
-                "rule_code": f"SCALP_EXIT_{reason}",
+                "rule_code": f"SCALP_EXIT_{reason}"[:30],
                 "order_type": "market",
                 "direction": "sell",
                 "shares": shares,
@@ -701,7 +701,7 @@ class MicroPullbackEngine:
                     "market_price": curr_p,
                     "limit_price": curr_p,
                     "group_name": "HOT_MICRO_PULLBACK",
-                    "rule_code": f"SCALP_EXIT_{reason}",
+                    "rule_code": f"SCALP_EXIT_{reason}"[:30],
                 }
             except Exception:
                 pass

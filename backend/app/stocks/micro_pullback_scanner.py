@@ -26,9 +26,10 @@ class MicroPullbackScanner:
         self.is_running: bool = False
         self.current_top_tickers: Set[str] = set()
         self._task: asyncio.Task | None = None
+        self._fallback_task: asyncio.Task | None = None
 
     def start(self):
-        """Inicia el bucle de escaneo."""
+        """Inicia el bucle de escaneo y el alimentador de soporte."""
         if self.is_running:
             return
         self.is_running = True
@@ -37,18 +38,84 @@ class MicroPullbackScanner:
         try:
             loop = asyncio.get_running_loop()
             self._task = loop.create_task(self._scan_loop())
+            self._fallback_task = loop.create_task(self._fallback_bar_feeder())
         except RuntimeError:
             self._task = asyncio.ensure_future(self._scan_loop())
-        log_info(MODULE, "🔎 Escáner de Momentum Micro-Pullbacks INICIADO (Refresco cada 15s).")
+            self._fallback_task = asyncio.ensure_future(self._fallback_bar_feeder())
+        log_info(MODULE, "🔎 Escáner de Momentum Micro-Pullbacks INICIADO (Refresco cada 15s con fallback automático).")
 
     def stop(self):
-        """Detiene el bucle y desuscribe candidatos."""
+        """Detiene los bucles y desuscribe candidatos."""
         self.is_running = False
         if self._task and not self._task.done():
             self._task.cancel()
+        if self._fallback_task and not self._fallback_task.done():
+            self._fallback_task.cancel()
         engine = get_micro_pullback_engine()
         engine.stop()
         log_info(MODULE, "🛑 Escáner de Momentum Micro-Pullbacks DETENIDO.")
+
+    async def _fallback_bar_feeder(self):
+        """
+        Alimentador de respaldo: Si TWS Paper no cuenta con permisos de datos en tiempo real L1
+        (IB Error 420 No market data permissions), genera barras rápidas para que el motor
+        in-memory continúe detectando impulsos y ejecutando compras sin interrupción.
+        """
+        import yfinance as yf
+        while self.is_running:
+            try:
+                engine = get_micro_pullback_engine()
+                now_ts = time.time()
+                stalled_tickers = []
+                for ticker, cand in list(engine.candidates.items()):
+                    last_bar_ts = cand.bars[-1]["time"] if cand.bars else 0
+                    # Si no ha recibido barras de TWS en más de 8 segundos:
+                    if (now_ts - last_bar_ts) > 8.0:
+                        stalled_tickers.append(ticker)
+
+                if stalled_tickers:
+                    loop = asyncio.get_running_loop()
+
+                    def _fetch_sync():
+                        res = {}
+                        try:
+                            # Descargar velas de 1 minuto recientes para los candidatos
+                            data = yf.download(stalled_tickers, period="1d", interval="1m", progress=False, timeout=5)
+                            if data is not None and not data.empty:
+                                for t in stalled_tickers:
+                                    try:
+                                        if len(stalled_tickers) == 1:
+                                            df_t = data
+                                        else:
+                                            df_t = data.xs(t, axis=1, level=1) if (hasattr(data.columns, 'levels') and t in data.columns.levels[1]) else None
+                                        if df_t is not None and not df_t.empty:
+                                            df_t = df_t.dropna()
+                                            if not df_t.empty:
+                                                last_row = df_t.iloc[-1]
+                                                res[t] = {
+                                                    "open": float(last_row["Open"]),
+                                                    "high": float(last_row["High"]),
+                                                    "low": float(last_row["Low"]),
+                                                    "close": float(last_row["Close"]),
+                                                    "volume": int(last_row["Volume"]),
+                                                    "time": now_ts,
+                                                }
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+                        return res
+
+                    bar_dict = await loop.run_in_executor(None, _fetch_sync)
+                    for t, b in bar_dict.items():
+                        engine.process_5s_bar(t, b)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                pass
+
+            await asyncio.sleep(5)
 
     async def _scan_loop(self):
         """Bucle continuo de descubrimiento de líderes."""

@@ -153,6 +153,16 @@ class PositionMonitor:
                     await self._close_position(trade, current_price, "eod_hard_exit_1550")
                     return
 
+            # ── EXCLUSIÓN MICRO-PULLBACK SCALPER ──────────────────────────────────────────
+            # Las posiciones de scalping ('HOT_MICRO_PULLBACK') son operadas y monitoreadas
+            # exclusivamente por el motor de ultra-baja latencia en memoria (MicroPullbackEngine),
+            # el cual ejecuta su propia cascada de salida en 3 tramos (HOD 50%, 15m 60%, 1H 40%)
+            # y regla de escape rápido (45s Bailout). Evitar que el monitor general de stocks
+            # las liquide prematuramente al 100% con reglas macro de swing (ADUANA_TP_CLOSE).
+            group = str(trade.get("group_name") or "")
+            if "HOT_MICRO_PULLBACK" in group or "MICRO_PULLBACK" in group:
+                return
+
             # 1.2 GOLDEN HOUR HARVEST (15:00 a 15:50 ET) PARA POSICIONES CON GANANCIA >= +5.0%
             if is_weekday and pnl_pct >= 5.0 and dt_time(15, 0) <= cur_t < dt_time(15, 50):
                 gh_tp_done = bool(trade.get("golden_hour_tp_executed") or trade.get("tp_block1_executed"))
