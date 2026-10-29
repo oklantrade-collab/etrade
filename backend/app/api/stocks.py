@@ -557,8 +557,22 @@ async def get_stocks_journal(limit: int = 100):
             entry_p = float(t.get("entry_price") or 0.0)
             exit_p = float(t.get("exit_price") or entry_p)
             sh = int(float(t.get("shares") or 0))
-            pnl_u = float(t.get("pnl_usd") if t.get("pnl_usd") is not None else (exit_p - entry_p) * sh)
-            pnl_p = float(t.get("pnl_pct") if t.get("pnl_pct") is not None else (((exit_p - entry_p) / entry_p * 100) if entry_p > 0 else 0.0))
+            raw_pnl_u = t.get("pnl_usd")
+            raw_pnl_p = t.get("pnl_pct")
+
+            if raw_pnl_u is not None and abs(float(raw_pnl_u)) > 0.0001:
+                pnl_u = float(raw_pnl_u)
+            elif entry_p > 0 and exit_p > 0 and abs(exit_p - entry_p) >= 0.0001 and sh > 0:
+                pnl_u = (exit_p - entry_p) * sh
+            else:
+                pnl_u = float(raw_pnl_u or 0.0)
+
+            if raw_pnl_p is not None and abs(float(raw_pnl_p)) > 0.0001:
+                pnl_p = float(raw_pnl_p)
+            elif entry_p > 0 and exit_p > 0 and abs(exit_p - entry_p) >= 0.0001:
+                pnl_p = ((exit_p - entry_p) / entry_p * 100)
+            else:
+                pnl_p = float(raw_pnl_p or 0.0)
 
             entries.append({
                 "id": t.get("id"),
@@ -610,15 +624,35 @@ async def get_stocks_journal(limit: int = 100):
 
             avg_p = float(p.get("avg_price") or 0.0)
             cur_p = float(p.get("current_price") or 0.0)
-            pnl_u = float(p.get("unrealized_pnl") or 0.0)
+            sh = int(float(p.get("shares") or 0))
+            raw_pnl_u = p.get("unrealized_pnl")
+            raw_pnl_p = p.get("unrealized_pnl_pct")
 
             # FILTRO: Descartar cierres artificiales/ficticios donde entry == exit y pnl == 0 (ej. sync o limpieza sin trade real)
-            if abs(avg_p - cur_p) < 0.0001 and abs(pnl_u) < 0.0001:
+            if abs(avg_p - cur_p) < 0.0001 and (raw_pnl_u is None or abs(float(raw_pnl_u)) < 0.0001):
                 continue
+
+            if raw_pnl_u is not None and abs(float(raw_pnl_u)) > 0.0001:
+                pnl_u = float(raw_pnl_u)
+            elif avg_p > 0 and cur_p > 0 and abs(cur_p - avg_p) >= 0.0001 and sh > 0:
+                pnl_u = (cur_p - avg_p) * sh
+            else:
+                pnl_u = float(raw_pnl_u or 0.0)
+
+            if raw_pnl_p is not None and abs(float(raw_pnl_p)) > 0.0001:
+                pnl_p = float(raw_pnl_p)
+            elif avg_p > 0 and cur_p > 0 and abs(cur_p - avg_p) >= 0.0001:
+                pnl_p = ((cur_p - avg_p) / avg_p * 100)
+            else:
+                pnl_p = float(raw_pnl_p or 0.0)
 
             key = f"{ticker_str}_{p.get('first_buy_at')}"
             if key in seen_keys:
                 continue
+
+            exit_reason = p.get("exit_triggered_by") or p.get("sl_close_reason")
+            if not exit_reason or str(exit_reason).strip().upper() == "CLOSED":
+                exit_reason = "TAKE_PROFIT" if pnl_u > 0 else "STOP_LOSS"
 
             entries.append({
                 "id": p.get("id"),
@@ -626,17 +660,17 @@ async def get_stocks_journal(limit: int = 100):
                 "group_name": p.get("group_name") or "HOT",
                 "strategy": p.get("group_name") or "V5_STOCKS",
                 "side": "buy",
-                "shares": int(float(p.get("shares") or 0)),
+                "shares": sh,
                 "entry_price": avg_p,
                 "avg_price": avg_p,
                 "exit_price": cur_p,
                 "current_price": cur_p,
-                "total_cost": round(avg_p * float(p.get("shares") or 0), 2),
+                "total_cost": round(avg_p * sh, 2),
                 "pnl_usd": round(pnl_u, 2),
                 "unrealized_pnl": round(pnl_u, 2),
-                "pnl_pct": round(float(p.get("unrealized_pnl_pct") or 0.0), 2),
-                "unrealized_pnl_pct": round(float(p.get("unrealized_pnl_pct") or 0.0), 2),
-                "exit_reason": p.get("exit_triggered_by") or p.get("sl_close_reason") or "CLOSED",
+                "pnl_pct": round(pnl_p, 2),
+                "unrealized_pnl_pct": round(pnl_p, 2),
+                "exit_reason": exit_reason,
                 "first_buy_at": p.get("first_buy_at"),
                 "entry_date": p.get("first_buy_at"),
                 "updated_at": p.get("updated_at"),

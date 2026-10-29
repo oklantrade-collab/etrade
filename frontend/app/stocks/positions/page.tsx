@@ -191,18 +191,38 @@ export default function StocksPositions() {
               </div>
               
               <div style={{ gridColumn: 'span 2', background: 'rgba(255,255,255,0.02)', padding: '20px', borderRadius: '16px', marginTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                   <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>P&L {(selectedPos.status === 'open' || !selectedPos.exit_date ? 'No Realizado' : 'Realizado')}</p>
-                   <p style={{ margin: 0, fontSize: '24px', fontWeight: 900, color: (selectedPos.unrealized_pnl || selectedPos.pnl_usd || 0) >= 0 ? '#00C896' : '#FF4757' }}>
-                     {(selectedPos.unrealized_pnl || selectedPos.pnl_usd || 0) >= 0 ? '+' : ''}${(selectedPos.unrealized_pnl || selectedPos.pnl_usd || 0).toFixed(2)}
-                   </p>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                   <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Retorno (ROI)</p>
-                   <p style={{ margin: 0, fontSize: '20px', fontWeight: 900, color: (selectedPos.unrealized_pnl_pct || selectedPos.pnl_pct || 0) >= 0 ? '#00C896' : '#FF4757' }}>
-                     {(selectedPos.unrealized_pnl_pct || selectedPos.pnl_pct || 0) >= 0 ? '+' : ''}{(selectedPos.unrealized_pnl_pct || selectedPos.pnl_pct || 0).toFixed(2)}%
-                   </p>
-                </div>
+                {(() => {
+                  const entry = Number(selectedPos.avg_price || selectedPos.entry_price || 0)
+                  const exit = Number(selectedPos.current_price || selectedPos.exit_price || 0)
+                  const sh = Math.abs(Number(selectedPos.shares || 0))
+                  let pnlUsd = (selectedPos.pnl_usd !== undefined && selectedPos.pnl_usd !== null && Math.abs(Number(selectedPos.pnl_usd)) > 0.0001)
+                    ? Number(selectedPos.pnl_usd)
+                    : (selectedPos.unrealized_pnl !== undefined && selectedPos.unrealized_pnl !== null && Math.abs(Number(selectedPos.unrealized_pnl)) > 0.0001)
+                    ? Number(selectedPos.unrealized_pnl)
+                    : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 && sh > 0 ? (exit - entry) * sh : 0)
+                  let pnlPct = (selectedPos.pnl_pct !== undefined && selectedPos.pnl_pct !== null && Math.abs(Number(selectedPos.pnl_pct)) > 0.0001)
+                    ? Number(selectedPos.pnl_pct)
+                    : (selectedPos.unrealized_pnl_pct !== undefined && selectedPos.unrealized_pnl_pct !== null && Math.abs(Number(selectedPos.unrealized_pnl_pct)) > 0.0001)
+                    ? Number(selectedPos.unrealized_pnl_pct)
+                    : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 ? ((exit - entry) / entry) * 100 : 0)
+                  const isPos = pnlUsd >= 0
+                  return (
+                    <>
+                      <div>
+                        <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>P&L {(selectedPos.status === 'open' || !selectedPos.exit_date ? 'No Realizado' : 'Realizado')}</p>
+                        <p style={{ margin: 0, fontSize: '24px', fontWeight: 900, color: isPos ? '#00C896' : '#FF4757' }}>
+                          {isPos ? '+' : ''}${pnlUsd.toFixed(2)}
+                        </p>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <p style={{ margin: 0, fontSize: '10px', color: '#666', fontWeight: 800, textTransform: 'uppercase' }}>Retorno (ROI)</p>
+                        <p style={{ margin: 0, fontSize: '20px', fontWeight: 900, color: isPos ? '#00C896' : '#FF4757' }}>
+                          {isPos ? '+' : ''}{pnlPct.toFixed(2)}%
+                        </p>
+                      </div>
+                    </>
+                  )
+                })()}
               </div>
 
               {/* Nuevos bloques integrados del expander */}
@@ -495,14 +515,32 @@ export default function StocksPositions() {
                   <span style={{ fontWeight: 700, fontSize: '13px' }}>${(pos.current_price || pos.exit_price)?.toFixed(2)}</span>
                   <span style={{ fontSize: '13px', color: pos.shares >= 0 ? '#AAA' : '#FF4757/70' }}>{pos.shares >= 0 ? '+' : ''}{pos.shares}</span>
                   <span style={{ textAlign: 'center' }}><ReasonBadge reason={pos.exit_reason || 'closed'} /></span>
-                  <div style={{ textAlign: 'right' }}>
-                    <p style={{ margin: 0, fontWeight: 900, color: (pos.pnl_usd || pos.unrealized_pnl || 0) >= 0 ? '#00C896' : '#FF4757' }}>
-                      {(pos.pnl_usd || pos.unrealized_pnl || 0) >= 0 ? '+' : ''}${(pos.pnl_usd || pos.unrealized_pnl || 0).toFixed(2)}
-                    </p>
-                    <p style={{ margin: 0, fontSize: '11px', color: (pos.pnl_pct || pos.unrealized_pnl_pct || 0) >= 0 ? '#00C896' : '#FF4757', opacity: 0.8 }}>
-                      {(pos.pnl_pct || pos.unrealized_pnl_pct || 0) >= 0 ? '+' : ''}{(pos.pnl_pct || pos.unrealized_pnl_pct || 0).toFixed(2)}%
-                    </p>
-                  </div>
+                  {(() => {
+                    const entry = Number(pos.avg_price || pos.entry_price || 0)
+                    const exit = Number(pos.current_price || pos.exit_price || 0)
+                    const sh = Math.abs(Number(pos.shares || 0))
+                    let pnlUsd = (pos.pnl_usd !== undefined && pos.pnl_usd !== null && Math.abs(Number(pos.pnl_usd)) > 0.0001)
+                      ? Number(pos.pnl_usd)
+                      : (pos.unrealized_pnl !== undefined && pos.unrealized_pnl !== null && Math.abs(Number(pos.unrealized_pnl)) > 0.0001)
+                      ? Number(pos.unrealized_pnl)
+                      : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 && sh > 0 ? (exit - entry) * sh : 0)
+                    let pnlPct = (pos.pnl_pct !== undefined && pos.pnl_pct !== null && Math.abs(Number(pos.pnl_pct)) > 0.0001)
+                      ? Number(pos.pnl_pct)
+                      : (pos.unrealized_pnl_pct !== undefined && pos.unrealized_pnl_pct !== null && Math.abs(Number(pos.unrealized_pnl_pct)) > 0.0001)
+                      ? Number(pos.unrealized_pnl_pct)
+                      : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 ? ((exit - entry) / entry) * 100 : 0)
+                    const isPos = pnlUsd >= 0
+                    return (
+                      <div style={{ textAlign: 'right' }}>
+                        <p style={{ margin: 0, fontWeight: 900, color: isPos ? '#00C896' : '#FF4757' }}>
+                          {isPos ? '+' : ''}${pnlUsd.toFixed(2)}
+                        </p>
+                        <p style={{ margin: 0, fontSize: '11px', color: isPos ? '#00C896' : '#FF4757', opacity: 0.8 }}>
+                          {isPos ? '+' : ''}{pnlPct.toFixed(2)}%
+                        </p>
+                      </div>
+                    )
+                  })()}
                   <div style={{ textAlign: 'right' }}>
                       <button 
                          onClick={() => { setSelectedTicker(pos.ticker); setShowChart(true); }}

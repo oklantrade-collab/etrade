@@ -436,8 +436,37 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                             continue
                 except Exception:
                     pass
+                entry_p = float(p_data.get("avg_price") or 0.0)
+                cur_p = float(p_data.get("current_price") or entry_p)
+                pos_sh = int(float(p_data.get("shares") or 0))
+                sell_rule = "broker_sync"
+
+                try:
+                    sell_ord = sb.table("stocks_orders")\
+                        .select("filled_at, filled_price, rule_code")\
+                        .eq("ticker", sym)\
+                        .eq("direction", "sell")\
+                        .eq("status", "filled")\
+                        .order("filled_at", desc=True)\
+                        .limit(1)\
+                        .execute()
+                    if sell_ord.data and sell_ord.data[0].get("filled_at"):
+                        if sell_ord.data[0].get("filled_price"):
+                            cur_p = float(sell_ord.data[0]["filled_price"])
+                        if sell_ord.data[0].get("rule_code"):
+                            sell_rule = sell_ord.data[0]["rule_code"]
+                except Exception:
+                    pass
+
+                pnl_usd = round((cur_p - entry_p) * pos_sh, 2)
+                pnl_pct = round(((cur_p - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+
                 sb.table("stocks_positions").update({
                     "status": "closed",
+                    "current_price": cur_p,
+                    "unrealized_pnl": pnl_usd,
+                    "unrealized_pnl_pct": pnl_pct,
+                    "sl_close_reason": sell_rule,
                     "updated_at": now_iso,
                 }).eq("id", p_data["id"]).execute()
     except Exception as e_stk:

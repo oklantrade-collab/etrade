@@ -274,58 +274,58 @@ def on_ib_order_status(order_id: int, status_info: dict):
                         log_warning(MODULE, f"Error actualizando opt_paper_trades en SELL: {opt_close_e}")
                 else:
                     pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).in_("status", ["open", "closing"]).execute()
-                for pos in (pos_res.data or []):
-                    entry_p = float(pos.get("avg_price") or 0)
-                    pos_sh = int(pos.get("shares") or 0)
-                    rem_sh = pos_sh - shares
+                    for pos in (pos_res.data or []):
+                        entry_p = float(pos.get("avg_price") or 0)
+                        pos_sh = int(pos.get("shares") or 0)
+                        rem_sh = pos_sh - shares
 
-                    if rem_sh > 0:
-                        # Venta PARCIAL confirmada por el broker
-                        pnl_usd = round((exec_price - entry_p) * shares, 2)
-                        pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
-                        sb.table("stocks_positions").update({
-                            "shares": rem_sh,
-                            "shares_remaining": rem_sh,
-                            "current_price": exec_price,
-                            "status": "open",
-                            "updated_at": now_iso
-                        }).eq("id", pos["id"]).execute()
-                        log_info(MODULE, f"✅ Venta PARCIAL confirmada por Broker para {ticker}: {shares} vendidas, quedan {rem_sh}")
-                    else:
-                        # Cierre TOTAL confirmado por el broker
-                        pnl_usd = round((exec_price - entry_p) * pos_sh, 2)
-                        pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
-                        sb.table("trades_journal").insert({
-                            "ticker": ticker,
-                            "shares": pos_sh,
-                            "entry_price": entry_p,
-                            "exit_price": exec_price,
-                            "entry_date": pos.get("first_buy_at") or now_iso,
-                            "exit_date": now_iso,
-                            "pnl_usd": pnl_usd,
-                            "pnl_pct": pnl_pct,
-                            "result": "win" if pnl_usd >= 0 else "loss",
-                            "exit_reason": "IB_BROKER_CONFIRMED_SELL",
-                            "trade_type": pos.get("group_name") or "STOCKS_IB"
-                        }).execute()
+                        if rem_sh > 0:
+                            # Venta PARCIAL confirmada por el broker
+                            pnl_usd = round((exec_price - entry_p) * shares, 2)
+                            pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                            sb.table("stocks_positions").update({
+                                "shares": rem_sh,
+                                "shares_remaining": rem_sh,
+                                "current_price": exec_price,
+                                "status": "open",
+                                "updated_at": now_iso
+                            }).eq("id", pos["id"]).execute()
+                            log_info(MODULE, f"✅ Venta PARCIAL confirmada por Broker para {ticker}: {shares} vendidas, quedan {rem_sh}")
+                        else:
+                            # Cierre TOTAL confirmado por el broker
+                            pnl_usd = round((exec_price - entry_p) * pos_sh, 2)
+                            pnl_pct = round(((exec_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                            sb.table("trades_journal").insert({
+                                "ticker": ticker,
+                                "shares": pos_sh,
+                                "entry_price": entry_p,
+                                "exit_price": exec_price,
+                                "entry_date": pos.get("first_buy_at") or now_iso,
+                                "exit_date": now_iso,
+                                "pnl_usd": pnl_usd,
+                                "pnl_pct": pnl_pct,
+                                "result": "win" if pnl_usd >= 0 else "loss",
+                                "exit_reason": "IB_BROKER_CONFIRMED_SELL",
+                                "trade_type": pos.get("group_name") or "STOCKS_IB"
+                            }).execute()
 
-                        # Propuesta #3: Registrar cierre en Disyuntor Diario
-                        try:
-                            from app.core.circuit_breaker import record_trade_completion
-                            record_trade_completion(ticker, pnl_usd)
-                        except Exception as cb_err:
-                            log_warning(MODULE, f"Aviso registrando disyuntor en broker fill: {cb_err}")
-                        sb.table("stocks_positions").update({
-                            "status": "closed",
-                            "shares": 0,
-                            "shares_remaining": 0,
-                            "current_price": exec_price,
-                            "unrealized_pnl": pnl_usd,
-                            "unrealized_pnl_pct": pnl_pct,
-                            "sl_close_reason": "broker_confirmed_sell",
-                            "updated_at": now_iso
-                        }).eq("id", pos["id"]).execute()
-                        log_info(MODULE, f"✅ Cierre TOTAL confirmado por Broker para {ticker} en Supabase")
+                            # Propuesta #3: Registrar cierre en Disyuntor Diario
+                            try:
+                                from app.core.circuit_breaker import record_trade_completion
+                                record_trade_completion(ticker, pnl_usd)
+                            except Exception as cb_err:
+                                log_warning(MODULE, f"Aviso registrando disyuntor en broker fill: {cb_err}")
+                            sb.table("stocks_positions").update({
+                                "status": "closed",
+                                "shares": 0,
+                                "shares_remaining": 0,
+                                "current_price": exec_price,
+                                "unrealized_pnl": pnl_usd,
+                                "unrealized_pnl_pct": pnl_pct,
+                                "sl_close_reason": "broker_confirmed_sell",
+                                "updated_at": now_iso
+                            }).eq("id", pos["id"]).execute()
+                            log_info(MODULE, f"✅ Cierre TOTAL confirmado por Broker para {ticker} en Supabase")
             except Exception as close_e:
                 log_error(MODULE, f"Error procesando SELL {ticker} en Supabase: {close_e}")
 
@@ -797,9 +797,10 @@ class IBBridgeWorker:
 
                     real_exit_time = now_iso
                     real_exit_price = p_data.get("current_price") or p_data.get("avg_price")
+                    sell_rule = "broker_sync"
                     try:
                         sell_ord = sb.table("stocks_orders")\
-                            .select("filled_at, filled_price")\
+                            .select("filled_at, filled_price, rule_code")\
                             .eq("ticker", sym)\
                             .eq("direction", "sell")\
                             .eq("status", "filled")\
@@ -810,15 +811,44 @@ class IBBridgeWorker:
                             real_exit_time = sell_ord.data[0]["filled_at"]
                             if sell_ord.data[0].get("filled_price"):
                                 real_exit_price = float(sell_ord.data[0]["filled_price"])
+                            if sell_ord.data[0].get("rule_code"):
+                                sell_rule = sell_ord.data[0]["rule_code"]
                     except Exception as ord_e:
                         log_warning(MODULE, f"No se pudo consultar orden sell para {sym}: {ord_e}")
+
+                    entry_p = float(p_data.get("avg_price") or 0.0)
+                    pos_sh = int(float(p_data.get("shares") or 0))
+                    pnl_usd = round((real_exit_price - entry_p) * pos_sh, 2)
+                    pnl_pct = round(((real_exit_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
 
                     sb.table("stocks_positions").update({
                         "status": "closed",
                         "current_price": real_exit_price,
+                        "unrealized_pnl": pnl_usd,
+                        "unrealized_pnl_pct": pnl_pct,
+                        "sl_close_reason": sell_rule,
                         "updated_at": real_exit_time
                     }).eq("id", p_data["id"]).execute()
-                    log_info(MODULE, f"📤 [SYNC STOCKS] Acción cerrada en Supabase sincronizada con orden real ({real_exit_time}): {sym}")
+
+                    # Registrar permanentemente en trades_journal para Closed History
+                    try:
+                        sb.table("trades_journal").insert({
+                            "ticker": sym,
+                            "shares": pos_sh,
+                            "entry_price": entry_p,
+                            "exit_price": real_exit_price,
+                            "entry_date": p_data.get("first_buy_at") or real_exit_time,
+                            "exit_date": real_exit_time,
+                            "pnl_usd": pnl_usd,
+                            "pnl_pct": pnl_pct,
+                            "result": "win" if pnl_usd >= 0 else "loss",
+                            "exit_reason": sell_rule,
+                            "trade_type": p_data.get("group_name") or "STOCKS_IB"
+                        }).execute()
+                    except Exception as tj_err:
+                        log_warning(MODULE, f"Aviso insertando en trades_journal para {sym}: {tj_err}")
+
+                    log_info(MODULE, f"📤 [SYNC STOCKS] Acción cerrada en Supabase sincronizada con orden real ({real_exit_time}): {sym} (PnL: ${pnl_usd:.2f})")
 
             # ── 3. RECONCILIAR OPT_PAPER_TRADES (SINCRONIZACIÓN BIDIRECCIONAL CON BROKER TWS) ──
             try:

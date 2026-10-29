@@ -22,11 +22,38 @@ export default function StocksJournal() {
     }
   }
 
+  const getTradePnl = (t: any) => {
+    const raw = t.pnl_usd ?? t.unrealized_pnl
+    if (raw !== undefined && raw !== null && Math.abs(Number(raw)) > 0.0001) {
+      return Number(raw)
+    }
+    const entry = Number(t.avg_price || t.entry_price || 0)
+    const exit = Number(t.current_price || t.exit_price || 0)
+    const sh = Math.abs(Number(t.shares || 0))
+    if (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 && sh > 0) {
+      return (exit - entry) * sh
+    }
+    return Number(raw || 0)
+  }
+
+  const getTradePnlPct = (t: any) => {
+    const raw = t.pnl_pct ?? t.unrealized_pnl_pct
+    if (raw !== undefined && raw !== null && Math.abs(Number(raw)) > 0.0001) {
+      return Number(raw)
+    }
+    const entry = Number(t.avg_price || t.entry_price || 0)
+    const exit = Number(t.current_price || t.exit_price || 0)
+    if (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001) {
+      return ((exit - entry) / entry) * 100
+    }
+    return Number(raw || 0)
+  }
+
   const stats = {
     totalTrades: trades.length,
-    wins: trades.filter(t => (t.unrealized_pnl || 0) > 0).length,
-    losses: trades.filter(t => (t.unrealized_pnl || 0) <= 0).length,
-    totalPnL: trades.reduce((acc, t) => acc + (t.unrealized_pnl || 0), 0)
+    wins: trades.filter(t => getTradePnl(t) > 0).length,
+    losses: trades.filter(t => getTradePnl(t) <= 0).length,
+    totalPnL: trades.reduce((acc, t) => acc + getTradePnl(t), 0)
   }
 
   const winRate = stats.totalTrades > 0 ? (stats.wins / stats.totalTrades * 100).toFixed(1) : 0
@@ -92,7 +119,9 @@ export default function StocksJournal() {
         )}
         
         {!loading && trades.map((trade, i) => {
-          const isWin = (trade.unrealized_pnl || 0) > 0;
+          const pnlVal = getTradePnl(trade);
+          const pnlPctVal = getTradePnlPct(trade);
+          const isWin = pnlVal >= 0;
           return (
             <div key={trade.id} style={{ 
               display: 'grid', 
@@ -103,14 +132,14 @@ export default function StocksJournal() {
               background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)'
             }}>
               <span style={{ fontSize: '11px', color: '#666' }}>
-                {new Date(trade.updated_at).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                {new Date(trade.updated_at || trade.exit_date).toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
               </span>
               <span style={{ fontWeight: 900, fontSize: '14px' }}>{trade.ticker}</span>
               <span style={{ fontSize: '10px', fontWeight: 800, color: '#555' }}>
                 {trade.group_name === 'inversiones_pro' ? 'PRO' : 'HOT'}
               </span>
-              <span style={{ color: '#AAA' }}>${trade.avg_price?.toFixed(2)}</span>
-              <span style={{ fontWeight: 700 }}>${trade.current_price?.toFixed(2)}</span>
+              <span style={{ color: '#AAA' }}>${(trade.avg_price || trade.entry_price)?.toFixed(2)}</span>
+              <span style={{ fontWeight: 700 }}>${(trade.current_price || trade.exit_price)?.toFixed(2)}</span>
               <span style={{ color: '#AAA' }}>{trade.shares}</span>
               <span style={{ color: trade.dca_count > 0 ? '#CE93D8' : '#333' }}>
                 {trade.dca_count > 0 ? `×${trade.dca_count}` : '—'}
@@ -122,15 +151,15 @@ export default function StocksJournal() {
                   color: isWin ? '#00C896' : '#FF4757',
                   fontSize: '14px'
                 }}>
-                  {isWin ? '+' : ''}${trade.unrealized_pnl?.toFixed(2)}
+                  {isWin ? '+' : ''}${pnlVal.toFixed(2)}
                 </p>
                 <p style={{ 
                   margin: 0, 
                   fontSize: '11px', 
                   color: isWin ? '#00C896' : '#FF4757',
-                  opacity: 0.6
+                  opacity: 0.8 
                 }}>
-                  {isWin ? '+' : ''}{trade.unrealized_pnl_pct?.toFixed(2)}%
+                  {isWin ? '+' : ''}{pnlPctVal.toFixed(2)}%
                 </p>
               </div>
             </div>
