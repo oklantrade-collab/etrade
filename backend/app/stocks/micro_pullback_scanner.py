@@ -57,11 +57,22 @@ class MicroPullbackScanner:
 
     async def _fallback_bar_feeder(self):
         """
-        Alimentador de respaldo: Si TWS Paper no cuenta con permisos de datos en tiempo real L1
-        (IB Error 420 No market data permissions), genera barras rápidas para que el motor
-        in-memory continúe detectando impulsos y ejecutando compras sin interrupción.
+        Alimentador de alta frecuencia para Micro-Pullbacks:
+        Prioridad 1: Finnhub REST Quotes en paralelo (sub-segundo con FINNHUB_API_KEY).
+        Prioridad 2: YFinance 1m download como respaldo de emergencia.
+        Genera barras de 5 segundos de ultra-baja latencia para alimentar el motor en memoria
+        cuando TWS Paper no cuenta con suscripción L1 (IB Error 420).
         """
-        import yfinance as yf
+        import os
+        import httpx
+        from app.core.config import settings
+
+        finnhub_key = (os.getenv("FINNHUB_API_KEY") or getattr(settings, "FINNHUB_API_KEY", "") or "").strip()
+        if finnhub_key:
+            log_info(MODULE, f"⚡ Alimentador de Micro-Barras 5s activo: FINNHUB REST API (Key: {finnhub_key[:4]}***).")
+        else:
+            log_warning(MODULE, "⚠️ FINNHUB_API_KEY no detectada. Usando YFinance como fallback secundario.")
+
         while self.is_running:
             try:
                 engine = get_micro_pullback_engine()
@@ -69,51 +80,85 @@ class MicroPullbackScanner:
                 stalled_tickers = []
                 for ticker, cand in list(engine.candidates.items()):
                     last_bar_ts = cand.bars[-1]["time"] if cand.bars else 0
-                    # Si no ha recibido barras de TWS en más de 8 segundos:
-                    if (now_ts - last_bar_ts) > 8.0:
+                    # Si no ha recibido barras de TWS en más de 4.5 segundos:
+                    if (now_ts - last_bar_ts) >= 4.5:
                         stalled_tickers.append(ticker)
 
                 if stalled_tickers:
-                    loop = asyncio.get_running_loop()
+                    bar_dict = {}
 
-                    def _fetch_sync():
-                        res = {}
+                    # ── PRIORIDAD 1: FINNHUB REST EN PARALELO ──
+                    if finnhub_key:
                         try:
-                            # Descargar velas de 1 minuto recientes para los candidatos
-                            data = yf.download(stalled_tickers, period="1d", interval="1m", progress=False, timeout=5)
-                            if data is not None and not data.empty:
-                                for t in stalled_tickers:
-                                    try:
-                                        if len(stalled_tickers) == 1:
-                                            df_t = data
-                                        else:
-                                            df_t = data.xs(t, axis=1, level=1) if (hasattr(data.columns, 'levels') and t in data.columns.levels[1]) else None
-                                        if df_t is not None and not df_t.empty:
-                                            df_t = df_t.dropna()
-                                            if not df_t.empty:
-                                                last_row = df_t.iloc[-1]
-                                                res[t] = {
-                                                    "open": float(last_row["Open"]),
-                                                    "high": float(last_row["High"]),
-                                                    "low": float(last_row["Low"]),
-                                                    "close": float(last_row["Close"]),
-                                                    "volume": int(last_row["Volume"]),
-                                                    "time": now_ts,
-                                                }
-                                    except Exception:
-                                        pass
+                            async with httpx.AsyncClient(timeout=2.5) as client:
+                                tasks = [
+                                    client.get(f"https://finnhub.io/api/v1/quote?symbol={t}&token={finnhub_key}")
+                                    for t in stalled_tickers
+                                ]
+                                responses = await asyncio.gather(*tasks, return_exceptions=True)
+                                for t, resp in zip(stalled_tickers, responses):
+                                    if isinstance(resp, httpx.Response) and resp.status_code == 200:
+                                        data = resp.json()
+                                        c = float(data.get("c") or 0.0)
+                                        if c > 0:
+                                            cand = engine.candidates.get(t)
+                                            prev_c = cand.bars[-1]["close"] if (cand and cand.bars) else c
+                                            bar_h = max(c, prev_c)
+                                            bar_l = min(c, prev_c)
+                                            bar_dict[t] = {
+                                                "open": prev_c,
+                                                "high": bar_h,
+                                                "low": bar_l,
+                                                "close": c,
+                                                "volume": int(data.get("v") or 1000),
+                                                "time": now_ts,
+                                            }
+                        except Exception as e_fh:
+                            log_debug(MODULE, f"Aviso en Finnhub feeder: {e_fh}")
+
+                    # ── PRIORIDAD 2: YFINANCE PARA TICKERS RESTANTES ──
+                    missing_tickers = [t for t in stalled_tickers if t not in bar_dict]
+                    if missing_tickers:
+                        try:
+                            import yfinance as yf
+                            loop = asyncio.get_running_loop()
+
+                            def _fetch_yf():
+                                res = {}
+                                data = yf.download(missing_tickers, period="1d", interval="1m", progress=False, timeout=4)
+                                if data is not None and not data.empty:
+                                    for t in missing_tickers:
+                                        try:
+                                            df_t = data if len(missing_tickers) == 1 else (data.xs(t, axis=1, level=1) if (hasattr(data.columns, 'levels') and t in data.columns.levels[1]) else None)
+                                            if df_t is not None and not df_t.empty:
+                                                df_t = df_t.dropna()
+                                                if not df_t.empty:
+                                                    last_row = df_t.iloc[-1]
+                                                    res[t] = {
+                                                        "open": float(last_row["Open"]),
+                                                        "high": float(last_row["High"]),
+                                                        "low": float(last_row["Low"]),
+                                                        "close": float(last_row["Close"]),
+                                                        "volume": int(last_row["Volume"]),
+                                                        "time": now_ts,
+                                                    }
+                                        except Exception:
+                                            pass
+                                return res
+
+                            yf_dict = await loop.run_in_executor(None, _fetch_yf)
+                            bar_dict.update(yf_dict)
                         except Exception:
                             pass
-                        return res
 
-                    bar_dict = await loop.run_in_executor(None, _fetch_sync)
+                    # Despachar cada barra sintetizada al motor en memoria
                     for t, b in bar_dict.items():
                         engine.process_5s_bar(t, b)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                pass
+                log_debug(MODULE, f"Error en ciclo de alimentador de barras: {e}")
 
             await asyncio.sleep(5)
 
