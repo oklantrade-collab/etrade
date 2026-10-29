@@ -4,12 +4,19 @@ import React from 'react';
 import { useMarketBell } from '@/context/MarketBellContext';
 
 export default function MarketBellButton({ compact = false }: { compact?: boolean }) {
-  const { enabled, setShowModal, nextBell, nycTime } = useMarketBell();
+  const { enabled, setShowModal, nextBell, nycTime, isUnlocked, unlockAudio } = useMarketBell();
+
+  const handleClick = () => {
+    if (!isUnlocked) {
+      unlockAudio();
+    }
+    setShowModal(true);
+  };
 
   return (
     <button
-      onClick={() => setShowModal(true)}
-      title={`Campana Bursátil: ${enabled ? 'Activada' : 'Silenciada'} • NYC: ${nycTime.timeStr} ET • Próxima: ${nextBell.countdownStr}`}
+      onClick={handleClick}
+      title={`Campana Bursátil Thinkorswim: ${enabled ? 'Activada' : 'Silenciada'} • Audio: ${isUnlocked ? 'Listo' : 'Requiere Clic'} • NYC: ${nycTime.timeStr} ET • Próxima: ${nextBell.countdownStr}`}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -34,6 +41,12 @@ export default function MarketBellButton({ compact = false }: { compact?: boolea
           : `CAMPANA ${enabled ? 'ON' : 'OFF'} (${nextBell.countdownStr})`
         }
       </span>
+      {!isUnlocked && (
+        <span 
+          title="Haz clic para autorizar audio en el navegador" 
+          style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#F59E0B', display: 'inline-block' }}
+        />
+      )}
     </button>
   );
 }

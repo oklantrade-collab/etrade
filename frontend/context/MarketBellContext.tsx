@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
-import { marketBell } from '@/lib/audio/marketBell';
+import { marketBell, BellSoundProfile, SoundOption, AVAILABLE_SOUNDS } from '@/lib/audio/marketBell';
 import { getNYCDateTime, getNextMarketBellInfo, NYCTimeInfo, MarketBellEvent, isMarketHoliday, isEarlyCloseDay } from '@/lib/marketSchedule';
 import toast from 'react-hot-toast';
 
@@ -11,11 +11,14 @@ interface MarketBellContextType {
   toggleEnabled: () => void;
   volume: number;
   setVolume: (volume: number) => void;
+  soundProfile: BellSoundProfile;
+  setSoundProfile: (profile: BellSoundProfile) => void;
+  availableSounds: SoundOption[];
   nycTime: NYCTimeInfo;
   nextBell: MarketBellEvent;
   isUnlocked: boolean;
   unlockAudio: () => void;
-  testBell: (type: 'open' | 'close') => void;
+  testBell: (type: 'open' | 'close', specificProfile?: BellSoundProfile) => void;
   lastTriggered: string | null;
   showModal: boolean;
   setShowModal: (show: boolean) => void;
@@ -26,6 +29,7 @@ const MarketBellContext = createContext<MarketBellContextType | null>(null);
 export function MarketBellProvider({ children }: { children: React.ReactNode }) {
   const [enabled, setEnabledState] = useState<boolean>(true);
   const [volume, setVolumeState] = useState<number>(0.85);
+  const [soundProfile, setSoundProfileState] = useState<BellSoundProfile>('tos-session');
   const [nycTime, setNycTime] = useState<NYCTimeInfo>(() => getNYCDateTime());
   const [nextBell, setNextBell] = useState<MarketBellEvent>(() => getNextMarketBellInfo(getNYCDateTime()));
   const [isUnlocked, setIsUnlocked] = useState<boolean>(false);
@@ -46,6 +50,11 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
         const v = parseFloat(savedVol);
         setVolumeState(v);
         marketBell.setVolume(v);
+      }
+      const savedProf = localStorage.getItem('etrade_bell_sound_profile') as BellSoundProfile;
+      if (savedProf && AVAILABLE_SOUNDS.some(s => s.id === savedProf)) {
+        setSoundProfileState(savedProf);
+        marketBell.setSoundProfile(savedProf);
       }
     } catch (e) {
       // ignore
@@ -71,22 +80,31 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     marketBell.setVolume(value);
   }, []);
 
+  const setSoundProfile = useCallback((profile: BellSoundProfile) => {
+    setSoundProfileState(profile);
+    marketBell.setSoundProfile(profile);
+  }, []);
+
   const unlockAudio = useCallback(() => {
     const success = marketBell.unlockAudio();
     setIsUnlocked(success);
   }, []);
 
   // Play Bell and record trigger
-  const triggerBell = useCallback(async (type: 'open' | 'close', reason: string = 'horario automático') => {
-    if (!enabled) {
+  const triggerBell = useCallback(async (
+    type: 'open' | 'close', 
+    reason: string = 'horario automático',
+    overrideProfile?: BellSoundProfile
+  ) => {
+    if (!enabled && !overrideProfile) {
       console.log(`[MarketBell] ${type.toUpperCase()} bell scheduled, but sound is muted by user.`);
       return;
     }
 
-    console.log(`[MarketBell] 🔔 Ringing ${type.toUpperCase()} bell (${reason})`);
+    console.log(`[MarketBell] 🔔 Ringing Thinkorswim ${type.toUpperCase()} bell (${reason})`);
     marketBell.unlockAudio();
     setIsUnlocked(true);
-    await marketBell.play(type);
+    await marketBell.play(type, overrideProfile);
 
     const nowStr = new Date().toLocaleTimeString();
     setLastTriggered(`${type === 'open' ? 'Apertura' : 'Cierre'} a las ${nowStr}`);
@@ -99,7 +117,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
               <span className="text-3xl animate-bounce">🔔</span>
               <div>
                 <p className="text-sm font-black text-emerald-400 uppercase tracking-wider">¡Apertura de Wall Street (NYSE/NASDAQ)!</p>
-                <p className="text-xs text-slate-300 mt-0.5">La campana bursátil ha sonado. Sesión regular abierta (09:30 AM ET).</p>
+                <p className="text-xs text-slate-300 mt-0.5">Campana Thinkorswim reproducida. Sesión regular abierta (09:30 AM ET).</p>
               </div>
             </div>
           </div>
@@ -114,7 +132,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
               <span className="text-3xl animate-pulse">🛎️</span>
               <div>
                 <p className="text-sm font-black text-rose-400 uppercase tracking-wider">¡Cierre de la Bolsa (NYSE/NASDAQ)!</p>
-                <p className="text-xs text-slate-300 mt-0.5">La campana de cierre ha sonado. Sesión regular finalizada (04:00 PM ET).</p>
+                <p className="text-xs text-slate-300 mt-0.5">Campana Thinkorswim reproducida. Sesión regular finalizada (04:00 PM ET).</p>
               </div>
             </div>
           </div>
@@ -125,11 +143,11 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
   }, [enabled]);
 
   // Public test trigger
-  const testBell = useCallback((type: 'open' | 'close') => {
-    triggerBell(type, 'prueba manual');
+  const testBell = useCallback((type: 'open' | 'close', specificProfile?: BellSoundProfile) => {
+    triggerBell(type, 'prueba manual Thinkorswim', specificProfile);
   }, [triggerBell]);
 
-  // Main 1-second timekeeping and auto-trigger clock
+  // Main 1-second timekeeping and resilient auto-trigger clock
   useEffect(() => {
     const timer = setInterval(() => {
       const currentNYC = getNYCDateTime();
@@ -146,21 +164,26 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
       const isEarlyClose = isEarlyCloseDay(year, month, day, dayOfWeek);
       const closeHour = isEarlyClose ? 13 : 16;
 
-      // 1. Check Market Open: 09:30:00 ET (window 0-2 seconds)
-      if (hours === 9 && minutes === 30 && seconds <= 2) {
+      // Seconds elapsed today in New York
+      const totalSec = hours * 3600 + minutes * 60 + seconds;
+      const openSec = 9 * 3600 + 30 * 60; // 34200 (09:30:00 ET)
+      const closeSec = closeHour * 3600;   // 57600 (16:00:00 ET) or 46800 (13:00 ET)
+
+      // 1. Check Market Open: 09:30:00 ET (resilient 120s window survives background tab throttling)
+      if (totalSec >= openSec && totalSec < openSec + 120) {
         const key = `etrade_bell_${dateStr}_open`;
         if (typeof window !== 'undefined' && !localStorage.getItem(key)) {
           localStorage.setItem(key, 'true');
-          triggerBell('open', '09:30:00 AM ET Exacto');
+          triggerBell('open', '09:30 AM ET Apertura Oficial');
         }
       }
 
-      // 2. Check Market Close: 16:00:00 ET (or 13:00 on early close)
-      if (hours === closeHour && minutes === 0 && seconds <= 2) {
+      // 2. Check Market Close: 16:00:00 ET (resilient 120s window)
+      if (totalSec >= closeSec && totalSec < closeSec + 120) {
         const key = `etrade_bell_${dateStr}_close`;
         if (typeof window !== 'undefined' && !localStorage.getItem(key)) {
           localStorage.setItem(key, 'true');
-          triggerBell('close', `${closeHour}:00:00 PM ET Exacto`);
+          triggerBell('close', `${closeHour}:00 PM ET Cierre Oficial`);
         }
       }
     }, 1000);
@@ -168,14 +191,22 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     return () => clearInterval(timer);
   }, [triggerBell]);
 
-  // Supplementary backend status poller (every 30 seconds)
+  // Supplementary backend status poller (every 15 seconds)
   useEffect(() => {
+    let isInitialCheck = true;
     const checkBackendStatus = async () => {
       try {
         const res = await fetch(`/api/v1/stocks/market-status?t=${Date.now()}`);
         if (!res.ok) return;
         const data = await res.json();
         
+        // Skip first boot to avoid false bell triggers
+        if (isInitialCheck) {
+          isInitialCheck = false;
+          prevIsOpenRef.current = data.is_open;
+          return;
+        }
+
         // If state changed from closed to open during market hours
         if (prevIsOpenRef.current === false && data.is_open === true) {
           const currentNYC = getNYCDateTime();
@@ -203,7 +234,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     };
 
     checkBackendStatus();
-    const interval = setInterval(checkBackendStatus, 30000);
+    const interval = setInterval(checkBackendStatus, 15000);
     return () => clearInterval(interval);
   }, [triggerBell]);
 
@@ -215,6 +246,9 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
         toggleEnabled,
         volume,
         setVolume,
+        soundProfile,
+        setSoundProfile,
+        availableSounds: AVAILABLE_SOUNDS,
         nycTime,
         nextBell,
         isUnlocked,
