@@ -318,10 +318,14 @@ files_to_sync = [
     # MICRO PULLBACKS SCALPER & STOCKS
     "app/stocks/micro_pullback_engine.py",
     "app/stocks/micro_pullback_scanner.py",
+    "app/stocks/velocity_ranking.py",
+    "app/stocks/playbook_gate.py",
     "app/options/broker_sync.py",
     "app/core/market_hours.py",
     "app/api/stocks.py",
     "tests/test_micro_pullback_engine.py",
+    "tests/test_velocity_ranking.py",
+    "tests/test_playbook_gate.py",
     # WARRIOR PLAYBOOK KNOWLEDGE BASE
     "app/stocks/warrior_playbook_engine.py",
     "app/stocks/warrior_experience_ingestor.py",
@@ -332,6 +336,7 @@ files_to_sync = [
     "migration_038_warrior_monday_squeeze_kb.sql",
     "migration_039_warrior_no_trade_discipline_kb.sql",
     "migration_040_warrior_wild_card_friday_amod_kb.sql",
+    "migration_041_scanner_velocity.sql",
     "data/experiences/ross_cameron_monday_squeeze_mndr.json",
     "data/experiences/ross_cameron_no_trade_three_stocks_100.json",
     "data/experiences/ross_cameron_wild_card_friday_amod.json",
