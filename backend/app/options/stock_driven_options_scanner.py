@@ -617,15 +617,17 @@ async def run_stock_driven_options_pipeline(
                 selected_options.append({"id": cid, "symbol": sym, "direction": direction, "strike": best_contract.strike, "score": score})
 
                 # ── REGLA 2: DISPARO AUTOMÁTICO UNA VEZ ELEGIBLE O SELECCIONADA ──
-                # Verificar límite de capital ($5,000) y tope de posiciones abiertas (3)
+                # El tope de posiciones lo define el capital establecido en Settings/Opciones
                 try:
                     open_trades = sb.table("opt_paper_trades").select("id, max_loss_total, symbol").eq("status", "open").execute().data or []
                     current_open_risk = sum(float(t.get("max_loss_total") or 0.0) for t in open_trades)
                     capital_limit = float(eff.get("max_open_risk_usd", 5000.0))
-                    max_positions = int(eff.get("max_open_positions", 3))
 
-                    if len(open_trades) >= max_positions:
-                        log_info(MODULE, f"⏸️ No se auto-dispara {sym}: Límite alcanzado ({len(open_trades)}/{max_positions} posiciones abiertas en broker/paper).")
+                    # 1 contrato por subyacente para diversificar y no sobreconcentrar
+                    already_open_for_sym = any(str(t.get("symbol") or "").upper() == sym.upper() for t in open_trades)
+
+                    if already_open_for_sym:
+                        log_info(MODULE, f"⏸️ No se auto-dispara {sym}: Ya existe una posición abierta para este subyacente (diversificación 1 por ticker).")
                     elif current_open_risk + cost_total > capital_limit:
                         log_info(MODULE, f"⛔ No se auto-dispara {sym}: Riesgo actual (${current_open_risk:.2f}) + orden (${cost_total:.2f}) excede el límite de capital de ${capital_limit:.2f}.")
                     else:

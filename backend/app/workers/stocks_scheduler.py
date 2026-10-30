@@ -2747,7 +2747,7 @@ async def run_options_gap_defense_cycle():
             )
 
             # 1. Evaluación de las 5 Reglas Institucionales (Escalonado Agresivo)
-            from app.options.exit_engine import evaluate_technical_rules_and_stops, get_underlying_technical_context
+            from app.options.exit_engine import evaluate_technical_rules_and_stops, get_underlying_technical_context, check_options_dip_rebuy_opportunity
             tech_ctx = get_underlying_technical_context(symbol)
             by_tech, reason_tech, tech_info = evaluate_technical_rules_and_stops(eval_pos, tech_ctx, now_dt)
 
@@ -2823,9 +2823,27 @@ async def run_options_gap_defense_cycle():
                 exit_code_cand = eval_res.get("rule_code", "OPT_GAP_EXIT")
                 is_emergency_hard_sl = (exit_code_cand == "OPT_SWING_HARD_SL" or "HARD_SL" in exit_code_cand) and cur_pnl_pct <= -45.0
 
-                if is_swing_multiweek and cur_pnl_pct < 1.0 and not is_emergency_hard_sl:
-                    log_info(MODULE, f"⛔ BLOQUEO SALIDA SWING: {symbol} vence {expiry_str} (DTE {dte_days_v}d). Regla de negocio: Opciones que vencen la próxima semana o posteriores NO se cierran en pérdida por ruido técnico esta semana (PnL actual: {cur_pnl_pct:+.2f}% < +1.0%). Manteniendo posición abierta.")
+                # Candado 1: Expansión de Bandas de Bollinger en 15m (Regla Usuario: Mientras Upper sube y Lower baja -> NO CERRAR)
+                if tech_ctx.get("is_bb_expanding_15m") and not is_emergency_hard_sl:
+                    log_info(MODULE, f"🔒 CANDADO BOLLINGER 15m: {symbol} Bandas en expansión (Upper sube, Lower baja). Bloqueando salida {exit_code_cand}. Dejando correr impulso de momentum.")
                     eval_res["should_exit"] = False
+
+                # Candado 2: Opciones Multi-Semana (DTE >= 4) con Umbral +3% de ganancia neta acordada
+                if is_swing_multiweek and cur_pnl_pct < 3.0 and not is_emergency_hard_sl:
+                    log_info(MODULE, f"⛔ BLOQUEO SALIDA SWING: {symbol} vence {expiry_str} (DTE {dte_days_v}d). Regla de negocio: Opciones que vencen la próxima semana o posteriores NO se cierran por debajo de +3.0% de ganancia (PnL actual: {cur_pnl_pct:+.2f}% < +3.0%). Manteniendo posición abierta.")
+                    eval_res["should_exit"] = False
+
+                # Blindaje definitivo: Si la salida fue bloqueada por cualquier regla, salir del bloque de cierre inmediatamente
+                if not eval_res.get("should_exit"):
+                    sb.table("opt_paper_trades").update({
+                        "last_mark_price": cur_opt_premium,
+                        "last_mark_at": now_iso,
+                        "unrealized_pnl": unrealized_pnl_usd,
+                        "exit_plan": exit_plan,
+                        "updated_at": now_iso
+                    }).eq("id", pid).execute()
+                    continue
+
                 exit_code = eval_res.get("rule_code", "OPT_GAP_EXIT")
                 exit_reason_txt = eval_res.get("reason", exit_code)
                 realized_pnl_usd = unrealized_pnl_usd
@@ -2978,6 +2996,74 @@ async def run_options_gap_defense_cycle():
                     "exit_plan": exit_plan,
                     "updated_at": now_iso
                 }).eq("id", pid).execute()
+
+                # ── EVALUACIÓN DE RECOMPRA EN RETROCESO (DCA / CENTRO DE COSTO) ──
+                # Si la posición está en retroceso y la tendencia 1H es favorable al soporte EMA9/EMA20:
+                if cur_pnl_pct < 0.0 and tech_ctx and tech_ctx.get("valid"):
+                    try:
+                        rebuy_opp = check_options_dip_rebuy_opportunity(eval_pos, tech_ctx, cur_stock_p)
+                        if rebuy_opp:
+                            rebuys_count = int(exit_plan.get("rebuys_count", 0))
+                            last_rebuy_ts = float(exit_plan.get("last_rebuy_ts", 0.0))
+                            now_epoch = time.time()
+                            # Cooldown mínimo de 15 minutos entre recompras
+                            if rebuys_count < 2 and (now_epoch - last_rebuy_ts >= 900.0):
+                                from app.options import settings_defaults as sd
+                                eff_sett = sd.effective_settings(None)
+                                capital_limit = float(eff_sett.get("max_open_risk_usd", 5000.0))
+                                all_open = sb.table("opt_paper_trades").select("max_loss_total, entry_total_invested").eq("status", "open").execute().data or []
+                                cur_tot_risk = sum(float(t.get("max_loss_total") or t.get("entry_total_invested") or 0.0) for t in all_open)
+                                rebuy_cost = (cur_opt_premium or entry_debit) * 100.0 * 1
+
+                                if cur_tot_risk + rebuy_cost <= capital_limit:
+                                    new_qty = qty + 1
+                                    cur_invested = float(pos.get("entry_total_invested") or (entry_debit * 100.0 * qty))
+                                    new_invested = round(cur_invested + rebuy_cost, 2)
+                                    new_avg_debit = round(new_invested / (new_qty * 100.0), 4)
+
+                                    exit_plan["rebuys_count"] = rebuys_count + 1
+                                    exit_plan["last_rebuy_ts"] = now_epoch
+                                    exit_plan[f"rebuy_{rebuys_count+1}_price"] = cur_opt_premium or entry_debit
+                                    exit_plan[f"rebuy_{rebuys_count+1}_underlying"] = cur_stock_p
+
+                                    sb.table("opt_paper_trades").update({
+                                        "qty": new_qty,
+                                        "entry_debit": new_avg_debit,
+                                        "entry_total_invested": new_invested,
+                                        "max_loss_total": new_invested,
+                                        "exit_plan": exit_plan,
+                                        "updated_at": now_iso
+                                    }).eq("id", pid).execute()
+
+                                    exp_compact = expiry_str.replace("-", "")[:8] if expiry_str else "20261026"
+                                    opt_tb = f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
+                                    sb.table("stocks_orders").insert({
+                                        "ticker": symbol[:10],
+                                        "target_band": opt_tb,
+                                        "group_name": "OPTIONS_DIP_REBUY",
+                                        "rule_code": "APEX_AUTO",
+                                        "order_type": "limit",
+                                        "direction": "buy",
+                                        "shares": 1,
+                                        "market_price": cur_opt_premium or entry_debit,
+                                        "limit_price": round(cur_opt_premium or entry_debit, 2),
+                                        "status": "pending",
+                                        "created_at": now_iso
+                                    }).execute()
+
+                                    log_info(MODULE, f"🛒 RECOMPRA DCA EJECUTADA: {symbol} Strike ${strike} {'C' if is_call else 'P'} -> {new_qty} contratos (Nuevo costo prom: ${new_avg_debit:.2f}). Motivo: {rebuy_opp.get('reason')}")
+                                    send_telegram_opt_alert(
+                                        f"🛒 [OPTIONS DCA REBUY] RECOMPRA EN RETROCESO\n"
+                                        f"Ticker: {symbol} ({strat.upper()})\n"
+                                        f"Contrato: Strike ${strike} {'CALL' if is_call else 'PUT'} (Exp: {expiry_str})\n"
+                                        f"Precio Recompra: ${cur_opt_premium or entry_debit:.2f} (Stock: ${cur_stock_p:.2f})\n"
+                                        f"Nuevo Costo Promedio: ${new_avg_debit:.2f} (Total Contratos: {new_qty})\n"
+                                        f"Motivo: {rebuy_opp.get('reason')}"
+                                    )
+                                else:
+                                    log_info(MODULE, f"⏸️ Recompra DCA pausada para {symbol}: Riesgo actual (${cur_tot_risk:.2f}) + orden (${rebuy_cost:.2f}) excede límite de ${capital_limit:.2f}")
+                    except Exception as e_rebuy:
+                        log_warning(MODULE, f"Aviso al evaluar recompra DCA para {symbol}: {e_rebuy}")
 
     except Exception as e_def:
         log_warning(MODULE, f"Error en ciclo defensivo de opciones: {e_def}")

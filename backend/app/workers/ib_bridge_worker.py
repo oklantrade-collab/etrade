@@ -239,13 +239,20 @@ def on_ib_order_status(order_id: int, status_info: dict):
                     try:
                         und_sym = ticker_u.split(":")[0].replace("OPT", "").strip(":")
                         opt_pos_res = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).eq("status", "open").execute()
-                        for opos in (opt_pos_res.data or []):
+                        target_rows = opt_pos_res.data or []
+                        if not target_rows:
+                            recent_res = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).order("id", desc=True).limit(1).execute()
+                            if recent_res.data:
+                                target_rows = recent_res.data
+
+                        for opos in target_rows:
                             entry_debit = float(opos.get("entry_debit") or 0.0)
                             qty = int(opos.get("qty") or 1)
                             total_inv = float(opos.get("entry_total_invested") or (entry_debit * 100 * qty))
                             fee = 0.70 * qty
                             recovered = round((exec_price * 100 * qty) - fee, 2)
                             realized = round(recovered - total_inv, 2)
+                            pnl_pct = round(((exec_price - entry_debit) / entry_debit * 100), 2) if entry_debit > 0 else 0.0
 
                             sb.table("opt_paper_trades").update({
                                 "status": "closed",
@@ -270,6 +277,23 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 }]
                             }).eq("id", opos["id"]).execute()
                             log_info(MODULE, f"opt_paper_trades ID {opos['id']} ({und_sym}) cerrado confirmado por Broker a ${exec_price:.2f} (PnL: ${realized:.2f})")
+
+                            try:
+                                sb.table("trades_journal").insert({
+                                    "ticker": und_sym,
+                                    "shares": qty,
+                                    "entry_price": entry_debit,
+                                    "exit_price": exec_price,
+                                    "entry_date": opos.get("entry_time") or now_iso,
+                                    "exit_date": now_iso,
+                                    "pnl_usd": realized,
+                                    "pnl_pct": pnl_pct,
+                                    "result": "win" if realized >= 0 else "loss",
+                                    "exit_reason": "IB_BROKER_CONFIRMED_SELL",
+                                    "trade_type": "OPTIONS_GAP_RUNNER"
+                                }).execute()
+                            except Exception as tj_err:
+                                log_warning(MODULE, f"Aviso insertando en trades_journal para opción {und_sym}: {tj_err}")
                     except Exception as opt_close_e:
                         log_warning(MODULE, f"Error actualizando opt_paper_trades en SELL: {opt_close_e}")
                 else:
@@ -622,6 +646,14 @@ class IBBridgeWorker:
                     ib_ord.firmQuoteOnly = False
                     ib_ord.action = direction.upper()
                     ib_ord.totalQuantity = shares
+
+                    if is_option and direction.lower() == "buy":
+                        try:
+                            from ibapi.tag_value import TagValue
+                            ib_ord.algoStrategy = "Adaptive"
+                            ib_ord.algoParams = [TagValue("adaptivePriority", "Normal")]
+                        except Exception as e_algo:
+                            log_warning(MODULE, f"Aviso configurando Adaptive Algo para opción: {e_algo}")
                     
                     if order_type in ("stop", "stp", "buy_stop") and trigger_price > 0:
                         ib_ord.orderType = "STP"

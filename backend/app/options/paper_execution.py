@@ -102,11 +102,20 @@ def simulate_entry_fill(candidate: dict[str, Any],
         slippage = slip_mult * spread
 
         if side == "buy":
-            fill_price = round(ask + slippage, 4)
+            # Ejecución dirigida al Midpoint para no pagar el spread completo ni nacer en pérdida contable
+            if bid > 0 and ask > 0:
+                midpoint = round((bid + ask) / 2.0, 4)
+                fill_price = round(midpoint + (slippage * 0.5), 4)
+            else:
+                fill_price = round(ask + slippage, 4)
             total_debit += fill_price
             closing_side = "sell"
         else:
-            fill_price = round(max(0.01, bid - slippage), 4)
+            if bid > 0 and ask > 0:
+                midpoint = round((bid + ask) / 2.0, 4)
+                fill_price = round(max(0.01, midpoint - (slippage * 0.5)), 4)
+            else:
+                fill_price = round(max(0.01, bid - slippage), 4)
             total_debit -= fill_price
             closing_side = "buy"
 
@@ -351,13 +360,9 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     ctx = aduana.static_context(uid, event_flags, underlying=und)
     ctx.now = now_dt
 
-    # Cargar posiciones abiertas reales para evaluar O-4 (Riesgo total <= $5000) y O-11 (Máx 3 posiciones)
+    # Cargar posiciones abiertas reales para evaluar límite de capital de Settings/Opciones
     try:
         open_rows = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
-        max_simultaneous = int(eff.get("max_open_positions", 3))
-        if len(open_rows) >= max_simultaneous:
-            return None
-
         current_open_risk = sum(float(p.get("max_loss_total") or p.get("entry_total_invested") or 0.0) for p in open_rows)
         max_capital = float(eff.get("max_open_risk_usd", 5000.0))
         cand_max_loss = float(cand.get("max_loss_total") or 0.0)
