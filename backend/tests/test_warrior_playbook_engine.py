@@ -280,3 +280,89 @@ def test_inference_mndr_tight_stop_distant_support():
     assert result.execution_params["fixed_stop_cents"] == 0.15
     assert "MNDR" in result.historical_trade_ref
 
+
+# =====================================================================
+# TESTS FOR NO TRADE DAY / CAPITAL PRESERVATION IN DRAWDOWN
+# (SIQ +900%, APUS +100%, MI +220% -> $0.00 PnL)
+# =====================================================================
+
+def test_no_trade_day_session_retrieval():
+    sessions = warrior_playbook.get_all_sessions()
+    assert len(sessions) >= 4
+
+    no_trade_sess = next((s for s in sessions if "Three Stocks Are Up Over 100%" in s["video_title"]), None)
+    assert no_trade_sess is not None
+    assert no_trade_sess["net_pnl"] == 0.00
+    assert no_trade_sess["prior_drawdown"] == -25000.00
+    assert len(no_trade_sess["trades"]) == 3
+
+    tickers = [t["ticker"] for t in no_trade_sess["trades"]]
+    assert "SIQ" in tickers
+    assert "APUS" in tickers
+    assert "MI" in tickers
+
+    siq = next(t for t in no_trade_sess["trades"] if t["ticker"] == "SIQ")
+    assert siq["running_surge_pct"] == 900.0
+    assert siq["archetype_code"] == "ROSS_NO_TRADE_DISCIPLINE"
+
+    apus = next(t for t in no_trade_sess["trades"] if t["ticker"] == "APUS")
+    assert apus["running_surge_pct"] == 100.0
+
+    mi = next(t for t in no_trade_sess["trades"] if t["ticker"] == "MI")
+    assert mi["running_surge_pct"] == 220.0
+
+def test_inference_siq_exhausted_4am_block():
+    ctx = {
+        "ticker": "SIQ_LIKE",
+        "price": 12.50,
+        "vwap": 10.00,
+        "spike_time": "04:00",
+        "has_topping_tail": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_EXHAUSTED_4AM_SPIKE"
+    assert "SIQ" in result.historical_trade_ref
+
+def test_inference_mi_volatility_halt_block():
+    ctx = {
+        "ticker": "MI_LIKE",
+        "price": 3.80,
+        "vwap": 2.50,
+        "is_volatility_halted": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_VOLATILITY_HALT_TRAP"
+    assert "MI" in result.historical_trade_ref
+
+def test_inference_mi_single_candle_spike_no_news_block():
+    ctx = {
+        "ticker": "MI_SPIKE",
+        "price": 4.00,
+        "vwap": 2.00,
+        "is_single_candle_spike": True,
+        "has_positive_news": False
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_VOLATILITY_HALT_TRAP"
+    assert "MI" in result.historical_trade_ref
+
+def test_inference_apus_undefined_risk_block():
+    ctx = {
+        "ticker": "APUS_LIKE",
+        "price": 6.80,
+        "vwap": 6.20,
+        "has_undefined_risk": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_CHOPPY_RESISTANCE_UNDEFINED_RISK"
+    assert "APUS" in result.historical_trade_ref
+
+

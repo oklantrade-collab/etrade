@@ -321,6 +321,17 @@ files_to_sync = [
     "app/core/market_hours.py",
     "app/api/stocks.py",
     "tests/test_micro_pullback_engine.py",
+    # WARRIOR PLAYBOOK KNOWLEDGE BASE
+    "app/stocks/warrior_playbook_engine.py",
+    "app/stocks/warrior_experience_ingestor.py",
+    "app/api/warrior_playbook.py",
+    "tests/test_warrior_playbook_engine.py",
+    "migration_036_warrior_playbook_kb.sql",
+    "migration_037_warrior_cold_market_kb.sql",
+    "migration_038_warrior_monday_squeeze_kb.sql",
+    "migration_039_warrior_no_trade_discipline_kb.sql",
+    "data/experiences/ross_cameron_monday_squeeze_mndr.json",
+    "data/experiences/ross_cameron_no_trade_three_stocks_100.json",
 ]
 
 # Archivos frontend para sincronizar (relativos a root)

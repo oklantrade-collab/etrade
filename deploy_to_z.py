@@ -23,6 +23,7 @@ individual_files = [
     "backend/migration_036_warrior_playbook_kb.sql",
     "backend/migration_037_warrior_cold_market_kb.sql",
     "backend/migration_038_warrior_monday_squeeze_kb.sql",
+    "backend/migration_039_warrior_no_trade_discipline_kb.sql",
 ]
 
 def sync_to_apolo():

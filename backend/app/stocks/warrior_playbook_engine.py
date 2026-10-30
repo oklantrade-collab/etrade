@@ -547,7 +547,99 @@ SESSION_MONDAY_SHORT_SQUEEZE_CASE_STUDY = WarriorSession(
     ]
 )
 
+SESSION_NO_TRADE_DAY_CASE_STUDY = WarriorSession(
+    session_date="2024-10-07",
+    video_title="Three Stocks Are Up Over 100% RIGHT NOW (No Trade Day - $0.00)",
+    video_url="https://www.youtube.com/watch?v=warrior_three_stocks_100_no_trade",
+    net_pnl=0.00,
+    account_mode="main_account",
+    prior_drawdown=-25000.0,
+    mental_state="Transmisión desde furgoneta Mercedes Sprinter equipada con Starlink. En periodo de recuperación de pérdidas (drawdown); enfoque estricto en paciencia y no forzar operaciones.",
+    key_mindset_change="Saber cuándo NO operar ('No Trade Day') es una habilidad táctica maestra. Si una acción subió a las 4 AM y dejó mechas de rechazo (SIQ), si muestra falsas rupturas sin riesgo definible (APUS), o si explota en 1 vela sin noticias y entra en halts (MI), la decisión correcta es quedarse al margen ($0 USD). Preservar el capital en drawdown es la máxima prioridad.",
+    stop_trading_discipline="Cero operaciones ejecutadas (0 trades, $0.00 PnL). A pesar de haber 3 acciones con subidas superiores al 100%, ninguna ofreció una relación riesgo/beneficio ejecutable.",
+    notes="Análisis exhaustivo de 3 corredores de más de 100%: SIQ (+900% SPAC), APUS (+100%), MI (+220% en 1m). Todas descartadas con disciplina quirúrgica.",
+    trades=[
+        WarriorTrade(
+            ticker="SIQ",
+            archetype_code="ROSS_NO_TRADE_DISCIPLINE",
+            pnl=0.00,
+            duration_seconds=0,
+            sector="SPAC Merger / Wise Space Holdings",
+            float_shares=2_500_000,
+            running_surge_pct=900.0,
+            avg_entry_price=0.0,
+            avg_exit_price=0.0,
+            key_takeaway="Subió de $1.80 a $18.37 a las 4:00 AM tras fusión SPAC. A las 6:45 AM el movimiento ya había ocurrido y dejó una vela con enorme mecha superior (topping tail). Descartada por impulso agotado y salida en pánico.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="FILTERING",
+                    price_level=18.37,
+                    trigger_observed="Explosión de $1.80-$3.60 a $18.37 a las 4:00 AM con fusión de SPAC del viernes.",
+                    action_taken="No perseguir en pre-mercado tardío.",
+                    risk_factor="El 90% del impulso ocurrió antes de que abrieran los escáneres principales; volumen vendedor masivo posterior.",
+                    result_outcome="Aparición de vela de rechazo superior extrema (topping tail); el precio colapsó."
+                )
+            ]
+        ),
+        WarriorTrade(
+            ticker="APUS",
+            archetype_code="ROSS_NO_TRADE_DISCIPLINE",
+            pnl=0.00,
+            duration_seconds=0,
+            sector="Small Cap Momentum",
+            float_shares=4_200_000,
+            running_surge_pct=100.0,
+            avg_entry_price=0.0,
+            avg_exit_price=0.0,
+            key_takeaway="Subió de $3.40 a $7.00 respaldada por noticia de 3:40 AM. Aunque formó hombro-cabeza-hombro invertido, marcó continuas mechas de rechazo y falsas rupturas en resistencia sin riesgo claro. Descartada por riesgo no definible.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="FILTERING",
+                    price_level=6.40,
+                    trigger_observed="Impulso hacia $6.40 y $7.00 con noticia a las 3:40 AM; patrón HCH invertido en gráfico de 5m.",
+                    action_taken="Evaluar punto de entrada en resistencia.",
+                    risk_factor="Múltiples mechas superiores de rechazo y amagos de falso breakout.",
+                    result_outcome="Imposibilidad de colocar un stop loss con buena relación riesgo/beneficio. Se descartó la compra."
+                )
+            ]
+        ),
+        WarriorTrade(
+            ticker="MI",
+            archetype_code="ROSS_NO_TRADE_DISCIPLINE",
+            pnl=0.00,
+            duration_seconds=0,
+            sector="Micro Cap Volatility",
+            float_shares=1_800_000,
+            running_surge_pct=220.0,
+            avg_entry_price=0.0,
+            avg_exit_price=0.0,
+            key_takeaway="Disparo vertical de $1.25 a $4.00 en una sola vela de 1 minuto sin noticias. Entró de inmediato en suspensiones por volatilidad (volatility halts), imposibilitando la gestión del riesgo.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="FILTERING",
+                    price_level=4.00,
+                    trigger_observed="Aparición súbita en el escáner saltando de $1.25 a $4.00 en 60 segundos sin catalizador fundamental.",
+                    action_taken="Monitorear Level 2 sin colocar orden.",
+                    risk_factor="Entrada en múltiples paradas por volatilidad (halts) que congelan la orden y exponen a gaps bajistas.",
+                    result_outcome="Descartada totalmente; durante un halt el stop loss no se ejecuta y el riesgo es incontrolable."
+                )
+            ]
+        ),
+    ]
+)
+
 ARCHETYPES_CATALOG = {
+    "ROSS_NO_TRADE_DISCIPLINE": {
+        "name": "Disciplina de Cero Operaciones (No Trade Day / Sidelines)",
+        "description": "Protocolo de preservación absoluta de capital y paciencia en drawdown. Cuando activos de +100% muestran movimientos agotados de madrugada (4 AM), rechazos continuos en resistencia sin riesgo claro o paradas por volatilidad (halts), la decisión correcta es quedarse al margen ($0 USD).",
+        "ideal_time": "Pre-Market / Toda la sesión",
+        "ideal_float_max": 10_000_000,
+        "ideal_price_range": (1.00, 20.00),
+        "pitfalls": ["Chasing exhausted 4:00 AM spikes", "Trading choppy resistance without clear stop", "Buying single-minute spikes into volatility halts", "Boredom trading during drawdowns"]
+    },
     "ROSS_NO_NEWS_PARABOLIC_SQUEEZE": {
         "name": "Short Squeeze Parabólico Sin Noticias (MNDR Pattern)",
         "description": "Disparo parabólico vertical (>150%-225%) en pre-mercado sin catalizador fundamental. Entrada en micro pullback anticipando números enteros con Stop corto fijo de 10-15 centavos debido a que el soporte estructural está alejado.",
@@ -603,6 +695,7 @@ class WarriorPlaybookEngine:
             SESSION_72K_CASE_STUDY,
             SESSION_COLD_MARKET_CASE_STUDY,
             SESSION_MONDAY_SHORT_SQUEEZE_CASE_STUDY,
+            SESSION_NO_TRADE_DAY_CASE_STUDY,
         ]
         self._archetypes = ARCHETYPES_CATALOG
 
@@ -670,6 +763,22 @@ class WarriorPlaybookEngine:
         support_price = float(context.get("support_price", 0.0))
         time_str = str(context.get("time_str", ""))
         is_pre_715_curl = bool(context.get("is_pre_715_curl", False) or (time_str and time_str < "07:15"))
+
+        # Flags de la sesión No Trade Day (SIQ, APUS, MI)
+        is_exhausted_4am_spike = bool(
+            context.get("is_4am_exhausted", False)
+            or context.get("is_exhausted_4am_spike", False)
+            or (context.get("spike_time") == "04:00" and has_topping_tail)
+        )
+        is_volatility_halted = bool(
+            context.get("is_volatility_halted", False)
+            or context.get("is_halted", False)
+            or (context.get("is_single_candle_spike", False) and not has_positive_news)
+        )
+        has_undefined_risk = bool(
+            context.get("has_undefined_risk", False)
+            or context.get("has_choppy_rejections", False)
+        )
 
         # ── CASO COLD 1: FILTRO DE ACCIÓN PESADA / THICKLY TRADED (Lección NCPL) ──
         if is_thickly_traded:
@@ -750,6 +859,72 @@ class WarriorPlaybookEngine:
                 lessons_learned=[
                     "No operar patrones curl antes de las 7:15 AM sin volumen masivo confirmado (>200k)",
                     "Esperar a que el pre-mercado formalice su volumen y participantes a partir de 7:15-7:30 AM"
+                ]
+            )
+
+        # ── CASO NO-TRADE 1: FILTRO ANTI-TRAMPA DE VOLATILITY HALT / SALTO EN 1 VELA (Lección MI) ──
+        if is_volatility_halted:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_NO_TRADE_DISCIPLINE",
+                archetype_name="Filtro Anti-Trampa de Volatility Halt",
+                similarity_score=0.97,
+                recommended_action="BLOCK_VOLATILITY_HALT_TRAP",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="MI (Descartada - $0 USD)",
+                reasoning=(
+                    f"{ticker} se disparó en una sola vela de un minuto sin noticias o entró en suspensión por volatilidad (volatility halt). "
+                    f"Lección de Ross Cameron en MI (+220% en 1m): Movimientos hiper-acelerados sin noticia entran en suspensiones repetitivas (halts) "
+                    f"donde las órdenes quedan atrapadas y es imposible gestionar el riesgo. Prohibido entrar en activos propensos a halts desordenados."
+                ),
+                execution_params={"block_entries": True, "reason": "Single-candle spike into volatility halts"},
+                lessons_learned=[
+                    "No operar disparos verticales de 1 minuto sin noticias que desencadenen volatility halts",
+                    "Durante un halt, las órdenes de protección no se ejecutan y el capital queda expuesto a gaps asesinos"
+                ]
+            )
+
+        # ── CASO NO-TRADE 2: FILTRO DE MOVIMIENTO AGOTADO DE MADRUGADA (Lección SIQ) ──
+        if is_exhausted_4am_spike:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_NO_TRADE_DISCIPLINE",
+                archetype_name="Filtro de Impulso Agotado de Madrugada (4 AM Spike)",
+                similarity_score=0.96,
+                recommended_action="BLOCK_EXHAUSTED_4AM_SPIKE",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="SIQ (Descartada - $0 USD)",
+                reasoning=(
+                    f"{ticker} subió verticalmente de madrugada (4:00 AM) pero a la sesión de pre-mercado regular muestra agotamiento y mecha superior de rechazo (topping tail). "
+                    f"Lección de Ross Cameron en SIQ (+900%): El movimiento principal ya se dio horas antes y los compradores iniciales están saliendo en pánico. "
+                    f"Prohibido perseguir acciones agotadas de madrugada."
+                ),
+                execution_params={"block_entries": True, "reason": "Exhausted 4 AM pre-market run"},
+                lessons_learned=[
+                    "No perseguir gappers de madrugada cuyo impulso principal ya concluyó a las 4:00 AM",
+                    "Evitar trampas de salida donde institucionales liquidan sobre compradores tardíos"
+                ]
+            )
+
+        # ── CASO NO-TRADE 3: FILTRO DE RIESGO NO DEFINIBLE EN RESISTENCIA SUCIA (Lección APUS) ──
+        if has_undefined_risk:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_NO_TRADE_DISCIPLINE",
+                archetype_name="Filtro de Riesgo No Definible en Resistencia Choppy",
+                similarity_score=0.94,
+                recommended_action="BLOCK_CHOPPY_RESISTANCE_UNDEFINED_RISK",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="APUS (Descartada - $0 USD)",
+                reasoning=(
+                    f"{ticker} subió cerca de 100% pero genera mechas continuas de rechazo y falsos breakouts en resistencia. "
+                    f"Lección de Ross Cameron en APUS: A pesar de patrones vistosos (como HCH invertido), si la acción no ofrece un nivel de riesgo "
+                    f"claro y definible (stop loss estructural viable), la decisión correcta es quedarse al margen (sidelines). En drawdown, no arriesgar si el R:R es incierto."
+                ),
+                execution_params={"block_entries": True, "reason": "Choppy resistance with undefinable risk"},
+                lessons_learned=[
+                    "Si no se puede definir con precisión el nivel de stop loss y ratio R:R, no entrar",
+                    "Evitar falsas rupturas con mechas de rechazo repetitivas en techos"
                 ]
             )
 

@@ -1,0 +1,83 @@
+{
+  "session_date": "2024-10-07",
+  "video_title": "Three Stocks Are Up Over 100% RIGHT NOW (No Trade Day - $0.00)",
+  "video_url": "https://www.youtube.com/watch?v=warrior_three_stocks_100_no_trade",
+  "net_pnl": 0.0,
+  "account_mode": "main_account",
+  "prior_drawdown": -25000.0,
+  "mental_state": "Transmisión desde furgoneta Mercedes Sprinter equipada con Starlink. En periodo de recuperación de pérdidas (drawdown); enfoque estricto en paciencia y no forzar operaciones.",
+  "key_mindset_change": "Saber cuándo NO operar ('No Trade Day') es una habilidad táctica maestra. Si una acción subió a las 4 AM y dejó mechas de rechazo (SIQ), si muestra falsas rupturas sin riesgo definible (APUS), o si explota en 1 vela sin noticias y entra en halts (MI), la decisión correcta es quedarse al margen ($0 USD). Preservar el capital en drawdown es la máxima prioridad.",
+  "stop_trading_discipline": "Cero operaciones ejecutadas (0 trades, $0.00 PnL). A pesar de haber 3 acciones con subidas superiores al 100%, ninguna ofreció una relación riesgo/beneficio ejecutable.",
+  "notes": "Análisis exhaustivo de 3 corredores de más de 100%: SIQ (+900% SPAC), APUS (+100%), MI (+220% en 1m). Todas descartadas con disciplina quirúrgica.",
+  "trades": [
+    {
+      "ticker": "SIQ",
+      "archetype_code": "ROSS_NO_TRADE_DISCIPLINE",
+      "pnl": 0.0,
+      "duration_seconds": 0,
+      "sector": "SPAC Merger / Wise Space Holdings",
+      "float_shares": 2500000,
+      "running_surge_pct": 900.0,
+      "avg_entry_price": 0.0,
+      "avg_exit_price": 0.0,
+      "key_takeaway": "Subió de $1.80 a $18.37 a las 4:00 AM tras fusión SPAC. A las 6:45 AM el movimiento ya había ocurrido y dejó una vela con enorme mecha superior (topping tail). Descartada por impulso agotado y salida en pánico.",
+      "phases": [
+        {
+          "sequence_order": 1,
+          "phase_type": "FILTERING",
+          "price_level": 18.37,
+          "trigger_observed": "Explosión de $1.80-$3.60 a $18.37 a las 4:00 AM con fusión de SPAC del viernes.",
+          "action_taken": "No perseguir en pre-mercado tardío.",
+          "risk_factor": "El 90% del impulso ocurrió antes de que abrieran los escáneres principales; volumen vendedor masivo posterior.",
+          "result_outcome": "Aparición de vela de rechazo superior extrema (topping tail); el precio colapsó."
+        }
+      ]
+    },
+    {
+      "ticker": "APUS",
+      "archetype_code": "ROSS_NO_TRADE_DISCIPLINE",
+      "pnl": 0.0,
+      "duration_seconds": 0,
+      "sector": "Small Cap Momentum",
+      "float_shares": 4200000,
+      "running_surge_pct": 100.0,
+      "avg_entry_price": 0.0,
+      "avg_exit_price": 0.0,
+      "key_takeaway": "Subió de $3.40 a $7.00 respaldada por noticia de 3:40 AM. Aunque formó hombro-cabeza-hombro invertido, marcó continuas mechas de rechazo y falsas rupturas en resistencia sin riesgo claro. Descartada por riesgo no definible.",
+      "phases": [
+        {
+          "sequence_order": 1,
+          "phase_type": "FILTERING",
+          "price_level": 6.4,
+          "trigger_observed": "Impulso hacia $6.40 y $7.00 con noticia a las 3:40 AM; patrón HCH invertido en gráfico de 5m.",
+          "action_taken": "Evaluar punto de entrada en resistencia.",
+          "risk_factor": "Múltiples mechas superiores de rechazo y amagos de falso breakout.",
+          "result_outcome": "Imposibilidad de colocar un stop loss con buena relación riesgo/beneficio. Se descartó la compra."
+        }
+      ]
+    },
+    {
+      "ticker": "MI",
+      "archetype_code": "ROSS_NO_TRADE_DISCIPLINE",
+      "pnl": 0.0,
+      "duration_seconds": 0,
+      "sector": "Micro Cap Volatility",
+      "float_shares": 1800000,
+      "running_surge_pct": 220.0,
+      "avg_entry_price": 0.0,
+      "avg_exit_price": 0.0,
+      "key_takeaway": "Disparo vertical de $1.25 a $4.00 en una sola vela de 1 minuto sin noticias. Entró de inmediato en suspensiones por volatilidad (volatility halts), imposibilitando la gestión del riesgo.",
+      "phases": [
+        {
+          "sequence_order": 1,
+          "phase_type": "FILTERING",
+          "price_level": 4.0,
+          "trigger_observed": "Aparición súbita en el escáner saltando de $1.25 a $4.00 en 60 segundos sin catalizador fundamental.",
+          "action_taken": "Monitorear Level 2 sin colocar orden.",
+          "risk_factor": "Entrada en múltiples paradas por volatilidad (halts) que congelan la orden y exponen a gaps bajistas.",
+          "result_outcome": "Descartada totalmente; durante un halt el stop loss no se ejecuta y el riesgo es incontrolable."
+        }
+      ]
+    }
+  ]
+}
