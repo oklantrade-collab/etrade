@@ -182,13 +182,51 @@ def evaluate_stock_for_options_triggers(
 
     # ── GATILLO 4: Gap & Go Intradía ──
     open_day = float(o15.iloc[0])
-    prev_close = float(df_1d["close"].iloc[-2]) if (df_1d is not None and len(df_1d) >= 2) else float(c15.iloc[0])
+    c1d = _safe_col(df_1d, "close") if (df_1d is not None and not df_1d.empty) else None
+    prev_close = float(c1d.iloc[-2]) if (c1d is not None and len(c1d) >= 2) else float(c15.iloc[0])
     gap_pct = ((open_day - prev_close) / (prev_close + 1e-6)) * 100.0
     first_15m_green = float(c15.iloc[0]) >= float(o15.iloc[0])
     first_15m_red = float(c15.iloc[0]) <= float(o15.iloc[0])
 
     trig4_gap_call = (gap_pct >= 1.5) and (rvol_est >= 2.0) and first_15m_green and (cur_price >= orb_high_15m * 0.998)
     trig4_gap_put = (gap_pct <= -1.5) and (rvol_est >= 2.0) and first_15m_red and (cur_price <= orb_low_15m * 1.002)
+
+    # ── GATILLO 5: Ignición de Expansión Bollinger 15M (Squeeze Breakout / Momento Explosivo) ──
+    # Bandas abriéndose en 15m (Upper sube, Lower baja, ancho expandiéndose) con confirmación de volumen
+    trig5_bb_ignition_call = False
+    trig5_bb_ignition_put = False
+    try:
+        bb15_eval = compute_bollinger_bands(c15, period=20, num_std=2.0)
+        u15_eval = bb15_eval["upper"]
+        l15_eval = bb15_eval["lower"]
+        basis15_eval = bb15_eval["basis"]
+
+        cur_u15 = float(u15_eval.iloc[-1])
+        prev_u15 = float(u15_eval.iloc[-2]) if len(u15_eval) >= 2 else cur_u15
+        cur_l15 = float(l15_eval.iloc[-1])
+        prev_l15 = float(l15_eval.iloc[-2]) if len(l15_eval) >= 2 else cur_l15
+        cur_basis15 = float(basis15_eval.iloc[-1])
+
+        bw_cur15 = (cur_u15 - cur_l15) / (cur_basis15 + 1e-6) * 100.0
+        bw_prev15 = (prev_u15 - prev_l15) / (float(basis15_eval.iloc[-2]) + 1e-6) * 100.0 if len(basis15_eval) >= 2 else bw_cur15
+
+        u_expanding15 = cur_u15 > prev_u15
+        l_expanding15 = cur_l15 < prev_l15
+        bw_expanding15 = bw_cur15 > bw_prev15
+
+        prev_contracted = (bw_prev15 <= bw_cur15 * 1.02) or (prev_u15 <= float(u15_eval.iloc[-3]) if len(u15_eval) >= 3 else True)
+
+        v15 = _safe_col(df_15m, "volume")
+        avg_v15 = float(v15.iloc[-20:].mean()) if len(v15) >= 20 else 1000.0
+        last_v15 = float(v15.iloc[-1]) if len(v15) > 0 else 0.0
+        vol_boost_15m = (last_v15 >= avg_v15 * 1.15) or volume_burst_5m or (rvol_est >= 1.3)
+
+        is_bb_ignition_15m = u_expanding15 and l_expanding15 and bw_expanding15 and prev_contracted and vol_boost_15m
+
+        trig5_bb_ignition_call = is_bb_ignition_15m and (cur_price >= cur_basis15) and is_candle_green_5m
+        trig5_bb_ignition_put = is_bb_ignition_15m and (cur_price <= cur_basis15) and is_candle_red_5m
+    except Exception as e_bb:
+        log_warning(MODULE, f"Aviso calculando Gatillo Bollinger 15m para {sym}: {e_bb}")
 
     # ─────────────────────────────────────────────────────────────
     # 3. MOTOR DE CATALIZADORES (Noticias, Earnings, FDA, Dilución)
@@ -235,6 +273,9 @@ def evaluate_stock_for_options_triggers(
     if trig4_gap_call:
         base_call += 30.0
         triggers_call.append("TRIG_GAP_AND_GO")
+    if trig5_bb_ignition_call:
+        base_call += 35.0
+        triggers_call.append("TRIG_BOLLINGER_15M_IGNITION")
     if regime_code == "BULL_TREND_EXPANSION":
         base_call += 20.0
     elif regime_code == "COUNTER_TREND_BOUNCE":
@@ -254,6 +295,9 @@ def evaluate_stock_for_options_triggers(
     if trig4_gap_put:
         base_put += 30.0
         triggers_put.append("TRIG_GAP_AND_GO")
+    if trig5_bb_ignition_put:
+        base_put += 35.0
+        triggers_put.append("TRIG_BOLLINGER_15M_IGNITION")
     if "BEAR" in regime_code:
         base_put += 20.0
     elif regime_code == "COUNTER_TREND_BOUNCE" and cur_price <= cur_ema20_15m:
@@ -529,6 +573,9 @@ async def run_stock_driven_options_pipeline(
             "take_profit_structural": True,
             "is_runner": has_cat,
             "has_catalyst": has_cat,
+            "is_bollinger_ignition": ("TRIG_BOLLINGER_15M_IGNITION" in (cand.get("triggers_fired") or [])),
+            "bb_expansion_locked": ("TRIG_BOLLINGER_15M_IGNITION" in (cand.get("triggers_fired") or [])),
+            "entry_trigger": "BOLLINGER_15M_IGNITION" if ("TRIG_BOLLINGER_15M_IGNITION" in (cand.get("triggers_fired") or [])) else "STOCK_DRIVEN",
             "tp_scale_mode": "AGGRESSIVE_RUNNER" if has_cat else "TECHNICAL_SCALP",
             "gap_type": "OPEN_GAP_UP" if direction == "CALL" else "OPEN_GAP_DOWN",
             "last_eval_at": now_iso

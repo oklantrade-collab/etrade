@@ -48,7 +48,7 @@ from app.data.yfinance_provider import YFinanceProvider
 from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
 from app.options.opt_contract_picker import fetch_and_select_best_option_contract
 from app.options.autonomous_options_dispatcher import dispatch_autonomous_option_trade
-from app.options.aduana_gap_runner_options import compute_vwap, _safe_col, is_optionable
+from app.options.aduana_gap_runner_options import compute_vwap, compute_bollinger_bands, _safe_col, is_optionable
 
 MODULE = "INTRADAY_MOMENTUM_OPT"
 
@@ -278,18 +278,47 @@ def evaluate_intraday_momentum_breakout(
     res["vwap"] = round(current_vwap, 2)
     res["rvol"] = rvol_est
 
+    # 5. Detección de Ignición de Apertura Bollinger en 15m (Squeeze Breakout)
+    is_bb_ignition_call_15m = False
+    is_bb_ignition_put_15m = False
+    try:
+        if len(df_15m) >= 20:
+            c15 = _safe_col(df_15m, "close")
+            bb15 = compute_bollinger_bands(c15, period=20, num_std=2.0)
+            u15 = bb15["upper"]
+            l15 = bb15["lower"]
+            basis15 = bb15["basis"]
+
+            cur_u = float(u15.iloc[-1])
+            prev_u = float(u15.iloc[-2])
+            cur_l = float(l15.iloc[-1])
+            prev_l = float(l15.iloc[-2])
+            cur_b = float(basis15.iloc[-1])
+
+            u_exp = cur_u > prev_u
+            l_exp = cur_l < prev_l
+            bw_exp = ((cur_u - cur_l) / (cur_b + 1e-6)) > ((prev_u - prev_l) / (float(basis15.iloc[-2]) + 1e-6))
+
+            if u_exp and l_exp and bw_exp:
+                if current_price >= cur_b:
+                    is_bb_ignition_call_15m = True
+                if current_price <= cur_b:
+                    is_bb_ignition_put_15m = True
+    except Exception:
+        pass
+
     # ── EVALUACIÓN CONDICIONAL PARA CALL ──
     # a) 1H EMA3 > EMA9 obligatorio (Fail-Closed)
-    # b) Ruptura o test firme de ORB High (Precio >= ORB High * 0.998)
+    # b) Ruptura o test firme de ORB High (Precio >= ORB High * 0.998) O Ignición Bollinger 15m
     # c) Sobre VWAP
     # d) Vela 5m verde y volumen acelerando
     # e) Reglas Maestras Estructurales 1D aprobadas
     if (
         ema_1h_state is True
-        and current_price >= (orb_high_15m * 0.998)
+        and (current_price >= (orb_high_15m * 0.998) or is_bb_ignition_call_15m)
         and current_price >= current_vwap
         and is_green_5m
-        and (volume_burst_5m or rvol_est >= 1.4 or catalyst_bonus > 0.0)
+        and (volume_burst_5m or rvol_est >= 1.4 or catalyst_bonus > 0.0 or is_bb_ignition_call_15m)
     ):
         if not st_reg.get("can_enter_call", True):
             call_veto = st_reg.get("call_veto_reason") or "Bloqueado por Reglas Maestras Estructurales 1D"
@@ -297,10 +326,15 @@ def evaluate_intraday_momentum_breakout(
             return res
 
         score = 70.0
-        triggers = ["ORB_15M_BREAKOUT", "VWAP_SUPPORT", "1H_EMA3_GT_EMA9"]
+        triggers = ["VWAP_SUPPORT", "1H_EMA3_GT_EMA9"]
+        if current_price >= (orb_high_15m * 0.998):
+            triggers.append("ORB_15M_BREAKOUT")
         if current_price > orb_high_15m:
             score += 15.0
             triggers.append("ORB_CLEAR_BREAK")
+        if is_bb_ignition_call_15m:
+            score += 15.0
+            triggers.append("BOLLINGER_15M_IGNITION")
         if volume_burst_5m:
             score += 10.0
             triggers.append("5M_VOLUME_BURST")
@@ -320,7 +354,7 @@ def evaluate_intraday_momentum_breakout(
             "score": round(score, 1),
             "triggers": triggers,
             "regime_info": st_reg,
-            "reason": f"Impulso Alcista ORB 15M + VWAP ($ {current_price:.2f} >= ORB ${orb_high_15m:.2f}) con 1H EMA3>EMA9 y RVOL={rvol_est:.1f}x",
+            "reason": f"Impulso Alcista {'BOLLINGER 15M + ' if is_bb_ignition_call_15m else ''}ORB/VWAP (${current_price:.2f}) con 1H EMA3>EMA9 y RVOL={rvol_est:.1f}x",
             "metrics": {
                 "price": current_price,
                 "orb_high": orb_high_15m,
@@ -328,6 +362,7 @@ def evaluate_intraday_momentum_breakout(
                 "rvol": rvol_est,
                 "dist_orb_pct": round(((current_price - orb_high_15m) / orb_high_15m) * 100.0, 2),
                 "is_ema3_gt_ema9_1h": True,
+                "is_bb_ignition": is_bb_ignition_call_15m,
                 "catalyst_bonus": catalyst_bonus
             }
         })
@@ -335,16 +370,16 @@ def evaluate_intraday_momentum_breakout(
 
     # ── EVALUACIÓN CONDICIONAL PARA PUT ──
     # a) 1H EMA3 <= EMA9 (bajista en 1H)
-    # b) Ruptura o test firme de ORB Low (Precio <= ORB Low * 1.002)
+    # b) Ruptura o test firme de ORB Low (Precio <= ORB Low * 1.002) O Ignición Bollinger 15m
     # c) Bajo VWAP
     # d) Vela 5m roja y volumen acelerando
     # e) Reglas Maestras Estructurales 1D aprobadas
     if (
         ema_1h_state is False
-        and current_price <= (orb_low_15m * 1.002)
+        and (current_price <= (orb_low_15m * 1.002) or is_bb_ignition_put_15m)
         and current_price <= current_vwap
         and is_red_5m
-        and (volume_burst_5m or rvol_est >= 1.4 or catalyst_bonus > 0.0)
+        and (volume_burst_5m or rvol_est >= 1.4 or catalyst_bonus > 0.0 or is_bb_ignition_put_15m)
     ):
         if not st_reg.get("can_enter_put", True):
             put_veto = st_reg.get("put_veto_reason") or "Bloqueado por Reglas Maestras Estructurales 1D"
@@ -352,10 +387,15 @@ def evaluate_intraday_momentum_breakout(
             return res
 
         score = 70.0
-        triggers = ["ORB_15M_BREAKDOWN", "VWAP_RESISTANCE", "1H_EMA3_LE_EMA9"]
+        triggers = ["VWAP_RESISTANCE", "1H_EMA3_LE_EMA9"]
+        if current_price <= (orb_low_15m * 1.002):
+            triggers.append("ORB_15M_BREAKDOWN")
         if current_price < orb_low_15m:
             score += 15.0
             triggers.append("ORB_CLEAR_BREAKDOWN")
+        if is_bb_ignition_put_15m:
+            score += 15.0
+            triggers.append("BOLLINGER_15M_IGNITION")
         if volume_burst_5m:
             score += 10.0
             triggers.append("5M_VOLUME_BURST")
