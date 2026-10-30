@@ -386,7 +386,176 @@ SESSION_COLD_MARKET_CASE_STUDY = WarriorSession(
     ]
 )
 
+SESSION_MONDAY_SHORT_SQUEEZE_CASE_STUDY = WarriorSession(
+    session_date="2024-10-14",
+    video_title="Crazy +225% Short Squeeze on Monday Morning! (+$9,671.43)",
+    video_url="https://www.youtube.com/watch?v=warrior_monday_squeeze_mndr",
+    net_pnl=9671.43,
+    account_mode="main_account",
+    prior_drawdown=0.0,
+    mental_state="Apertura de semana (lunes temprano). Enfoque en capturar el 'lead gapper' que despierte el apetito del mercado.",
+    key_mindset_change="Dominar el Efecto Ola de Simpatía (Sympathy Wave) y la regla de Stop Corto en soporte lejano: Cuando un short squeeze (MNDR +225%) no tiene noticias, el soporte estructural queda a kilómetros ($1.12 vs $1.70); se DEBE usar un stop mental ceñido de 10 a 15 centavos. El calor generado por el primer corredor activa compras masivas en las siguientes acciones con noticias frescas (GIXI a las 7:32 AM).",
+    stop_trading_discipline="Cerró la jornada con 5 operaciones ganadoras de 6 (+9,671.43). La única pérdida fue MEDS (-$1,200) a las 7:00 AM por precipitarse antes de que el mercado tuviera volumen real.",
+    notes="Sesión maestra de lunes: MNDR (+$1,300), GIXI (+$7,289.43), WFFF (+$2,282), MEDS (-$1,200). Monitoreó además CLWT, DCX e YMAT.",
+    trades=[
+        WarriorTrade(
+            ticker="MNDR",
+            archetype_code="ROSS_NO_NEWS_PARABOLIC_SQUEEZE",
+            pnl=1300.00,
+            duration_seconds=300,
+            sector="Tecnología / Salud Móvil (Singapur)",
+            float_shares=3_200_000,
+            running_surge_pct=225.0,
+            avg_entry_price=1.70,
+            avg_exit_price=2.35,
+            key_takeaway="Short Squeeze parabólico sin noticias (+225%). Entrada en micro pullback a $1.70 anticipando quiebre de $2.00 con Stop corto de 10-15 centavos porque el soporte real ($1.12) estaba muy lejos.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="FILTERING",
+                    price_level=1.12,
+                    trigger_observed="Disparo vertical inicial desde $0.92 hasta $1.12 y $1.50 sin noticias fundamentales.",
+                    action_taken="Dejar pasar el primer tramo parabólico desordenado.",
+                    risk_factor="Perseguir precios sin soporte definido.",
+                    result_outcome="Esperó a que el gráfico marcara el primer retroceso ordenado."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="ENTRY",
+                    price_level=1.70,
+                    trigger_observed="Micro pullback limpio alrededor de $1.70 formando bandera antes de la barrera psicológica de $2.00.",
+                    action_taken="Comprar en $1.70 anticipando la ruptura de los $2.00.",
+                    risk_factor="Soporte técnico real muy abajo ($1.12); ratio R:R inviable si se usa soporte base.",
+                    result_outcome="Aplicó regla de Stop corto fijo de 10-15 centavos (stop en $1.58-$1.60)."
+                ),
+                WarriorTradePhase(
+                    sequence_order=3,
+                    phase_type="SCALING_OUT",
+                    price_level=2.25,
+                    trigger_observed="Ruptura de los $2.00 disparando con violencia hacia $2.25 y $2.40.",
+                    action_taken="Vender bloques parciales en la aceleración.",
+                    risk_factor="Volatilidad extrema.",
+                    result_outcome="Aseguró ganancias iniciales sin riesgo."
+                ),
+                WarriorTradePhase(
+                    sequence_order=4,
+                    phase_type="EXIT",
+                    price_level=2.50,
+                    trigger_observed="Precio alcanza pico en $2.57-$2.90 y aparecen velas con mechas superiores (topping tail).",
+                    action_taken="Venta total asegurando +$1,300 USD de beneficio conservador.",
+                    risk_factor="Reversión inmediata de short squeeze sin noticias.",
+                    result_outcome="Salida perfecta antes de la posterior consolidación pesada."
+                ),
+            ]
+        ),
+        WarriorTrade(
+            ticker="GIXI",
+            archetype_code="ROSS_NO_NEWS_PARABOLIC_SQUEEZE",
+            pnl=7289.43,
+            duration_seconds=420,
+            sector="Tecnología (Israel)",
+            float_shares=4_800_000,
+            running_surge_pct=100.0,
+            avg_entry_price=2.10,
+            avg_exit_price=3.40,
+            key_takeaway="Operación estrella de la sesión. Catalizador de noticia a las 7:32 AM montado sobre la ola de simpatía (Sympathy Wave) que MNDR despertó en el mercado.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=2.10,
+                    trigger_observed="Noticia publicada a las 7:32 AM con el mercado caliente por la subida de MNDR.",
+                    action_taken="Entrar con alta convicción aprovechando el apetito comprador desatado.",
+                    risk_factor="Falso breakout de pre-mercado.",
+                    result_outcome="Explosión del 100% hacia $3.50+ con volumen arrollador."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="EXIT",
+                    price_level=3.40,
+                    trigger_observed="Desaceleración de cinta en $3.50 con absorción institucional.",
+                    action_taken="Venta en la cima asegurando más de +$7,000 USD de ganancia.",
+                    risk_factor="Toma masiva de beneficios de pre-mercado.",
+                    result_outcome="Trade más lucrativo de la jornada matutina."
+                ),
+            ]
+        ),
+        WarriorTrade(
+            ticker="WFFF",
+            archetype_code="ROSS_CONSOLIDATION_OVER_VWAP_BREAKOUT",
+            pnl=2282.00,
+            duration_seconds=240,
+            sector="Consumo / Agro (Malasia)",
+            float_shares=5_100_000,
+            running_surge_pct=45.0,
+            avg_entry_price=12.50,
+            avg_exit_price=13.80,
+            key_takeaway="Operación de continuidad ingresando en $12.50 y tomando beneficios rápidos en la zona de $13.70-$14.69.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=12.50,
+                    trigger_observed="Continuación alcista tras consolidación con volumen ascendente.",
+                    action_taken="Entrar en $12.50 buscando impulso hacia $14.00.",
+                    risk_factor="Precio nominal alto ($12+).",
+                    result_outcome="Disparo limpio hacia $13.70-$14.69."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="EXIT",
+                    price_level=13.80,
+                    trigger_observed="Llegada a resistencia en $14.00.",
+                    action_taken="Tomar ganancias rápidas asegurando +$2,282 USD.",
+                    risk_factor="Rechazo en números enteros.",
+                    result_outcome="Ganancia capturada con precisión."
+                ),
+            ]
+        ),
+        WarriorTrade(
+            ticker="MEDS",
+            archetype_code="ROSS_COLD_MARKET_DEFENSE",
+            pnl=-1200.00,
+            duration_seconds=180,
+            sector="Salud / Farmacia",
+            float_shares=6_000_000,
+            running_surge_pct=25.0,
+            avg_entry_price=3.40,
+            avg_exit_price=3.15,
+            key_takeaway="Única pérdida del día (-$1,200). Comprar patrón curl a las 7:00 AM es prematuro porque el mercado carece de volumen a esa hora.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=3.40,
+                    trigger_observed="Intento de recuperación (curl) a las 7:00 AM.",
+                    action_taken="Comprar anticipando continuidad.",
+                    risk_factor="Hora excesivamente temprana (7:00 AM) con volumen desértico.",
+                    result_outcome="Falta total de compradores; el precio se desinfló."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="EXIT",
+                    price_level=3.15,
+                    trigger_observed="Ruptura a la baja sin soporte de cinta.",
+                    action_taken="Cerrar con stop loss defensivo perdiendo -$1,200.",
+                    risk_factor="Desplome si no se respeta el stop.",
+                    result_outcome="Pérdida asumida; evitó un castigo mayor."
+                ),
+            ]
+        ),
+    ]
+)
+
 ARCHETYPES_CATALOG = {
+    "ROSS_NO_NEWS_PARABOLIC_SQUEEZE": {
+        "name": "Short Squeeze Parabólico Sin Noticias (MNDR Pattern)",
+        "description": "Disparo parabólico vertical (>150%-225%) en pre-mercado sin catalizador fundamental. Entrada en micro pullback anticipando números enteros con Stop corto fijo de 10-15 centavos debido a que el soporte estructural está alejado.",
+        "ideal_time": "07:30-09:15 AM (Pre-Market temprano)",
+        "ideal_float_max": 6_000_000,
+        "ideal_price_range": (0.80, 5.00),
+        "pitfalls": ["Using distant structural support as stop loss (causes massive loss)", "Entering before 7:15 AM without volume", "Chasing topping tails above whole number"]
+    },
     "ROSS_COLD_MARKET_DEFENSE": {
         "name": "Defensa Activa en Mercado Frío/Rojo (Don't Make It Worse)",
         "description": "Protocolo de reducción de riesgo y supervivencia cuando S&P 500 / Nasdaq están en rojo y los breakouts no tienen seguimiento. Tamaño al 25%-33%, prohibidas recompras en techos planos y salida inmediata ante mechas de rechazo (topping tails).",
@@ -430,7 +599,11 @@ class WarriorPlaybookEngine:
     """Motor de consulta y evaluación de oportunidades en vivo contra el Playbook de Ross Cameron."""
 
     def __init__(self):
-        self._sessions: List[WarriorSession] = [SESSION_72K_CASE_STUDY, SESSION_COLD_MARKET_CASE_STUDY]
+        self._sessions: List[WarriorSession] = [
+            SESSION_72K_CASE_STUDY,
+            SESSION_COLD_MARKET_CASE_STUDY,
+            SESSION_MONDAY_SHORT_SQUEEZE_CASE_STUDY,
+        ]
         self._archetypes = ARCHETYPES_CATALOG
 
     def get_all_sessions(self) -> List[Dict[str, Any]]:
@@ -491,6 +664,13 @@ class WarriorPlaybookEngine:
         has_positive_news = bool(context.get("has_positive_news", False))
         candle_is_red = bool(context.get("candle_is_red", False))
 
+        # Flags de la sesión de lunes (MNDR, GIXI, WFFF, MEDS)
+        is_parabolic_squeeze = bool(context.get("is_parabolic_squeeze", False) or change_pct >= 150.0)
+        has_sympathy_wave_active = bool(context.get("has_sympathy_wave_active", False))
+        support_price = float(context.get("support_price", 0.0))
+        time_str = str(context.get("time_str", ""))
+        is_pre_715_curl = bool(context.get("is_pre_715_curl", False) or (time_str and time_str < "07:15"))
+
         # ── CASO COLD 1: FILTRO DE ACCIÓN PESADA / THICKLY TRADED (Lección NCPL) ──
         if is_thickly_traded:
             return PlaybookMatchResult(
@@ -549,6 +729,28 @@ class WarriorPlaybookEngine:
                 ),
                 execution_params={"block_entries": True, "require_green_candle": True},
                 lessons_learned=["No comprar noticias positivas si el precio cotiza en vela roja"]
+            )
+
+        # ── CASO COLD / MONDAY: FILTRO ANTI-PRECIPITACIÓN PRE-7:15 AM (Lección MEDS) ──
+        if is_pre_715_curl and volume < 200_000:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Filtro Anti-Precipitación Pre-7:15 AM",
+                similarity_score=0.94,
+                recommended_action="BLOCK_PRE_715_UNCONFIRMED_CURL",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="MEDS (-$1,200 USD)",
+                reasoning=(
+                    f"Intento de entrada en patrón curl o rebote antes de las 07:15 AM ({time_str or 'temprano'}) con volumen bajo ({volume:,.0f}). "
+                    f"Lección de Ross Cameron en MEDS: Comprar a las 7:00 AM es precipitarse porque el mercado no tiene suficiente volumen "
+                    f"ni liquidez institucional; la falta de seguimiento comprador produjo la única pérdida del lunes (-$1,200). Prohibido operar curls sin volumen masivo antes de las 7:15 AM."
+                ),
+                execution_params={"block_entries": True, "min_time": "07:15", "min_premarket_volume": 200_000},
+                lessons_learned=[
+                    "No operar patrones curl antes de las 7:15 AM sin volumen masivo confirmado (>200k)",
+                    "Esperar a que el pre-mercado formalice su volumen y participantes a partir de 7:15-7:30 AM"
+                ]
             )
 
         # ── CASO COLD 4: CORTE DEFENSIVO POR TOPPING TAIL CANDLE (Lección PCLA) ──
@@ -672,6 +874,33 @@ class WarriorPlaybookEngine:
                 ]
             )
 
+        # ── CASO MONDAY 2: IMPULSO POR OLA DE SIMPATÍA TRAS RUNNER LÍDER (Lección GIXI) ──
+        if has_sympathy_wave_active and has_positive_news:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_NO_NEWS_PARABOLIC_SQUEEZE",
+                archetype_name="Impulso por Ola de Simpatía (Sympathy Wave Runner)",
+                similarity_score=0.96,
+                recommended_action="BOOST_SYMPATHY_RUNNER",
+                action_type="EXECUTE_ENTRY",
+                historical_trade_ref="GIXI (+$7,289.43 USD)",
+                reasoning=(
+                    f"{ticker} publicó catalizador fresco con el mercado encendido por la ola de simpatía (Sympathy Wave) de un gapper previo (tipo MNDR). "
+                    f"Lección de Ross Cameron en GIXI: El trade más lucrativo (+100% y +$7,289 USD) ocurrió a las 7:32 AM aprovechando el calor y liquidez "
+                    f"que el corredor anterior desató en el sector. Aumentar tamaño y convicción."
+                ),
+                execution_params={
+                    "position_size_multiplier": 1.25,
+                    "entry_type": "CATALYST_SYMPATHY_MOMENTUM",
+                    "take_profit_target_pct": 20.0,
+                    "trailing_stop_pct": 3.5
+                },
+                lessons_learned=[
+                    "Aprovechar la ola de simpatía: un líder parabólico temprano despierta compradores para los siguientes catalizadores",
+                    "GIXI a las 7:32 AM generó la mayor ganancia del día gracias a la inercia compradora previa"
+                ]
+            )
+
         # ── CASO C: CORREDOR MASIVO RUNNING UP CON ESCALAMIENTO PIRAMIDAL (Lección GEM) ──
         if (change_pct >= 150.0 or is_running_up) and float_shares <= 8_000_000 and tape_acceleration:
             # Calcular proximidad a números enteros y medios
@@ -701,6 +930,38 @@ class WarriorPlaybookEngine:
                     "Añadir agresivamente a la posición ganadora mientras la cinta imprima verde sin titubear",
                     "Tomar parciales en números enteros ($4.00, $5.00)",
                     "Vender bloque completo en clímax; no intentar aguantar retrocesos en movimientos parabólicos"
+                ]
+            )
+
+        # ── CASO MONDAY 3: SHORT SQUEEZE SIN NOTICIAS CON STOP CORTO POR SOPORTE LEJANO (Lección MNDR) ──
+        base_support = support_price if support_price > 0 else (vwap if vwap > 0 else 0.0)
+        distance_to_support_pct = ((price - base_support) / price) if (price > 0 and base_support > 0) else 0.0
+        if is_parabolic_squeeze and distance_to_support_pct > 0.12:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_NO_NEWS_PARABOLIC_SQUEEZE",
+                archetype_name="Short Squeeze Parabólico con Stop Ceñido de 10-15 Centavos",
+                similarity_score=0.95,
+                recommended_action="USE_TIGHT_MICRO_STOP_10_CENTS",
+                action_type="EXECUTE_ENTRY",
+                historical_trade_ref="MNDR (+$1,300 USD)",
+                reasoning=(
+                    f"{ticker} en short squeeze vertical (+{change_pct:.1f}%). El soporte base (${base_support:.2f}) "
+                    f"está a {distance_to_support_pct*100:.1f}% de distancia, lo que destruiría la relación R:R si se usa soporte estructural. "
+                    f"Regla de Ross Cameron en MNDR: En micro pullbacks parabólicos, NO usar el soporte alejado. Usar stop mental ceñido de "
+                    f"$0.10 a $0.15 centavos (o ~2.5%-3.5%), buscando la ruptura de números enteros ($2.00) y vendiendo en la aceleración."
+                ),
+                execution_params={
+                    "entry_type": "MICRO_PULLBACK_WHOLE_NUMBER",
+                    "fixed_stop_cents": 0.15,
+                    "max_stop_pct": 3.5,
+                    "target_cents": [price + 0.30, price + 0.55, price + 0.80],
+                    "trailing_stop_after_breakout": True
+                },
+                lessons_learned=[
+                    "En squeeze parabólico, no usar soporte estructural lejano como stop loss",
+                    "Fijar stop ultracorto de 10-15 centavos y escalar ganancias en los números enteros",
+                    "Vender al primer indicio de mecha superior (topping tail)"
                 ]
             )
 

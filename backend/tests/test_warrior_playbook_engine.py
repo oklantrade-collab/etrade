@@ -203,3 +203,80 @@ def test_cold_market_reduced_sizing_protocol():
     assert result.execution_params["position_size_multiplier"] == 0.30
     assert result.execution_params["max_daily_loss_limit"] == 1500.0
     assert "DAVI" in result.historical_trade_ref
+
+
+# =====================================================================
+# TESTS FOR MONDAY MORNING +225% SHORT SQUEEZE SESSION (MNDR, GIXI, WFFF, MEDS)
+# =====================================================================
+
+def test_monday_squeeze_session_retrieval():
+    sessions = warrior_playbook.get_all_sessions()
+    assert len(sessions) >= 3
+
+    mon_sess = next((s for s in sessions if "Short Squeeze on Monday" in s["video_title"]), None)
+    assert mon_sess is not None
+    assert mon_sess["net_pnl"] == 9671.43
+    assert len(mon_sess["trades"]) == 4
+
+    tickers = [t["ticker"] for t in mon_sess["trades"]]
+    assert "MNDR" in tickers
+    assert "GIXI" in tickers
+    assert "WFFF" in tickers
+    assert "MEDS" in tickers
+
+    mndr = next(t for t in mon_sess["trades"] if t["ticker"] == "MNDR")
+    assert mndr["pnl"] == 1300.00
+    assert mndr["running_surge_pct"] == 225.0
+    assert len(mndr["phases"]) == 4
+
+    gixi = next(t for t in mon_sess["trades"] if t["ticker"] == "GIXI")
+    assert gixi["pnl"] == 7289.43
+
+    meds = next(t for t in mon_sess["trades"] if t["ticker"] == "MEDS")
+    assert meds["pnl"] == -1200.00
+
+def test_inference_meds_pre_715_curl_block():
+    ctx = {
+        "ticker": "MEDS_LIKE",
+        "price": 3.40,
+        "vwap": 3.30,
+        "time_str": "07:05",
+        "volume": 60_000
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_PRE_715_UNCONFIRMED_CURL"
+    assert "MEDS" in result.historical_trade_ref
+
+def test_inference_gixi_sympathy_boost():
+    ctx = {
+        "ticker": "GIXI_LIKE",
+        "price": 2.15,
+        "vwap": 2.05,
+        "has_sympathy_wave_active": True,
+        "has_positive_news": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "EXECUTE_ENTRY"
+    assert result.recommended_action == "BOOST_SYMPATHY_RUNNER"
+    assert result.execution_params["position_size_multiplier"] == 1.25
+    assert "GIXI" in result.historical_trade_ref
+
+def test_inference_mndr_tight_stop_distant_support():
+    # Parabolic squeeze without news where base support is at $1.12 but entry is at $1.70
+    ctx = {
+        "ticker": "MNDR_LIKE",
+        "price": 1.70,
+        "support_price": 1.12,
+        "change_pct": 210.0,
+        "is_parabolic_squeeze": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "EXECUTE_ENTRY"
+    assert result.recommended_action == "USE_TIGHT_MICRO_STOP_10_CENTS"
+    assert result.execution_params["fixed_stop_cents"] == 0.15
+    assert "MNDR" in result.historical_trade_ref
+

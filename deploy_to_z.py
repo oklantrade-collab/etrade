@@ -13,12 +13,16 @@ folders_to_sync = [
     "backend/app/workers",
     "backend/app/data",
     "backend/app/api",
+    "backend/data",
 ]
 
 individual_files = [
     "run_ib_bridge.bat",
     "backend/run_options_worker.bat",
     "backend/app/main.py",
+    "backend/migration_036_warrior_playbook_kb.sql",
+    "backend/migration_037_warrior_cold_market_kb.sql",
+    "backend/migration_038_warrior_monday_squeeze_kb.sql",
 ]
 
 def sync_to_apolo():
