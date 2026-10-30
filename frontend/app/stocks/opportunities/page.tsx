@@ -239,7 +239,7 @@ function PriorityQueuePanel({
             {displayQueue.map((item: any, idx: number) => {
               const apex4h = item.apex_score_4h || item.apex_4h || 0;
               const retExp = item.return_expected || item.change_pct || 0;
-              const rank = item.composite_rank || parseFloat(item.rank_score) || 0;
+              const rank = item.composite_rank || parseFloat(item.velocity_score) || parseFloat(item.rank_score) || 0;
               const status = item.status || item.queue_status || 'pending';
               const isOB = item.is_overbought || status === 'blocked';
 
@@ -1196,7 +1196,9 @@ const ApexBadge = ({ score4h, score1d, signal, confidence, edge }: {
 function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: any) {
   const rank = opp.rank || index + 1;
   const medal = rank === 1 ? '🥇' : (rank === 2 ? '🥈' : (rank === 3 ? '🥉' : ''));
-  const rankScore = parseFloat(opp.rank_score) || parseFloat(opp.buying_force_5m) || 50;
+  const velScore = parseFloat(opp.velocity_score) || 0;
+  const rankScore = velScore > 0 ? velScore : (parseFloat(opp.rank_score) || parseFloat(opp.buying_force_5m) || 50);
+  const hasVelocity = velScore > 0;
 
   // Semáforo info
   const semColor = opp.semaphore_color || (opp.semaphore === 'PULLBACK' ? '#10B981' : (opp.semaphore === 'CLIMAX' ? '#F59E0B' : '#94A3B8'));
@@ -1235,8 +1237,10 @@ function ScannerRow({ opp, index, isPro, onOpenDetails, onDelete, onOpenNews }: 
           </span>
           {medal && <span style={{ fontSize: '12px' }}>{medal}</span>}
         </div>
-        <span style={{ fontSize: '10px', color: '#38BDF8', fontWeight: 800 }}>
-          {rankScore.toFixed(0)} pts
+        <span style={{ fontSize: '10px', color: hasVelocity ? '#F59E0B' : '#38BDF8', fontWeight: 800 }}
+          title={hasVelocity ? `VEL ${velScore.toFixed(1)} — RVOL: ${opp.velocity_components?.rvol_norm?.toFixed(0) || '?'} · ADX: ${opp.velocity_components?.adx_norm?.toFixed(0) || '?'} · ΔP5m: ${opp.velocity_components?.dp5m_norm?.toFixed(0) || '?'} · Vol: ${opp.velocity_components?.vol_norm?.toFixed(0) || '?'}` : `Score: ${rankScore.toFixed(0)}`}
+        >
+          {hasVelocity ? `⚡${velScore.toFixed(0)}` : `${rankScore.toFixed(0)} pts`}
         </span>
       </div>
 
@@ -1595,14 +1599,14 @@ export default function OpportunitiesIntelligence() {
   const gapUpList = opportunitiesWithQueue
     .filter(o => o.is_gap_runner && o.status !== 'blocked' && o.queue_status !== 'blocked' && !o.is_deep_bear_excluded)
     .sort((a, b) => {
-      const scoreDiff = (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0);
+      const scoreDiff = (parseFloat(b.velocity_score) || parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.velocity_score) || parseFloat(a.rank_score) || a.buying_force_5m || 0);
       if (scoreDiff !== 0) return scoreDiff;
       return (b.gap_pct || 0) - (a.gap_pct || 0);
     });
 
   const hotList = opportunitiesWithQueue
     .filter(o => o._from_priority_queue || (o.price <= settings.hotMaxPrice && o.volume >= settings.minVolume))
-    .sort((a, b) => (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0))
+    .sort((a, b) => (parseFloat(b.velocity_score) || parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.velocity_score) || parseFloat(a.rank_score) || a.buying_force_5m || 0))
     .slice(0, 20);
 
   const alphaList = opportunitiesWithQueue
@@ -1615,10 +1619,8 @@ export default function OpportunitiesIntelligence() {
       return o.is_gap_runner || o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0);
     })
     .sort((a, b) => {
-      // Prioridad 1 Absoluta a OPEN GAP UP genuinos
-      if (a.is_gap_runner && !b.is_gap_runner) return -1;
-      if (!a.is_gap_runner && b.is_gap_runner) return 1;
-      return (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0);
+      // Ranking unificado por Velocity Score (sin boost fijo para gap runners)
+      return (parseFloat(b.velocity_score) || parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.velocity_score) || parseFloat(a.rank_score) || a.buying_force_5m || 0);
     });
 
   const top3List = alphaList.slice(0, settings.activeStocksLimit || 3);
@@ -1629,7 +1631,7 @@ export default function OpportunitiesIntelligence() {
     <div style={{ padding: '24px 32px', minHeight: '100vh', background: '#090A0F', color: '#FFF', fontFamily: 'Inter, sans-serif' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
         <div>
-          <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Intelligence Layer v4.5 • APEX Score v1.0</div>
+          <div style={{ fontSize: '10px', fontWeight: 900, color: '#22C55E', textTransform: 'uppercase', letterSpacing: '0.2em' }}>Intelligence Layer v5.0 • Velocity Ranking ⚡</div>
           <h1 style={{ fontSize: '24px', fontWeight: 900, margin: '4px 0', letterSpacing: '-0.02em' }}>🎯 AI Stock Scanner</h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
               <p style={{ color: '#555', fontSize: '12px' }}>{total} monitoreados · NYC Live Tracking</p>
@@ -1753,7 +1755,7 @@ export default function OpportunitiesIntelligence() {
               </span>
             </div>
             <p style={{ color: '#CCC', fontSize: 12, margin: '4px 0 0' }}>
-              Detectados <b>{gapUpList.length}</b> activos de STOCKS con OPEN GAP UP institucional. Reciben <b>Score Boost (+25 pts)</b>, prioridad 0 en la cola de compra del BOT y Escudo Defensivo ADUANA (SL 15m EMA9, Trailing Stop Midpoint 1H, TP parcial Upper 5 / Upper 6).
+              Detectados <b>{gapUpList.length}</b> activos de STOCKS con OPEN GAP UP institucional. Compiten por <b>Velocity Score ⚡</b> (RVOL, ADX, ΔP, Vol), prioridad en la cola de compra del BOT y Escudo Defensivo ADUANA (SL 15m EMA9, Trailing Stop Midpoint 1H, TP parcial Upper 5 / Upper 6).
             </p>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

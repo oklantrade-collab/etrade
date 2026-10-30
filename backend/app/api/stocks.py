@@ -14,6 +14,11 @@ from app.core.supabase_client import get_supabase, reset_supabase
 from dateutil.parser import parse as parse_dt
 from app.core.market_hours import is_market_open, get_nyc_now, convert_to_lima, get_market_status_dict
 from app.data.ib_provider import IBProvider
+from app.stocks.velocity_ranking import (
+    load_velocity_config_cached,
+    compute_velocity_score,
+    passes_velocity_minimums,
+)
 
 def clean_nan_values(obj):
     """Recursively replaces NaN, Inf, and -Inf with safe JSON-serializable values (0.0)."""
@@ -36,7 +41,7 @@ _ib = IBProvider() # Shared IB connection for the API process
 # CACHE LOCAL PARA REDUCIR EGRESS
 METADATA_CACHE = {}
 LAST_DATA_CACHE = {"data": None, "timestamp": 0}
-CACHE_TTL = 45  # 5 segundos de gracia para el Dashboard
+CACHE_TTL = 20  # Caché corto del Dashboard (el escáner de velocidad refresca cada 60s)
 
 @router.get("/opportunities")
 async def get_stocks_opportunities(gap_runner_only: bool = False):
@@ -329,10 +334,9 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 opp["min_gap_required"] = min_thresh
 
                 if is_runner:
-                    # Score Boost institucional de +25 puntos para liderar la cola de compras
-                    base_rank = float(opp.get("rank_score") or opp.get("buying_force_5m") or 50.0)
-                    opp["gap_runner_boost"] = 25.0
-                    opp["rank_score"] = round(min(100.0, base_rank + 25.0), 1)
+                    # Gap Runner = ETIQUETA (no prioridad fija). El orden lo define el Velocity Score
+                    # (RVOL + ADX 5m + ΔP 5m + Volumen), de modo que un gap agotado no lidere la lista.
+                    opp["gap_runner_boost"] = 0.0
                     opp["is_high_priority"] = True
                 else:
                     opp["gap_runner_boost"] = 0.0
@@ -346,20 +350,35 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
             if gap_runner_only:
                 flattened = [i for i in flattened if i.get("is_gap_runner")]
 
+            # ── VELOCITY SCORE: velocidad de movimiento inmediata (mínimos en Settings/STOCKS) ──
+            try:
+                vel_cfg = load_velocity_config_cached()
+                for opp in flattened:
+                    if opp.get("velocity_score") is None:
+                        vr = compute_velocity_score(opp, vel_cfg)
+                        opp["velocity_score"] = vr.score
+                        opp["velocity_components"] = vr.components
+                        opp["is_velocity_descending"] = vr.is_descending
+                    ok_min, why_not = passes_velocity_minimums(opp, vel_cfg)
+                    opp["meets_velocity_minimums"] = bool(ok_min)
+                    if not ok_min:
+                        opp["velocity_reject_reason"] = why_not
+            except Exception as e_vel:
+                log_warning("stocks_api", f"Velocity ranking skipped: {e_vel}")
+
             # Re-rankear y ordenar:
             # 1. Bloqueadas / Deep Bear / EMA3<EMA9 castigadas al fondo
-            # 2. OPEN GAP UP genuinos al frente
-            # 3. rank_score desc
-            # 4. gap_pct desc
+            # 2. Velocity Score desc (los Gap Runners compiten solo por velocidad)
+            # 3. gap_pct desc
             flattened.sort(key=lambda x: (
                 1 if (
                     str(x.get("status") or "").lower() == "blocked"
                     or str(x.get("queue_status") or "").lower() == "blocked"
                     or x.get("is_deep_bear_excluded")
+                    or x.get("is_velocity_descending")
                     or not x.get("is_ema3_above_ema9", True)
                 ) else 0,
-                0 if x.get("is_gap_runner") else 1,
-                -float(x.get("rank_score") or x.get("buying_force_5m") or 0.0),
+                -float(x.get("velocity_score") or 0.0),
                 -float(x.get("gap_pct") or x.get("change_pct") or 0.0)
             ))
             for idx, item in enumerate(flattened, 1):

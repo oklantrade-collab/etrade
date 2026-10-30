@@ -69,6 +69,7 @@ class ScalpCandidateState:
         self.db_order_id: str = ""
         self.entry_rule: str = "SCALP_MICRO_PULLBACK"
         self.last_exit_ts: float = 0.0
+        self.last_gate_log_ts: float = 0.0   # Throttle de logs del gate Playbook/Velocidad
 
         # Cascada Escalonada y Recompras (Dips)
         self.rebuys_count: int = 0          # Máximo 3 recompras
@@ -180,6 +181,7 @@ class MicroPullbackEngine:
         is_green = c >= o
         lower_wick = (min(o, c) - l)
         lower_wick_ratio = lower_wick / bar_range
+        upper_wick_ratio = (h - max(o, c)) / bar_range
         
         bar_metric = {
             "time": bar["time"],
@@ -190,6 +192,7 @@ class MicroPullbackEngine:
             "volume": vol,
             "is_green": is_green,
             "lower_wick_ratio": lower_wick_ratio,
+            "upper_wick_ratio": upper_wick_ratio,
         }
         cand.bars.append(bar_metric)
 
@@ -300,6 +303,31 @@ class MicroPullbackEngine:
         dist_pct = abs(price - base_50c) / price * 100.0
         return dist_pct <= 1.5
 
+    def _run_entry_gate(self, cand: ScalpCandidateState, entry_price: float, rule_code: str):
+        """Gate Playbook/Velocidad previo al disparo. Fail-open ante cualquier error."""
+        from app.stocks.playbook_gate import evaluate_entry_gate, GateDecision
+        try:
+            snap = {}
+            try:
+                from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+                snap = get_live_1h_candle_and_sipv(cand.ticker, entry_price) or {}
+            except Exception:
+                snap = {}
+            gate = evaluate_entry_gate(cand.ticker, entry_price, list(cand.bars), rule_code=rule_code, snap=snap)
+        except Exception as e:
+            log_warning(MODULE, f"Gate no disponible para {cand.ticker}: {e} (fail-open)")
+            return GateDecision()
+
+        now_ts = time.time()
+        if not gate.allow:
+            if now_ts - cand.last_gate_log_ts >= 30.0:
+                cand.last_gate_log_ts = now_ts
+                log_warning(MODULE, f"⛔ [{cand.ticker}] DISPARO BLOQUEADO por Gate ({gate.action}): {gate.reasoning}")
+        elif gate.size_multiplier != 1.0 or gate.fixed_stop_cents:
+            log_info(MODULE, f"⚖️ [{cand.ticker}] Gate ajusta operación: tamaño x{gate.size_multiplier:.2f} "
+                             f"(mercado {'FRÍO' if gate.market_cold else 'normal'}, {gate.action})")
+        return gate
+
     # ──────────────────────────────────────────────────────────
     # DISPARO INMEDIATO DE LA ORDEN (Sub-segundo)
     # ──────────────────────────────────────────────────────────
@@ -316,8 +344,17 @@ class MicroPullbackEngine:
             cand.phase = "IDLE"
             return
 
+        # 0. GATE PREVIO: Velocidad vigente + Régimen de mercado + Playbook Ross Cameron
+        gate = self._run_entry_gate(cand, entry_price, rule_code)
+        if not gate.allow:
+            is_dip = (rule_code == "SCALP_BUY_THE_DIP")
+            cand.phase = "WAITING_DIP_5M" if is_dip else "IDLE"
+            if is_dip:
+                cand.rebuys_count = max(0, cand.rebuys_count - 1)  # el disparo no se ejecutó
+            return
+
         # 1. Dimensionamiento con Icebreaker (25% en la primera operación si no hay colchón)
-        shares = self._calculate_scalp_shares(entry_price)
+        shares = self._calculate_scalp_shares(entry_price, size_multiplier=gate.size_multiplier)
         if shares < 1:
             log_warning(MODULE, f"Capital insuficiente para comprar 1 acción de {cand.ticker} a ${entry_price:.2f}")
             cand.phase = "IDLE"
@@ -328,6 +365,13 @@ class MicroPullbackEngine:
             stop_loss_price = round(cand.pullback_low - 0.02, 2)
         else:
             stop_loss_price = round(entry_price * 0.97, 2)
+
+        # Stop ceñido (MNDR): soporte lejano → riesgo fijo de 10-15 centavos
+        if gate.fixed_stop_cents:
+            tight_stop = round(entry_price - float(gate.fixed_stop_cents), 2)
+            if tight_stop > stop_loss_price:
+                log_info(MODULE, f"🎯 [{cand.ticker}] Stop ceñido Playbook: ${stop_loss_price:.2f} → ${tight_stop:.2f}")
+                stop_loss_price = tight_stop
 
         if cand.impulse_high > 0:
             target_hod_price = round(max(cand.highest_price_reached, cand.impulse_high), 2)
@@ -716,8 +760,9 @@ class MicroPullbackEngine:
     # ──────────────────────────────────────────────────────────
     # Dimensionamiento Icebreaker (% Inversión por Operación)
     # ──────────────────────────────────────────────────────────
-    def _calculate_scalp_shares(self, price: float) -> int:
-        """Calcula el número de acciones respetando el % de Settings e Icebreaker."""
+    def _calculate_scalp_shares(self, price: float, size_multiplier: float = 1.0) -> int:
+        """Calcula el número de acciones respetando el % de Settings e Icebreaker.
+        size_multiplier: ajuste del Playbook/régimen de mercado (0.10 viernes frío, 0.30 frío, 1.25 sympathy)."""
         if price <= 0:
             return 0
         try:
@@ -737,6 +782,10 @@ class MicroPullbackEngine:
             else:
                 allocated_usd = std_capital_allocation         # Ej. $500
                 log_info(MODULE, f"🔥 [FULL SIZE ACTIVO] Colchón existente (+${self.daily_cushion_usd:.2f}): Asignando 100% (${allocated_usd:.2f} USD)")
+
+            if size_multiplier != 1.0:
+                allocated_usd = allocated_usd * max(0.0, size_multiplier)
+                log_info(MODULE, f"⚖️ Multiplicador de tamaño x{size_multiplier:.2f} → ${allocated_usd:.2f} USD")
 
             shares = int(allocated_usd // price)
             return max(1, shares) if allocated_usd >= price else 0

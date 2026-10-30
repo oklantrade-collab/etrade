@@ -22,6 +22,7 @@ import pandas as pd
 from app.core.logger import log_info, log_warning, log_error
 from app.stocks.news_catalyst_service import fetch_stock_news
 from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+from app.stocks.velocity_ranking import load_velocity_config_cached, rank_by_velocity
 
 MODULE = "ALPHA_RUNNER_SCANNER"
 
@@ -30,6 +31,7 @@ _SCAN_CACHE = {
     "data": [],
 }
 CACHE_TTL = 45.0  # 45 segundos para mantenerlo súper fluido
+MAX_ENRICH_CANDIDATES = 45  # Tope de candidatos enriquecidos (ADX/noticias) por ciclo
 
 
 def _is_ib_connected() -> bool:
@@ -324,8 +326,12 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
     global _SCAN_CACHE
     now = time.time()
 
+    # Configuración de Velocidad (Settings/STOCKS) con caché en memoria
+    vel_cfg = load_velocity_config_cached()
+    cache_ttl = vel_cfg["scanner_refresh_seconds"]
+
     # Retornar de cache si aún está vigente
-    if _SCAN_CACHE["data"] and (now - _SCAN_CACHE["timestamp"] < CACHE_TTL):
+    if _SCAN_CACHE["data"] and (now - _SCAN_CACHE["timestamp"] < cache_ttl):
         return _SCAN_CACHE["data"][:limit]
 
     candidates = []
@@ -342,9 +348,43 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
             EquityQuery('GT', ['intradaymarketcap', 1_000_000]),
         ])
 
-        fetch_size = max(35, limit + 10)
-        res = screen(query, size=fetch_size, sortField='percentchange', sortAsc=False)
-        raw_quotes = res.get('quotes', []) or []
+        # Universo ampliado: Top por % cambio + Más activos por volumen (acciones que
+        # acaban de despertar pueden no estar aún en el Top por % acumulado).
+        fetch_size = max(60, limit + 35)
+        raw_quotes = []
+        seen_syms = set()
+        for sort_field, size in (('percentchange', fetch_size), ('dayvolume', 40)):
+            try:
+                res_s = screen(query, size=size, sortField=sort_field, sortAsc=False)
+                for q_item in (res_s.get('quotes', []) or []):
+                    q_sym = str(q_item.get('symbol', '')).strip().upper()
+                    if q_sym and q_sym not in seen_syms:
+                        seen_syms.add(q_sym)
+                        raw_quotes.append(q_item)
+            except Exception as e_screen:
+                log_warning(MODULE, f"Screener ({sort_field}) no disponible: {e_screen}")
+
+        # Pre-filtro barato con los mínimos configurables (evita enriquecer ruido)
+        # y tope de enriquecimiento ordenado por energía preliminar (RVOL x cambio).
+        def _prelim(q_item):
+            v = int(q_item.get('regularMarketVolume') or q_item.get('dayvolume') or 0)
+            av = int(q_item.get('averageDailyVolume3Month') or max(1, v // 2))
+            c = float(q_item.get('regularMarketChangePercent') or 0.0)
+            r = (v / max(1, av)) if av > 0 else 1.0
+            return v, c, r
+
+        pre_filtered = []
+        for q_item in raw_quotes:
+            v_, c_, r_ = _prelim(q_item)
+            if c_ < vel_cfg["scanner_min_change_pct"]:
+                continue
+            if v_ < vel_cfg["scanner_min_volume"]:
+                continue
+            if r_ < vel_cfg["scanner_min_rvol"]:
+                continue
+            pre_filtered.append((r_ * max(c_, 0.1), q_item))
+        pre_filtered.sort(key=lambda t: t[0], reverse=True)
+        raw_quotes = [t[1] for t in pre_filtered[:MAX_ENRICH_CANDIDATES]]
 
         log_info(MODULE, f"Escaneados {len(raw_quotes)} tickers brutos de Yahoo Screener")
 
@@ -480,6 +520,13 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
                 "minus_di_5m": live_1h.get("minus_di_5m", 15.0),
                 "is_candle_1_green": live_1h.get("is_candle_1_green", True),
                 "open_ge_close": live_1h.get("open_ge_close_prev", True),
+                # Velocidad inmediata (Velocity Score)
+                "delta_p_5m_pct": live_1h.get("delta_p_5m_pct", 0.0),
+                "volume_5m_last": live_1h.get("volume_5m_last", 0),
+                "macd_hist_5m": live_1h.get("macd_hist_5m", 0.0),
+                "is_ema3_above_ema9_5m": live_1h.get("is_ema3_above_ema9_5m", True),
+                "ema9_5m": live_1h.get("ema9_5m", 0.0),
+                "vwap_intraday": live_1h.get("vwap_intraday", 0.0),
                 # Noticia / Catalizador
                 "has_news": news_info.get("has_news", False),
                 "catalyst_badge": news_info.get("catalyst_badge"),
@@ -498,8 +545,9 @@ def scan_top_gainers_live(limit: int = 25) -> List[Dict[str, Any]]:
     except Exception as e:
         log_error(MODULE, f"Error en escaneo de Top Gainers: {e}")
 
-    # Ordenar estrictamente por rank_score descendente
-    candidates.sort(key=lambda x: x["rank_score"], reverse=True)
+    # Ordenar por Velocity Score (RVOL + ADX 5m + ΔP 5m + Volumen) aplicando mínimos de Settings/STOCKS.
+    # Excluye acciones descendentes (ΔP5m<0 y EMA3<=EMA9 en 5m).
+    candidates = rank_by_velocity(candidates, vel_cfg, apply_minimums=True, keep_penalized=True)
 
     # Asignar posición numérica de Rank (#1, #2, #3...)
     for idx, c in enumerate(candidates, 1):

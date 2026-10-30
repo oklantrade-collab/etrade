@@ -24,6 +24,7 @@ from app.stocks.micro_pullback_engine import (
     MAX_BAILOUT_BARS
 )
 from app.stocks.aduana_gap_runner_engine import evaluate_gap_runner_entry_tranches
+from app.stocks.playbook_gate import GateDecision
 
 
 class TestMicroPullbackAndGapRunner(unittest.TestCase):
@@ -34,6 +35,10 @@ class TestMicroPullbackAndGapRunner(unittest.TestCase):
         self.ticker = "GMAB"
         self.cand = ScalpCandidateState(self.ticker)
         self.engine.candidates[self.ticker] = self.cand
+        # Aislar del gate Playbook/Velocidad (usa red: Supabase/yfinance). Se prueba en test_playbook_gate.py
+        gate_patcher = patch.object(MicroPullbackEngine, "_run_entry_gate", return_value=GateDecision())
+        self.mock_gate = gate_patcher.start()
+        self.addCleanup(gate_patcher.stop)
 
     def test_50_pct_rule_and_trigger(self):
         """Impulso + Micro Pullback ordenado > 50% Fibo + Gatillo de compra."""

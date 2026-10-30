@@ -309,6 +309,40 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
         </div>
       </SettingsSection>
 
+      <SettingsSection title="🚀 Ranking por Velocidad de Movimiento">
+        <div style={{ padding: '0 20px 10px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           El escáner ordena por Velocity Score (RVOL + ADX 5m + ΔP 5m + Volumen), no por % acumulado del día. Solo aparecen acciones que superan estos mínimos (se mantienen todos los demás filtros).
+        </div>
+        <SettingRow label="📈 Variación mínima del día" value={generalForm.scanner_min_change_pct ?? 3} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, scanner_min_change_pct: v })} />
+        <SettingRow label="🔊 RVOL mínimo" value={generalForm.scanner_min_rvol ?? 1.5} type="number" suffix="x" onChange={(v: any) => setGeneralForm({ ...generalForm, scanner_min_rvol: v })} />
+        <SettingRow label="🧭 ADX 5m mínimo" value={generalForm.scanner_min_adx_5m ?? 20} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, scanner_min_adx_5m: v })} />
+        <SettingRow label="📦 Volumen mínimo (acciones)" value={generalForm.scanner_min_volume ?? 300000} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, scanner_min_volume: v })} />
+        <SettingRow label="⏱️ ΔP mínimo últimos 5 min" value={generalForm.scanner_min_dp5m_pct ?? 0} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, scanner_min_dp5m_pct: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Si ΔP 5m es menor a este valor y EMA3 ≤ EMA9 en 5m, la acción se considera descendente y se excluye de la lista.
+        </div>
+        <SettingRow label="⚖️ Peso RVOL" value={generalForm.velocity_w_rvol ?? 0.35} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, velocity_w_rvol: v })} />
+        <SettingRow label="⚖️ Peso ADX 5m" value={generalForm.velocity_w_adx ?? 0.25} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, velocity_w_adx: v })} />
+        <SettingRow label="⚖️ Peso ΔP 5m" value={generalForm.velocity_w_dp5m ?? 0.30} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, velocity_w_dp5m: v })} />
+        <SettingRow label="⚖️ Peso Volumen" value={generalForm.velocity_w_vol ?? 0.10} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, velocity_w_vol: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           Los pesos se normalizan automáticamente para sumar 1.0.
+        </div>
+        <SettingRow label="🔄 Refresco del ranking" value={generalForm.scanner_refresh_seconds ?? 60} type="number" suffix="seg" onChange={(v: any) => setGeneralForm({ ...generalForm, scanner_refresh_seconds: v })} />
+        <SettingRow label="🎯 Velocity Score mínimo al disparar compra" value={generalForm.velocity_gate_min_score ?? 10} type="number" onChange={(v: any) => setGeneralForm({ ...generalForm, velocity_gate_min_score: v })} />
+        <div style={{ display: 'flex', alignItems: 'center', padding: '10px 18px', gap: '16px' }}>
+          <div style={{ flex: 1, color: 'var(--text-secondary)', fontSize: '13px' }}>🛡️ Gate Playbook Ross Cameron (antes de comprar)</div>
+          <select value={generalForm.playbook_gate_mode || 'enforce'} onChange={(e) => setGeneralForm({ ...generalForm, playbook_gate_mode: e.target.value })} style={SelectStyle}>
+            <option value="enforce">Enforce (bloquea + ajusta tamaño)</option>
+            <option value="observe">Observe (solo registra)</option>
+          </select>
+        </div>
+        <SettingRow label="🧊 Mercado frío si SPY/QQQ día <" value={generalForm.cold_market_spy_pct ?? -0.3} type="number" suffix="%" onChange={(v: any) => setGeneralForm({ ...generalForm, cold_market_spy_pct: v })} />
+        <div style={{ padding: '4px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
+           En mercado frío el lote baja a 30% (10% los viernes) y se bloquean patrones curl / techo plano / topping tail.
+        </div>
+      </SettingsSection>
+
       <SettingsSection title="⚡ Catalizadores & Arbitraje ADX (Acciones)">
         <div style={{ padding: '0 20px 10px 20px', color: '#666', fontSize: '11px', fontStyle: 'italic' }}>
            Configuración del motor de catalizadores rápidos (Gap&Go, SIPV 1h, ADX, REBOTE).

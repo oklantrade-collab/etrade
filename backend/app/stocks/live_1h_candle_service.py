@@ -125,6 +125,10 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         "ema3_5m": current_price or 0.0,
         "ema9_5m": current_price or 0.0,
         "is_ema3_5m_ascending": True,
+        # Velocidad inmediata (Velocity Score)
+        "delta_p_5m_pct": 0.0,
+        "volume_5m_last": 0,
+        "macd_hist_5m": 0.0,
         # Métricas 15m & Gap Up
         "is_1h_gap_up": False,
         "gap_up_1h_pct": 0.0,
@@ -312,6 +316,27 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             except Exception as e_5m_ema:
                 log_debug(MODULE, f"Error calculando EMAs 5m para {clean_ticker}: {e_5m_ema}")
 
+        # Velocidad inmediata: ΔP en la ventana de 5 min, volumen de la última vela y MACD 5m
+        delta_p_5m_pct = 0.0
+        volume_5m_last = 0
+        macd_hist_5m = 0.0
+        if df_5m is not None and not df_5m.empty and len(df_5m) >= 3:
+            try:
+                c5v = df_5m["Close"].astype(float).copy()
+                if current_price and current_price > 0:
+                    c5v.iloc[-1] = current_price
+                ref_close = float(c5v.iloc[-2])
+                if ref_close > 0:
+                    delta_p_5m_pct = round((float(c5v.iloc[-1]) - ref_close) / ref_close * 100.0, 3)
+                if "Volume" in df_5m.columns:
+                    volume_5m_last = int(df_5m["Volume"].iloc[-1] or 0)
+                if len(c5v) >= 26:
+                    macd_line = c5v.ewm(span=12, adjust=False).mean() - c5v.ewm(span=26, adjust=False).mean()
+                    macd_sig = macd_line.ewm(span=9, adjust=False).mean()
+                    macd_hist_5m = round(float(macd_line.iloc[-1] - macd_sig.iloc[-1]), 5)
+            except Exception as e_vel:
+                log_debug(MODULE, f"Error calculando velocidad 5m para {clean_ticker}: {e_vel}")
+
         # Métricas Anti-Agotamiento Intradía (VWAP y Open del Día)
         eff_price = current_price or c_close
         day_open_price = eff_price
@@ -453,6 +478,9 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "ema3_5m": round(ema3_5m_val, 4),
             "ema9_5m": round(ema9_5m_val, 4),
             "is_ema3_5m_ascending": is_ema3_5m_asc,
+            "delta_p_5m_pct": delta_p_5m_pct,
+            "volume_5m_last": volume_5m_last,
+            "macd_hist_5m": macd_hist_5m,
             "is_1h_gap_up": is_1h_gap_up,
             "gap_up_1h_pct": gap_up_1h_pct,
             # Métricas 15m

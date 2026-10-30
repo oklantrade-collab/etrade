@@ -12,11 +12,36 @@ import time
 from typing import List, Dict, Set
 from app.core.logger import log_info, log_warning, log_error
 from app.stocks.micro_pullback_engine import get_micro_pullback_engine
+from app.stocks.velocity_ranking import load_velocity_config_cached, rank_by_velocity
 
 MODULE = "MICRO_PULLBACK_SCANNER"
 
 SCAN_INTERVAL_SECONDS = 15.0  # Cada 15 segundos refresca el Top 5 en RAM
 MAX_TRACKED_TICKERS = 5       # Top 5 simultáneos
+VELOCITY_ENRICH_POOL = 15     # Candidatos pre-filtrados Ross a los que se calcula velocidad real
+LOW_FLOAT_VELOCITY_BONUS = 1.15  # Multiplicador de desempate para float < 5M
+
+_VEL_INPUT_CACHE: Dict[str, tuple] = {}  # { ticker: (ts, inputs) }
+_VEL_INPUT_TTL = 60.0
+
+
+def _velocity_inputs(sym: str, price: float) -> dict:
+    """ADX 5m, ΔP 5m y EMA3/9 5m del ticker (caché de 60s para no saturar yfinance)."""
+    now = time.time()
+    cached = _VEL_INPUT_CACHE.get(sym)
+    if cached and (now - cached[0]) < _VEL_INPUT_TTL:
+        return cached[1]
+    out: dict = {}
+    try:
+        from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+        snap = get_live_1h_candle_and_sipv(sym, price)
+        for k in ("adx_5m", "plus_di_5m", "minus_di_5m", "delta_p_5m_pct", "is_ema3_above_ema9_5m"):
+            if k in snap:
+                out[k] = snap.get(k)
+    except Exception:
+        out = {}
+    _VEL_INPUT_CACHE[sym] = (now, out)
+    return out
 
 
 class MicroPullbackScanner:
@@ -250,8 +275,18 @@ class MicroPullbackScanner:
                             "score": score
                         })
 
+                    # Pre-orden barato (Ross) → pool de enriquecimiento → Velocity Score real
                     filtered.sort(key=lambda x: x["score"], reverse=True)
-                    top_candidates = [x["ticker"] for x in filtered[:MAX_TRACKED_TICKERS]]
+                    vel_cfg = load_velocity_config_cached()
+                    pool = filtered[:VELOCITY_ENRICH_POOL]
+                    for f_item in pool:
+                        f_item["change_pct"] = f_item["change"]
+                        f_item.update(_velocity_inputs(f_item["ticker"], f_item["price"]))
+                    ranked = rank_by_velocity(pool, vel_cfg, apply_minimums=True)
+                    # Desempate: Low-Float (<5M) pesa más, sin alterar el score mostrado
+                    ranked.sort(key=lambda x: -(float(x.get("velocity_score") or 0.0)
+                                                * (LOW_FLOAT_VELOCITY_BONUS if 0 < x.get("shares", 0) < 5_000_000 else 1.0)))
+                    top_candidates = [x["ticker"] for x in ranked[:MAX_TRACKED_TICKERS]]
                     if top_candidates:
                         log_info(MODULE, f"🎯 [WARRIOR STOCKS TOP] Seleccionados {len(top_candidates)} líderes Ross Cameron: {top_candidates}")
                     return top_candidates
