@@ -507,14 +507,14 @@ class UniverseBuilder:
         rows = []
         for c in candidates:
             rows.append({
-                "ticker": c["ticker"],
-                "pool_type": c.get("pool_type", "")[:50] if c.get("pool_type") else "",
+                "ticker": str(c["ticker"])[:10],
+                "pool_type": str(c.get("pool_type") or "")[:20],
                 "catalyst_score": c.get("catalyst_score", 5),
-                "catalyst_type": "HOT_BY_VOLUME" if c.get("_price", 100) < 20 else "SWEEP",
+                "catalyst_type": ("HOT_BY_VOLUME" if c.get("_price", 100) < 20 else "SWEEP")[:20],
                 "date": today,
                 "price": round(float(c.get("_price", 0) or 0), 2),
                 "hard_filter_pass": True,
-                "quality_flag": c.get("quality_flag", "PASS"),
+                "quality_flag": str(c.get("quality_flag", "PASS"))[:20],
                 # CAMPOS FUNDAMENTALES
                 "fundamental_score": round(float(c.get("fundamental_score", 0) or 0), 2),
                 "revenue_growth_yoy": round(float(c.get("revenue_growth_yoy", 0) or 0), 2),
@@ -524,8 +524,6 @@ class UniverseBuilder:
                 "inst_ownership_pct": round(float(c.get("inst_ownership_pct", 0) or 0), 2),
                 "market_cap_mln": round(float(c.get("market_cap_mln", 0) or 0), 2),
                 "gap_pct": round(float(c.get("_change_pct", 0) or 0), 2),
-                "intrinsic_value": round(float(c.get("intrinsic_value", 0) or 0), 2),
-                "is_overvalued": bool(c.get("is_overvalued", False))
             })
 
         # Log sample for debugging
