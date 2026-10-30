@@ -3071,6 +3071,7 @@ async def run_options_gap_defense_cycle():
 
 _LAST_STOCK_DRIVEN_OPTIONS_TS = 0.0
 _LAST_INTRADAY_MOMENTUM_OPTIONS_TS = 0.0
+_LAST_WARRIOR_MOMENTUM_OPTIONS_TS = 0.0
 
 
 async def run_options_auto_execution_cycle():
@@ -3085,7 +3086,7 @@ async def run_options_auto_execution_cycle():
        - Despacha las órdenes de piernas a stocks_orders para ejecución TWS por ib_bridge_worker.
        - Emite alerta Telegram institucional.
     """
-    global _LAST_STOCK_DRIVEN_OPTIONS_TS, _LAST_INTRADAY_MOMENTUM_OPTIONS_TS
+    global _LAST_STOCK_DRIVEN_OPTIONS_TS, _LAST_INTRADAY_MOMENTUM_OPTIONS_TS, _LAST_WARRIOR_MOMENTUM_OPTIONS_TS
     from app.core.market_hours import is_options_market_open
     is_open, reason_open = is_options_market_open()
     if not is_open:
@@ -3116,6 +3117,16 @@ async def run_options_auto_execution_cycle():
                 await run_intraday_momentum_options_scan(supabase=sb, budget_usd=1000.0, auto_dispatch=True)
             except Exception as intra_err:
                 log_warning(MODULE, f"Aviso en ciclo Intraday Momentum OTM -> ITM: {intra_err}")
+
+        # 0.2 Escaneo Warrior Momentum Options (Ross Cameron Adapted for Options - cada 3 min)
+        if now_ts - _LAST_WARRIOR_MOMENTUM_OPTIONS_TS >= 180.0:
+            _LAST_WARRIOR_MOMENTUM_OPTIONS_TS = now_ts
+            try:
+                from app.options.warrior_momentum_options import run_warrior_momentum_options_scan
+                log_info(MODULE, "⚔️ Ejecutando ciclo Warrior Momentum Options Scanner (Ross Cameron)...")
+                await run_warrior_momentum_options_scan(limit=2)
+            except Exception as w_err:
+                log_warning(MODULE, f"Aviso en ciclo Warrior Momentum Options: {w_err}")
 
         rows = sb.table("opt_settings").select("key,value").execute().data or []
         stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}

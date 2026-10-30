@@ -178,45 +178,85 @@ class MicroPullbackScanner:
 
     async def _fetch_rapid_top_gainers(self) -> List[str]:
         """
-        Descubre los Top Gainers con volumen > 300k de forma no bloqueante.
-        Usa Yahoo Finance Screener rápido en thread pool (sin llamadas de AI/noticias).
+        Descubre los Top Gainers según la filosofía estricta de Ross Cameron (Warrior Trading):
+        - Precio: $1.00 a $15.00
+        - Flotación / Acciones: <= 10M (Prioridad Dorada < 5M)
+        - RVOL >= 2.0x y Cambio >= +5.0%
+        - Volumen >= 150,000 (disponible desde apertura 08:30 AM Lima)
+        - Descarte incondicional de tickers ya operados hoy (One-and-Done)
+        - Bloqueo de compras nuevas después de las 11:00 AM EST (10:00 AM Lima)
         """
-        try:
-            # Screening continuo en paralelo
+        from app.core.market_hours import get_nyc_now
+        nyc_now = get_nyc_now()
+        
+        # Bloqueo después de las 11:00 AM ET (10:00 AM Lima)
+        if nyc_now.hour > 11 or (nyc_now.hour == 11 and nyc_now.minute >= 0):
+            return []
 
+        try:
             loop = asyncio.get_running_loop()
-            
+            engine = get_micro_pullback_engine()
+            closed_today = set(getattr(engine, "closed_tickers_today", set()))
+
             def get_screener_sync():
                 try:
                     from yfinance.screener import EquityQuery, screen
                     q = EquityQuery('and', [
-                        EquityQuery('gt', ['percentchange', 3.0]),
-                        EquityQuery('gt', ['dayvolume', 300000]),
+                        EquityQuery('gt', ['percentchange', 5.0]),
+                        EquityQuery('gt', ['dayvolume', 150000]),
                         EquityQuery('gte', ['intradayprice', 1.0]),
-                        EquityQuery('lte', ['intradayprice', 80.0]),
+                        EquityQuery('lte', ['intradayprice', 15.0]),
                         EquityQuery('eq', ['region', 'us'])
                     ])
-                    res = screen(q, sortField='percentchange', sortAsc=False, size=15)
+                    res = screen(q, sortField='percentchange', sortAsc=False, size=35)
                     quotes = res.get("quotes", [])
                     filtered = []
                     for q_item in quotes:
                         sym = str(q_item.get("symbol") or "").upper().strip()
+                        if '.' in sym or '-' in sym or len(sym) > 5:
+                            continue
+                        # Regla One-and-Done: No revenge trading en el día
+                        if sym in closed_today:
+                            continue
+
                         chg = float(q_item.get("regularMarketChangePercent") or 0.0)
                         vol = int(q_item.get("regularMarketVolume") or 0)
                         price = float(q_item.get("regularMarketPrice") or 0.0)
-                        
-                        # Excluir warrants, preferred shares y símbolos raros
-                        if '.' in sym or '-' in sym or len(sym) > 5:
+                        avg_vol = float(q_item.get("averageDailyVolume3Month") or q_item.get("averageDailyVolume10Day") or 1.0)
+                        rvol = (vol / avg_vol) if avg_vol > 0 else 1.0
+                        mcap = float(q_item.get("marketCap") or 0.0)
+
+                        # Estimación / Obtención de Float
+                        shares = float(q_item.get("sharesOutstanding") or 0.0)
+                        if shares <= 0 and price > 0 and mcap > 0:
+                            shares = mcap / price
+
+                        # Filtro estricto Ross Cameron: Float <= 10 Millones
+                        if shares > 10_500_000:
                             continue
-                        # Filtro de candidatos viables para micro-pullbacks:
-                        # Precio $1.00 a $80.00, Volumen >= 300k, Ganancia del día >= +3.0%
-                        if 1.0 <= price <= 80.0 and vol >= 300_000 and chg >= 3.0:
-                            filtered.append({"ticker": sym, "change": chg, "volume": vol, "price": price})
-                    
-                    filtered.sort(key=lambda x: x["change"], reverse=True)
-                    return [x["ticker"] for x in filtered[:MAX_TRACKED_TICKERS]]
+
+                        # Score de Momentum Warrior:
+                        # Prioridad extrema a Low Float (< 5M) + RVOL alto + Cambio %
+                        float_bonus = 60.0 if (0 < shares < 5_000_000) else 25.0
+                        score = (chg * 2.0) + (min(rvol, 30.0) * 3.0) + float_bonus
+
+                        filtered.append({
+                            "ticker": sym,
+                            "change": chg,
+                            "volume": vol,
+                            "price": price,
+                            "shares": shares,
+                            "rvol": rvol,
+                            "score": score
+                        })
+
+                    filtered.sort(key=lambda x: x["score"], reverse=True)
+                    top_candidates = [x["ticker"] for x in filtered[:MAX_TRACKED_TICKERS]]
+                    if top_candidates:
+                        log_info(MODULE, f"🎯 [WARRIOR STOCKS TOP] Seleccionados {len(top_candidates)} líderes Ross Cameron: {top_candidates}")
+                    return top_candidates
                 except Exception as ex:
-                    log_warning(MODULE, f"Aviso al obtener gainers rápidos: {ex}")
+                    log_warning(MODULE, f"Aviso al obtener gainers rápidos Ross Cameron: {ex}")
                     return []
 
             top_syms = await loop.run_in_executor(None, get_screener_sync)

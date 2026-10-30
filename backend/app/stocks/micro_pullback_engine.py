@@ -22,7 +22,7 @@ import asyncio
 import collections
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Set
 
 from app.core.logger import log_info, log_warning, log_error
 from app.core.supabase_client import get_supabase
@@ -81,6 +81,7 @@ class MicroPullbackEngine:
     def __init__(self):
         self.candidates: Dict[str, ScalpCandidateState] = {}
         self.active_scalps: Dict[str, ScalpCandidateState] = {}
+        self.closed_tickers_today: Set[str] = set()  # Lista negra intradía: One-and-Done por ticker
         self.daily_cushion_usd: float = 0.0
         self.is_running: bool = False
         self._bg_tasks = set()
@@ -120,6 +121,9 @@ class MicroPullbackEngine:
     def register_ticker(self, ticker: str):
         """Suscribe un ticker de alta volatilidad al feed de 5 segundos de TWS o Finnhub fallback."""
         ticker = ticker.upper().strip()
+        if ticker in self.closed_tickers_today:
+            log_info(MODULE, f"🚫 [{ticker}] Descartado: Ticker ya cerrado hoy. Regla One-and-Done activa (No revenge trading).")
+            return
         if ticker in self.candidates:
             return
 
@@ -156,6 +160,9 @@ class MicroPullbackEngine:
         Procesa cada barra de 5 segundos estrictamente en RAM.
         Zero llamadas síncronas a base de datos.
         """
+        if ticker in self.closed_tickers_today:
+            return
+
         cand = self.candidates.get(ticker)
         if not cand:
             return
@@ -582,6 +589,9 @@ class MicroPullbackEngine:
         cand.phase = "IDLE"
         cand.shares = 0
         self.active_scalps.pop(cand.ticker, None)
+        self.closed_tickers_today.add(cand.ticker)
+        self.unregister_ticker(cand.ticker)
+        log_info(MODULE, f"🚫 [{cand.ticker}] Añadido a Lista Negra Intradía (One-and-Done). Posición cerrada y desuscrito de barras 5s; no se volverá a operar hoy.")
 
         # Actualizar journal y colchón en background
         self._safe_create_task(self._async_log_trade_close(cand, reason))
