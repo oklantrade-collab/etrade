@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import { marketBell, BellSoundProfile, SoundOption, AVAILABLE_SOUNDS } from '@/lib/audio/marketBell';
 import { getNYCDateTime, getNextMarketBellInfo, NYCTimeInfo, MarketBellEvent, isMarketHoliday, isEarlyCloseDay } from '@/lib/marketSchedule';
+import { supabase } from '@/lib/supabase';
 import toast from 'react-hot-toast';
 
 export interface OrderFillDetails {
@@ -46,7 +47,9 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
 
   const prevIsOpenRef = useRef<boolean | null>(null);
   const knownFilledOrdersRef = useRef<Set<string>>(new Set());
-  const isFirstOrdersCheckRef = useRef<boolean>(true);
+  const knownStocksPositionsRef = useRef<Map<string, string>>(new Map());
+  const knownOptionTradesRef = useRef<Map<string, string>>(new Map());
+  const isFirstCheckRef = useRef<boolean>(true);
 
   // Initialize saved preferences
   useEffect(() => {
@@ -306,49 +309,146 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     return () => clearInterval(interval);
   }, [triggerBell]);
 
-  // Real-time Order Fill Audio Listener (Every 5 seconds checks latest filled orders from TWS)
+  // Real-time Audio Listener for STOCKS & OPTIONS Order Fills (Thinkorswim Ding/Chimes)
   useEffect(() => {
-    const checkOrderExecutions = async () => {
+    // Handler for a filled stock order
+    const handleStockOrderFill = async (order: any) => {
+      if (!order || order.status !== 'filled') return;
+      const idStr = String(order.id);
+      if (knownFilledOrdersRef.current.has(idStr)) return;
+      knownFilledOrdersRef.current.add(idStr);
+
+      const isBuy = String(order.direction || '').toLowerCase() === 'buy';
+      const isOption = Boolean(order.target_band?.startsWith('OPT:') || order.rule_code?.includes('OPTION'));
+
+      await playOrderSound(isBuy ? 'buy' : 'close', {
+        symbol: order.ticker,
+        shares: order.shares,
+        price: order.filled_price || order.limit_price || order.market_price,
+        isOption
+      });
+    };
+
+    // Handler for an option trade fill (open or closed)
+    const handleOptionTradeChange = async (trade: any) => {
+      if (!trade || !trade.id) return;
+      const idStr = String(trade.id);
+      const prevStatus = knownOptionTradesRef.current.get(idStr);
+      const currentStatus = String(trade.status || '').toLowerCase();
+
+      // Brand new trade opened
+      if (!prevStatus && currentStatus === 'open') {
+        knownOptionTradesRef.current.set(idStr, currentStatus);
+        await playOrderSound('buy', {
+          symbol: trade.symbol || trade.ticker || 'OPCIÓN',
+          shares: trade.contracts || 1,
+          price: trade.entry_price || trade.current_price,
+          isOption: true
+        });
+        return;
+      }
+
+      // Existing trade closed / sold
+      if (prevStatus === 'open' && currentStatus === 'closed') {
+        knownOptionTradesRef.current.set(idStr, 'closed');
+        await playOrderSound('close', {
+          symbol: trade.symbol || trade.ticker || 'OPCIÓN',
+          shares: trade.contracts || 1,
+          price: trade.exit_price || trade.entry_price,
+          isOption: true
+        });
+        return;
+      }
+
+      knownOptionTradesRef.current.set(idStr, currentStatus);
+    };
+
+    // 1. Initial State Seeding (so past trades don't chime on page refresh)
+    const seedInitialState = async () => {
       try {
-        const res = await fetch('/api/v1/stocks/orders?limit=15');
-        if (!res.ok) return;
-        const orders = await res.json();
-        if (!Array.isArray(orders)) return;
+        // Seed Stock Orders
+        const { data: stOrders } = await supabase
+          .from('stocks_orders')
+          .select('id, status')
+          .order('created_at', { ascending: false })
+          .limit(50);
+        (stOrders || []).forEach((o: any) => {
+          if (o.status === 'filled') knownFilledOrdersRef.current.add(String(o.id));
+        });
 
-        const filledOrders = orders.filter((o: any) => o.status === 'filled');
+        // Seed Option Trades
+        const { data: optTrades } = await supabase
+          .from('opt_paper_trades')
+          .select('id, status')
+          .order('entry_time', { ascending: false })
+          .limit(50);
+        (optTrades || []).forEach((t: any) => {
+          knownOptionTradesRef.current.set(String(t.id), String(t.status || '').toLowerCase());
+        });
 
-        if (isFirstOrdersCheckRef.current) {
-          // First run: Seed known IDs so historical orders do not trigger sound on page load
-          isFirstOrdersCheckRef.current = false;
-          filledOrders.forEach((o: any) => knownFilledOrdersRef.current.add(String(o.id)));
-          return;
-        }
-
-        // Check for any newly filled orders
-        for (const order of filledOrders) {
-          const idStr = String(order.id);
-          if (!knownFilledOrdersRef.current.has(idStr)) {
-            knownFilledOrdersRef.current.add(idStr);
-
-            const isBuy = String(order.direction || '').toLowerCase() === 'buy';
-            const isOption = Boolean(order.target_band?.startsWith('OPT:') || order.rule_code?.includes('OPTION'));
-            
-            await playOrderSound(isBuy ? 'buy' : 'close', {
-              symbol: order.ticker,
-              shares: order.shares,
-              price: order.filled_price || order.market_price,
-              isOption
-            });
-          }
-        }
-      } catch (e) {
-        // quiet
+        isFirstCheckRef.current = false;
+      } catch (err) {
+        console.warn('[MarketBell] Error seeding initial trade states:', err);
+        isFirstCheckRef.current = false;
       }
     };
 
-    checkOrderExecutions();
-    const orderInterval = setInterval(checkOrderExecutions, 5000);
-    return () => clearInterval(orderInterval);
+    seedInitialState();
+
+    // 2. Instant Supabase Realtime Subscriptions (zero-delay WebSocket)
+    const stockChannel = supabase
+      .channel('market-bell-stocks-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'stocks_orders' }, (payload: any) => {
+        if (isFirstCheckRef.current) return;
+        const newRecord = payload.new;
+        if (newRecord && newRecord.status === 'filled') {
+          handleStockOrderFill(newRecord);
+        }
+      })
+      .subscribe();
+
+    const optionsChannel = supabase
+      .channel('market-bell-options-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'opt_paper_trades' }, (payload: any) => {
+        if (isFirstCheckRef.current) return;
+        const newRecord = payload.new;
+        if (newRecord) {
+          handleOptionTradeChange(newRecord);
+        }
+      })
+      .subscribe();
+
+    // 3. Fallback Periodic Poller (every 3 seconds in case WebSocket is unavailable)
+    const pollInterval = setInterval(async () => {
+      if (isFirstCheckRef.current) return;
+
+      try {
+        // Poll Stocks Orders
+        const { data: recentOrders } = await supabase
+          .from('stocks_orders')
+          .select('*')
+          .eq('status', 'filled')
+          .order('created_at', { ascending: false })
+          .limit(10);
+        (recentOrders || []).forEach((o: any) => handleStockOrderFill(o));
+
+        // Poll Option Trades
+        const { data: recentOptions } = await supabase
+          .from('opt_paper_trades')
+          .select('*')
+          .order('entry_time', { ascending: false })
+          .limit(10);
+        (recentOptions || []).forEach((t: any) => handleOptionTradeChange(t));
+      } catch (e) {
+        // quiet fallback
+      }
+    }, 3000);
+
+    return () => {
+      supabase.removeChannel(stockChannel);
+      supabase.removeChannel(optionsChannel);
+      clearInterval(pollInterval);
+    };
   }, [playOrderSound]);
 
   return (

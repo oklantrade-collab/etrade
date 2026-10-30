@@ -5,11 +5,13 @@ export function proxy(request: NextRequest) {
   const token = request.cookies.get('access_token')?.value
   const { pathname } = request.nextUrl
 
-  // Public paths
+  // Public paths and static assets that must never be intercepted
   const isPublicPath = 
     pathname === '/login' || 
     pathname === '/register' || 
-    pathname.startsWith('/auth')
+    pathname.startsWith('/auth') ||
+    pathname.startsWith('/sounds') ||
+    /\.(?:wav|mp3|ogg|ico|png|jpg|jpeg|svg|webp)$/i.test(pathname)
 
   // If path is root, redirect to dashboard or login
   if (pathname === '/') {
@@ -36,8 +38,10 @@ export const config = {
      * - api (API routes)
      * - _next/static (static files)
      * - _next/image (image optimization files)
+     * - sounds (audio files: Thinkorswim bell, ding, chimes, etc.)
      * - favicon.ico (favicon file)
+     * - static assets with extensions (.wav, .mp3, etc.)
      */
-    '/((?!api|_next/static|_next/image|favicon.ico).*)',
+    '/((?!api|_next/static|_next/image|sounds|favicon.ico|.*\\.(?:wav|mp3|ogg|ico|png|jpg|jpeg|svg|webp)$).*)',
   ],
 }

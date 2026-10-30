@@ -346,9 +346,18 @@ class MarketBellAudioEngine {
   public synthesizeOrderFill(isBuy: boolean): boolean {
     try {
       this.unlockAudio();
+      if (!this.audioCtx && typeof window !== 'undefined') {
+        const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtxClass) {
+          this.audioCtx = new AudioCtxClass();
+        }
+      }
       if (!this.audioCtx) return false;
 
       const ctx = this.audioCtx;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
       const now = ctx.currentTime;
 
       const masterGain = ctx.createGain();
