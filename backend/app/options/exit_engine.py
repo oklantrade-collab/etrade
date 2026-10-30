@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from datetime import date, datetime, timezone
 from typing import Any, Optional
+import numpy as np
 import pandas as pd
 
 from app.core.logger import log_info, log_warning
@@ -26,6 +27,51 @@ MODULE = "OPTIONS_EXIT"
 _TECH_CONTEXT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 TECH_CACHE_TTL = 45.0  # 45 segundos de cache en memoria por símbolo
 
+
+
+def _compute_adx_and_di(df: pd.DataFrame, period: int = 14) -> tuple[float, float, float, float]:
+    """Calcula ADX actual, ADX previo, +DI y -DI usando pandas y numpy."""
+    try:
+        h = _safe_col(df, "high")
+        l = _safe_col(df, "low")
+        c = _safe_col(df, "close")
+        if len(c) < period + 2:
+            return 20.0, 20.0, 20.0, 20.0
+        tr1 = h - l
+        tr2 = (h - c.shift()).abs()
+        tr3 = (l - c.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        up = h - h.shift()
+        down = l.shift() - l
+        plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+        minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+        tr_sum = tr.rolling(period).sum() + 1e-6
+        p_di = 100.0 * (pd.Series(plus_dm, index=df.index).rolling(period).sum() / tr_sum)
+        m_di = 100.0 * (pd.Series(minus_dm, index=df.index).rolling(period).sum() / tr_sum)
+        dx = 100.0 * ((p_di - m_di).abs() / ((p_di + m_di) + 1e-6))
+        adx_s = dx.rolling(period).mean()
+        cur_adx = float(adx_s.iloc[-1])
+        prev_adx = float(adx_s.iloc[-2]) if len(adx_s) >= 2 else cur_adx
+        cur_p_di = float(p_di.iloc[-1])
+        cur_m_di = float(m_di.iloc[-1])
+        return cur_adx, prev_adx, cur_p_di, cur_m_di
+    except Exception:
+        return 20.0, 20.0, 20.0, 20.0
+
+
+def _compute_rvol(df: pd.DataFrame, window: int = 20) -> float:
+    """Calcula el RVOL de la última vela respecto al promedio rodante de volumen."""
+    try:
+        v = _safe_col(df, "volume")
+        if len(v) < 2:
+            return 1.0
+        cur_vol = float(v.iloc[-1])
+        avg_vol = float(v.iloc[-window-1:-1].mean()) if len(v) > window else float(v.mean())
+        if avg_vol <= 0:
+            return 1.0
+        return round(cur_vol / avg_vol, 2)
+    except Exception:
+        return 1.0
 
 def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
     """
@@ -71,6 +117,14 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
         res["ema20_15m"] = float(ema20_15m_s.iloc[-1])
 
         fib_15m = calculate_fibonacci_bands(df_15m, cur_p)
+        adx_15m, prev_adx_15m, p_di_15m, m_di_15m = _compute_adx_and_di(df_15m)
+        res["adx_15m"] = adx_15m
+        res["prev_adx_15m"] = prev_adx_15m
+        res["adx_slope_15m"] = adx_15m - prev_adx_15m
+        res["plus_di_15m"] = p_di_15m
+        res["minus_di_15m"] = m_di_15m
+        res["rvol_15m"] = _compute_rvol(df_15m)
+        res["delta_p_15m_pct"] = float((c15.iloc[-1] - c15.iloc[-2]) / (c15.iloc[-2] + 1e-6) * 100.0) if len(c15) >= 2 else 0.0
         res["upper_5_15m"] = float(fib_15m.get("upper_5") or 0.0)
         res["upper_6_15m"] = float(fib_15m.get("upper_6") or 0.0)
         res["lower_5_15m"] = float(fib_15m.get("lower_5") or 0.0)
@@ -142,6 +196,9 @@ def get_underlying_technical_context(symbol: str) -> dict[str, Any]:
             res["ema20_1h"] = float(ema20_1h_s.iloc[-1])
 
             rsi_1h_s = compute_rsi(c1h, period=14)
+            adx_1h, prev_adx_1h, p_di_1h, m_di_1h = _compute_adx_and_di(df_1h)
+            res["adx_1h"] = adx_1h
+            res["rvol_1h"] = _compute_rvol(df_1h)
             res["rsi_1h"] = float(rsi_1h_s.iloc[-1])
 
             fib_1h = calculate_fibonacci_bands(df_1h, cur_p)
@@ -200,6 +257,9 @@ DB_EXIT_REASONS_MAP = {
     "tp_lower_5_6": "take_profit",
     "tp_upper_6": "take_profit",
     "tp_lower_6": "take_profit",
+    "tp_bb_climax_partial": "take_profit",
+    "tp_peak_profit_ratchet": "take_profit",
+    "tp_rvol_exhaustion": "take_profit",
     "sl_underlying_pierced": "stop_loss",
     "ema_cross_15m": "signal_invalidation",
     "ema3_flat_descending_1h": "signal_invalidation",
@@ -376,8 +436,8 @@ def evaluate_technical_rules_and_stops(
     stype = str(position.get("strategy_type") or "").lower()
     direction = str(position.get("direction") or "").lower()
     symbol = str(position.get("symbol") or tech.get("symbol") or "").upper()
-    is_call = ("call" in stype) or (direction in ("bullish", "call"))
-    is_put = ("put" in stype) or (direction in ("bearish", "put"))
+    is_call = ("call" in stype) or ("call" in direction) or (direction == "bullish")
+    is_put = ("put" in stype) or ("put" in direction) or (direction == "bearish")
 
     current_price = float(tech.get("current_price") or 0.0)
     if current_price <= 0:
@@ -537,14 +597,93 @@ def evaluate_technical_rules_and_stops(
             }
 
     # ─────────────────────────────────────────────────────────────
-    # FASE 3: EVALUACIÓN DE LAS REGLAS INSTITUCIONALES Y DEL USUARIO
+    # FASE 3: EVALUACIÓN DE LAS REGLAS INSTITUCIONALES Y ROSS CAMERON
     # ─────────────────────────────────────────────────────────────
-    # Candado de Expansión de Bollinger en 15m (Regla Usuario: Mientras Upper sube y Lower baja => NO CERRAR)
-    is_bb_expanding_15m = bool(tech.get("is_bb_expanding_15m", False))
-    if is_bb_expanding_15m:
-        return False, None, {"exit_plan": exit_plan, "detail": "Candado Bollinger 15m activo: Bandas en expansión (dejar correr impulso)"}
-
     pos_qty = int(position.get("qty") or 1)
+    is_bb_expanding_15m = bool(tech.get("is_bb_expanding_15m", False))
+    rvol_15m = float(tech.get("rvol_15m") or 1.0)
+    adx_15m = float(tech.get("adx_15m") or 20.0)
+    adx_slope_15m = float(tech.get("adx_slope_15m") or 0.0)
+    p_di_15m = float(tech.get("plus_di_15m") or 20.0)
+    m_di_15m = float(tech.get("minus_di_15m") or 20.0)
+    dir_aligned = (p_di_15m > m_di_15m) if is_call else (m_di_15m > p_di_15m)
+
+    # Watermark del PnL más alto alcanzado (en % y en USD)
+    highest_pnl_pct = float(exit_plan.get("highest_pnl_pct") or 0.0)
+    if unr_pnl_pct > highest_pnl_pct:
+        highest_pnl_pct = unr_pnl_pct
+        exit_plan["highest_pnl_pct"] = highest_pnl_pct
+
+    unr_pnl_usd = float(position.get("unrealized_pnl") or 0.0)
+    highest_pnl_usd = float(exit_plan.get("highest_pnl_usd") or 0.0)
+    if unr_pnl_usd > highest_pnl_usd:
+        highest_pnl_usd = unr_pnl_usd
+        exit_plan["highest_pnl_usd"] = highest_pnl_usd
+
+    # GUARDIA DE MOMENTUM MULTIVARIADA (Ross Cameron / Usuario):
+    # Si hay empuje institucional vigoroso con volumen (RVOL >= 1.3x) y ADX acelerando,
+    # NO cortar el trade alcista/bajista prematuramente; dejar correr la tendencia.
+    is_strong_momentum = (
+        is_bb_expanding_15m and 
+        rvol_15m >= 1.30 and 
+        adx_15m >= 25.0 and 
+        adx_slope_15m >= 0.0 and 
+        dir_aligned
+    )
+    if is_strong_momentum:
+        return False, None, {
+            "exit_plan": exit_plan, 
+            "detail": f"Candado de Momentum activo: Bandas en expansión con RVOL {rvol_15m:.2f}x y ADX {adx_15m:.1f} (dejar correr tendencia)"
+        }
+
+    # ── REGLA ROSS CAMERON 1: TOMA PARCIAL 50% AL PERFORAR BANDA BOLLINGER (2.0σ) ──
+    # Cuando el precio toca/perfora la banda exterior y el volumen ya NO es explosivo,
+    # tomar el 50% para congelar ganancias en el pico (sell half into the push).
+    bb_u_15m = float(tech.get("bb_upper_15m") or 0.0)
+    bb_l_15m = float(tech.get("bb_lower_15m") or 0.0)
+    partial_taken = bool(exit_plan.get("partial_tp_taken", False))
+
+    h_15m_c = float(tech.get("candle_closed_high_15m") or current_price)
+    l_15m_c = float(tech.get("candle_closed_low_15m") or current_price)
+    hit_bb_climax = False
+    if is_call and bb_u_15m > 0 and (current_price >= bb_u_15m or h_15m_c >= bb_u_15m):
+        hit_bb_climax = True
+    elif is_put and bb_l_15m > 0 and (current_price <= bb_l_15m or l_15m_c <= bb_l_15m):
+        hit_bb_climax = True
+
+    if hit_bb_climax and unr_pnl_pct >= 10.0 and not partial_taken and not is_strong_momentum and pos_age_min >= 3.0:
+        ratio = 0.5 if pos_qty >= 2 else 1.0
+        band_name = f"BB Upper 15m (${bb_u_15m:.2f})" if is_call else f"BB Lower 15m (${bb_l_15m:.2f})"
+        return True, "tp_bb_climax_partial", {
+            "detail": f"Take Profit Parcial (50%) Clímax Bollinger: Subyacente (${current_price:.2f}) perforó {band_name} con PnL +{unr_pnl_pct:.1f}% y RVOL agotado ({rvol_15m:.2f}x)",
+            "exit_plan": exit_plan,
+            "exit_ratio": ratio,
+        }
+
+    # ── REGLA ROSS CAMERON 2: CANDADO DE GANANCIA PICO (PEAK PROFIT RATCHET) ──
+    # Prohibido devolver más del 15% de la ganancia máxima alcanzada.
+    if (highest_pnl_usd >= 100.0 or highest_pnl_pct >= 15.0) and pos_age_min >= 5.0:
+        pnl_floor_usd = round(highest_pnl_usd * 0.85, 2)
+        if unr_pnl_usd < pnl_floor_usd and unr_pnl_usd > 0:
+            cur_ema3_15 = float(tech.get("ema3_15m") or 0.0)
+            prev_ema3_15 = float(tech.get("prev_ema3_15m") or cur_ema3_15)
+            is_retreating = (current_price < prev_ema3_15) if is_call else (current_price > prev_ema3_15)
+            if is_retreating or rvol_15m < 0.60:
+                return True, "tp_peak_profit_ratchet", {
+                    "detail": f"Candado de Ganancia Pico: PnL retrocedió >15% del pico (${unr_pnl_usd:.2f} < piso ${pnl_floor_usd:.2f} de pico ${highest_pnl_usd:.2f})",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
+
+    # ── REGLA ROSS CAMERON 3: SALIDA POR AGOTAMIENTO DE VOLUMEN (RVOL < 0.40x) ──
+    # Si el precio está cerca o fuera de la banda Bollinger pero el volumen se secó completamente.
+    is_near_outer_bb = (current_price >= bb_u_15m * 0.998) if is_call else (current_price <= bb_l_15m * 1.002)
+    if is_near_outer_bb and rvol_15m <= 0.40 and unr_pnl_pct >= 8.0 and pos_age_min >= 5.0 and not is_strong_momentum:
+        return True, "tp_rvol_exhaustion", {
+            "detail": f"Take Profit por Agotamiento de Volumen: Subyacente en banda BB con RVOL seco a {rvol_15m:.2f}x (<=0.40x) con PnL +{unr_pnl_pct:.1f}%",
+            "exit_plan": exit_plan,
+            "exit_ratio": 1.0,
+        }
     ema3_15m = float(tech.get("ema3_15m") or 0.0)
     ema9_15m = float(tech.get("ema9_15m") or 0.0)
     rsi_1h = float(tech.get("rsi_1h") or 50.0)
@@ -996,8 +1135,9 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
             except Exception as exc:
                 log_warning(MODULE, f"Aviso al registrar risk_event: {exc}")
 
-            closed_count += 1
-            exits_summary.append({"position_id": pid, "symbol": pos["symbol"], "reason": reason, "realized_pnl": exit_fill_res.realized_pnl})
+            if not (is_partial and remaining_qty > 0):
+                pass  # closed_count ya fue incrementado en el bloque Cierre Total
+            exits_summary.append({"position_id": pid, "symbol": pos["symbol"], "reason": reason, "realized_pnl": exit_fill_res.realized_pnl, "partial": is_partial})
             log_info(MODULE, f"Posicion {pid} ({pos['symbol']}) cerrada por {reason}: PnL=${exit_fill_res.realized_pnl:.2f}")
         else:
             # Solo actualizar mark to market y persistir nuevo exit_plan

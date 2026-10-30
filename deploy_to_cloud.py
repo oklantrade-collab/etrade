@@ -300,6 +300,7 @@ files_to_sync = [
     "app/options/opt_gap_aduana_defense.py",
     "app/workers/ib_bridge_worker.py",
     "tests/test_options_technical_exits.py",
+    "tests/test_options_climax_exits.py",
     "tests/test_options_scheduler_integration.py",
     "tests/test_intraday_momentum_options_scanner.py",
     "tests/test_live_1h_broker_choke_point.py",
