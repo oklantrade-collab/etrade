@@ -1,0 +1,87 @@
+{
+  "session_date": "2024-10-18",
+  "video_title": "Wild Card Friday Short Squeeze (+300% AMOD) - (+$700.00)",
+  "video_url": "https://www.youtube.com/watch?v=warrior_wild_card_friday_amod",
+  "net_pnl": 700.0,
+  "account_mode": "main_account",
+  "prior_drawdown": -18000.0,
+  "mental_state": "Sesión de pre-mercado y apertura de un viernes ('Wild Card Friday'), cerrando una semana difícil/roja en un mercado frío. Prioridad: disciplina y protección de capital.",
+  "key_mindset_change": "Gestión de tamaño a un décimo (1/10): Debido a la baja liquidez y alta tasa de rechazos, reducir el lote al 10% del estándar blinda el capital. En AMOD descartó compras iniciales por MACD negativo y esperó pacientemente la bandera de 5 minutos sobre la 9 EMA hacia los $4.00. Terminar en verde (+ $700) compensando una pérdida previa cierra la semana en positivo.",
+  "stop_trading_discipline": "Cerró el viernes con ganancia neta verde tras compensar la pérdida de TN (-$1,179.48) con la ganancia de AMOD (+$1,800.00). Mantuvo la disciplina de no sobreoperar en viernes frío.",
+  "notes": "Sesión Wild Card Friday: AMOD (+300%, +$1,800.00), TN (-$1,179.48). Tamaño de posición al 1/10 (10%).",
+  "trades": [
+    {
+      "ticker": "TN",
+      "archetype_code": "ROSS_COLD_MARKET_DEFENSE",
+      "pnl": -1179.48,
+      "duration_seconds": 150,
+      "sector": "Penny Stocks / Nano Cap",
+      "float_shares": 3500000,
+      "running_surge_pct": 15.0,
+      "avg_entry_price": 0.61,
+      "avg_exit_price": 0.49,
+      "key_takeaway": "Comprar patrón curl hacia doble techo en $0.61 solo subió a $0.70 antes de sufrir un rechazo violento. Salida defensiva perdiendo 11 centavos por acción (-$1,179.48).",
+      "phases": [
+        {
+          "sequence_order": 1,
+          "phase_type": "ENTRY",
+          "price_level": 0.61,
+          "trigger_observed": "Intento de curvatura alcista (curl) hacia la zona de doble techo.",
+          "action_taken": "Comprar 10,000 acciones a $0.61.",
+          "risk_factor": "Resistencia pesada en doble techo y mercado frío sin seguimiento.",
+          "result_outcome": "El precio avanzó apenas a $0.70 y fue rechazado con violencia."
+        },
+        {
+          "sequence_order": 2,
+          "phase_type": "EXIT",
+          "price_level": 0.49,
+          "trigger_observed": "Pérdida rápida de soporte con volumen vendedor.",
+          "action_taken": "Ejecutar stop loss vendiendo en la caída.",
+          "risk_factor": "Colapso a mínimos si se aguanta la posición.",
+          "result_outcome": "Pérdida de -$1,179.48 USD asumida con disciplina."
+        }
+      ]
+    },
+    {
+      "ticker": "AMOD",
+      "archetype_code": "ROSS_5M_BULL_FLAG_9EMA",
+      "pnl": 1800.0,
+      "duration_seconds": 120,
+      "sector": "Tecnología / Short Squeeze (+300%)",
+      "float_shares": 4500000,
+      "running_surge_pct": 300.0,
+      "avg_entry_price": 3.9,
+      "avg_exit_price": 4.0,
+      "key_takeaway": "Disparo de +300% con más de 100M de volumen. Descartó compras con MACD negativo. Esperó bandera alcista de 5m sobre la 9 EMA y ejecutó scalping rápido hacia la cifra redonda de $4.00 asegurando +$1,800 USD en segundos.",
+      "phases": [
+        {
+          "sequence_order": 1,
+          "phase_type": "FILTERING",
+          "price_level": 3.2,
+          "trigger_observed": "Impulso temprano con lecturas de MACD negativo / divergencia.",
+          "action_taken": "Descartar compras iniciales hasta que el indicador confirme alineación.",
+          "risk_factor": "Falso breakout con momentum negativo.",
+          "result_outcome": "Evitó quedar atrapado en el retroceso inicial."
+        },
+        {
+          "sequence_order": 2,
+          "phase_type": "ENTRY",
+          "price_level": 3.9,
+          "trigger_observed": "Bandera alcista de 5 minutos consolidando sobre la 9 EMA preparándose para quebrar $4.00.",
+          "action_taken": "Entrar con scalping rápido de 20,000 acciones en la ruptura.",
+          "risk_factor": "Rechazo en número entero psicológico.",
+          "result_outcome": "Aceleración inmediata directa a $4.00."
+        },
+        {
+          "sequence_order": 3,
+          "phase_type": "EXIT",
+          "price_level": 4.0,
+          "trigger_observed": "Toque del precio en la cifra redonda de $4.00.",
+          "action_taken": "Venta relámpago de las 20,000 acciones para capturar 10 centavos por acción.",
+          "risk_factor": "Pausa por volatilidad o rechazo en $4.00.",
+          "result_outcome": "+$1,800 USD asegurados en segundos; jornada cerrada en verde."
+        }
+      ]
+    }
+  ]
+}

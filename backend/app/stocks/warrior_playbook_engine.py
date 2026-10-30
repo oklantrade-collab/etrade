@@ -631,7 +631,103 @@ SESSION_NO_TRADE_DAY_CASE_STUDY = WarriorSession(
     ]
 )
 
+SESSION_WILD_CARD_FRIDAY_CASE_STUDY = WarriorSession(
+    session_date="2024-10-18",
+    video_title="Wild Card Friday Short Squeeze (+300% AMOD) - (+$700.00)",
+    video_url="https://www.youtube.com/watch?v=warrior_wild_card_friday_amod",
+    net_pnl=700.00,
+    account_mode="main_account",
+    prior_drawdown=-18000.0,
+    mental_state="Sesión de pre-mercado y apertura de un viernes ('Wild Card Friday'), cerrando una semana difícil/roja en un mercado frío. Prioridad: disciplina y protección de capital.",
+    key_mindset_change="Gestión de tamaño a un décimo (1/10): Debido a la baja liquidez y alta tasa de rechazos, reducir el lote al 10% del estándar blinda el capital. En AMOD descartó compras iniciales por MACD negativo y esperó pacientemente la bandera de 5 minutos sobre la 9 EMA hacia los $4.00. Terminar en verde (+ $700) compensando una pérdida previa cierra la semana en positivo.",
+    stop_trading_discipline="Cerró el viernes con ganancia neta verde tras compensar la pérdida de TN (-$1,179.48) con la ganancia de AMOD (+$1,800.00). Mantuvo la disciplina de no sobreoperar en viernes frío.",
+    notes="Sesión Wild Card Friday: AMOD (+300%, +$1,800.00), TN (-$1,179.48). Tamaño de posición al 1/10 (10%).",
+    trades=[
+        WarriorTrade(
+            ticker="TN",
+            archetype_code="ROSS_COLD_MARKET_DEFENSE",
+            pnl=-1179.48,
+            duration_seconds=150,
+            sector="Penny Stocks / Nano Cap",
+            float_shares=3_500_000,
+            running_surge_pct=15.0,
+            avg_entry_price=0.61,
+            avg_exit_price=0.49,
+            key_takeaway="Comprar patrón curl hacia doble techo en $0.61 solo subió a $0.70 antes de sufrir un rechazo violento. Salida defensiva perdiendo 11 centavos por acción (-$1,179.48).",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=0.61,
+                    trigger_observed="Intento de curvatura alcista (curl) hacia la zona de doble techo.",
+                    action_taken="Comprar 10,000 acciones a $0.61.",
+                    risk_factor="Resistencia pesada en doble techo y mercado frío sin seguimiento.",
+                    result_outcome="El precio avanzó apenas a $0.70 y fue rechazado con violencia."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="EXIT",
+                    price_level=0.49,
+                    trigger_observed="Pérdida rápida de soporte con volumen vendedor.",
+                    action_taken="Ejecutar stop loss vendiendo en la caída.",
+                    risk_factor="Colapso a mínimos si se aguanta la posición.",
+                    result_outcome="Pérdida de -$1,179.48 USD asumida con disciplina."
+                ),
+            ]
+        ),
+        WarriorTrade(
+            ticker="AMOD",
+            archetype_code="ROSS_5M_BULL_FLAG_9EMA",
+            pnl=1800.00,
+            duration_seconds=120,
+            sector="Tecnología / Short Squeeze (+300%)",
+            float_shares=4_500_000,
+            running_surge_pct=300.0,
+            avg_entry_price=3.90,
+            avg_exit_price=4.00,
+            key_takeaway="Disparo de +300% con más de 100M de volumen. Descartó compras con MACD negativo. Esperó bandera alcista de 5m sobre la 9 EMA y ejecutó scalping rápido hacia la cifra redonda de $4.00 asegurando +$1,800 USD en segundos.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="FILTERING",
+                    price_level=3.20,
+                    trigger_observed="Impulso temprano con lecturas de MACD negativo / divergencia.",
+                    action_taken="Descartar compras iniciales hasta que el indicador confirme alineación.",
+                    risk_factor="Falso breakout con momentum negativo.",
+                    result_outcome="Evitó quedar atrapado en el retroceso inicial."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="ENTRY",
+                    price_level=3.90,
+                    trigger_observed="Bandera alcista de 5 minutos consolidando sobre la 9 EMA preparándose para quebrar $4.00.",
+                    action_taken="Entrar con scalping rápido de 20,000 acciones en la ruptura.",
+                    risk_factor="Rechazo en número entero psicológico.",
+                    result_outcome="Aceleración inmediata directa a $4.00."
+                ),
+                WarriorTradePhase(
+                    sequence_order=3,
+                    phase_type="EXIT",
+                    price_level=4.00,
+                    trigger_observed="Toque del precio en la cifra redonda de $4.00.",
+                    action_taken="Venta relámpago de las 20,000 acciones para capturar 10 centavos por acción.",
+                    risk_factor="Pausa por volatilidad o rechazo en $4.00.",
+                    result_outcome="+$1,800 USD asegurados en segundos; jornada cerrada en verde."
+                ),
+            ]
+        ),
+    ]
+)
+
 ARCHETYPES_CATALOG = {
+    "ROSS_5M_BULL_FLAG_9EMA": {
+        "name": "Bandera Alcista de 5 Minutos sobre 9 EMA (AMOD Pattern)",
+        "description": "Patrón de scalping de alta probabilidad en corredores de alto volumen (+200-300%). Requiere MACD positivo; se entra en la bandera de consolidación de 5 minutos apoyada en la media móvil exponencial de 9 períodos (9 EMA) buscando el quiebre hacia número redondo ($4.00) con toma de beneficios inmediata.",
+        "ideal_time": "08:45-10:15 AM (Pre-Market y Apertura)",
+        "ideal_float_max": 15_000_000,
+        "ideal_price_range": (1.50, 8.00),
+        "pitfalls": ["Buying when MACD is negative", "Buying curls into double tops in cold tape", "Holding past whole numbers instead of taking quick scalp"]
+    },
     "ROSS_NO_TRADE_DISCIPLINE": {
         "name": "Disciplina de Cero Operaciones (No Trade Day / Sidelines)",
         "description": "Protocolo de preservación absoluta de capital y paciencia en drawdown. Cuando activos de +100% muestran movimientos agotados de madrugada (4 AM), rechazos continuos en resistencia sin riesgo claro o paradas por volatilidad (halts), la decisión correcta es quedarse al margen ($0 USD).",
@@ -696,6 +792,7 @@ class WarriorPlaybookEngine:
             SESSION_COLD_MARKET_CASE_STUDY,
             SESSION_MONDAY_SHORT_SQUEEZE_CASE_STUDY,
             SESSION_NO_TRADE_DAY_CASE_STUDY,
+            SESSION_WILD_CARD_FRIDAY_CASE_STUDY,
         ]
         self._archetypes = ARCHETYPES_CATALOG
 
@@ -778,6 +875,26 @@ class WarriorPlaybookEngine:
         has_undefined_risk = bool(
             context.get("has_undefined_risk", False)
             or context.get("has_choppy_rejections", False)
+        )
+
+        # Flags de la sesión Wild Card Friday (AMOD, TN)
+        macd_is_negative = bool(
+            context.get("macd_is_negative", False)
+            or (float(context.get("macd_histogram", 0.0)) < 0)
+        )
+        is_curl_into_double_top = bool(
+            context.get("is_curl_into_double_top", False)
+            or (context.get("pattern") == "curl" and context.get("near_double_top", False))
+        )
+        is_5m_bull_flag = bool(context.get("is_5m_bull_flag", False))
+        price_near_ema_9 = bool(
+            context.get("price_near_ema_9", False)
+            or (context.get("ema_9") and abs(price - float(context.get("ema_9"))) / price <= 0.02)
+        )
+        is_wild_card_friday = bool(context.get("is_wild_card_friday", False))
+        is_tenth_size_mode = bool(
+            context.get("is_tenth_size_mode", False)
+            or (is_wild_card_friday and is_cold_market)
         )
 
         # ── CASO COLD 1: FILTRO DE ACCIÓN PESADA / THICKLY TRADED (Lección NCPL) ──
@@ -928,6 +1045,50 @@ class WarriorPlaybookEngine:
                 ]
             )
 
+        # ── CASO FRIDAY 1: FILTRO DE MOMENTUM NEGATIVO EN MACD (Lección AMOD Temprana) ──
+        if macd_is_negative:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_5M_BULL_FLAG_9EMA",
+                archetype_name="Filtro de MACD Negativo / Divergencia Bajista",
+                similarity_score=0.95,
+                recommended_action="BLOCK_NEGATIVE_MACD_MOMENTUM",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="AMOD (Descarte Temprano)",
+                reasoning=(
+                    f"{ticker} subiendo con volumen pero con lecturas de MACD en terreno negativo o divergencia bajista. "
+                    f"Lección de Ross Cameron en AMOD (+300%): Descartar compras iniciales si el MACD es negativo porque el momentum no acompaña; "
+                    f"esperar a que el indicador cruce o el precio construya una bandera limpia sobre soporte."
+                ),
+                execution_params={"block_entries": True, "require_positive_macd": True},
+                lessons_learned=[
+                    "No comprar rupturas tempranas si el histograma o línea de MACD es negativo",
+                    "Esperar alineación de momentum técnico antes de arriesgar capital"
+                ]
+            )
+
+        # ── CASO FRIDAY 2: FILTRO DE CURL HACIA DOBLE TECHO EN MERCADO FRÍO (Lección TN) ──
+        if is_curl_into_double_top:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Filtro Anti-Curl hacia Doble Techo",
+                similarity_score=0.93,
+                recommended_action="BLOCK_CURL_INTO_DOUBLE_TOP",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="TN (-$1,179.48 USD)",
+                reasoning=(
+                    f"Intento de compra en patrón de curvatura (curl) hacia una zona de doble techo previo. "
+                    f"Lección de Ross Cameron en TN ($0.61 a $0.70): En mercado frío o penny stocks, comprar hacia un doble techo tiene bajísima "
+                    f"probabilidad de quiebre y sufre rechazos violentos, provocando la pérdida de -$1,179 USD. Prohibido comprar curls bajo dobles techos."
+                ),
+                execution_params={"block_entries": True, "reason": "Curl into double top resistance"},
+                lessons_learned=[
+                    "No comprar patrones curl hacia resistencias mayores de doble techo en mercado frío",
+                    "El ratio riesgo/beneficio es pésimo: ganas 9 centavos o pierdes 12 centavos"
+                ]
+            )
+
         # ── CASO COLD 4: CORTE DEFENSIVO POR TOPPING TAIL CANDLE (Lección PCLA) ──
         if has_topping_tail and is_cold_market:
             return PlaybookMatchResult(
@@ -1073,6 +1234,39 @@ class WarriorPlaybookEngine:
                 lessons_learned=[
                     "Aprovechar la ola de simpatía: un líder parabólico temprano despierta compradores para los siguientes catalizadores",
                     "GIXI a las 7:32 AM generó la mayor ganancia del día gracias a la inercia compradora previa"
+                ]
+            )
+
+        # ── CASO FRIDAY 3: BANDERA ALCISTA DE 5 MINUTOS SOBRE 9 EMA (Lección AMOD) ──
+        if is_5m_bull_flag and price_near_ema_9 and not macd_is_negative:
+            # Calcular proximidad al número entero siguiente
+            target_round = round(int(price) + 1.0, 2) if (price % 1.0) > 0.60 else round(price + 0.50, 2)
+            sizing_mult = 0.10 if (is_tenth_size_mode or is_wild_card_friday) else 0.40
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_5M_BULL_FLAG_9EMA",
+                archetype_name="Bandera Alcista de 5m sobre 9 EMA hacia Número Redondo",
+                similarity_score=0.96,
+                recommended_action="BUY_5M_BULL_FLAG_9EMA",
+                action_type="EXECUTE_ENTRY",
+                historical_trade_ref="AMOD (+$1,800 USD)",
+                reasoning=(
+                    f"{ticker} formando bandera de 5 minutos sobre soporte de la 9 EMA con volumen masivo (+{change_pct:.1f}%). "
+                    f"Estrategia de Ross Cameron en AMOD: Scalping rápido en la ruptura hacia la cifra redonda (${target_round:.2f}) "
+                    f"con tamaño defensivo ({sizing_mult*100:.0f}% en Wild Card Friday / Mercado Frío) y venta relámpago de +10 centavos al toque de la cifra redonda."
+                ),
+                execution_params={
+                    "entry_type": "5M_BULL_FLAG_BREAKOUT",
+                    "position_size_multiplier": sizing_mult,
+                    "target_round_number": target_round,
+                    "take_profit_cents": 0.10,
+                    "stop_loss_pct": 2.5,
+                    "exit_on_round_touch": True
+                },
+                lessons_learned=[
+                    "Esperar consolidación de 5 minutos sobre la 9 EMA con MACD positivo",
+                    "En Wild Card Friday o mercado frío, operar con 1/10 del tamaño habitual para proteger capital",
+                    "Tomar scalps rápidos de 10 centavos al tocar cifras redondas ($4.00)"
                 ]
             )
 

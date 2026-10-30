@@ -366,3 +366,78 @@ def test_inference_apus_undefined_risk_block():
     assert "APUS" in result.historical_trade_ref
 
 
+# =====================================================================
+# TESTS FOR WILD CARD FRIDAY (+300% AMOD & TN) (+$700.00 PnL, 1/10th Sizing)
+# =====================================================================
+
+def test_wild_card_friday_session_retrieval():
+    sessions = warrior_playbook.get_all_sessions()
+    assert len(sessions) >= 5
+
+    friday_sess = next((s for s in sessions if "Wild Card Friday" in s["video_title"]), None)
+    assert friday_sess is not None
+    assert friday_sess["net_pnl"] == 700.00
+    assert friday_sess["prior_drawdown"] == -18000.00
+    assert len(friday_sess["trades"]) == 2
+
+    tickers = [t["ticker"] for t in friday_sess["trades"]]
+    assert "TN" in tickers
+    assert "AMOD" in tickers
+
+    tn = next(t for t in friday_sess["trades"] if t["ticker"] == "TN")
+    assert tn["pnl"] == -1179.48
+    assert tn["avg_entry_price"] == 0.61
+
+    amod = next(t for t in friday_sess["trades"] if t["ticker"] == "AMOD")
+    assert amod["pnl"] == 1800.00
+    assert amod["running_surge_pct"] == 300.0
+    assert amod["archetype_code"] == "ROSS_5M_BULL_FLAG_9EMA"
+    assert len(amod["phases"]) == 3
+
+def test_inference_negative_macd_block():
+    ctx = {
+        "ticker": "AMOD_EARLY",
+        "price": 3.20,
+        "vwap": 3.00,
+        "macd_is_negative": True,
+        "change_pct": 120.0
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_NEGATIVE_MACD_MOMENTUM"
+    assert "AMOD" in result.historical_trade_ref
+
+def test_inference_curl_into_double_top_block():
+    ctx = {
+        "ticker": "TN_LIKE",
+        "price": 0.61,
+        "vwap": 0.60,
+        "is_curl_into_double_top": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "BLOCK_ENTRY"
+    assert result.recommended_action == "BLOCK_CURL_INTO_DOUBLE_TOP"
+    assert "TN" in result.historical_trade_ref
+
+def test_inference_amod_5m_bull_flag_9ema():
+    ctx = {
+        "ticker": "AMOD_LIKE",
+        "price": 3.90,
+        "vwap": 3.40,
+        "is_5m_bull_flag": True,
+        "price_near_ema_9": True,
+        "change_pct": 280.0,
+        "is_wild_card_friday": True
+    }
+    result = warrior_playbook.evaluate_live_opportunity(ctx)
+    assert result.matched is True
+    assert result.action_type == "EXECUTE_ENTRY"
+    assert result.recommended_action == "BUY_5M_BULL_FLAG_9EMA"
+    assert result.execution_params["position_size_multiplier"] == 0.10
+    assert result.execution_params["take_profit_cents"] == 0.10
+    assert "AMOD" in result.historical_trade_ref
+
+
+

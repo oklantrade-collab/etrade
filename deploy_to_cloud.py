@@ -330,8 +330,10 @@ files_to_sync = [
     "migration_037_warrior_cold_market_kb.sql",
     "migration_038_warrior_monday_squeeze_kb.sql",
     "migration_039_warrior_no_trade_discipline_kb.sql",
+    "migration_040_warrior_wild_card_friday_amod_kb.sql",
     "data/experiences/ross_cameron_monday_squeeze_mndr.json",
     "data/experiences/ross_cameron_no_trade_three_stocks_100.json",
+    "data/experiences/ross_cameron_wild_card_friday_amod.json",
 ]
 
 # Archivos frontend para sincronizar (relativos a root)

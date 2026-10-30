@@ -24,6 +24,7 @@ individual_files = [
     "backend/migration_037_warrior_cold_market_kb.sql",
     "backend/migration_038_warrior_monday_squeeze_kb.sql",
     "backend/migration_039_warrior_no_trade_discipline_kb.sql",
+    "backend/migration_040_warrior_wild_card_friday_amod_kb.sql",
 ]
 
 def sync_to_apolo():
