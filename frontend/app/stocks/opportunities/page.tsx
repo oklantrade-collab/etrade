@@ -155,7 +155,12 @@ function PriorityQueuePanel({
   const isGapUp = activeTab === 'GAP_UP';
   const isTop3 = activeTab === 'TOP3';
   const isQueue = activeTab === 'QUEUE';
-  const displayQueue = (isTop3 || isGapUp) ? queue.slice(0, activeLimit) : queue.slice(0, 10);
+  // Filtrar terminantemente activos bloqueados, trampas o en Deep Bear Winter de la cola activa
+  const validQueue = (queue || []).filter((item: any) => {
+    const st = String(item.status || item.queue_status || '').toLowerCase();
+    return st !== 'blocked' && !item.is_deep_bear_excluded && !item.is_trap;
+  });
+  const displayQueue = (isTop3 || isGapUp) ? validQueue.slice(0, activeLimit) : validQueue.slice(0, 10);
   const hasQueue = displayQueue && displayQueue.length > 0;
 
   const title = isGapUp
@@ -235,8 +240,8 @@ function PriorityQueuePanel({
               const apex4h = item.apex_score_4h || item.apex_4h || 0;
               const retExp = item.return_expected || item.change_pct || 0;
               const rank = item.composite_rank || parseFloat(item.rank_score) || 0;
-              const isOB = item.is_overbought;
-              const status = item.status || 'pending';
+              const status = item.status || item.queue_status || 'pending';
+              const isOB = item.is_overbought || status === 'blocked';
 
               return (
                 <div key={item.ticker || idx} style={{
@@ -1569,9 +1574,11 @@ export default function OpportunitiesIntelligence() {
     };
   });
 
-  // Cola APEX: Filtra acciones con alto APEX Score del día (>= 60), descartando acciones bajistas (-1.5%)
+  // Cola APEX: Filtra acciones con alto APEX Score del día (>= 60), descartando bloqueadas o bajistas (-1.5%)
   const queueList = opportunitiesWithQueue
     .filter(o => {
+      const isBlocked = o.status === 'blocked' || o.queue_status === 'blocked' || o.is_deep_bear_excluded;
+      if (isBlocked) return false;
       const apex = o.apex_4h || o.apex_1d || 0;
       const chg = o.change_pct !== undefined ? o.change_pct : 0;
       if (chg < -1.5) return false;
@@ -1584,9 +1591,9 @@ export default function OpportunitiesIntelligence() {
       return (a.queue_rank || 999) - (b.queue_rank || 999);
     });
 
-  // Open Gap Up Runners: Prioridad 1 Institucional
+  // Open Gap Up Runners: Prioridad 1 Institucional (excluyendo bloqueadas)
   const gapUpList = opportunitiesWithQueue
-    .filter(o => o.is_gap_runner)
+    .filter(o => o.is_gap_runner && o.status !== 'blocked' && o.queue_status !== 'blocked' && !o.is_deep_bear_excluded)
     .sort((a, b) => {
       const scoreDiff = (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0);
       if (scoreDiff !== 0) return scoreDiff;
@@ -1599,9 +1606,16 @@ export default function OpportunitiesIntelligence() {
     .slice(0, 20);
 
   const alphaList = opportunitiesWithQueue
-    .filter(o => o.is_gap_runner || o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0))
+    .filter(o => {
+      // Excluir terminantemente bloqueadas, en trampa, o en Deep Bear Winter
+      const isBlocked = o.status === 'blocked' || o.queue_status === 'blocked' || o.is_overbought_queue || o.is_deep_bear_excluded || o.is_trap;
+      if (isBlocked) return false;
+      // Excluir si 1H EMA3 < EMA9 (a menos que tenga reversión explosiva con RVOL >= 3.0x y EMA3 ascendente)
+      if (o.is_ema3_above_ema9 === false && (!o.rvol || o.rvol < 3.0)) return false;
+      return o.is_gap_runner || o.source === 'live_top_gainers' || o.is_intraday_alpha || o.is_high_growth_opp || (o.change_pct && o.change_pct >= 5.0);
+    })
     .sort((a, b) => {
-      // Prioridad 1 Absoluta a OPEN GAP UP
+      // Prioridad 1 Absoluta a OPEN GAP UP genuinos
       if (a.is_gap_runner && !b.is_gap_runner) return -1;
       if (!a.is_gap_runner && b.is_gap_runner) return 1;
       return (parseFloat(b.rank_score) || b.buying_force_5m || 0) - (parseFloat(a.rank_score) || a.buying_force_5m || 0);
@@ -1764,7 +1778,7 @@ export default function OpportunitiesIntelligence() {
 
       {/* APEX Priority Queue Panel */}
       <PriorityQueuePanel 
-        queue={activeTab === 'TOP3' ? (top3List.length > 0 ? top3List : priorityQueue) : (activeTab === 'GAP_UP' ? gapUpList : (activeTab === 'QUEUE' ? queueList : priorityQueue))} 
+        queue={activeTab === 'TOP3' ? (top3List.length > 0 ? top3List : priorityQueue.filter((p: any) => p.status !== 'blocked' && p.queue_status !== 'blocked')) : (activeTab === 'GAP_UP' ? gapUpList : (activeTab === 'QUEUE' ? queueList : priorityQueue.filter((p: any) => p.status !== 'blocked' && p.queue_status !== 'blocked')))} 
         capital={pqCapital} 
         summary={pqSummary} 
         activeTab={activeTab} 

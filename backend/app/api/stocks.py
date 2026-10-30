@@ -172,8 +172,10 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                     
                     if ticker in owned_tickers:
                         merged["queue_status"] = "owned"
+                        merged["status"] = "owned"
                     else:
                         merged["queue_status"] = q_info.get("status", "watching")
+                        merged["status"] = q_info.get("status", "watching")
 
                     merged["is_overbought_queue"] = q_info.get("is_overbought", False)
 
@@ -264,34 +266,38 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 min_thresh = get_min_gap_threshold(t)
                 is_trap = bool(opp.get("is_trap", False))
 
-                # Requisito Mínimo en 1H: (EMA3 > EMA9) o (RSI < 80)
+                # Requisito Mínimo en 1H: (EMA3 > EMA9) Y (RSI < 80) Y (EMA3 ascendente)
                 is_ema3_above_ema9 = opp.get("is_ema3_above_ema9")
+                is_ema3_asc = opp.get("is_ema3_1h_ascending")
                 rsi_1h_val = opp.get("rsi_1h")
-                if is_ema3_above_ema9 is None or rsi_1h_val is None:
+                if is_ema3_above_ema9 is None or rsi_1h_val is None or is_ema3_asc is None:
                     try:
                         p_val = float(opp.get("price") or 0.0)
                         h1_data = get_live_1h_candle_and_sipv(t, p_val)
                         if is_ema3_above_ema9 is None:
                             is_ema3_above_ema9 = h1_data.get("is_ema3_above_ema9", False)
                             opp["is_ema3_above_ema9"] = is_ema3_above_ema9
+                        if is_ema3_asc is None:
+                            is_ema3_asc = h1_data.get("is_ema3_1h_ascending", True)
+                            opp["is_ema3_1h_ascending"] = is_ema3_asc
                         if rsi_1h_val is None:
                             rsi_1h_val = float(h1_data.get("rsi_1h") or 50.0)
                             opp["rsi_1h"] = rsi_1h_val
                     except Exception:
                         if is_ema3_above_ema9 is None: is_ema3_above_ema9 = False
+                        if is_ema3_asc is None: is_ema3_asc = False
                         if rsi_1h_val is None: rsi_1h_val = 50.0
 
                 rsi_1h_num = float(rsi_1h_val if rsi_1h_val is not None else 50.0)
-                meets_1h_criteria = bool(is_ema3_above_ema9 or (rsi_1h_num < 80.0))
+                # Requisito 1H estricto institucional: EMA3 > EMA9 obligatorio, RSI < 80 y pendiente positiva
+                meets_1h_criteria = bool(is_ema3_above_ema9 and (rsi_1h_num < 80.0) and is_ema3_asc)
                 opp["meets_1h_criteria"] = meets_1h_criteria
 
-                # Califica como Open Gap Up institucional si supera el umbral, no es trampa Y cumple el requisito mínimo de 1H
-                is_runner = (eff_gap >= min_thresh) and (not is_trap) and meets_1h_criteria
-                opp["is_gap_runner"] = is_runner
-                opp["gap_type"] = "OPEN_GAP_UP" if is_runner else None
-                opp["gap_pct"] = eff_gap
-                opp["asset_class"] = get_asset_class(t)
-                opp["min_gap_required"] = min_thresh
+                # Liquidez intradía verificada desde Minuto 1 (evita acciones ilíquidas como TNMG de 6 acciones)
+                vol_val = int(opp.get("volume") or 0)
+                rvol_val = float(opp.get("rvol") or 1.0)
+                has_min_liquidity = (vol_val >= 50_000) or (rvol_val >= 1.5 and vol_val >= 15_000)
+                opp["has_min_liquidity"] = has_min_liquidity
 
                 # Enriquecimiento con STRUCTURAL_REGIME_ENGINE (EMA 3/9/20/50/200 + VWAP + ATR)
                 try:
@@ -307,6 +313,21 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                     opp["regime_label"] = "⚪ NEUTRAL"
                     opp["is_deep_bear_excluded"] = False
 
+                is_status_blocked = bool(
+                    str(opp.get("status") or "").lower() == "blocked"
+                    or str(opp.get("queue_status") or "").lower() == "blocked"
+                    or opp.get("is_overbought_queue") is True
+                    or opp.get("is_deep_bear_excluded") is True
+                )
+
+                # Califica como Open Gap Up institucional SOLO si supera umbral, no es trampa, cumple 1H, tiene liquidez y no está bloqueada
+                is_runner = (eff_gap >= min_thresh) and (not is_trap) and meets_1h_criteria and has_min_liquidity and (not is_status_blocked)
+                opp["is_gap_runner"] = is_runner
+                opp["gap_type"] = "OPEN_GAP_UP" if is_runner else None
+                opp["gap_pct"] = eff_gap
+                opp["asset_class"] = get_asset_class(t)
+                opp["min_gap_required"] = min_thresh
+
                 if is_runner:
                     # Score Boost institucional de +25 puntos para liderar la cola de compras
                     base_rank = float(opp.get("rank_score") or opp.get("buying_force_5m") or 50.0)
@@ -317,19 +338,29 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                     opp["gap_runner_boost"] = 0.0
                     opp["is_high_priority"] = False
 
-                # Si está en DEEP BEAR WINTER, castigar ranking para evitar compras de acciones atrapadas
-                if opp.get("is_deep_bear_excluded"):
-                    opp["rank_score"] = max(0.0, float(opp.get("rank_score") or 50.0) - 40.0)
+                # Si está bloqueada, en trampa, en DEEP BEAR WINTER o EMA3 < EMA9, castigar ranking a <= 25.0
+                if is_status_blocked or is_trap or not is_ema3_above_ema9:
+                    opp["rank_score"] = min(float(opp.get("rank_score") or 50.0), 25.0)
                     opp["is_high_priority"] = False
 
             if gap_runner_only:
                 flattened = [i for i in flattened if i.get("is_gap_runner")]
 
-            # Re-rankear y ordenar: Prioridad 0 absoluta a OPEN GAP UP, luego rank_score desc, gap_pct desc
+            # Re-rankear y ordenar:
+            # 1. Bloqueadas / Deep Bear / EMA3<EMA9 castigadas al fondo
+            # 2. OPEN GAP UP genuinos al frente
+            # 3. rank_score desc
+            # 4. gap_pct desc
             flattened.sort(key=lambda x: (
+                1 if (
+                    str(x.get("status") or "").lower() == "blocked"
+                    or str(x.get("queue_status") or "").lower() == "blocked"
+                    or x.get("is_deep_bear_excluded")
+                    or not x.get("is_ema3_above_ema9", True)
+                ) else 0,
                 0 if x.get("is_gap_runner") else 1,
                 -float(x.get("rank_score") or x.get("buying_force_5m") or 0.0),
-                -float(x.get("gap_pct") or 0.0)
+                -float(x.get("gap_pct") or x.get("change_pct") or 0.0)
             ))
             for idx, item in enumerate(flattened, 1):
                 item["rank"] = idx
@@ -354,7 +385,6 @@ async def get_stocks_opportunities(gap_runner_only: bool = False):
                 await asyncio.sleep(1)
                 continue
             log_error("stocks_api", f"Error in get_stocks_opportunities: {e}")
-            from app.core.market_hours import get_market_status_dict
             return {"opportunities": [], "total": 0, "market_status": get_market_status_dict()}
 
 @router.get("/news/{ticker}")
@@ -994,11 +1024,12 @@ async def get_priority_queue():
             # Use apex_score_4h from queue or fallback to 0
             apex_4h = float(q.get("apex_score_4h") or 0)
             comp_rank = float(q.get("composite_rank") or 0)
+            status_val = str(q.get("status") or "").lower()
             
-            # Filtro estricto: Descartar activos con APEX bajo (< 60) o rendimiento negativo del día
-            # Esto evita que acciones en caída (como SOFI) aparezcan en la cola de compras
+            # Filtro estricto: Descartar activos bloqueados, sobrecomprados/trampa, con APEX bajo (< 60) o rendimiento negativo del día
+            # Esto evita que acciones bloqueadas o en caída (como TNMG, WKHS, SOFI) aparezcan en la cola de compras del BOT
             ret_exp = float(q.get("return_expected") or q.get("change_pct") or 0.0)
-            if apex_4h < 60.0 or ret_exp < -0.5:
+            if status_val == "blocked" or q.get("is_overbought") is True or apex_4h < 60.0 or ret_exp < -0.5:
                 continue
             
             queue.append(q)

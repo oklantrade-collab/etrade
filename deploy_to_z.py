@@ -65,7 +65,12 @@ def sync_to_apolo():
                 if not os.path.exists(dst_file):
                     needs_copy = True
                 else:
-                    if not filecmp.cmp(src_file, dst_file, shallow=False):
+                    try:
+                        s_stat = os.stat(src_file)
+                        d_stat = os.stat(dst_file)
+                        if s_stat.st_size != d_stat.st_size or abs(s_stat.st_mtime - d_stat.st_mtime) > 1.0:
+                            needs_copy = True
+                    except Exception:
                         needs_copy = True
 
                 if needs_copy:
@@ -93,7 +98,12 @@ def sync_to_apolo():
         if not os.path.exists(dst_file):
             needs_copy = True
         else:
-            if not filecmp.cmp(src_file, dst_file, shallow=False):
+            try:
+                s_stat = os.stat(src_file)
+                d_stat = os.stat(dst_file)
+                if s_stat.st_size != d_stat.st_size or abs(s_stat.st_mtime - d_stat.st_mtime) > 1.0:
+                    needs_copy = True
+            except Exception:
                 needs_copy = True
 
         if needs_copy:
