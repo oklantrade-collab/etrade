@@ -323,6 +323,54 @@ class TestMicroPullbackAndGapRunner(unittest.TestCase):
         self.assertTrue(res_with_fda["catalyst_priority_pass"])
         self.assertEqual(res_with_fda["tranche_step"], 1)
 
+    def test_bailout_spares_position_when_5m_bullish(self):
+        """Valida que Breakout or Bailout NO liquide la posición si 5m EMA3 > EMA9 sigue alcista."""
+        self.cand.in_trade = True
+        self.cand.phase = "IN_TRADE"
+        self.cand.entry_price = 50.0
+        self.cand.target_hod = 52.0
+        self.cand.stop_loss = 48.0
+        self.cand.shares = 100
+        self.cand.initial_shares = 100
+        self.cand.bars_in_trade = 8
+        self.engine.active_scalps[self.ticker] = self.cand
+
+        with patch.object(self.engine, "_is_5m_trend_bullish", return_value=True):
+            # Barra 9 llega, no rompió HOD pero precio está en 50.80 (> entry y > stop_loss)
+            bar9 = {"time": 1700000045, "open": 50.7, "high": 50.9, "low": 50.6, "close": 50.8, "volume": 8000, "is_green": True, "lower_wick_ratio": 0.1}
+            self.engine.process_5s_bar(self.ticker, bar9)
+
+            # Debe permanecer viva y no liquidada
+            self.assertTrue(self.cand.in_trade)
+            self.assertEqual(self.cand.shares, 100)
+            self.assertEqual(self.cand.bars_in_trade, 9)
+
+    def test_close_transitions_to_waiting_dip_5m(self):
+        """Si un scalp cierra pero 5m EMA3 > EMA9 sigue alcista, pasa a WAITING_DIP_5M sin entrar a lista negra."""
+        self.cand.in_trade = True
+        self.cand.shares = 50
+        self.cand.entry_price = 50.0
+        self.cand.highest_price_reached = 52.0
+        self.cand.rebuys_count = 0
+        self.engine.active_scalps[self.ticker] = self.cand
+
+        with patch.object(self.engine, "_is_5m_trend_bullish", return_value=True), \
+             patch("app.stocks.micro_pullback_engine.get_ib_connection") as mock_ib:
+            mock_conn = MagicMock()
+            mock_conn.connected = True
+            mock_conn.get_next_order_id.return_value = 5555
+            mock_conn.us_stock_contract.return_value = MagicMock()
+            mock_ib.return_value = mock_conn
+
+            self.engine._close_scalp(self.cand, reason="TAKE_PROFIT_HOD")
+
+            # No debe estar en lista negra
+            self.assertNotIn(self.ticker, self.engine.closed_tickers_today)
+            # Debe estar en fase de espera de dip
+            self.assertEqual(self.cand.phase, "WAITING_DIP_5M")
+            self.assertFalse(self.cand.in_trade)
+            self.assertEqual(self.cand.shares, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

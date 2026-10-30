@@ -67,6 +67,8 @@ class ScalpCandidateState:
         self.target_hod: float = 0.0
         self.order_id: int = 0
         self.db_order_id: str = ""
+        self.entry_rule: str = "SCALP_MICRO_PULLBACK"
+        self.last_exit_ts: float = 0.0
 
         # Cascada Escalonada y Recompras (Dips)
         self.rebuys_count: int = 0          # Máximo 3 recompras
@@ -206,6 +208,9 @@ class MicroPullbackEngine:
         elif cand.phase == "PULLBACK_OBSERVED":
             self._evaluate_pullback_progression(cand, bar_metric)
 
+        elif cand.phase == "WAITING_DIP_5M":
+            self._evaluate_dip_reentry(cand, bar_metric)
+
     # ──────────────────────────────────────────────────────────
     # ESTADO 1: Detección de Impulso Inicial
     # ──────────────────────────────────────────────────────────
@@ -298,7 +303,7 @@ class MicroPullbackEngine:
     # ──────────────────────────────────────────────────────────
     # DISPARO INMEDIATO DE LA ORDEN (Sub-segundo)
     # ──────────────────────────────────────────────────────────
-    def _trigger_entry(self, cand: ScalpCandidateState, entry_price: float):
+    def _trigger_entry(self, cand: ScalpCandidateState, entry_price: float, rule_code: str = "SCALP_MICRO_PULLBACK"):
         """Calcula tamaño Icebreaker, Stop Loss y despacha la orden por socket a TWS."""
         if len(self.active_scalps) >= MAX_CONCURRENT_SCALPS:
             log_warning(MODULE, f"Límite de scalps simultáneos ({MAX_CONCURRENT_SCALPS}) alcanzado. Omitiendo.")
@@ -318,9 +323,16 @@ class MicroPullbackEngine:
             cand.phase = "IDLE"
             return
 
-        # 2. Stop Loss Técnico: Debajo del mínimo del retroceso
-        stop_loss_price = round(cand.pullback_low - 0.02, 2)
-        target_hod_price = round(cand.impulse_high, 2)
+        # 2. Stop Loss Técnico: Debajo del mínimo del retroceso o suelo de absorción
+        if cand.pullback_low > 0:
+            stop_loss_price = round(cand.pullback_low - 0.02, 2)
+        else:
+            stop_loss_price = round(entry_price * 0.97, 2)
+
+        if cand.impulse_high > 0:
+            target_hod_price = round(max(cand.highest_price_reached, cand.impulse_high), 2)
+        else:
+            target_hod_price = round(entry_price * 1.05, 2)
 
         # 3. Preparar orden LMT Marketable (Ask + 0.02) para garantizar fill sin rechazo TWS
         limit_exec_price = round(entry_price + 0.02, 2)
@@ -338,7 +350,7 @@ class MicroPullbackEngine:
 
         # Despacho en memoria
         ib.placeOrder(order_id, contract, ib_ord)
-        log_info(MODULE, f"🚀 [ORDEN ENVIADA A TWS] BUY {shares}x {cand.ticker} @ LMT ${limit_exec_price:.2f} (SL: ${stop_loss_price:.2f}, TP HOD: ${target_hod_price:.2f})")
+        log_info(MODULE, f"🚀 [ORDEN ENVIADA A TWS] BUY {shares}x {cand.ticker} ({rule_code}) @ LMT ${limit_exec_price:.2f} (SL: ${stop_loss_price:.2f}, TP HOD: ${target_hod_price:.2f})")
 
         # Actualizar estado de posición
         cand.in_trade = True
@@ -346,8 +358,8 @@ class MicroPullbackEngine:
         cand.entry_price = entry_price
         cand.initial_shares = shares
         cand.shares = shares
-        cand.highest_price_reached = entry_price
-        cand.rebuys_count = 0
+        cand.entry_rule = rule_code
+        cand.highest_price_reached = max(cand.highest_price_reached, entry_price)
         cand.realized_scalp_profit = 0.0
         cand.entry_bar_idx = len(cand.bars)
         cand.bars_in_trade = 0
@@ -357,7 +369,7 @@ class MicroPullbackEngine:
         self.active_scalps[cand.ticker] = cand
 
         # Sincronización asíncrona a Supabase (Background)
-        self._safe_create_task(self._async_log_order_to_supabase(cand, limit_exec_price))
+        self._safe_create_task(self._async_log_order_to_supabase(cand, limit_exec_price, rule_code=rule_code))
 
     # ──────────────────────────────────────────────────────────
     # ESTADO 4: Gestión de Salida en Cascada (3 Tramos + Recompras Dips)
@@ -389,17 +401,33 @@ class MicroPullbackEngine:
         if cand.phase == "IN_TRADE":
             cand.bars_in_trade += 1
 
-            # RUPTURA HOD -> TRAMO 1: VENTA DEL 50% Y PASE A RUNNER 15M
-            if current_p >= cand.target_hod * 1.002:
+            # RUPTURA HOD O IMPULSO ALCISTA -> TRAMO 1: VENTA DEL 50% Y PASE A RUNNER 15M
+            gain_pct = ((current_p - cand.entry_price) / cand.entry_price * 100.0) if cand.entry_price > 0 else 0.0
+            is_push_gain = (gain_pct >= 2.5)
+            is_near_hod = (current_p >= cand.target_hod * 0.995)
+
+            if is_near_hod or is_push_gain:
                 self._execute_tramo_1_hod(cand, current_p)
                 return
 
-            # REGLA 'BREAKOUT OR BAILOUT' (9 BARRAS DE 5s = 45s)
+            # REGLA 'BREAKOUT OR BAILOUT'
             if cand.bars_in_trade >= MAX_BAILOUT_BARS:
-                if current_p < cand.target_hod:
-                    log_info(MODULE, f"⏳ [{cand.ticker}] BREAKOUT OR BAILOUT: Cumplidas {MAX_BAILOUT_BARS} barras (45s) sin romper HOD. Saliendo de inmediato (${current_p:.2f}).")
-                    self._close_scalp(cand, reason="BREAKOUT_OR_BAILOUT")
-                    return
+                # Comprobar si 5m EMA3 > EMA9 sigue en tendencia alcista
+                is_5m_bull = self._is_5m_trend_bullish(cand.ticker, current_p)
+
+                # Si 5m sigue alcista y el precio sostiene el stop loss técnico:
+                if is_5m_bull and current_p > cand.stop_loss:
+                    # Bailout extendido solo si transcurren más de 36 barras (3 min) perdiendo la entrada
+                    if cand.bars_in_trade >= (MAX_BAILOUT_BARS * 4) and current_p < cand.entry_price * 0.99:
+                        log_info(MODULE, f"⏳ [{cand.ticker}] BAILOUT EXTENDIDO: 3 min sin avance y perdiendo entrada (${current_p:.2f} < ${cand.entry_price:.2f}).")
+                        self._close_scalp(cand, reason="EXTENDED_BAILOUT_BELOW_ENTRY")
+                        return
+                    # De lo contrario, mantener la posición para dejar que complete el swing de 5m
+                else:
+                    if current_p < cand.target_hod:
+                        log_info(MODULE, f"⏳ [{cand.ticker}] BREAKOUT OR BAILOUT: Sin soporte 5m tras {MAX_BAILOUT_BARS} barras (45s). Saliendo (${current_p:.2f}).")
+                        self._close_scalp(cand, reason="BREAKOUT_OR_BAILOUT")
+                        return
 
         # ── FASE 2: RUNNER_15M_MODE (60% DEL RUNNER VENDIDO EN GIRO DE 15M) ──
         elif cand.phase == "RUNNER_15M_MODE":
@@ -568,6 +596,71 @@ class MicroPullbackEngine:
         except Exception as e:
             log_debug(MODULE, f"Error evaluando recompra para {cand.ticker}: {e}")
 
+    def _is_5m_trend_bullish(self, ticker: str, current_p: float) -> bool:
+        """Determina si la tendencia en 5 minutos mantiene EMA3 > EMA9 y no ha colapsado bajo soporte."""
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            snap = get_live_1h_candle_and_sipv(ticker, current_p)
+            is_5m_bull = bool(snap.get("is_ema3_above_ema9_5m", True))
+            ema9_5m = float(snap.get("ema9_5m") or 0.0)
+            if ema9_5m > 0 and current_p < ema9_5m * 0.985:
+                # Perforó más de 1.5% bajo EMA9 5m -> debilidad evidente
+                return False
+            return is_5m_bull
+        except Exception:
+            return True
+
+    def _evaluate_dip_reentry(self, cand: ScalpCandidateState, bar: dict):
+        """
+        Evalúa recompra en soporte (Buy the Dip) cuando el activo corrigió tras el spike
+        pero la tendencia en 5 minutos (EMA3 > EMA9) permanece intacta.
+        """
+        now_ts = time.time()
+        # Cooldown de 20 segundos tras el último cierre para no recomprar en la misma caída violenta
+        if now_ts - cand.last_exit_ts < 20.0:
+            return
+
+        if cand.rebuys_count >= 3:
+            cand.phase = "IDLE"
+            self.closed_tickers_today.add(cand.ticker)
+            self.unregister_ticker(cand.ticker)
+            return
+
+        current_p = bar["close"]
+        try:
+            from app.stocks.live_1h_candle_service import get_live_1h_candle_and_sipv
+            snap = get_live_1h_candle_and_sipv(cand.ticker, current_p)
+
+            is_5m_bull = bool(snap.get("is_ema3_above_ema9_5m", False))
+            if not is_5m_bull:
+                log_info(MODULE, f"📉 [{cand.ticker}] Tendencia 5m rota (EMA3 <= EMA9). Cancelando WAITING_DIP_5M.")
+                cand.phase = "IDLE"
+                self.closed_tickers_today.add(cand.ticker)
+                self.unregister_ticker(cand.ticker)
+                return
+
+            ema9_5m = float(snap.get("ema9_5m") or 0.0)
+            vwap = float(snap.get("vwap_intraday") or 0.0)
+            support_level = ema9_5m if ema9_5m > 0 else vwap
+
+            # Condición de Dip: El precio está en la zona de soporte (dentro de 2.5% de EMA9 5m o VWAP)
+            in_dip_zone = (support_level > 0 and current_p <= support_level * 1.025 and current_p >= support_level * 0.98)
+
+            # Condición de Giro: Barra de 5s verde con mecha inferior (bottoming tail) o superando High de vela previa
+            prev_bar = cand.bars[-2] if len(cand.bars) >= 2 else bar
+            has_absorption = bar["lower_wick_ratio"] >= 0.20 or bar["close"] > prev_bar["high"]
+            is_turning_up = bar["is_green"] and has_absorption
+
+            if in_dip_zone and is_turning_up:
+                cand.rebuys_count += 1
+                cand.last_rebuy_ts = now_ts
+                cand.pullback_low = bar["low"]
+                log_info(MODULE, f"🎯 [{cand.ticker}] BUY THE DIP EN SOPORTE 5M ({cand.rebuys_count}/3): "
+                                 f"Rebote en ${current_p:.2f} (Soporte EMA9 5m ${support_level:.2f}). Disparando orden!")
+                self._trigger_entry(cand, entry_price=current_p, rule_code="SCALP_BUY_THE_DIP")
+        except Exception as dip_err:
+            log_debug(MODULE, f"Error evaluando dip re-entry para {cand.ticker}: {dip_err}")
+
     def _close_scalp(self, cand: ScalpCandidateState, reason: str):
         """Envía orden de venta de cierre a TWS y resetea estado."""
         ib = get_ib_connection()
@@ -586,12 +679,22 @@ class MicroPullbackEngine:
             self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, cand.shares, reason))
 
         cand.in_trade = False
-        cand.phase = "IDLE"
         cand.shares = 0
         self.active_scalps.pop(cand.ticker, None)
-        self.closed_tickers_today.add(cand.ticker)
-        self.unregister_ticker(cand.ticker)
-        log_info(MODULE, f"🚫 [{cand.ticker}] Añadido a Lista Negra Intradía (One-and-Done). Posición cerrada y desuscrito de barras 5s; no se volverá a operar hoy.")
+        cand.last_exit_ts = time.time()
+
+        # Evaluar si la tendencia de 5m sigue viva para esperar Dip
+        last_ref_price = cand.bars[-1]["close"] if cand.bars else (cand.highest_price_reached or cand.entry_price)
+        is_5m_bull = self._is_5m_trend_bullish(cand.ticker, last_ref_price)
+
+        if is_5m_bull and cand.rebuys_count < 3 and "STOP_LOSS" not in reason:
+            cand.phase = "WAITING_DIP_5M"
+            log_info(MODULE, f"🔄 [{cand.ticker}] Scalp cerrado ({reason}), pero 5m EMA3 > EMA9 se mantiene activa. Pasando a WAITING_DIP_5M para buscar recompra en retroceso.")
+        else:
+            cand.phase = "IDLE"
+            self.closed_tickers_today.add(cand.ticker)
+            self.unregister_ticker(cand.ticker)
+            log_info(MODULE, f"🚫 [{cand.ticker}] Añadido a Lista Negra Intradía (One-and-Done). Posición cerrada y desuscrito de barras 5s; no se volverá a operar hoy.")
 
         # Actualizar journal y colchón en background
         self._safe_create_task(self._async_log_trade_close(cand, reason))
@@ -644,7 +747,7 @@ class MicroPullbackEngine:
     # ──────────────────────────────────────────────────────────
     # Persistencia Asíncrona a Supabase (Zero Latency)
     # ──────────────────────────────────────────────────────────
-    async def _async_log_order_to_supabase(self, cand: ScalpCandidateState, limit_price: float):
+    async def _async_log_order_to_supabase(self, cand: ScalpCandidateState, limit_price: float, rule_code: str = "SCALP_MICRO_PULLBACK"):
         """Registra la orden en Supabase de forma asíncrona."""
         try:
             sb = get_supabase()
@@ -652,7 +755,7 @@ class MicroPullbackEngine:
             order_data = {
                 "ticker": cand.ticker,
                 "group_name": "HOT_MICRO_PULLBACK",
-                "rule_code": "SCALP_MICRO_PULLBACK",
+                "rule_code": rule_code,
                 "order_type": "limit",
                 "direction": "buy",
                 "shares": cand.shares,
@@ -674,7 +777,7 @@ class MicroPullbackEngine:
                         "market_price": cand.entry_price,
                         "limit_price": limit_price,
                         "group_name": "HOT_MICRO_PULLBACK",
-                        "rule_code": "SCALP_MICRO_PULLBACK",
+                        "rule_code": rule_code,
                     }
                 except Exception:
                     pass

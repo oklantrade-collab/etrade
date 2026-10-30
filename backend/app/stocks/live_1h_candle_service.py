@@ -121,6 +121,10 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         "rsi_5m": 55.0,
         "is_last_candle_green": True,
         "open_ge_close_prev": True,
+        "is_ema3_above_ema9_5m": True,
+        "ema3_5m": current_price or 0.0,
+        "ema9_5m": current_price or 0.0,
+        "is_ema3_5m_ascending": True,
         # Métricas 15m & Gap Up
         "is_1h_gap_up": False,
         "gap_up_1h_pct": 0.0,
@@ -287,6 +291,27 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                 is_last_candle_green = bool(prev_bar["Close"] >= prev_bar["Open"])
                 open_ge_close_prev = bool(curr_bar["Open"] >= (prev_bar["Close"] - 0.01))
 
+        # Métricas de EMAs 5m
+        is_ema3_above_ema9_5m = True
+        ema3_5m_val = float(current_price or c_close)
+        ema9_5m_val = float(current_price or c_close)
+        is_ema3_5m_asc = True
+
+        if df_5m is not None and not df_5m.empty and len(df_5m) >= 5:
+            try:
+                c5 = df_5m["Close"].copy()
+                if current_price and current_price > 0:
+                    c5.iloc[-1] = current_price
+                ema3_5_s = c5.ewm(span=3, adjust=False).mean()
+                ema9_5_s = c5.ewm(span=9, adjust=False).mean()
+                ema3_5m_val = float(ema3_5_s.iloc[-1])
+                ema9_5m_val = float(ema9_5_s.iloc[-1])
+                is_ema3_above_ema9_5m = bool(ema3_5m_val > ema9_5m_val)
+                if len(ema3_5_s) >= 2:
+                    is_ema3_5m_asc = bool(ema3_5_s.iloc[-1] >= ema3_5_s.iloc[-2])
+            except Exception as e_5m_ema:
+                log_debug(MODULE, f"Error calculando EMAs 5m para {clean_ticker}: {e_5m_ema}")
+
         # Métricas Anti-Agotamiento Intradía (VWAP y Open del Día)
         eff_price = current_price or c_close
         day_open_price = eff_price
@@ -424,6 +449,10 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             "rsi_5m": rsi_5m,
             "is_last_candle_green": is_last_candle_green,
             "open_ge_close_prev": open_ge_close_prev,
+            "is_ema3_above_ema9_5m": is_ema3_above_ema9_5m,
+            "ema3_5m": round(ema3_5m_val, 4),
+            "ema9_5m": round(ema9_5m_val, 4),
+            "is_ema3_5m_ascending": is_ema3_5m_asc,
             "is_1h_gap_up": is_1h_gap_up,
             "gap_up_1h_pct": gap_up_1h_pct,
             # Métricas 15m
