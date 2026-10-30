@@ -448,6 +448,26 @@ async def run_stock_driven_options_pipeline(
 
     log_info(MODULE, f"🚀 Iniciando Pipeline Stock-First de Opciones para {len(candidate_symbols)} tickers...")
 
+    # 1.5 Evaluar Régimen Macro de Mercado (SPY) para alinear dirección general (Día de PUTs vs Día de CALLs)
+    is_market_bearish_day = False
+    is_market_bullish_day = False
+    try:
+        spy_15m = await provider.get_ohlcv("SPY", interval="15m", period="5d")
+        if spy_15m is not None and len(spy_15m) >= 20:
+            c_spy = _safe_col(spy_15m, "close")
+            o_spy = _safe_col(spy_15m, "open")
+            ema20_spy = float(c_spy.ewm(span=20, adjust=False).mean().iloc[-1])
+            cur_spy = float(c_spy.iloc[-1])
+            open_day_spy = float(o_spy.iloc[0])
+            is_market_bearish_day = (cur_spy < ema20_spy) and (cur_spy < open_day_spy)
+            is_market_bullish_day = (cur_spy > ema20_spy) and (cur_spy > open_day_spy)
+            if is_market_bearish_day:
+                log_info(MODULE, f"📉 RÉGIMEN MERCADO BAJISTA (DÍA DE PUTS): SPY (${cur_spy:.2f}) < EMA20 (${ema20_spy:.2f}) y apertura (${open_day_spy:.2f}). Se vetan compras de CALLs ordinarias y se priorizan PUTs.")
+            elif is_market_bullish_day:
+                log_info(MODULE, f"📈 RÉGIMEN MERCADO ALCISTA (DÍA DE CALLS): SPY (${cur_spy:.2f}) > EMA20 (${ema20_spy:.2f}). Se vetan compras de PUTs ordinarias.")
+    except Exception as e_spy:
+        log_warning(MODULE, f"Aviso al evaluar régimen macro SPY: {e_spy}")
+
     call_candidates: List[Dict[str, Any]] = []
     put_candidates: List[Dict[str, Any]] = []
 
@@ -467,9 +487,22 @@ async def run_stock_driven_options_pipeline(
             eval_res = evaluate_stock_for_options_triggers(sym, df_5m, df_15m, df_1d=df_1d)
             if eval_res.get("is_qualified"):
                 rec_dir = eval_res.get("recommended_direction")
+                cat_tier = int(eval_res.get("catalyst_info", {}).get("tier", 3))
+
+                # Filtro de Régimen Macro: En día bajista (Día de PUTs), vetar CALLs a menos que tengan catalizador Tier 1
+                if rec_dir == "CALL" and is_market_bearish_day and cat_tier > 1:
+                    log_info(MODULE, f"🛡️ VETO MACRO CALL: {sym} calificado para CALL descartado porque el mercado general está en caída fuerte (SPY bajista).")
+                    continue
+                elif rec_dir == "PUT" and is_market_bullish_day and cat_tier > 1:
+                    log_info(MODULE, f"🛡️ VETO MACRO PUT: {sym} calificado para PUT descartado porque el mercado general está en fuerte alza (SPY alcista).")
+                    continue
+
                 if rec_dir == "CALL":
                     call_candidates.append(eval_res)
                 elif rec_dir == "PUT":
+                    # Si el mercado es bajista, premiar PUTs en rebotes extremos
+                    if is_market_bearish_day:
+                        eval_res["score"] = min(100.0, float(eval_res.get("score") or 0.0) + 15.0)
                     put_candidates.append(eval_res)
         except Exception as e_sym:
             log_warning(MODULE, f"Error evaluando subyacente {sym}: {e_sym}")

@@ -2820,18 +2820,28 @@ async def run_options_gap_defense_cycle():
             eval_pos["unrealized_pnl_pct"] = cur_pnl_pct
 
             if eval_res.get("should_exit"):
-                exit_code_cand = eval_res.get("rule_code", "OPT_GAP_EXIT")
-                is_emergency_hard_sl = (exit_code_cand == "OPT_SWING_HARD_SL" or "HARD_SL" in exit_code_cand) and cur_pnl_pct <= -45.0
+                exit_code_cand = str(eval_res.get("rule_code") or "OPT_GAP_EXIT")
+                exit_code_lower = exit_code_cand.lower()
+                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in ("sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap"))
 
-                # Candado 1: Expansión de Bandas de Bollinger en 15m (Regla Usuario: Mientras Upper sube y Lower baja -> NO CERRAR)
-                if tech_ctx.get("is_bb_expanding_15m") and not is_emergency_hard_sl:
-                    log_info(MODULE, f"🔒 CANDADO BOLLINGER 15m: {symbol} Bandas en expansión (Upper sube, Lower baja). Bloqueando salida {exit_code_cand}. Dejando correr impulso de momentum.")
-                    eval_res["should_exit"] = False
+                # Candados restrictivos (Candado 1 Bollinger y Candado 2 Swing Multi-Semana)
+                # NUNCA deben bloquear un Stop Loss técnico ni un corte defensivo de pérdidas!
+                if not is_stop_loss_or_invalidation:
+                    # Candado 1: Expansión de Bandas de Bollinger en 15m (solo si momentum es favorable a la posición)
+                    is_expanding = bool(tech_ctx.get("is_bb_expanding_15m"))
+                    p_di = float(tech_ctx.get("plus_di_15m") or 20.0)
+                    m_di = float(tech_ctx.get("minus_di_15m") or 20.0)
+                    dir_aligned = (p_di > m_di) if is_call else (m_di > p_di)
+                    if is_expanding and dir_aligned and not is_gap_runner:
+                        log_info(MODULE, f"🔒 CANDADO BOLLINGER 15m: {symbol} Bandas en expansión favorable. Bloqueando salida {exit_code_cand}. Dejando correr impulso de momentum.")
+                        eval_res["should_exit"] = False
 
-                # Candado 2: Opciones Multi-Semana (DTE >= 4) con Umbral +3% de ganancia neta acordada
-                if is_swing_multiweek and cur_pnl_pct < 3.0 and not is_emergency_hard_sl:
-                    log_info(MODULE, f"⛔ BLOQUEO SALIDA SWING: {symbol} vence {expiry_str} (DTE {dte_days_v}d). Regla de negocio: Opciones que vencen la próxima semana o posteriores NO se cierran por debajo de +3.0% de ganancia (PnL actual: {cur_pnl_pct:+.2f}% < +3.0%). Manteniendo posición abierta.")
-                    eval_res["should_exit"] = False
+                    # Candado 2: Opciones Multi-Semana (DTE >= 4) con Umbral +3% de ganancia neta acordada
+                    # SOLO protege ganancias positivas menores al 3% (evita tomar centavos en swing).
+                    # JAMÁS bloquea salidas cuando la posición está en pérdida (cur_pnl_pct <= 0.0) ni en Stop Loss.
+                    if is_swing_multiweek and 0.0 < cur_pnl_pct < 3.0:
+                        log_info(MODULE, f"⛔ BLOQUEO SALIDA SWING: {symbol} vence {expiry_str} (DTE {dte_days_v}d). Regla de negocio: Opciones que vencen la próxima semana o posteriores NO se cierran por debajo de +3.0% de ganancia (PnL actual: {cur_pnl_pct:+.2f}% < +3.0%). Manteniendo posición abierta.")
+                        eval_res["should_exit"] = False
 
                 # Blindaje definitivo: Si la salida fue bloqueada por cualquier regla, salir del bloque de cierre inmediatamente
                 if not eval_res.get("should_exit"):
