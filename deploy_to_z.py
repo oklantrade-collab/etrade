@@ -1,75 +1,120 @@
-import shutil
 import os
-
-files_to_copy = [
-    # Módulos Core & Filtros Macro / Riesgo (Propuestas #1, #2, #3, #7)
-    "backend/app/core/macro_sentiment_engine.py",
-    "backend/app/core/relative_strength.py",
-    "backend/app/core/cost_guard.py",
-    "backend/app/core/circuit_breaker.py",
-    "backend/app/core/structural_regime_engine.py",
-    "backend/app/core/market_hours.py",
-
-    # Opciones & Pre-Trade Validator
-    "backend/app/options/pre_trade_validator.py",
-    "backend/app/options/score.py",
-    "backend/app/options/autonomous_options_dispatcher.py",
-    "backend/app/options/opt_contract_picker.py",
-    "backend/app/options/aduana_gap_runner_options.py",
-    "backend/app/options/options_aduana.py",
-    "backend/app/options/settings_defaults.py",
-    "backend/app/options/paper_execution.py",
-    "backend/app/options/stock_driven_options_scanner.py",
-    "backend/app/options/exit_engine.py",
-    "backend/app/options/candidates.py",
-    "backend/app/options/worker.py",
-    "backend/app/options/bs.py",
-    "backend/app/api/options.py",
-
-    # Stocks Orchestration & Cost Basis Buffer Exits
-    "backend/app/stocks/stocks_orchestrator.py",
-    "backend/app/stocks/stocks_order_executor.py",
-    "backend/app/stocks/stocks_adaptive_tp_v2.py",
-    "backend/app/stocks/aduana_stocks_exit_engine.py",
-    "backend/app/stocks/aduana_gap_runner_engine.py",
-    "backend/app/stocks/alpha_runner_scanner.py",
-    "backend/app/stocks/bull_expansion_scanner.py",
-    "backend/app/stocks/bear_rollover_scanner.py",
-    "backend/app/stocks/catalyst_classifier.py",
-    "backend/app/stocks/live_1h_candle_service.py",
-    "backend/app/stocks/trap_shield.py",
-    "backend/app/workers/stocks_scheduler.py",
-    "backend/app/data/ib_scanner.py",
-    "backend/tests/test_bull_expansion_scanner.py",
-    "backend/tests/test_bear_rollover_scanner.py",
-    "backend/tests/test_autonomous_options_dispatcher.py",
-
-    # IBKR Bridge Worker (APOLO TWS Bridge + LMT Shield + Slippage Reconciliation)
-    "backend/app/workers/ib_bridge_worker.py",
-
-    # Otros módulos
-    "backend/app/workers/forex_worker_standalone.py",
-    "backend/app/workers/forex_execution_service.py",
-    "backend/app/execution/providers/ctrader_provider.py",
-]
+import shutil
+import filecmp
 
 source_base = "C:/Fuentes/eTrade"
 target_base = "Z:/etrade"
 
-if not os.path.exists(target_base):
-    print(f"AVISO: {target_base} no está accesible en este momento. Conecte APOLO o monte la unidad Z: para sincronizar.")
-else:
-    for f in files_to_copy:
-        src = os.path.join(source_base, f.replace("/", os.sep))
-        dst = os.path.join(target_base, f.replace("/", os.sep))
-        
-        if os.path.exists(src):
-            try:
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                shutil.copy2(src, dst)
-                print(f"Copiado a Z: {f}")
-            except Exception as e:
-                print(f"No se pudo copiar {f}: {e}")
+# Core folders and specific files to sync to APOLO
+folders_to_sync = [
+    "backend/app/options",
+    "backend/app/core",
+    "backend/app/stocks",
+    "backend/app/workers",
+    "backend/app/data",
+    "backend/app/api",
+]
+
+individual_files = [
+    "run_ib_bridge.bat",
+    "backend/run_options_worker.bat",
+    "backend/app/main.py",
+]
+
+def sync_to_apolo():
+    if not os.path.exists(target_base):
+        print(f"❌ ERROR: {target_base} no está accesible. Verifique la conexión de red a APOLO (\\192.168.1.105\\Fuentes).")
+        return False
+
+    print(f"============================================================")
+    print(f"   SINCRONIZANDO ETRADE HACIA SERVIDOR APOLO ({target_base})")
+    print(f"============================================================")
+
+    copied_files = []
+    skipped_files = []
+    error_files = []
+
+    # 1. Sync folders
+    for folder in folders_to_sync:
+        src_dir = os.path.join(source_base, folder.replace("/", os.sep))
+        dst_dir = os.path.join(target_base, folder.replace("/", os.sep))
+
+        if not os.path.exists(src_dir):
+            continue
+
+        for root, dirs, files in os.walk(src_dir):
+            if any(x in root for x in ["__pycache__", ".pytest_cache"]):
+                continue
+            rel_path = os.path.relpath(root, src_dir)
+            target_sub_dir = os.path.join(dst_dir, rel_path) if rel_path != "." else dst_dir
+
+            for f in files:
+                if f.endswith((".pyc", ".tmp", ".log")):
+                    continue
+                src_file = os.path.join(root, f)
+                dst_file = os.path.join(target_sub_dir, f)
+                display_name = os.path.relpath(src_file, source_base)
+
+                needs_copy = False
+                if not os.path.exists(dst_file):
+                    needs_copy = True
+                else:
+                    if not filecmp.cmp(src_file, dst_file, shallow=False):
+                        needs_copy = True
+
+                if needs_copy:
+                    try:
+                        os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                        shutil.copy2(src_file, dst_file)
+                        size_kb = os.path.getsize(src_file) / 1024
+                        print(f"  [COPIADO] {display_name} ({size_kb:.1f} KB)")
+                        copied_files.append(display_name)
+                    except Exception as e:
+                        print(f"  [ERROR] {display_name}: {e}")
+                        error_files.append((display_name, str(e)))
+                else:
+                    skipped_files.append(display_name)
+
+    # 2. Sync individual files
+    for item in individual_files:
+        src_file = os.path.join(source_base, item.replace("/", os.sep))
+        dst_file = os.path.join(target_base, item.replace("/", os.sep))
+
+        if not os.path.exists(src_file):
+            continue
+
+        needs_copy = False
+        if not os.path.exists(dst_file):
+            needs_copy = True
         else:
-            print(f"No existe: {src}")
-    print("Sincronización a APOLO (Z:) finalizada.")
+            if not filecmp.cmp(src_file, dst_file, shallow=False):
+                needs_copy = True
+
+        if needs_copy:
+            try:
+                os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+                size_kb = os.path.getsize(src_file) / 1024
+                print(f"  [COPIADO] {item} ({size_kb:.1f} KB)")
+                copied_files.append(item)
+            except Exception as e:
+                print(f"  [ERROR] {item}: {e}")
+                error_files.append((item, str(e)))
+        else:
+            skipped_files.append(item)
+
+    print(f"\n============================================================")
+    print(f"   RESUMEN DE SINCRONIZACIÓN A SERVIDOR APOLO")
+    print(f"============================================================")
+    print(f"Archivos actualizados/copiados : {len(copied_files)}")
+    print(f"Archivos ya idénticos (al día) : {len(skipped_files)}")
+    print(f"Errores de copiado            : {len(error_files)}")
+    if copied_files:
+        print("\nDetalle de archivos sincronizados a APOLO:")
+        for cf in copied_files:
+            print(f"  ✓ {cf}")
+    print(f"============================================================\n")
+    return len(error_files) == 0
+
+if __name__ == "__main__":
+    sync_to_apolo()

@@ -1,8 +1,8 @@
 @echo off
 TITLE eTrade Options Worker (PAPER - solo lectura)
 set "BACKEND_DIR=%~dp0"
-IF NOT EXIST "%BACKEND_DIR%app" set "BACKEND_DIR=D:\Fuentes\etrade\backend\"
-IF NOT EXIST "%BACKEND_DIR%app" set "BACKEND_DIR=C:\Fuentes\etrade\backend\"
+IF NOT EXIST "%BACKEND_DIR%app" IF EXIST "C:\Fuentes\etrade\backend\app" set "BACKEND_DIR=C:\Fuentes\etrade\backend\"
+IF NOT EXIST "%BACKEND_DIR%app" IF EXIST "D:\Fuentes\etrade\backend\app" set "BACKEND_DIR=D:\Fuentes\etrade\backend\"
 cd /d "%BACKEND_DIR%"
 set PYTHONPATH=%cd%;%PYTHONPATH%
 
@@ -23,5 +23,8 @@ echo ========================================================
 echo    eTrade Options - IB Paper Worker (Client ID: %OPT_IB_CLIENT_ID%)
 echo ========================================================
 echo Iniciando Options Worker en %BACKEND_DIR%...
+:run_options
 %PYTHON_EXE% -m app.options.worker
-pause
+echo [AVISO] El Options Worker se detuvo. Reiniciando en 3 segundos...
+timeout /t 3 /nobreak >nul
+goto run_options

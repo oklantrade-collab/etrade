@@ -1,6 +1,7 @@
 @echo off
 set "PROJECT_DIR=%~dp0"
-IF NOT EXIST "%PROJECT_DIR%backend\app" set "PROJECT_DIR=C:\Fuentes\etrade\"
+IF NOT EXIST "%PROJECT_DIR%backend\app" IF EXIST "C:\Fuentes\etrade\backend\app" set "PROJECT_DIR=C:\Fuentes\etrade\"
+IF NOT EXIST "%PROJECT_DIR%backend\app" IF EXIST "D:\Fuentes\etrade\backend\app" set "PROJECT_DIR=D:\Fuentes\etrade\"
 IF NOT EXIST "%PROJECT_DIR%backend\app" (
     echo [ERROR] No se encontro la carpeta del proyecto. Edita PROJECT_DIR en este .bat.
     pause
