@@ -263,7 +263,138 @@ SESSION_72K_CASE_STUDY = WarriorSession(
     ]
 )
 
+SESSION_COLD_MARKET_CASE_STUDY = WarriorSession(
+    session_date="2024-08-29",
+    video_title="Don't Make It Worse!",
+    video_url="https://www.youtube.com/watch?v=warrior_dont_make_it_worse",
+    net_pnl=-1516.16,
+    account_mode="main_account",
+    prior_drawdown=0.0,
+    mental_state="Mercado frío, lento y errático en pre-mercado con S&P 500 y Nasdaq en rojo; breakouts sin volumen de continuación.",
+    key_mindset_change="Regla de oro: 'Don't Make It Worse!'. Reducir el tamaño de posición al 25%-33% del estándar. Aceptar una pérdida pequeña (-$1,500) y proteger el capital en vez de entrar en espiral de venganza arriesgando -$15,000 o -$20,000.",
+    stop_trading_discipline="Cerrar la sesión temprano tras detectar mechas de rechazo superiores (topping tails) y giros violentos (jackknife). Dejar de operar antes de que el mercado abra si no hay confirmación.",
+    notes="Sesión defensiva maestra. Operó PCLA (-$1,000), NWE (-$798.16) y DAVI (+$282). Descartó con disciplina NCPL (thickly traded), AXG (sin volumen tras split) y DAIC (noticia positiva pero en cinta roja).",
+    trades=[
+        WarriorTrade(
+            ticker="PCLA",
+            archetype_code="ROSS_COLD_MARKET_DEFENSE",
+            pnl=-1000.00,
+            duration_seconds=180,
+            sector="Salud / Farmacéutica Japonesa",
+            float_shares=8_000_000,
+            running_surge_pct=40.0,
+            avg_entry_price=3.20,
+            avg_exit_price=3.05,
+            key_takeaway="En mercado frío, el intento de curl back hacia máximos falló con vela de rechazo superior (topping tail candle). Liquidación defensiva rápida.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=3.20,
+                    trigger_observed="Intento de recuperación (curl back) hacia los máximos de la mañana tras rebote inicial.",
+                    action_taken="Comprar con tamaño de posición reducido para buscar continuación alcista.",
+                    risk_factor="Mercado macro frío sin volumen de seguimiento institucional.",
+                    result_outcome="El precio sube brevemente pero no logra absorber las ventas en la zona alta."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="EXIT",
+                    price_level=3.05,
+                    trigger_observed="Aparición de mecha superior de rechazo (topping tail candle) y reanudación de volumen vendedor.",
+                    action_taken="Cortar la posición con pérdida controlada de -$1,000 para no agrandar el daño.",
+                    risk_factor="Desplome posterior si se intenta aguantar (hope mode).",
+                    result_outcome="Pérdida pequeña asumida con disciplina; la acción siguió cayendo."
+                ),
+            ]
+        ),
+        WarriorTrade(
+            ticker="NWE",
+            archetype_code="ROSS_COLD_MARKET_DEFENSE",
+            pnl=-798.16,
+            duration_seconds=360,
+            sector="Energía / Utilities",
+            float_shares=14_000_000,
+            running_surge_pct=35.0,
+            avg_entry_price=7.25,
+            avg_exit_price=7.10,
+            peak_unrealized_pnl=350.00,
+            giveback_pnl=1148.16,
+            key_takeaway="Ruptura de compresión en techo plano (flat top squeeze) en $7.33 provocó un doble techo y rechazo violento (jackknife). Prohibido forzar recompras en techos en mercado rojo.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=6.90,
+                    trigger_observed="Retroceso hacia soporte (buy the dip) tras subida matutina.",
+                    action_taken="Comprar en el dip con lote pequeño.",
+                    risk_factor="Mercado sin momentum.",
+                    result_outcome="Pequeño rebote aprovechado para tomar una ganancia modesta."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="ENTRY",
+                    price_level=7.25,
+                    trigger_observed="Consolidación en la zona alta buscando compresión alcista (squeeze through flat top) en $7.33.",
+                    action_taken="Volver a comprar en la ruptura anticipada.",
+                    risk_factor="Doble techo en resistencia sin fuerza de ruptura.",
+                    result_outcome="Fallo rotundo en $7.33 formando doble techo."
+                ),
+                WarriorTradePhase(
+                    sequence_order=3,
+                    phase_type="EXIT",
+                    price_level=7.10,
+                    trigger_observed="Rechazo alcista violento en forma de navaja (jackknife reversal) desplomándose en segundos.",
+                    action_taken="Venta inmediata para frenar la sangría.",
+                    risk_factor="Deslizamiento si no se corta en el acto.",
+                    result_outcome="Devolvió la ganancia inicial y cerró con -$798.16 USD de pérdida neta."
+                ),
+            ]
+        ),
+        WarriorTrade(
+            ticker="DAVI",
+            archetype_code="ROSS_COLD_MARKET_DEFENSE",
+            pnl=282.00,
+            duration_seconds=120,
+            sector="Tecnología / Inteligencia Artificial",
+            float_shares=7_200_000,
+            running_surge_pct=50.0,
+            avg_entry_price=4.05,
+            avg_exit_price=4.15,
+            peak_unrealized_pnl=350.00,
+            key_takeaway="En mercado frío, si una ruptura ($4.00) no tiene aceleración inmediata, tomar ganancias mínimas (+3% a +5%) y salir rápido.",
+            phases=[
+                WarriorTradePhase(
+                    sequence_order=1,
+                    phase_type="ENTRY",
+                    price_level=4.05,
+                    trigger_observed="Noticia positiva y gráfico diario similar al patrón de la acción AI, rompiendo los $4.00 buscando $5.00-$6.00.",
+                    action_taken="Entrar con lote moderado en la rotura de $4.00.",
+                    risk_factor="Mercado general apagado que frena los seguimientos.",
+                    result_outcome="Pequeño empuje comprador hacia $4.15-$4.20."
+                ),
+                WarriorTradePhase(
+                    sequence_order=2,
+                    phase_type="EXIT",
+                    price_level=4.15,
+                    trigger_observed="Falta de volumen y desaceleración inmediata de la cinta.",
+                    action_taken="Vender para asegurar +$282 USD de ganancia parcial.",
+                    risk_factor="Reversión a negativo si se espera el target optimista de $5.00.",
+                    result_outcome="Aseguró pequeña ganancia y evitó quedar atrapado en la posterior caída."
+                ),
+            ]
+        ),
+    ]
+)
+
 ARCHETYPES_CATALOG = {
+    "ROSS_COLD_MARKET_DEFENSE": {
+        "name": "Defensa Activa en Mercado Frío/Rojo (Don't Make It Worse)",
+        "description": "Protocolo de reducción de riesgo y supervivencia cuando S&P 500 / Nasdaq están en rojo y los breakouts no tienen seguimiento. Tamaño al 25%-33%, prohibidas recompras en techos planos y salida inmediata ante mechas de rechazo (topping tails).",
+        "ideal_time": "08:30-09:45 AM (Pre-Market y Apertura)",
+        "ideal_float_max": 10_000_000,
+        "ideal_price_range": (1.50, 10.00),
+        "pitfalls": ["Overtrading / Revenge trading", "Buying flat-top squeezes in cold tape", "Holding through topping tail candles", "Trading thickly traded or illiquid reverse splits"]
+    },
     "ROSS_VWAP_BOUNCE_CLEAN": {
         "name": "Rebote Limpio en Soporte VWAP",
         "description": "Entrada en el soporte de VWAP tras un primer impulso fuerte. Evita el primer micro pullback si colisiona con resistencias mayores (ej. 200 MA overhead).",
@@ -299,7 +430,7 @@ class WarriorPlaybookEngine:
     """Motor de consulta y evaluación de oportunidades en vivo contra el Playbook de Ross Cameron."""
 
     def __init__(self):
-        self._sessions: List[WarriorSession] = [SESSION_72K_CASE_STUDY]
+        self._sessions: List[WarriorSession] = [SESSION_72K_CASE_STUDY, SESSION_COLD_MARKET_CASE_STUDY]
         self._archetypes = ARCHETYPES_CATALOG
 
     def get_all_sessions(self) -> List[Dict[str, Any]]:
@@ -330,6 +461,14 @@ class WarriorPlaybookEngine:
         - spread_pct: Optional[float] (Spread Bid/Ask porcentual)
         - is_consolidating_above_vwap: Optional[bool]
         - tape_acceleration: Optional[bool] (Cinta verde rápida en 5s)
+        - macro_is_red / is_cold_market: Optional[bool] (S&P 500 / Nasdaq en rojo o mercado lento)
+        - is_thickly_traded: Optional[bool] (Libro de órdenes saturado de bloques gigantes)
+        - is_reverse_split: Optional[bool] (Acción con split inverso reciente)
+        - volume: Optional[float] (Volumen acumulado)
+        - has_topping_tail: Optional[bool] (Vela con mecha superior >40% de rechazo)
+        - is_flat_top_squeeze: Optional[bool] (Intento de rotura de techo plano)
+        - has_positive_news: Optional[bool] (Noticia alcista)
+        - candle_is_red: Optional[bool] (Vela roja en pre-market o intradía)
         """
         ticker = str(context.get("ticker", "")).upper()
         price = float(context.get("price", 0.0))
@@ -338,9 +477,152 @@ class WarriorPlaybookEngine:
         change_pct = float(context.get("change_pct", 0.0))
         float_shares = float(context.get("float_shares", 10_000_000))
         spread_pct = float(context.get("spread_pct", 0.5))
+        volume = float(context.get("volume", 1_000_000))
         is_running_up = bool(context.get("is_running_up", False))
         is_consolidating_above_vwap = bool(context.get("is_consolidating_above_vwap", False))
         tape_acceleration = bool(context.get("tape_acceleration", False))
+
+        # Flags de mercado frío y filtros defensivos de Ross Cameron ("Don't Make It Worse!")
+        is_cold_market = bool(context.get("macro_is_red", False) or context.get("is_cold_market", False))
+        is_thickly_traded = bool(context.get("is_thickly_traded", False))
+        is_reverse_split = bool(context.get("is_reverse_split", False))
+        has_topping_tail = bool(context.get("has_topping_tail", False))
+        is_flat_top_squeeze = bool(context.get("is_flat_top_squeeze", False))
+        has_positive_news = bool(context.get("has_positive_news", False))
+        candle_is_red = bool(context.get("candle_is_red", False))
+
+        # ── CASO COLD 1: FILTRO DE ACCIÓN PESADA / THICKLY TRADED (Lección NCPL) ──
+        if is_thickly_traded:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Filtro Anti-Acción Pesada (Thickly Traded)",
+                similarity_score=0.94,
+                recommended_action="BLOCK_THICKLY_TRADED_TAPE",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="NCPL (Descartada)",
+                reasoning=(
+                    f"{ticker} descartada por libro de órdenes excesivamente denso (thickly traded) con bloques masivos en compra y venta. "
+                    f"Lección de Ross Cameron en NCPL: A pesar de ser la principal ganadora del día en porcentaje, los muros en Level 2 frenan el movimiento "
+                    f"e impiden la expansión rápida de precios. Prohibido comprar acciones lentas y pesadas."
+                ),
+                execution_params={"block_entries": True, "reason": "Thickly traded Level 2"},
+                lessons_learned=[
+                    "No operar gappers pesados con exceso de liquidez estancada en Level 2",
+                    "Buscar acciones ligeras (thin tape) donde órdenes de mercado muevan centavos con facilidad"
+                ]
+            )
+
+        # ── CASO COLD 2: FILTRO DE REVERSE SPLIT SIN VOLUMEN (Lección AXG) ──
+        if is_reverse_split and volume < 100_000:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Filtro de Reverse Split Ilíquido",
+                similarity_score=0.95,
+                recommended_action="BLOCK_ILLIQUID_REVERSE_SPLIT",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="AXG (Descartada)",
+                reasoning=(
+                    f"{ticker} descartada por falta extrema de volumen ({volume:,.0f} acciones) tras split inverso. "
+                    f"Lección de Ross Cameron en AXG: Descartada tras un reverse split de 200 a 1 con solo 5,000 acciones operadas; "
+                    f"el float bajo artificial sin compradores reales crea trampas sin liquidez de salida."
+                ),
+                execution_params={"block_entries": True, "min_volume_required": 100_000},
+                lessons_learned=["Ignorar bajas de float artificiales tras reverse split si no hay volumen masivo que lo confirme"]
+            )
+
+        # ── CASO COLD 3: FILTRO DE NOTICIA POSITIVA EN CINTA ROJA (Lección DAIC) ──
+        if has_positive_news and candle_is_red:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Filtro de Catalizador en Terreno Rojo",
+                similarity_score=0.92,
+                recommended_action="BLOCK_RED_TAPE_CATALYST",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="DAIC (Descartada)",
+                reasoning=(
+                    f"{ticker} publicó noticia positiva pero el gráfico está en terreno rojo o vela bajista. "
+                    f"Lección de Ross Cameron en DAIC: Noticia positiva de permanecer en NASDAQ descartada porque el precio no mostró demanda "
+                    f"y cotizó en rojo. La acción manda sobre la noticia; si no sube con volumen verde, no se compra."
+                ),
+                execution_params={"block_entries": True, "require_green_candle": True},
+                lessons_learned=["No comprar noticias positivas si el precio cotiza en vela roja"]
+            )
+
+        # ── CASO COLD 4: CORTE DEFENSIVO POR TOPPING TAIL CANDLE (Lección PCLA) ──
+        if has_topping_tail and is_cold_market:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Corte Defensivo por Mecha Superior de Rechazo",
+                similarity_score=0.93,
+                recommended_action="DEFENSIVE_CUT_TOPPING_TAIL",
+                action_type="SAFETY_GUARD",
+                historical_trade_ref="PCLA (-$1,000 USD)",
+                reasoning=(
+                    f"{ticker} intentó recuperación (curl back) pero generó mecha superior de rechazo (topping tail candle). "
+                    f"Lección de Ross Cameron en PCLA: En mercado frío, el rechazo superior indica fallo de continuación y reanudación de ventas. "
+                    f"Liquidación defensiva inmediata aceptando pérdida controlada (-$1,000) bajo el principio 'Don't Make It Worse!'."
+                ),
+                execution_params={"hard_stop_on_candle_low": True, "cancel_adds": True},
+                lessons_learned=[
+                    "Cortar de inmediato si aparece topping tail candle en mercado frío",
+                    "Aceptar pérdidas pequeñas y controladas en lugar de esperar recuperaciones milagrosas"
+                ]
+            )
+
+        # ── CASO COLD 5: BLOQUEO DE RUPTURA EN TECHO PLANO / ANTI-JACKKNIFE (Lección NWE) ──
+        if is_flat_top_squeeze and is_cold_market:
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Bloqueo Anti-Jackknife en Techo Plano",
+                similarity_score=0.91,
+                recommended_action="BLOCK_FLAT_TOP_BREAKOUT_IN_COLD_MARKET",
+                action_type="BLOCK_ENTRY",
+                historical_trade_ref="NWE (-$798.16 USD)",
+                reasoning=(
+                    f"Intento de compra en compresión de techo plano (flat top squeeze) en mercado frío. "
+                    f"Lección de Ross Cameron en NWE: Comprar en la zona alta buscando ruptura de techo provocó un doble techo y rechazo violento "
+                    f"en forma de navaja (jackknife reversal), devolviendo las ganancias del dip previo. Prohibido forzar rupturas en techos planos cuando los índices están en rojo."
+                ),
+                execution_params={"block_high_pivot_buys": True, "allow_only_deep_dips": True},
+                lessons_learned=[
+                    "No forzar compras en techos planos si el mercado macro está apagado",
+                    "Evitar dobles techos con giros violentos (jackknife reversals)"
+                ]
+            )
+
+        # ── CASO COLD 6: PROTOCOLO GENERAL DE TAMAÑO DEFENSIVO (Lección DAVI / Don't Make It Worse) ──
+        if is_cold_market and not is_running_up:
+            # Modificador defensivo de parámetros si el mercado está frío
+            return PlaybookMatchResult(
+                matched=True,
+                archetype_code="ROSS_COLD_MARKET_DEFENSE",
+                archetype_name="Modo Defensivo de Mercado Frío (Don't Make It Worse)",
+                similarity_score=0.89,
+                recommended_action="APPLY_COLD_MARKET_REDUCED_SIZING",
+                action_type="SAFETY_GUARD",
+                historical_trade_ref="DAVI (+$282 USD) / Sesión 'Don't Make It Worse'",
+                reasoning=(
+                    f"Mercado macro en rojo o pre-mercado frío sin volumen institucional. "
+                    f"Protocolo 'Don't Make It Worse': Reducción obligatoria del tamaño de lote al 25%-33% del estándar. "
+                    f"Targets reducidos (+3% a +6% tipo DAVI) y stop loss ultracorto. Límite estricto de pérdida máxima de sesión (-$1,500) para blindar el capital."
+                ),
+                execution_params={
+                    "position_size_multiplier": 0.30,  # 30% del tamaño normal
+                    "take_profit_target_pct": 5.0,     # Target modesto rápido
+                    "max_daily_loss_limit": 1500.0,    # Límite estricto de cierre de sesión
+                    "stop_loss_pct": 1.5
+                },
+                lessons_learned=[
+                    "Reducir tamaño al 25%-33% cuando los índices generales estén en rojo",
+                    "Tomar ganancias mínimas rápidas y no esperar continuaciones de +20%",
+                    "Detener el robot si el drawdown del día alcanza -$1,500"
+                ]
+            )
 
         # ── CASO A: GUARDIA DE SEGURIDAD 200 MA OVERHEAD (Lección VWave) ──
         if sma_200 and sma_200 > price and ((sma_200 - price) / price) < 0.025:
