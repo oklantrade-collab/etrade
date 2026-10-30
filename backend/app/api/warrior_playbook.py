@@ -54,6 +54,19 @@ def get_case_study_72k():
     }
 
 
+@router.post("/ingest")
+def ingest_new_experience(payload: Dict[str, Any]):
+    """
+    Endpoint del proceso WARRIOR_EXPERIENCE_INGESTOR.
+    Permite registrar un nuevo video o caso de estudio de trading para alimentar el robot.
+    """
+    from app.stocks.warrior_experience_ingestor import ingest_warrior_experience
+    res = ingest_warrior_experience(payload)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Error en ingesta"))
+    return res
+
+
 @router.post("/evaluate")
 def evaluate_ticker_against_playbook(req: LiveEvaluationRequest):
     """

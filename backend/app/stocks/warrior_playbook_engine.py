@@ -481,6 +481,77 @@ class WarriorPlaybookEngine:
             lessons_learned=[]
         )
 
+    def add_session(self, session: WarriorSession, persist_supabase: bool = True) -> bool:
+        """Agrega una nueva sesión o video al banco de datos en memoria y opcionalmente a Supabase."""
+        # Evitar duplicados por fecha y título
+        for idx, s in enumerate(self._sessions):
+            if s.session_date == session.session_date and s.video_title == session.video_title:
+                self._sessions[idx] = session
+                log_info(MODULE, f"Actualizada sesión existente en memoria: {session.video_title} ({session.session_date})")
+                break
+        else:
+            self._sessions.append(session)
+            log_info(MODULE, f"Nueva sesión incorporada al Playbook: {session.video_title} ({session.session_date}) - {len(session.trades)} trades")
+
+        if persist_supabase:
+            try:
+                from app.core.supabase_client import get_supabase
+                sb = get_supabase()
+                
+                # 1. Insert session
+                sess_row = sb.table("warrior_sessions").upsert({
+                    "session_date": session.session_date,
+                    "video_title": session.video_title,
+                    "video_url": session.video_url,
+                    "net_pnl": session.net_pnl,
+                    "account_mode": session.account_mode,
+                    "prior_drawdown": session.prior_drawdown,
+                    "mental_state": session.mental_state,
+                    "key_mindset_change": session.key_mindset_change,
+                    "stop_trading_discipline": session.stop_trading_discipline,
+                    "notes": session.notes,
+                }, on_conflict="session_date,video_title").execute()
+                
+                if sess_row.data:
+                    sess_id = sess_row.data[0]["id"]
+                    for t in session.trades:
+                        t_row = sb.table("warrior_trades").insert({
+                            "session_id": sess_id,
+                            "archetype_code": t.archetype_code,
+                            "ticker": t.ticker,
+                            "pnl": t.pnl,
+                            "duration_seconds": t.duration_seconds,
+                            "sector": t.sector,
+                            "float_shares": t.float_shares,
+                            "running_surge_pct": t.running_surge_pct,
+                            "avg_entry_price": t.avg_entry_price,
+                            "avg_exit_price": t.avg_exit_price,
+                            "peak_unrealized_pnl": t.peak_unrealized_pnl,
+                            "giveback_pnl": t.giveback_pnl,
+                            "max_shares_held": t.max_shares_held,
+                            "key_takeaway": t.key_takeaway,
+                        }).execute()
+                        
+                        if t_row.data and t.phases:
+                            t_id = t_row.data[0]["id"]
+                            for p in t.phases:
+                                sb.table("warrior_trade_phases").insert({
+                                    "trade_id": t_id,
+                                    "sequence_order": p.sequence_order,
+                                    "phase_type": p.phase_type,
+                                    "price_level": p.price_level,
+                                    "trigger_observed": p.trigger_observed,
+                                    "action_taken": p.action_taken,
+                                    "risk_factor": p.risk_factor,
+                                    "result_outcome": p.result_outcome,
+                                    "timestamp_or_time_str": p.timestamp_or_time_str,
+                                    "shares": p.shares,
+                                }).execute()
+            except Exception as e:
+                log_warning(MODULE, f"No se pudo persistir en Supabase (continuando con in-memory): {e}")
+
+        return True
+
 
 # Singleton del motor
 warrior_playbook = WarriorPlaybookEngine()
