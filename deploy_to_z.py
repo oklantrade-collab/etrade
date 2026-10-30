@@ -112,7 +112,7 @@ def sync_to_apolo():
     if copied_files:
         print("\nDetalle de archivos sincronizados a APOLO:")
         for cf in copied_files:
-            print(f"  ✓ {cf}")
+            print(f"  [OK] {cf}")
     print(f"============================================================\n")
     return len(error_files) == 0
 
