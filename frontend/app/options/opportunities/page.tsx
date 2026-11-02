@@ -243,6 +243,52 @@ function CatalystSemaphores({ meta }: { meta?: any }) {
   )
 }
 
+function EtiSignalBadge({ isEti, dte, route }: { isEti?: boolean; dte?: number; route?: string }) {
+  if (!isEti) return null
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 5,
+      padding: '3px 8px',
+      borderRadius: 6,
+      background: 'linear-gradient(135deg, rgba(168,85,247,0.3) 0%, rgba(56,189,248,0.3) 100%)',
+      color: '#E0E7FF',
+      fontWeight: 900,
+      fontSize: 10,
+      letterSpacing: '0.3px',
+      border: '1px solid rgba(168,85,247,0.6)',
+      boxShadow: '0 0 12px rgba(168,85,247,0.35)',
+      textTransform: 'uppercase',
+      whiteSpace: 'nowrap',
+    }}>
+      <span>⚡ RADAR ETI</span>
+      <span style={{
+        fontSize: 8,
+        background: '#A855F7',
+        color: '#FFF',
+        padding: '1px 5px',
+        borderRadius: 3,
+        fontWeight: 900,
+      }}>
+        {dte === 0 ? '0DTE SCALP' : `${dte}DTE`}
+      </span>
+      {route && route !== 'NONE' && (
+        <span style={{
+          fontSize: 8,
+          background: route.includes('ROSS') ? 'rgba(34,197,94,0.4)' : 'rgba(56,189,248,0.4)',
+          color: route.includes('ROSS') ? '#22C55E' : '#38BDF8',
+          padding: '1px 4px',
+          borderRadius: 3,
+          fontWeight: 800,
+        }}>
+          {route.includes('ROSS') ? 'P1 ROSS' : 'OPC 2 ETI'}
+        </span>
+      )}
+    </span>
+  )
+}
+
 function StructuralRegimeBadge({ regime, compact = false }: { regime?: any; compact?: boolean }) {
   if (!regime || !regime.regime_code) return null
   const code = regime.regime_code
@@ -400,13 +446,15 @@ export default function OpportunitiesPage() {
   const [gapFilter, setGapFilter] = useState<'all' | 'gap_runners' | 'gap_up' | 'gap_down'>('all')
   const [strategy, setStrategy] = useState<string>('')
   const [search, setSearch] = useState<string>('')
-  const [sel, setSel] = useState<number | null>(null)
+  const [etiOnly, setEtiOnly] = useState<boolean>(false)
+  const [sel, setSel] = useState<any | null>(null)
   const [detail, setDetail] = useState<any>(null)
   const [runningSelect, setRunningSelect] = useState(false)
   const [scanning, setScanning] = useState(false)
   const [simulating, setSimulating] = useState(false)
   const [viewMode, setViewMode] = useState<'grouped' | 'flat'>('grouped')
   const [expandedSymbols, setExpandedSymbols] = useState<Record<string, boolean>>({})
+  const [syncingEti, setSyncingEti] = useState(false)
 
   const getDisplayScanTime = () => {
     if (data?.last_scan_time) return data.last_scan_time;
@@ -459,7 +507,7 @@ export default function OpportunitiesPage() {
     loadData()
   }, [status, direction, strategy, gapFilter])
 
-  const openDetail = async (id: number) => {
+  const openDetail = async (id: any) => {
     if (sel === id) {
       setSel(null)
       setDetail(null)
@@ -507,7 +555,7 @@ export default function OpportunitiesPage() {
     }
   }
 
-  const handleSimulateEntry = async (cid: number) => {
+  const handleSimulateEntry = async (cid: any, route?: string) => {
     setSimulating(true)
     setErr(null)
     setMsg(null)
@@ -515,10 +563,10 @@ export default function OpportunitiesPage() {
       const res = await fetch('/api/v1/options/positions/simulate-entry', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate_id: cid }),
+        body: JSON.stringify({ candidate_id: cid, route }),
       }).then(r => r.json())
       if (res.ok) {
-        setMsg(`¡Posición Paper abierta exitosamente para ${res.position?.symbol}! Ver en "Positions".`)
+        setMsg(`¡Posición Paper abierta exitosamente para ${res.position?.symbol}! Ver en "Positions". ${res.route_used ? `(Vía: ${res.route_used})` : ''}`)
         await loadData()
       } else {
         setErr(res.detail || 'Error al simular entrada')
@@ -530,8 +578,31 @@ export default function OpportunitiesPage() {
     }
   }
 
+  const handleSyncEti = async () => {
+    setSyncingEti(true)
+    setErr(null)
+    setMsg('Sincronizando con el servicio ETI en vivo (https://eti-zeta-one.vercel.app)...')
+    try {
+      const res = await fetch('/api/v1/options/eti/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }).then(r => r.json())
+      if (res.ok) {
+        setMsg(`✓ Radar Cuántico ETI sincronizado: ${res.ingested_count} señales institucionales actualizadas.`)
+        await loadData()
+      } else {
+        setErr(res.error || 'Error al sincronizar con ETI')
+      }
+    } catch (e: any) {
+      setErr(`Error de red al conectar con el servicio ETI: ${e.message}`)
+    } finally {
+      setSyncingEti(false)
+    }
+  }
+
   const summary = data?.summary
-  const items = data?.items || []
+  const allItems = data?.items || []
+  const items = etiOnly ? allItems.filter(i => i.is_eti_signal) : allItems
 
   // Deduplicate topCalls and topPuts by symbol (no repeated tickers in Top 3)
   const distinctTop = (list: any[]) => {
@@ -664,6 +735,230 @@ export default function OpportunitiesPage() {
       {err && (
         <div style={{ background: 'rgba(239,83,80,0.15)', border: '1px solid rgba(239,83,80,0.3)', color: '#EF5350', borderRadius: 8, padding: '10px 14px', fontSize: 12, marginBottom: 14 }}>
           {err}
+        </div>
+      )}
+
+      {/* RADAR CUÁNTICO ETI (ALTA PRIORIDAD 0DTE & SCALPING) BANNER HERO */}
+      {Boolean(summary?.has_eti_signals || (summary?.total_eti_signals ?? 0) > 0) && (
+        <div style={{
+          background: 'linear-gradient(135deg, rgba(88,28,135,0.45) 0%, rgba(15,23,42,0.92) 50%, rgba(30,58,138,0.45) 100%)',
+          border: '1px solid rgba(168,85,247,0.5)',
+          borderRadius: 14,
+          padding: '18px 22px',
+          marginBottom: 18,
+          boxShadow: '0 0 25px rgba(168,85,247,0.22)',
+        }}>
+          {/* Top Bar with Title and Status */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{ fontSize: 26 }}>⚡</span>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <b style={{ color: '#FFF', fontSize: 16, letterSpacing: '-0.3px', fontWeight: 900 }}>
+                    RADAR CUÁNTICO ETI · ALTA PRIORIDAD (0DTE & SCALPING)
+                  </b>
+                  <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 4, background: '#A855F7', color: '#FFF', fontWeight: 900 }}>
+                    CONFLUENCIA CAUSAL FDE / FCG
+                  </span>
+                  <span style={{ fontSize: 9, padding: '2px 8px', borderRadius: 4, background: 'rgba(34,197,94,0.2)', color: '#22C55E', fontWeight: 800, border: '1px solid rgba(34,197,94,0.4)' }}>
+                    DOBLE GATILLO: ROSS CAMERON P1 + OPCIÓN 2 ETI
+                  </span>
+                </div>
+                <p style={{ color: '#CCC', fontSize: 12, margin: '4px 0 0' }}>
+                  Inteligencia Causal institucional de Yoel Sardiñas & Carter conectada al Robot eTrade. Entrada de máxima asimetría por microestructura (P1) con fallback por perforación directa de nivel (Opción 2).
+                </p>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                onClick={handleSyncEti}
+                disabled={syncingEti}
+                style={{
+                  fontSize: 11,
+                  padding: '7px 14px',
+                  borderRadius: 8,
+                  background: syncingEti ? '#334155' : 'rgba(56,189,248,0.18)',
+                  color: syncingEti ? '#94A3B8' : '#38BDF8',
+                  fontWeight: 900,
+                  border: '1px solid rgba(56,189,248,0.4)',
+                  cursor: syncingEti ? 'not-allowed' : 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span>{syncingEti ? '⏳' : '🔄'}</span>
+                {syncingEti ? 'Sincronizando...' : 'Sincronizar ETI en Vivo'}
+              </button>
+              <button
+                onClick={() => setEtiOnly(!etiOnly)}
+                style={{
+                  fontSize: 11,
+                  padding: '7px 14px',
+                  borderRadius: 8,
+                  background: etiOnly ? '#A855F7' : 'rgba(168,85,247,0.2)',
+                  color: etiOnly ? '#FFF' : '#C084FC',
+                  fontWeight: 900,
+                  border: '1px solid rgba(168,85,247,0.5)',
+                  cursor: 'pointer',
+                  boxShadow: etiOnly ? '0 0 12px rgba(168,85,247,0.4)' : 'none',
+                }}
+              >
+                {etiOnly ? '★ Mostrando Solo ETI' : `⚡ Filtrar Señales ETI (${summary?.total_eti_signals ?? 0})`}
+              </button>
+            </div>
+          </div>
+
+          {/* ETI Active Signals List Cards */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {(summary?.eti_signals || []).map((sig: any) => {
+              const isCall = (sig.bias || '').toUpperCase() === 'BULLISH' || (sig.option_type || '').toUpperCase() === 'CALL';
+              const p1Fired = sig.status_p1 === 'TRIGGERED';
+              const p2Fired = sig.status_p2 === 'TRIGGERED';
+              const isInvalid = sig.status_p2 === 'INVALIDATED';
+
+              return (
+                <div key={sig.signal_id} style={{
+                  background: 'rgba(0,0,0,0.5)',
+                  border: isInvalid ? '1px solid rgba(239,68,68,0.4)' : (p1Fired || p2Fired ? '1px solid rgba(34,197,94,0.6)' : '1px solid rgba(255,255,255,0.08)'),
+                  borderRadius: 10,
+                  padding: '14px 18px',
+                }}>
+                  {/* Row 1: Header */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                      <span style={{ fontSize: 16, fontWeight: 900, color: '#FFF' }}>{sig.symbol}</span>
+                      <span style={{
+                        padding: '2px 8px',
+                        borderRadius: 4,
+                        fontSize: 11,
+                        fontWeight: 900,
+                        background: isCall ? 'rgba(34,197,94,0.2)' : 'rgba(232,121,249,0.2)',
+                        color: isCall ? '#22C55E' : '#E879F9',
+                        border: `1px solid ${isCall ? '#22C55E55' : '#E879F955'}`
+                      }}>
+                        {sig.option_type} ${sig.strike} {sig.is_zero_dte ? '0DTE' : `${sig.dte}DTE`}
+                      </span>
+                      <span style={{ fontSize: 11, color: '#38BDF8', fontWeight: 800 }}>
+                        {sig.playbook_rule}
+                      </span>
+                      <span style={{ fontSize: 10, background: 'rgba(255,215,0,0.15)', color: '#FFD700', padding: '2px 6px', borderRadius: 4, fontWeight: 800, border: '1px solid rgba(255,215,0,0.3)' }}>
+                        ★ Convicción FCG: {sig.fcg_confidence}%
+                      </span>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button
+                        onClick={() => handleSimulateEntry(sig.candidate_id, 'PRIORITY_1_ROSS_CAMERON')}
+                        disabled={simulating || isInvalid}
+                        style={{
+                          background: p1Fired ? 'linear-gradient(135deg, #22C55E 0%, #16A34A 100%)' : 'rgba(34,197,94,0.15)',
+                          color: p1Fired ? '#000' : '#22C55E',
+                          border: '1px solid rgba(34,197,94,0.4)',
+                          borderRadius: 6,
+                          padding: '6px 12px',
+                          fontSize: 11,
+                          fontWeight: 900,
+                          cursor: isInvalid ? 'not-allowed' : 'pointer',
+                          boxShadow: p1Fired ? '0 0 10px rgba(34,197,94,0.4)' : 'none',
+                        }}
+                        title="Ejecutar bajo reglas de microestructura de Ross Cameron (100% lote)"
+                      >
+                        🚀 Vía 1: Ross Cameron (P1)
+                      </button>
+                      <button
+                        onClick={() => handleSimulateEntry(sig.candidate_id, 'OPTION_2_FALLBACK_ETI')}
+                        disabled={simulating || isInvalid}
+                        style={{
+                          background: p2Fired ? 'linear-gradient(135deg, #38BDF8 0%, #0284C7 100%)' : 'rgba(56,189,248,0.15)',
+                          color: p2Fired ? '#000' : '#38BDF8',
+                          border: '1px solid rgba(56,189,248,0.4)',
+                          borderRadius: 6,
+                          padding: '6px 12px',
+                          fontSize: 11,
+                          fontWeight: 900,
+                          cursor: isInvalid ? 'not-allowed' : 'pointer',
+                          boxShadow: p2Fired ? '0 0 10px rgba(56,189,248,0.4)' : 'none',
+                        }}
+                        title="Ejecutar directamente si perfora el nivel Trigger de ETI (Tranche 65%)"
+                      >
+                        ⚡ Vía 2: Trigger ETI (Opción 2)
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Row 2: 5 Pillars Tactical Instruction Grid */}
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                    gap: 10,
+                    background: 'rgba(255,255,255,0.02)',
+                    padding: 12,
+                    borderRadius: 8,
+                    border: '1px solid rgba(255,255,255,0.04)',
+                    marginBottom: 10
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#888', textTransform: 'uppercase', fontWeight: 800 }}>1. Escenario Activo</div>
+                      <div style={{ fontSize: 12, fontWeight: 800, color: '#FFF', marginTop: 2 }}>{sig.playbook_rule}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#888', textTransform: 'uppercase', fontWeight: 800 }}>2. Trigger Activación</div>
+                      <div style={{ fontSize: 12, fontWeight: 900, color: '#38BDF8', marginTop: 2 }}>
+                        {isCall ? '≥' : '≤'} ${sig.trigger_price?.toFixed(2)} <span style={{ fontSize: 10, color: '#AAA' }}>(Spot: ${sig.current_price?.toFixed(2)})</span>
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#888', textTransform: 'uppercase', fontWeight: 800 }}>3. Invalidación (Stop)</div>
+                      <div style={{ fontSize: 12, fontWeight: 900, color: isInvalid ? '#EF4444' : '#FFA726', marginTop: 2 }}>
+                        {isCall ? '<' : '>'} ${sig.invalidation_price?.toFixed(2)} {isInvalid && '⚠️ STOP SUPERADO'}
+                      </div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 9, color: '#888', textTransform: 'uppercase', fontWeight: 800 }}>4. Rango Objetivo</div>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: '#22C55E', marginTop: 2 }}>
+                        TP1 +40% (50%) · TP2 +90% (30%) · Runner +20%
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Row 3: Causal Rationale & Dual Gate Status */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, fontSize: 11 }}>
+                    <div style={{ color: '#AAA', flex: 1, minWidth: 280 }}>
+                      <b style={{ color: '#EAB308' }}>5. Racional Causal:</b> {sig.primary_source}. {sig.catalyst_summary} <i style={{ color: '#C084FC' }}>{sig.greeks_thesis}</i>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <span style={{
+                        fontSize: 10,
+                        fontWeight: 800,
+                        padding: '3px 8px',
+                        borderRadius: 5,
+                        background: p1Fired ? 'rgba(34,197,94,0.25)' : 'rgba(255,255,255,0.05)',
+                        color: p1Fired ? '#22C55E' : (sig.status_p1 === 'PULLBACK_FORMED' ? '#FFD700' : '#888'),
+                        border: `1px solid ${p1Fired ? '#22C55E' : 'rgba(255,255,255,0.1)'}`
+                      }}>
+                        {p1Fired ? '🟢 P1 ROSS: GATILLADO' : (sig.status_p1 === 'PULLBACK_FORMED' ? '🟡 P1 ROSS: PULLBACK OK' : '⚪ P1 ROSS: ESPERANDO')}
+                      </span>
+
+                      <span style={{
+                        fontSize: 10,
+                        fontWeight: 800,
+                        padding: '3px 8px',
+                        borderRadius: 5,
+                        background: p2Fired ? 'rgba(56,189,248,0.25)' : (isInvalid ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.05)'),
+                        color: p2Fired ? '#38BDF8' : (isInvalid ? '#EF4444' : '#888'),
+                        border: `1px solid ${p2Fired ? '#38BDF8' : (isInvalid ? '#EF4444' : 'rgba(255,255,255,0.1)')}`
+                      }}>
+                        {p2Fired ? '⚡ OPC 2: GATILLADO' : (isInvalid ? '⛔ OPC 2: INVALIDADO' : '⚪ OPC 2: EN RANGO')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -984,14 +1279,25 @@ export default function OpportunitiesPage() {
 
             <div style={{ display: 'flex', background: 'rgba(0,0,0,0.3)', padding: 3, borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
               <button
-                onClick={() => setGapFilter('all')}
+                onClick={() => { setEtiOnly(false); setGapFilter('all'); }}
                 style={{
                   padding: '6px 11px', borderRadius: 6, fontSize: 11, fontWeight: 700, border: 'none', cursor: 'pointer',
-                  background: gapFilter === 'all' ? 'rgba(255,255,255,0.1)' : 'transparent',
-                  color: gapFilter === 'all' ? '#FFF' : '#888',
+                  background: (!etiOnly && gapFilter === 'all') ? 'rgba(255,255,255,0.1)' : 'transparent',
+                  color: (!etiOnly && gapFilter === 'all') ? '#FFF' : '#888',
                 }}
               >
                 Todos los Flujos
+              </button>
+              <button
+                onClick={() => setEtiOnly(!etiOnly)}
+                style={{
+                  padding: '6px 11px', borderRadius: 6, fontSize: 11, fontWeight: 800, border: 'none', cursor: 'pointer',
+                  background: etiOnly ? 'linear-gradient(135deg, rgba(168,85,247,0.4) 0%, rgba(56,189,248,0.4) 100%)' : 'rgba(255,255,255,0.03)',
+                  color: etiOnly ? '#FFF' : '#C084FC',
+                  boxShadow: etiOnly ? '0 0 10px rgba(168,85,247,0.3)' : 'none',
+                }}
+              >
+                ⚡ Radar Cuántico ETI ({summary?.total_eti_signals ?? 0})
               </button>
               <button
                 onClick={() => setGapFilter(gapFilter === 'gap_runners' ? 'all' : 'gap_runners')}
@@ -1169,6 +1475,7 @@ export default function OpportunitiesPage() {
                           <td style={{ ...td, color: '#FFF', fontWeight: 900 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                               <span>{group.symbol}</span>
+                              <EtiSignalBadge isEti={c.is_eti_signal} dte={c.dte} route={c.tactical_instruction?.recommended_route} />
                               <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
                               <StructuralRegimeBadge regime={c.structural_regime} compact />
                               <TriggersBadge triggers={c.score_breakdown?.triggers_fired} pTouch={c.score_breakdown?.p_touch_day_pct} catName={c.score_breakdown?.catalyst_name} />
@@ -1248,6 +1555,7 @@ export default function OpportunitiesPage() {
                               <td style={{ ...td, color: '#888', fontSize: 11 }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                                   <span>{alt.opt_underlyings?.symbol}</span>
+                                  <EtiSignalBadge isEti={alt.is_eti_signal} dte={alt.dte} route={alt.tactical_instruction?.recommended_route} />
                                   <GapRunnerBadge isRunner={alt.is_gap_runner} gapType={alt.gap_type} gapPct={alt.gap_pct} />
                                   <StructuralRegimeBadge regime={alt.structural_regime} compact />
                                 </div>
@@ -1309,6 +1617,52 @@ export default function OpportunitiesPage() {
                                       </>
                                     ) : (
                                       <>
+                                        {/* TARJETA INSTRUCTIVO RADAR CUÁNTICO ETI */}
+                                        {detail.tactical_instruction && (
+                                          <div style={{
+                                            marginBottom: 14,
+                                            background: 'linear-gradient(135deg, rgba(88,28,135,0.3) 0%, rgba(15,23,42,0.9) 100%)',
+                                            border: '1px solid rgba(168,85,247,0.5)',
+                                            borderRadius: 8,
+                                            padding: 14
+                                          }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+                                              <b style={{ color: '#E0E7FF', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                <span>⚡</span> Instructivo Táctico Radar Cuántico ETI (5 Pilares)
+                                              </b>
+                                              <div style={{ display: 'flex', gap: 6 }}>
+                                                <button
+                                                  onClick={() => handleSimulateEntry(c.id, 'PRIORITY_1_ROSS_CAMERON')}
+                                                  style={{
+                                                    fontSize: 10, fontWeight: 900, padding: '4px 8px', borderRadius: 5,
+                                                    background: 'rgba(34,197,94,0.2)', color: '#22C55E', border: '1px solid rgba(34,197,94,0.4)', cursor: 'pointer'
+                                                  }}
+                                                >
+                                                  🚀 Ejecutar P1 Ross Cameron
+                                                </button>
+                                                <button
+                                                  onClick={() => handleSimulateEntry(c.id, 'OPTION_2_FALLBACK_ETI')}
+                                                  style={{
+                                                    fontSize: 10, fontWeight: 900, padding: '4px 8px', borderRadius: 5,
+                                                    background: 'rgba(56,189,248,0.2)', color: '#38BDF8', border: '1px solid rgba(56,189,248,0.4)', cursor: 'pointer'
+                                                  }}
+                                                >
+                                                  ⚡ Ejecutar Opción 2 ETI
+                                                </button>
+                                              </div>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, fontSize: 11, marginBottom: 8 }}>
+                                              <div><span style={{ color: '#888' }}>1. Escenario Activo:</span> <b style={{ color: '#FFF' }}>{detail.tactical_instruction.escenario_activo}</b></div>
+                                              <div><span style={{ color: '#888' }}>2. Trigger Activación:</span> <b style={{ color: '#38BDF8' }}>${detail.tactical_instruction.trigger_activacion?.toFixed(2)}</b></div>
+                                              <div><span style={{ color: '#888' }}>3. Invalidación (Stop):</span> <b style={{ color: '#FFA726' }}>${detail.tactical_instruction.invalidacion_stop?.toFixed(2)}</b></div>
+                                              <div><span style={{ color: '#888' }}>4. Rango Objetivo:</span> <b style={{ color: '#22C55E' }}>{detail.tactical_instruction.rango_objetivo}</b></div>
+                                            </div>
+                                            <div style={{ fontSize: 11, color: '#CCC', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                                              <b style={{ color: '#EAB308' }}>5. Racional Causal Forrester:</b> {detail.tactical_instruction.racional_causal_forrester}
+                                            </div>
+                                          </div>
+                                        )}
+
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                                           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                             <b style={{ color: '#FFF', fontSize: 13 }}>Estructura & Griegas Netas (Doc §8.3)</b>
@@ -1465,6 +1819,7 @@ export default function OpportunitiesPage() {
                           <td style={{ ...td, color: '#FFF', fontWeight: 800 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                               <span>{c.opt_underlyings?.symbol}</span>
+                              <EtiSignalBadge isEti={c.is_eti_signal} dte={c.dte} route={c.tactical_instruction?.recommended_route} />
                               <GapRunnerBadge isRunner={c.is_gap_runner} gapType={c.gap_type} gapPct={c.gap_pct} />
                               <StructuralRegimeBadge regime={c.structural_regime} compact />
                             </div>
@@ -1523,6 +1878,52 @@ export default function OpportunitiesPage() {
                                       </>
                                     ) : (
                                       <>
+                                        {/* TARJETA INSTRUCTIVO RADAR CUÁNTICO ETI */}
+                                        {detail.tactical_instruction && (
+                                          <div style={{
+                                            marginBottom: 14,
+                                            background: 'linear-gradient(135deg, rgba(88,28,135,0.3) 0%, rgba(15,23,42,0.9) 100%)',
+                                            border: '1px solid rgba(168,85,247,0.5)',
+                                            borderRadius: 8,
+                                            padding: 14
+                                          }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+                                              <b style={{ color: '#E0E7FF', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                <span>⚡</span> Instructivo Táctico Radar Cuántico ETI (5 Pilares)
+                                              </b>
+                                              <div style={{ display: 'flex', gap: 6 }}>
+                                                <button
+                                                  onClick={() => handleSimulateEntry(c.id, 'PRIORITY_1_ROSS_CAMERON')}
+                                                  style={{
+                                                    fontSize: 10, fontWeight: 900, padding: '4px 8px', borderRadius: 5,
+                                                    background: 'rgba(34,197,94,0.2)', color: '#22C55E', border: '1px solid rgba(34,197,94,0.4)', cursor: 'pointer'
+                                                  }}
+                                                >
+                                                  🚀 Ejecutar P1 Ross Cameron
+                                                </button>
+                                                <button
+                                                  onClick={() => handleSimulateEntry(c.id, 'OPTION_2_FALLBACK_ETI')}
+                                                  style={{
+                                                    fontSize: 10, fontWeight: 900, padding: '4px 8px', borderRadius: 5,
+                                                    background: 'rgba(56,189,248,0.2)', color: '#38BDF8', border: '1px solid rgba(56,189,248,0.4)', cursor: 'pointer'
+                                                  }}
+                                                >
+                                                  ⚡ Ejecutar Opción 2 ETI
+                                                </button>
+                                              </div>
+                                            </div>
+                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, fontSize: 11, marginBottom: 8 }}>
+                                              <div><span style={{ color: '#888' }}>1. Escenario Activo:</span> <b style={{ color: '#FFF' }}>{detail.tactical_instruction.escenario_activo}</b></div>
+                                              <div><span style={{ color: '#888' }}>2. Trigger Activación:</span> <b style={{ color: '#38BDF8' }}>${detail.tactical_instruction.trigger_activacion?.toFixed(2)}</b></div>
+                                              <div><span style={{ color: '#888' }}>3. Invalidación (Stop):</span> <b style={{ color: '#FFA726' }}>${detail.tactical_instruction.invalidacion_stop?.toFixed(2)}</b></div>
+                                              <div><span style={{ color: '#888' }}>4. Rango Objetivo:</span> <b style={{ color: '#22C55E' }}>{detail.tactical_instruction.rango_objetivo}</b></div>
+                                            </div>
+                                            <div style={{ fontSize: 11, color: '#CCC', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 8 }}>
+                                              <b style={{ color: '#EAB308' }}>5. Racional Causal Forrester:</b> {detail.tactical_instruction.racional_causal_forrester}
+                                            </div>
+                                          </div>
+                                        )}
+
                                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                                           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                                             <b style={{ color: '#FFF', fontSize: 13 }}>Estructura & Griegas Netas (Doc §8.3)</b>

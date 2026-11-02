@@ -29,7 +29,7 @@ individual_files = [
 
 def sync_to_apolo():
     if not os.path.exists(target_base):
-        print(f"❌ ERROR: {target_base} no está accesible. Verifique la conexión de red a APOLO (\\192.168.1.105\\Fuentes).")
+        print(f"[ERROR]: {target_base} no está accesible. Verifique la conexión de red a APOLO (\\192.168.1.105\\Fuentes).")
         return False
 
     print(f"============================================================")
