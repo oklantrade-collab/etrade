@@ -6,6 +6,7 @@ Garantiza que `opt_paper_trades` y `stocks_positions` sean una copia idéntica d
 from __future__ import annotations
 
 import ast
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -37,29 +38,76 @@ def _row_contract_key(row_d: dict[str, Any]) -> tuple[str, str, float, str]:
     return (sym_u, exp_s, round(stk_f, 2), rgt_s)
 
 
-def load_broker_portfolio_snapshot(sb) -> tuple[dict[str, Any], float]:
+def fetch_live_broker_portfolio_direct(sb) -> tuple[dict[str, Any], float]:
     """
-    Lee `ib_broker_portfolio` desde `stocks_config` y devuelve (portfolio_dict, age_seconds).
+    Consulta directamente a Interactive Brokers TWS (vía socket APOLO / local)
+    cuando el snapshot en stocks_config tenga más de 25s de antigüedad o no exista.
+    Garantiza que 'lo que existe en el Broker manda' sin depender de un proceso externo.
     """
     try:
-        res = sb.table("stocks_config").select("value, updated_at").eq("key", "ib_broker_portfolio").limit(1).execute()
-        if not res.data:
+        from app.data.ib_provider import get_ib_connection
+        ib = get_ib_connection()
+        if not ib:
             return {}, 999999.0
-        row = res.data[0]
-        raw_val = row.get("value") or "{}"
-        upd_str = row.get("updated_at")
-        age_sec = 999999.0
-        if upd_str:
-            try:
-                u_dt = datetime.fromisoformat(str(upd_str).replace("Z", "+00:00"))
-                age_sec = max(0.0, (datetime.now(timezone.utc) - u_dt).total_seconds())
-            except Exception:
-                pass
-        portfolio = ast.literal_eval(raw_val) if isinstance(raw_val, str) else (raw_val or {})
-        if isinstance(portfolio, dict):
-            return portfolio, age_sec
+        if not ib.connected:
+            # Usar client_id 95 dedicado para consultas ad-hoc para no colisionar con 25 (Bridge) ni 31 (Worker)
+            ib.connect_tws(client_id=95)
+        if ib.connected:
+            positions = ib.request_broker_positions(timeout=3.5)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            if positions is not None:
+                try:
+                    sb.table("stocks_config").upsert({
+                        "key": "ib_broker_portfolio",
+                        "value": str(positions),
+                        "description": "Cartera de posiciones reales en Interactive Brokers TWS",
+                        "updated_at": now_iso
+                    }, on_conflict="key").execute()
+                    sb.table("stocks_config").upsert({
+                        "key": "ib_bridge_heartbeat",
+                        "value": str({"connected": True, "host_name": getattr(ib, "host", "192.168.1.105"), "tws_port": 7497, "mode": "PAPER", "timestamp": now_iso}),
+                        "description": "Estado en tiempo real del agente IBKR Bridge",
+                        "updated_at": now_iso
+                    }, on_conflict="key").execute()
+                except Exception:
+                    pass
+                return positions, 0.0
+    except Exception as e:
+        log_warning(MODULE, f"Consulta directa a TWS no completada: {e}")
+    return {}, 999999.0
+
+
+def load_broker_portfolio_snapshot(sb, allow_direct_fetch: bool = True) -> tuple[dict[str, Any], float]:
+    """
+    Lee `ib_broker_portfolio` desde `stocks_config` y devuelve (portfolio_dict, age_seconds).
+    Si el snapshot está ausente o tiene más de 25 segundos, intenta refrescarlo directamente con TWS.
+    """
+    portfolio = None
+    age_sec = 999999.0
+    try:
+        res = sb.table("stocks_config").select("value, updated_at").eq("key", "ib_broker_portfolio").limit(1).execute()
+        if res.data:
+            row = res.data[0]
+            raw_val = row.get("value") or "{}"
+            upd_str = row.get("updated_at")
+            if upd_str:
+                try:
+                    u_dt = datetime.fromisoformat(str(upd_str).replace("Z", "+00:00"))
+                    age_sec = max(0.0, (datetime.now(timezone.utc) - u_dt).total_seconds())
+                except Exception:
+                    pass
+            portfolio = ast.literal_eval(raw_val) if isinstance(raw_val, str) else (raw_val or {})
     except Exception as e:
         log_warning(MODULE, f"No se pudo leer ib_broker_portfolio: {e}")
+
+    # Si está ausente o tiene más de 25s de antigüedad, refrescar directamente de TWS
+    if allow_direct_fetch and (portfolio is None or age_sec > 25.0):
+        live_p, live_age = fetch_live_broker_portfolio_direct(sb)
+        if live_p is not None and live_age < 10.0:
+            return live_p, live_age
+
+    if isinstance(portfolio, dict):
+        return portfolio, age_sec
     return {}, 999999.0
 
 
@@ -106,8 +154,8 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
     if not force and (now_ts - _LAST_SYNC_TS < min_interval_sec):
         return {"skipped": True}
 
-    portfolio, age_sec = load_broker_portfolio_snapshot(sb)
-    if not portfolio or age_sec > 600.0:
+    portfolio, age_sec = load_broker_portfolio_snapshot(sb, allow_direct_fetch=True)
+    if portfolio is None or age_sec > 300.0:
         return {"skipped": True, "reason": f"snapshot_stale_or_empty ({age_sec:.0f}s)"}
 
     _LAST_SYNC_TS = now_ts

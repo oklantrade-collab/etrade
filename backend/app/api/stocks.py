@@ -432,11 +432,18 @@ async def get_stocks_positions():
     """
     Get active stock positions (INTERNAL ONLY).
     Optimized to read ONLY from DB with retry logic.
+    Garantiza reconciliacion autoritativa con IBKR Broker Portfolio.
     """
+    sb = get_supabase()
+    try:
+        from app.options.broker_sync import reconcile_with_ib_broker_portfolio
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=5.0)
+    except Exception:
+        pass
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            sb = get_supabase()
             # 1. Fetch all open positions (excluding options)
             res = sb.table("stocks_positions")\
                 .select("*")\

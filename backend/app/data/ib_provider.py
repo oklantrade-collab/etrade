@@ -12,9 +12,15 @@ Prerequisites:
 """
 import os
 import time
+import socket
 import threading
 from typing import Optional, Callable, Dict
 from datetime import datetime, timezone
+from dotenv import load_dotenv
+
+# Asegurar carga de variables de entorno
+load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"))
 
 from app.core.logger import log_info, log_error, log_warning
 
@@ -81,7 +87,19 @@ class IBConnection(EWrapper, EClient):
         Default: Paper Trading (port 7497).
         Live: port 7496 (requires explicit config).
         """
-        host = host or os.getenv("IB_HOST", "127.0.0.1")
+        env_host = os.getenv("IB_HOST")
+        if not host:
+            if env_host:
+                host = env_host
+            else:
+                # Probar si 127.0.0.1:7497 está escuchando, de lo contrario fallback a APOLO (192.168.1.105)
+                s = socket.socket()
+                s.settimeout(0.5)
+                if s.connect_ex(("127.0.0.1", 7497)) == 0:
+                    host = "127.0.0.1"
+                else:
+                    host = "192.168.1.105"
+                s.close()
         port = port or int(os.getenv("IB_PORT", "7497"))  # 7497=paper, 7496=live
         client_id = client_id or int(os.getenv("IB_CLIENT_ID", "1"))
 

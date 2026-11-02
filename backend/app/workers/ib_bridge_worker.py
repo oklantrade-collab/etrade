@@ -15,9 +15,13 @@ import sys
 import time
 import asyncio
 from datetime import datetime, timezone
+from dotenv import load_dotenv
 
-# Añadir raíz de backend al PYTHONPATH
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Añadir raíz de backend al PYTHONPATH y cargar .env
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(BASE_DIR)
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+load_dotenv()
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
@@ -398,7 +402,14 @@ def get_default_ib_host() -> str:
     env_host = os.getenv("IB_HOST")
     if env_host:
         return env_host
-    return "192.168.1.102"
+    # Probar si 127.0.0.1:7497 está escuchando, de lo contrario fallback a APOLO (192.168.1.105)
+    s = socket.socket()
+    s.settimeout(0.5)
+    if s.connect_ex(("127.0.0.1", 7497)) == 0:
+        s.close()
+        return "127.0.0.1"
+    s.close()
+    return "192.168.1.105"
 
 
 class IBBridgeWorker:
@@ -503,6 +514,7 @@ class IBBridgeWorker:
                 .execute()
 
             orders = res.data or []
+            now_dt = datetime.now(timezone.utc)
             for order in orders:
                 order_id = order["id"]
                 ticker = order["ticker"]
@@ -511,6 +523,29 @@ class IBBridgeWorker:
                 shares = int(order.get("shares") or 5)
                 price = float(order.get("limit_price") or order.get("market_price") or 0.0)
                 trigger_price = float(order.get("trigger_price") or price or 0.0)
+
+                # Validar vencimiento / TTL de la orden para evitar despachar señales viejas
+                c_str = order.get("created_at")
+                exp_str = order.get("expires_at")
+                is_expired = False
+                if exp_str:
+                    try:
+                        if datetime.fromisoformat(str(exp_str).replace("Z", "+00:00")) < now_dt:
+                            is_expired = True
+                    except Exception:
+                        pass
+                elif c_str:
+                    try:
+                        age_min = (now_dt - datetime.fromisoformat(str(c_str).replace("Z", "+00:00"))).total_seconds() / 60.0
+                        if age_min > 15.0:
+                            is_expired = True
+                    except Exception:
+                        pass
+
+                if is_expired:
+                    sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                    log_info(MODULE, f"⌛ Orden {order_id} ({ticker}) cancelada por vencimiento / TTL ({direction.upper()} {shares}x).")
+                    continue
 
                 # Marcar inmediatamente en proceso para evitar envíos duplicados
                 sb.table("stocks_orders").update({"status": "processing"}).eq("id", order_id).execute()

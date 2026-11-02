@@ -408,8 +408,9 @@ def execute_market_order(
     now = datetime.now(timezone.utc).isoformat()
     ib_live = is_ib_bridge_alive()
 
-    # Si el puente IBKR está activo en APOLO, enviar como 'pending' para que TWS ejecute la orden
-    initial_status = "pending" if (ib_live or not paper) else "filled"
+    # Principio Broker-First: El Broker manda. Todas las órdenes inician como 'pending'
+    # y solo se abren posiciones al recibir la confirmación de fill de Interactive Brokers TWS.
+    initial_status = "pending"
 
     # Registrar orden
     order_data = {
@@ -424,9 +425,9 @@ def execute_market_order(
         "tech_score": context.get("tech_score"),
         "movement_type": context.get("movement_type"),
         "rvol": context.get("rvol"),
-        "status": initial_status,
-        "filled_price": price if initial_status == "filled" else None,
-        "filled_at": now if initial_status == "filled" else None,
+        "status": "pending",
+        "filled_price": None,
+        "filled_at": None,
         "created_at": now,
     }
 
@@ -469,15 +470,10 @@ def execute_market_order(
             raise e_ord_ins
 
     # En STOCKS solo permitimos LONG (BUY).
-    # Si la orden va hacia IBKR TWS (ib_live=True), el callback de TWS abrirá la posición al llenar la orden.
+    # Principio inviolable Broker-First: El Broker manda. La posición en stocks_positions
+    # solo se abre cuando el callback de TWS o la reconciliación confirma la ejecución real en IBKR.
     if direction.lower() == "buy":
-        if not ib_live:
-            _open_or_update_position(
-                ticker, price, shares,
-                rule.get("group_name"),
-            )
-        else:
-            log_info(MODULE, f"📡 [IBKR BRIDGE APOLO] Orden BUY {ticker} x{shares} enviada a TWS Paper (puerto 7497).")
+        log_info(MODULE, f"📡 [IBKR TWS ORDER] Orden BUY {ticker} x{shares} encolada como 'pending' para ejecución en Broker TWS (puerto 7497).")
     else:
         # Si fue SELL, marcar las posiciones abiertas como 'closing' para esperar la confirmación del broker.
         # NUNCA insertar otra orden en stocks_orders aquí porque order_data ya fue insertada arriba!
