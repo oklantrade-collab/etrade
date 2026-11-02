@@ -1,0 +1,502 @@
+{
+  "signals": [
+    {
+      "signal_id": "eti-sig-live-meta-put-001",
+      "timestamp": "2026-11-02T12:32:27.941996+00:00",
+      "expires_at": "2026-11-02T23:59:59+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "META",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "META261102P00590000",
+        "option_type": "PUT",
+        "strike": 590.0,
+        "expiration_date": "2026-11-02",
+        "dte": 0,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.75
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "META_GAMMA_CASCADE_PUT_0DTE",
+        "expected_duration_minutes": 30
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 91.5,
+        "primary_source": "Yoel Sardi\u00f1as (FCG Calibraci\u00f3n #14 - Short Gamma Cascade)",
+        "catalyst_summary": "Subida de rendimientos de bonos a 10 a\u00f1os (4.93%) + Presiones regulatorias antimonopolio.",
+        "catalyst_impact_score": -0.78,
+        "greeks_thesis": "Gamma extrema en strikes $590-$595. Si el precio pierde $592.50, los market makers deben vender acciones para cubrir delta, acelerando la ca\u00edda intrad\u00eda."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 592.5,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 596.2,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 90.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "META_GAMMA_CASCADE_PUT_0DTE",
+        "trigger_activacion": 592.5,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 596.2,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +90% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (91.5% conf). Fuente: Yoel Sardi\u00f1as (FCG Calibraci\u00f3n #14 - Short Gamma Cascade). Subida de rendimientos de bonos a 10 a\u00f1os (4.93%) + Presiones regulatorias antimonopolio. Griegas: Gamma extrema en strikes $590-$595. Si el precio pierde $592.50, los market makers deben vender acciones para cubrir delta, acelerando la ca\u00edda intrad\u00eda.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $592.50 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-live-meta-20261102",
+      "timestamp": "2026-11-02T15:43:31.854339+00:00",
+      "expires_at": "2026-11-02T23:59:59+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "META",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "META261102P00608200",
+        "option_type": "PUT",
+        "strike": 608.2,
+        "expiration_date": "2026-11-02",
+        "dte": 0,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "BEARISH (PUT 0DTE)",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 88.0,
+        "primary_source": "Yoel Sardi\u00f1as (FCG Playbook)",
+        "catalyst_summary": "[O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] Playbook Yoel Sardi\u00f1as: Fallo en VWAP en los primeros 10 min + quiebre de pre-market low. Aceleraci\u00f3n de Gamma en PUTs 0DTE.",
+        "catalyst_impact_score": -0.8,
+        "greeks_thesis": "Aceleraci\u00f3n gamma institucional al quebrar nivel clave."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 611.23,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.25,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 617.37,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "BEARISH (PUT 0DTE)",
+        "trigger_activacion": 611.23,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 617.37,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (88.0% conf). Fuente: Yoel Sardi\u00f1as (FCG Playbook). [O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] Playbook Yoel Sardi\u00f1as: Fallo en VWAP en los primeros 10 min + quiebre de pre-market low. Aceleraci\u00f3n de Gamma en PUTs 0DTE. Griegas: Aceleraci\u00f3n gamma institucional al quebrar nivel clave.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $611.23 con RVOL \u2265 1.2x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-live-nvda-20261102",
+      "timestamp": "2026-11-02T15:43:31.854339+00:00",
+      "expires_at": "2026-11-02T23:59:59+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "NVDA",
+      "asset_class": "OPTION_WEEKLY",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "NVDA261102P00206700",
+        "option_type": "PUT",
+        "strike": 206.7,
+        "expiration_date": "2026-11-02",
+        "dte": 2,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "BEARISH (PUT Scalp)",
+        "expected_duration_minutes": 45
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 88.0,
+        "primary_source": "ETI System Dynamics",
+        "catalyst_summary": "[O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] Alta Beta (1.8x). Deslizamiento acelerado por venta de market makers al quebrar soporte.",
+        "catalyst_impact_score": -0.8,
+        "greeks_thesis": "Aceleraci\u00f3n gamma institucional al quebrar nivel clave."
+      },
+      "technical_gate": {
+        "trigger_type": "PRICE_BREAKOUT",
+        "underlying_trigger_price": 207.77,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.25,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 209.85,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "BEARISH (PUT Scalp)",
+        "trigger_activacion": 207.77,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 209.85,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (88.0% conf). Fuente: ETI System Dynamics. [O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] Alta Beta (1.8x). Deslizamiento acelerado por venta de market makers al quebrar soporte. Griegas: Aceleraci\u00f3n gamma institucional al quebrar nivel clave.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $207.77 con RVOL \u2265 1.2x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-live-spx-20261102",
+      "timestamp": "2026-11-02T15:43:31.854339+00:00",
+      "expires_at": "2026-11-02T23:59:59+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "SPX",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "SPX261102P07549400",
+        "option_type": "PUT",
+        "strike": 7549.4,
+        "expiration_date": "2026-11-02",
+        "dte": 0,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "BEARISH (0DTE PUT)",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 88.0,
+        "primary_source": "ETI System Dynamics",
+        "catalyst_summary": "[O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] Aduana O-13 Activada: Scalping 0DTE PUT por desaceleraci\u00f3n macro y rendimiento 10Y en 4.93%.",
+        "catalyst_impact_score": -0.8,
+        "greeks_thesis": "Aceleraci\u00f3n gamma institucional al quebrar nivel clave."
+      },
+      "technical_gate": {
+        "trigger_type": "PRICE_BREAKOUT",
+        "underlying_trigger_price": 7587.35,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.25,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 7663.61,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "BEARISH (0DTE PUT)",
+        "trigger_activacion": 7587.35,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 7663.61,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (88.0% conf). Fuente: ETI System Dynamics. [O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] Aduana O-13 Activada: Scalping 0DTE PUT por desaceleraci\u00f3n macro y rendimiento 10Y en 4.93%. Griegas: Aceleraci\u00f3n gamma institucional al quebrar nivel clave.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $7587.35 con RVOL \u2265 1.2x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-live-spy-20261102",
+      "timestamp": "2026-11-02T15:43:31.854339+00:00",
+      "expires_at": "2026-11-02T23:59:59+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "STANDBY",
+      "symbol": "SPY",
+      "asset_class": "OPTION_WEEKLY",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "SPY261102P00752600",
+        "option_type": "PUT",
+        "strike": 752.6,
+        "expiration_date": "2026-11-02",
+        "dte": 2,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "BEARISH (EMA Loss)",
+        "expected_duration_minutes": 45
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 88.0,
+        "primary_source": "ETI System Dynamics",
+        "catalyst_summary": "[O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] P\u00e9rdida de EMA 20 intrad\u00eda con rebote de volatilidad sobre 18.",
+        "catalyst_impact_score": -0.8,
+        "greeks_thesis": "Aceleraci\u00f3n gamma institucional al quebrar nivel clave."
+      },
+      "technical_gate": {
+        "trigger_type": "PRICE_BREAKOUT",
+        "underlying_trigger_price": 756.42,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.25,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 764.02,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "BEARISH (EMA Loss)",
+        "trigger_activacion": 756.42,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 764.02,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (88.0% conf). Fuente: ETI System Dynamics. [O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] P\u00e9rdida de EMA 20 intrad\u00eda con rebote de volatilidad sobre 18. Griegas: Aceleraci\u00f3n gamma institucional al quebrar nivel clave.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $756.42 con RVOL \u2265 1.2x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-live-qqq-20261102",
+      "timestamp": "2026-11-02T15:43:31.854339+00:00",
+      "expires_at": "2026-11-02T23:59:59+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "STANDBY",
+      "symbol": "QQQ",
+      "asset_class": "OPTION_WEEKLY",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "QQQ261102P00688400",
+        "option_type": "PUT",
+        "strike": 688.4,
+        "expiration_date": "2026-11-02",
+        "dte": 2,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "BEARISH (Rotaci\u00f3n)",
+        "expected_duration_minutes": 45
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 88.0,
+        "primary_source": "ETI System Dynamics",
+        "catalyst_summary": "[O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] \u25bc BEARISH (Rotaci\u00f3n)",
+        "catalyst_impact_score": -0.8,
+        "greeks_thesis": "Aceleraci\u00f3n gamma institucional al quebrar nivel clave."
+      },
+      "technical_gate": {
+        "trigger_type": "PRICE_BREAKOUT",
+        "underlying_trigger_price": 691.82,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.25,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 698.78,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "BEARISH (Rotaci\u00f3n)",
+        "trigger_activacion": 691.82,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 698.78,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (88.0% conf). Fuente: ETI System Dynamics. [O-13: ALLOW_PUTS_ONLY \u00b7 FDE: DECELERATION] \u25bc BEARISH (Rotaci\u00f3n) Griegas: Aceleraci\u00f3n gamma institucional al quebrar nivel clave.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $691.82 con RVOL \u2265 1.2x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "test-eti-meta-put-001",
+      "timestamp": "2026-11-02T15:43:29.300819+00:00",
+      "expires_at": "2026-11-02T17:43:29.300819+00:00",
+      "cadence": "PRE_MARKET",
+      "status": "TRIGGERED_AND_FILLED",
+      "symbol": "META",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "META261102P00590000",
+        "option_type": "PUT",
+        "strike": 590.0,
+        "expiration_date": "2026-11-02",
+        "dte": 0,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 2.75
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "META_GAMMA_CASCADE_PUT_0DTE",
+        "expected_duration_minutes": 30
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 91.5,
+        "primary_source": "Yoel Sardi\u00f1as (FCG Calibraci\u00f3n #14 - Short Gamma Cascade)",
+        "catalyst_summary": "Subida de rendimientos de bonos a 10 a\u00f1os (4.93%) + Presiones regulatorias antimonopolio.",
+        "catalyst_impact_score": -0.78,
+        "greeks_thesis": "Gamma extrema en strikes $590-$595. Si el precio pierde $592.50, acelera la ca\u00edda."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 592.5,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 596.2,
+        "stop_loss_contract_pct": -20.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 90.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "META_GAMMA_CASCADE_PUT_0DTE",
+        "trigger_activacion": 592.5,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 596.2,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +90% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (91.5% conf). Fuente: Yoel Sardi\u00f1as (FCG Calibraci\u00f3n #14 - Short Gamma Cascade). Subida de rendimientos de bonos a 10 a\u00f1os (4.93%) + Presiones regulatorias antimonopolio. Griegas: Gamma extrema en strikes $590-$595. Si el precio pierde $592.50, acelera la ca\u00edda.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $592.50 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "PRIORITY_1_ROSS_CAMERON"
+      }
+    }
+  ],
+  "updated_at": "2026-11-02T15:43:32.619471+00:00"
+}

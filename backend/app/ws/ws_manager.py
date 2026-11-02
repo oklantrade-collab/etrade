@@ -129,20 +129,26 @@ class WebSocketManager:
                         else:
                             log_warning(MODULE, f"EMERGENCY SL HIT for {symbol}! Price {price} reached SL {sl}. Routing to EREP Phase 1...")
                             from app.core.crypto_symbols import resolve_crypto_position_quantity
+                            from datetime import datetime, timezone
+                            now_iso = datetime.now(timezone.utc).isoformat()
                             qty = resolve_crypto_position_quantity(sb, pos)
                             
                             try:
                                 sb.table('positions').update({
+                                    'erep_active': True,
                                     'erep_phase': 1,
                                     'erep_p1_price': entry,
                                     'erep_q1': qty,
                                     'erep_market_type': 'crypto_futures',
+                                    'erep_activated_at': now_iso,
                                 }).eq('id', pos['id']).execute()
                                 
+                                pos['erep_active'] = True
                                 pos['erep_phase'] = 1
                                 pos['erep_p1_price'] = entry
                                 pos['erep_q1'] = qty
                                 pos['erep_market_type'] = 'crypto_futures'
+                                pos['erep_activated_at'] = now_iso
                             except Exception as db_err:
                                 log_error(MODULE, f"Error routing {symbol} to EREP Phase 1: {db_err}")
                             continue 
@@ -165,7 +171,7 @@ class WebSocketManager:
                         continue
                     
                 # C. EREP 60-Minute Timeout: force close if recovery is taking too long
-                erep_active = pos.get('erep_active', False)
+                erep_active = pos.get('erep_active', False) or (pos.get('erep_phase', 0) > 0)
                 erep_activated_at = pos.get('erep_activated_at')
                 if erep_active and erep_activated_at:
                     from datetime import datetime, timezone
@@ -193,27 +199,33 @@ class WebSocketManager:
                 # D. Check Sharp Drop from Peak (ONLY for non-EREP positions)
                 # EREP positions: SKIP sharp_drop — let the dip happen, wait for 5min recovery
                 # Normal positions: 3% drop triggers close
-                if not erep_active:
+                if not (pos.get('erep_active') or pos.get('erep_phase', 0) > 0 or pos.get('recovery_mode')):
                     peak = float(pos.get('highest_price_reached') or entry if is_long else pos.get('lowest_price_reached') or entry)
                     if peak > 0:
                         drop_from_peak = ((peak - price) / peak * 100) if is_long else ((price - peak) / peak * 100)
                         if drop_from_peak >= 3.0:
                             log_warning(MODULE, f"SHARP DROP for {symbol}! Price dropped {drop_from_peak:.2f}% from peak {peak}. Routing to EREP Phase 1...")
                             from app.core.crypto_symbols import resolve_crypto_position_quantity
+                            from datetime import datetime, timezone
+                            now_iso = datetime.now(timezone.utc).isoformat()
                             qty = resolve_crypto_position_quantity(sb, pos)
                             
                             try:
                                 sb.table('positions').update({
+                                    'erep_active': True,
                                     'erep_phase': 1,
                                     'erep_p1_price': entry,
                                     'erep_q1': qty,
                                     'erep_market_type': 'crypto_futures',
+                                    'erep_activated_at': now_iso,
                                 }).eq('id', pos['id']).execute()
                                 
+                                pos['erep_active'] = True
                                 pos['erep_phase'] = 1
                                 pos['erep_p1_price'] = entry
                                 pos['erep_q1'] = qty
                                 pos['erep_market_type'] = 'crypto_futures'
+                                pos['erep_activated_at'] = now_iso
                             except Exception as db_err:
                                 log_error(MODULE, f"Error routing {symbol} to EREP Phase 1 on Sharp Drop: {db_err}")
                             continue

@@ -19,6 +19,8 @@ from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
 from app.core.symbol_state import SymbolStateMachine
 
+sm = SymbolStateMachine.get_instance()
+
 MODULE = "stocks_order_exec"
 
 

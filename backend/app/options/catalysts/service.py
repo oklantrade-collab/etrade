@@ -152,8 +152,12 @@ def run_catalyst_scan(
             )
 
             # Componentes formateados
-            c_dict = {c.name: c.to_dict() for c in resolution.components}
-            c_active = [c.name for c in resolution.components if c.triggered]
+            if isinstance(resolution.components, dict):
+                c_dict = resolution.components
+                c_active = resolution.active_catalysts
+            else:
+                c_dict = {getattr(c, 'name', str(c)): getattr(c, 'to_dict', lambda: getattr(c, '__dict__', {}))() for c in resolution.components}
+                c_active = [getattr(c, 'name', str(c)) for c in resolution.components if getattr(c, 'triggered', False)]
 
             from app.options.aduana_gap_runner_options import get_asset_class, get_min_gap_threshold
             asset_class = get_asset_class(sym)
@@ -173,16 +177,28 @@ def run_catalyst_scan(
                 is_gap_runner = True
                 gap_type = "OPEN_GAP_DOWN"
 
+            cat_score = float(getattr(resolution, "catalyst_score", getattr(resolution, "total_score", 0.0)) or 0.0)
             if is_gap_runner:
                 c_active.append("gap_runner")
-                final_cat_score = round(min(100.0, resolution.total_score + 25.0), 1)
+                final_cat_score = round(min(100.0, cat_score + 25.0), 1)
             else:
-                final_cat_score = round(resolution.total_score, 1)
+                final_cat_score = round(cat_score, 1)
+
+            decision = getattr(resolution, "decision", None)
+            if not decision:
+                if resolution.direction in ("bullish", "CALL"):
+                    decision = "ENTER_CALL"
+                elif resolution.direction in ("bearish", "PUT"):
+                    decision = "ENTER_PUT"
+                else:
+                    decision = "NO_TRADE"
+
+            sipv_st = getattr(resolution, "sipv_state", "neutral")
 
             candidate_payload = {
                 "symbol": sym,
                 "direction": resolution.direction,
-                "decision": resolution.decision,
+                "decision": decision,
                 "catalyst_score": final_cat_score,
                 "is_gap_runner": is_gap_runner,
                 "gap_type": gap_type,
@@ -194,7 +210,7 @@ def run_catalyst_scan(
                 "c3_adx": c_dict.get("adx_di_5m", {}),
                 "c4_rebote": c_dict.get("rebote_15m", {}),
                 "adx_value": c_dict.get("adx_di_5m", {}).get("detail", {}).get("adx", 0.0),
-                "sipv_state": resolution.sipv_state,
+                "sipv_state": sipv_st,
                 "ttl_expires_at": ttl_expires_at,
                 "updated_at": now_utc.isoformat(),
                 "catalysts_active": c_active,
@@ -202,9 +218,9 @@ def run_catalyst_scan(
                 "price": price,
             }
 
-            if resolution.decision == "ENTER_CALL" and resolution.total_score >= min_score:
+            if decision == "ENTER_CALL" and final_cat_score >= min_score:
                 call_candidates.append(candidate_payload)
-            elif resolution.decision == "ENTER_PUT" and resolution.total_score >= min_score:
+            elif decision == "ENTER_PUT" and final_cat_score >= min_score:
                 put_candidates.append(candidate_payload)
             else:
                 neutral_count += 1
