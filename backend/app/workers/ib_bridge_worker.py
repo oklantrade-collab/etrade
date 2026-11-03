@@ -184,6 +184,14 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 "max_loss_total": round(shares * exec_price * 100, 2),
                                 "max_profit_total": 9999.0,
                                 "breakeven": round(strike_num + exec_price, 2) if is_call else round(strike_num - exec_price, 2),
+                                "exit_plan": {
+                                    "trailing_sl_type": "INITIAL",
+                                    "highest_premium_seen": exec_price,
+                                    "time_decay_guard_enabled": True,
+                                    "is_zero_dte": True,
+                                    "horizon": "SCALPING",
+                                    "last_eval_at": now_iso
+                                },
                                 "model_version": "ib_live_paper",
                                 "created_at": now_iso,
                                 "updated_at": now_iso

@@ -874,10 +874,11 @@ def place_stop_order(
     expires_at_dt = now + timedelta(minutes=int(context.get("ttl_minutes") or 45))
     ib_live = is_ib_bridge_alive()
 
-    # Si no hay IB Bridge activo y el precio ya superó el trigger_price, rellenar en simulación
-    already_triggered_sim = (not ib_live) and (market_price >= trigger_price)
-    initial_status = "filled" if already_triggered_sim else "pending"
-    fill_px = max(market_price, trigger_price) if already_triggered_sim else None
+    # Principio Broker-First: El Broker manda. La orden se registra como 'pending'
+    # y la posición se abre ÚNICAMENTE cuando el broker confirme el fill en TWS.
+    already_triggered_sim = False
+    initial_status = "pending"
+    fill_px = None
 
     order_data = {
         "ticker": ticker,
@@ -923,8 +924,7 @@ def place_stop_order(
         else:
             raise e_ord_ins
 
-    if already_triggered_sim and direction.lower() == "buy":
-        _open_or_update_position(ticker, fill_px, shares, rule.get("group_name") or "OPEN_GAP_RUNNER")
+    # Principio Broker-First: La posición se creará al confirmar fill en TWS.
 
     mode_str = "[IBKR PAPER STP]" if ib_live else "[PAPER STP]"
     log_info(

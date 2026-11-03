@@ -206,13 +206,9 @@ async def run_eti_autonomous_options_cycle(
             "settings_version": "AUTONOMOUS",
         }
 
-        # 5. Insertar en opt_paper_trades
-        try:
-            ins_res = sb.table("opt_paper_trades").insert(pos_data).execute()
-            inserted_pos = ins_res.data[0] if ins_res.data else pos_data
-        except Exception as e_pt:
-            log_warning(MODULE, f"Aviso insertando en opt_paper_trades: {e_pt}")
-            inserted_pos = pos_data
+        # 5. Principio Broker-First: NO insertar optimísticamente en opt_paper_trades.
+        # La posición se creará en opt_paper_trades ÚNICAMENTE cuando el broker confirme el fill
+        # a través de ib_bridge_worker (on_ib_order_status / reconcile_broker_portfolio).
 
         # 6. Despachar a stocks_orders para ejecución por ib_bridge_worker (TWS)
         try:
@@ -258,7 +254,7 @@ async def run_eti_autonomous_options_cycle(
             f"Contrato: {opt_target_band} ({rgt} Strike ${stk})\n"
             f"Precio Entrada Estimado: ${est_price:.2f} | Cantidad: {qty}\n"
             f"Motivo Técnico: {gate_res.reason}\n"
-            f"Estado: Registrado en Paper y Despachado a TWS."
+            f"Estado: Orden PENDING enviada al Broker TWS para confirmación de fill."
         )
 
         total_occupied_slots += 1

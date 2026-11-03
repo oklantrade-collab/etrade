@@ -962,52 +962,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         opt_price = best_contract.ask if best_contract.ask > 0 else best_contract.mid
 
                         if active_opt_pos is None and opt_t_step == 1:
-                            # 1. Registrar en opt_paper_trades
-                            new_paper_trade = {
-                                "symbol": ticker,
-                                "strategy_type": "long_call" if best_contract.right == "C" else "long_put",
-                                "direction": "bullish" if best_contract.right == "C" else "bearish",
-                                "status": "open",
-                                "qty": contracts_to_buy,
-                                "expiry": best_contract.expiry.isoformat(),
-                                "entry_time": now_iso,
-                                "entry_debit": opt_price,
-                                "entry_costs": round(0.70 * contracts_to_buy, 2),
-                                "entry_total_invested": round(opt_price * 100 * contracts_to_buy, 2),
-                                "max_loss_total": round(opt_price * 100 * contracts_to_buy, 2),
-                                "max_profit_total": 9999.0,
-                                "breakeven": round(best_contract.strike + opt_price, 2) if best_contract.right == "C" else round(best_contract.strike - opt_price, 2),
-                                "last_mark_price": opt_price,
-                                "last_mark_at": now_iso,
-                                "unrealized_pnl": 0.0,
-                                "exit_plan": {
-                                    "initial_sl": opt_gap_eval.get("initial_sl"),
-                                    "stop_loss_underlying": opt_gap_eval.get("initial_sl"),
-                                    "trailing_sl_type": "INITIAL",
-                                    "highest_premium_seen": opt_price,
-                                    "reentry_count": 0,
-                                    "tranche_step": 1,
-                                    "rule_code": opt_rule_cd,
-                                    "entry_reason": opt_gap_eval.get("reason"),
-                                    "last_eval_at": now_iso
-                                },
-                                "entry_fills": [{
-                                    "conid": best_contract.conid,
-                                    "contract_id": best_contract.contract_id,
-                                    "strike": best_contract.strike,
-                                    "right": best_contract.right,
-                                    "bid": best_contract.bid,
-                                    "ask": best_contract.ask,
-                                    "fill_price": opt_price,
-                                    "side": "buy",
-                                    "closing_side": "sell",
-                                    "market_data_type": "REALTIME"
-                                }],
-                                "model_version": "aduana_gap_runner_v6",
-                                "created_at": now_iso,
-                                "updated_at": now_iso
-                            }
-                            sb.table("opt_paper_trades").insert(new_paper_trade).execute()
+                            # Principio Broker-First: NO insertar en opt_paper_trades antes del fill.
+                            # La posición en opt_paper_trades se crea cuando el broker confirma la compra en TWS.
 
                             # 2. Despachar a stocks_orders para ejecución IB Bridge / TWS
                             sb.table("stocks_orders").insert({
@@ -1149,32 +1105,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             opt_ticker_formatted = f"{ticker}:OPT:{expiry_clean}:{strike_str}:{'C' if is_call else 'P'}"
 
                             now_iso = datetime.now(timezone.utc).isoformat()
-                            # Registrar en opt_paper_trades
-                            sb.table("opt_paper_trades").insert({
-                                "symbol": ticker,
-                                "strategy_type": vme_opt_rule,
-                                "direction": "bullish" if is_call else "bearish",
-                                "entry_debit": opt_price,
-                                "qty": contracts_to_buy,
-                                "status": "open",
-                                "entry_time": now_iso,
-                                "expiry": selected_contract.expiration,
-                                "exit_plan": {
-                                    "initial_sl": vme_res.get("initial_sl"),
-                                    "stop_loss_underlying": vme_res.get("initial_sl"),
-                                    "highest_premium_seen": opt_price,
-                                    "trailing_sl_underlying": 0.0,
-                                    "last_eval_at": now_iso
-                                },
-                                "entry_fills": [{
-                                    "symbol": opt_ticker_formatted,
-                                    "strike": selected_contract.strike,
-                                    "right": "C" if is_call else "P",
-                                    "expiry": selected_contract.expiration,
-                                    "price": opt_price,
-                                    "qty": contracts_to_buy
-                                }]
-                            }).execute()
+                            # Principio Broker-First: NO insertar en opt_paper_trades antes del fill.
+                            # La posición en opt_paper_trades se crea cuando el broker confirma la compra en TWS.
 
                             # Enviar orden a stocks_orders para sincronización con IBKR bridge / TWS
                             sb.table("stocks_orders").insert({
