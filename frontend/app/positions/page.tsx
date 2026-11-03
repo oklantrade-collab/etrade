@@ -19,6 +19,8 @@ export default function PositionsPage() {
   const [tz, setTz] = useState('America/Lima')
   const [selectedPosition, setSelectedPosition] = useState<any | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [paperTradesLoading, setPaperTradesLoading] = useState(false)
+  const [paperTradesError, setPaperTradesError] = useState<string | null>(null)
 
   useEffect(() => {
     const handleTzUpdate = () => {
@@ -33,7 +35,6 @@ export default function PositionsPage() {
   useEffect(() => {
     loadPositions()
     loadClosedPositions()
-    loadPaperTrades()
     loadMaxPositions()
     const channel = supabase
       .channel('positions-realtime')
@@ -41,6 +42,12 @@ export default function PositionsPage() {
       .subscribe()
     return () => { supabase.removeChannel(channel) }
   }, [])
+
+  useEffect(() => {
+    if (tab === 'paper' && paperTrades.length === 0 && !paperTradesLoading) {
+      loadPaperTrades()
+    }
+  }, [tab])
 
   async function loadPositions() {
     const { data, error } = await supabase
@@ -72,17 +79,26 @@ export default function PositionsPage() {
   }
 
   async function loadPaperTrades() {
-    const { data, error } = await supabase
-      .from('paper_trades')
-      .select('*')
-      .eq('mode', 'paper')
-      .order('closed_at', { ascending: false, nullsFirst: false })
-      .limit(100)
-    if (error) {
-      console.error('Error loading paper trades:', error)
-      setErrorMsg(`Error loading paper trades: ${error.message}`)
-    } else {
-      if (data) setPaperTrades(data)
+    setPaperTradesLoading(true)
+    setPaperTradesError(null)
+    try {
+      const { data, error } = await supabase
+        .from('paper_trades')
+        .select('id, symbol, side, rule_code, entry_price, exit_price, total_pnl_usd, closed_at')
+        .eq('mode', 'paper')
+        .order('id', { ascending: false })
+        .limit(100)
+      if (error) {
+        console.warn('Error loading paper trades:', error)
+        setPaperTradesError(error.message)
+      } else if (data) {
+        setPaperTrades(data)
+      }
+    } catch (err: any) {
+      console.warn('Exception loading paper trades:', err)
+      setPaperTradesError(err?.message || 'Error de conexión')
+    } finally {
+      setPaperTradesLoading(false)
     }
   }
 
@@ -557,7 +573,23 @@ export default function PositionsPage() {
             </div>
           ) : (
             <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--text-muted)' }}>
-              <p>No paper trades history.</p>
+              {paperTradesLoading ? (
+                <p>Cargando operaciones simuladas...</p>
+              ) : paperTradesError ? (
+                <div>
+                  <p style={{ color: 'var(--accent-red)', marginBottom: '12px' }}>
+                    Aviso: No se pudieron cargar las operaciones simuladas ({paperTradesError})
+                  </p>
+                  <button 
+                    onClick={() => loadPaperTrades()}
+                    style={{ padding: '6px 16px', borderRadius: '6px', background: 'var(--accent-blue)', color: '#fff', border: 'none', cursor: 'pointer', fontSize: '0.85rem' }}
+                  >
+                    Reintentar
+                  </button>
+                </div>
+              ) : (
+                <p>No paper trades history.</p>
+              )}
             </div>
           )
         )}
