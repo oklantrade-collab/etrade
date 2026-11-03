@@ -142,6 +142,8 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         # Métricas Anti-Agotamiento Intradía (VWAP, Open del Día, Volume Decay)
         "day_open_price": current_price or 0.0,
         "vwap_intraday": current_price or 0.0,
+        "price_5m": current_price or 0.0,
+        "is_below_vwap_5m": False,
         "is_below_vwap": False,
         "is_below_day_open": False,
         "vol_decay_ratio_15m": 1.0,
@@ -341,11 +343,13 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
         eff_price = current_price or c_close
         day_open_price = eff_price
         vwap_intraday = eff_price
+        price_5m = eff_price
         if df_5m is not None and not df_5m.empty:
             today_date = df_5m.index[-1].date()
             df_today = df_5m[df_5m.index.date == today_date]
             if len(df_today) >= 1:
                 try:
+                    price_5m = float(df_today["Close"].iloc[-1])
                     day_open_price = float(df_today["Open"].iloc[0])
                     h_t = df_today["High"]
                     l_t = df_today["Low"]
@@ -360,8 +364,10 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
                 except Exception as e_vwap:
                     log_debug(MODULE, f"Error calculando VWAP para {clean_ticker}: {e_vwap}")
 
-        is_below_vwap = bool(vwap_intraday > 0 and eff_price < vwap_intraday * 0.998)
-        is_below_day_open = bool(day_open_price > 0 and eff_price < day_open_price * 0.998)
+        # Candado Universal VWAP evaluado específicamente en temporalidad de 5 minutos (price_5m)
+        eval_vwap_price = price_5m if price_5m > 0 else eff_price
+        is_below_vwap = bool(vwap_intraday > 0 and eval_vwap_price < vwap_intraday * 0.998)
+        is_below_day_open = bool(day_open_price > 0 and eval_vwap_price < day_open_price * 0.998)
 
         # Métricas de 15m (Momentum Ladder & Bollinger Bands Expansion)
         is_15m_high_growing = False
@@ -496,6 +502,8 @@ def get_live_1h_candle_and_sipv(ticker: str, current_price: Optional[float] = No
             # Métricas Anti-Agotamiento Intradía (VWAP, Open del Día, Volume Decay)
             "day_open_price": round(day_open_price, 2),
             "vwap_intraday": round(vwap_intraday, 3),
+            "price_5m": round(price_5m, 4),
+            "is_below_vwap_5m": is_below_vwap,
             "is_below_vwap": is_below_vwap,
             "is_below_day_open": is_below_day_open,
             "vol_decay_ratio_15m": vol_decay_ratio_15m,

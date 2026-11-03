@@ -819,6 +819,9 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
                 **cand["exit_plan"],
                 "execution_route": selected_route,
                 "invalidation_underlying": sig.risk_management.invalidation_underlying,
+                "is_zero_dte": True,
+                "horizon": "SCALPING",
+                "time_decay_guard_enabled": True,
             },
             "model_version": "ETI-QUANTUM-v2.3",
             "settings_version": version,
@@ -827,6 +830,30 @@ def simulate_entry(payload: dict, user: dict = ceo_only):
             inserted = sb.table("opt_paper_trades").insert(pos_data).execute().data[0]
         except Exception:
             inserted = pos_data
+
+        # Despachar orden a stocks_orders para ejecución por ib_bridge_worker (TWS)
+        stk_val = sig.options_contract.strike if sig.options_contract else round(gate_res.current_price, 2)
+        exp_raw = sig.options_contract.expiration_date if sig.options_contract else now_dt.strftime("%Y-%m-%d")
+        exp_c = exp_raw.replace("-", "")[:8]
+        rgt_val = "C" if cand["direction"] == "bullish" else "P"
+        opt_target_band = f"OPT:{exp_c}:{stk_val}:{rgt_val}"
+        try:
+            sb.table("stocks_orders").insert({
+                "ticker": sig.symbol[:10],
+                "target_band": opt_target_band,
+                "group_name": "OPTIONS_AUTONOMOUS",
+                "rule_code": "ETI_MANUAL_SIM",
+                "order_type": "limit",
+                "limit_price": round(est_price, 2),
+                "direction": "buy",
+                "shares": 1,
+                "market_price": round(est_price, 2),
+                "status": "pending",
+                "created_at": now_iso,
+            }).execute()
+            log_info("OPTIONS_API", f"Orden ETI despachada a stocks_orders: {sig.symbol} {opt_target_band}")
+        except Exception as e_ord_eti:
+            log_warning("OPTIONS_API", f"Aviso despachando orden ETI a stocks_orders: {e_ord_eti}")
 
         # Notificar feedback asíncrono
         try:

@@ -260,7 +260,7 @@ def evaluate_daily_runway_feasibility(
     open_price: float,
     bb_upper_1d: float,
     rvol: float = 1.0,
-    min_required_runway_pct: float = 25.0,
+    min_required_runway_pct: float = 5.0,
     beta_expansion: float = 0.025,
     max_delta_pct: float = 0.25
 ) -> Dict[str, Any]:
@@ -292,10 +292,10 @@ def evaluate_daily_runway_feasibility(
     dynamic_ceiling = bb_upper_1d * (1.0 + delta_rvol)
     runway_pct = ((dynamic_ceiling - open_price) / open_price) * 100.0
 
-    # Regla Calibrada Institucional: Si RVOL >= 2.0x, la fuerte demanda institucional relaja el runway exigido a 11.0%
+    # Regla Calibrada Institucional: Runway mínimo reducido desde 5.0% para capturar breakouts
     effective_min_runway = min_required_runway_pct
-    if rvol >= 2.0 and min_required_runway_pct > 11.0:
-        effective_min_runway = 11.0
+    if rvol >= 2.0 and min_required_runway_pct > 5.0:
+        effective_min_runway = 5.0
 
     is_approved = runway_pct >= effective_min_runway
 
@@ -535,7 +535,7 @@ def evaluate_gap_runner_entry_tranches(
                 open_price=open_day_val,
                 bb_upper_1d=bb_up_1d_eval,
                 rvol=rvol_tr_val,
-                min_required_runway_pct=25.0
+                min_required_runway_pct=5.0
             )
             if not runway_eval["approved"]:
                 res["reason"] = runway_eval["reason"]

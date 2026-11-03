@@ -167,7 +167,7 @@ def evaluate_fast_track_entry(
                     open_price=open_today_val,
                     bb_upper_1d=bb_up_1d_ft,
                     rvol=rvol_run,
-                    min_required_runway_pct=25.0
+                    min_required_runway_pct=5.0
                 )
                 if not runway_res['approved']:
                     res['reason'] = runway_res['reason']
@@ -813,7 +813,7 @@ def evaluate_leg2_reversal_entry(
                     open_price=open_today_l2,
                     bb_upper_1d=bb_up_1d_l2,
                     rvol=rvol_leg2,
-                    min_required_runway_pct=25.0
+                    min_required_runway_pct=5.0
                 )
                 if not runway_res['approved']:
                     res['reason'] = runway_res['reason']

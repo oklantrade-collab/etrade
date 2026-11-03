@@ -58,38 +58,38 @@ class TestDailyRunwayAndRSISeal:
         assert res["delta_rvol_pct"] > 0
         assert res["runway_pct"] >= 25.0
 
-    def test_rvol_ge_2_relaxes_runway_to_11pct(self):
-        """Valida regla de 11 pct: Con RVOL >= 2.0x, acciones como ENVX (+15 pct), CRML (+19 pct) o AEYE (+12.1 pct) son APROBADAS."""
-        # Caso AEYE / ENVX: runway ~ 15%
+    def test_rvol_ge_2_relaxes_runway_to_5pct(self):
+        """Valida regla calibrada: Con RVOL >= 2.0x, el runway mínimo se relaja a 5.0% para habilitar runners con gaps expansivos."""
+        # Caso con runway ~ 8.6% y RVOL >= 2.0x -> APROBADO (supera el nuevo piso de 5.0%)
         res_approved = evaluate_daily_runway_feasibility(
             open_price=10.00,
-            bb_upper_1d=11.10,
-            rvol=2.2,
+            bb_upper_1d=10.60,
+            rvol=2.5,
             min_required_runway_pct=25.0
         )
         assert res_approved["approved"] is True
-        assert 11.0 <= res_approved["runway_pct"] < 25.0
-        assert "Requerido: 11%" in res_approved["reason"]
+        assert res_approved["runway_pct"] >= 5.0
+        assert "Requerido: 5%" in res_approved["reason"]
 
-        # Si RVOL < 2.0x (ej. 1.5x), el 15% de runway NO alcanza (requiere 25%) y debe ser RECHAZADO
+        # Si RVOL < 2.0x (ej. 1.5x), el 8.6% de runway NO alcanza (requiere 25%) y debe ser RECHAZADO
         res_rejected_low_rvol = evaluate_daily_runway_feasibility(
             open_price=10.00,
-            bb_upper_1d=11.10,
+            bb_upper_1d=10.60,
             rvol=1.5,
             min_required_runway_pct=25.0
         )
         assert res_rejected_low_rvol["approved"] is False
         assert "< 25%" in res_rejected_low_rvol["reason"]
 
-        # Si RVOL >= 2.0x pero runway < 11% (ej. 8%), debe ser RECHAZADO
+        # Si el espacio es menor al 5% (ej. 2%), debe ser RECHAZADO incluso con RVOL alto
         res_rejected_tight = evaluate_daily_runway_feasibility(
             open_price=10.00,
-            bb_upper_1d=10.40,
+            bb_upper_1d=9.80,
             rvol=2.5,
-            min_required_runway_pct=25.0
+            min_required_runway_pct=5.0
         )
         assert res_rejected_tight["approved"] is False
-        assert "< 11%" in res_rejected_tight["reason"]
+        assert "< 5%" in res_rejected_tight["reason"]
 
     def test_rsi_exhaustion_blocks_fast_track_entry(self):
         """Valida que evaluate_fast_track_entry rechace si RSI 5m > 75.0 (como SGRY con RSI 97)."""

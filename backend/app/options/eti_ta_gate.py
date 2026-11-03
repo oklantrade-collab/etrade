@@ -59,7 +59,8 @@ def evaluate_eti_ta_gate(
     if df_5m is None or df_5m.empty:
         try:
             import yfinance as yf
-            stock = yf.Ticker(sym)
+            sym_yf = "^SPX" if sym == "SPX" else ("^NDX" if sym == "NDX" else sym)
+            stock = yf.Ticker(sym_yf)
             raw_5m = stock.history(period="3d", interval="5m")
             if raw_5m is not None and not raw_5m.empty:
                 df_5m = raw_5m.rename(columns={"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"})

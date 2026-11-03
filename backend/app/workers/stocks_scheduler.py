@@ -2819,10 +2819,63 @@ async def run_options_gap_defense_cycle():
 
             eval_pos["unrealized_pnl_pct"] = cur_pnl_pct
 
+            # ── CANDADO TIME-DECAY GUARD PARA OPCIONES 0DTE & SCALPING (ETI / ROSS CAMERON) ──
+            # En opciones 0DTE, Theta acelera exponencialmente la pérdida si el trade no despega.
+            is_zero_dte_opt = (
+                dte_days_v <= 1 or
+                bool(pos.get("is_zero_dte")) or
+                "0dte" in str(pos.get("strategy_type", "")).lower() or
+                str(pos.get("model_version", "")).startswith("ETI") or
+                str(pos.get("rule_code", "")).startswith("ROSS_CAMERON") or
+                "SCALP" in str(pos.get("strategy_type", "")).upper() or
+                "SCALP" in str(exit_plan.get("horizon", "")).upper() or
+                bool(exit_plan.get("is_zero_dte")) or
+                bool(exit_plan.get("time_decay_guard_enabled"))
+            )
+
+            if is_zero_dte_opt and not eval_res.get("should_exit"):
+                # 1. Breakeven Ratchet a los 15 minutos:
+                # Si el contrato lleva >= 15 min y alcanza terreno positivo (>= +2%), blindar Breakeven (+1%).
+                if pos_age_min >= 15.0 and cur_pnl_pct >= 2.0 and not exit_plan.get("time_decay_be_locked"):
+                    exit_plan["time_decay_be_locked"] = True
+                    be_prem = round(entry_debit * 1.01, 2)
+                    exit_plan["stop_loss_premium"] = max(float(exit_plan.get("stop_loss_premium") or 0.0), be_prem)
+                    log_info(MODULE, f"🛡️ [TIME-DECAY GUARD] Breakeven asegurado a los 15m para {symbol} 0DTE: SL=${be_prem:.2f} (+1% neto protegido).")
+
+                # 2. Hard Stop Loss Rápido 0DTE (-25%):
+                # Cortar pérdidas ágilmente si la prima cae -25%, evitando la sangría de los swings (-50%).
+                if cur_pnl_pct <= -25.0 and has_live_opt_quote and (pos_age_min >= 2.0 or pos_age_min == 0.0):
+                    eval_res = {
+                        "should_exit": True,
+                        "rule_code": "OPT_0DTE_FAST_SL",
+                        "reason": f"Hard Stop 0DTE (-25%): PnL={cur_pnl_pct:.1f}%. Corte estricto de scalping.",
+                        "contracts_ratio_to_exit": 1.0
+                    }
+
+                # 3. Cierre Defensivo por Estancamiento Temporal (20 minutos):
+                # Si transcurrieron 20 min y no despegó, cerrando si cae por Theta (<= -10%) o a los 25m si está en pérdida (< 0%).
+                elif (pos_age_min >= 20.0 and cur_pnl_pct <= -10.0) or (pos_age_min >= 25.0 and cur_pnl_pct < 0.0):
+                    eval_res = {
+                        "should_exit": True,
+                        "rule_code": "OPT_0DTE_TIME_DECAY_GUARD",
+                        "reason": f"Time-Decay Guard: Contrato 0DTE estancado por {pos_age_min:.0f}m sin despegue (PnL: {cur_pnl_pct:+.1f}%). Cierre defensivo ante erosión de Theta.",
+                        "contracts_ratio_to_exit": 1.0
+                    }
+
+                # 4. Take Profit Rápido de Scalping (+35% a +40%):
+                elif cur_pnl_pct >= 35.0 and not exit_plan.get("tp_scalp_executed"):
+                    exit_plan["tp_scalp_executed"] = True
+                    eval_res = {
+                        "should_exit": True,
+                        "rule_code": "OPT_0DTE_TAKE_PROFIT_35",
+                        "reason": f"Take Profit Scalping 0DTE (+{cur_pnl_pct:.1f}%): Objetivo de scalping alcanzado.",
+                        "contracts_ratio_to_exit": 1.0 if qty == 1 else 0.5
+                    }
+
             if eval_res.get("should_exit"):
                 exit_code_cand = str(eval_res.get("rule_code") or "OPT_GAP_EXIT")
                 exit_code_lower = exit_code_cand.lower()
-                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in ("sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap"))
+                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in ("sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap", "time_decay"))
 
                 # Candados restrictivos (Candado 1 Bollinger y Candado 2 Swing Multi-Semana)
                 # NUNCA deben bloquear un Stop Loss técnico ni un corte defensivo de pérdidas!
@@ -3141,6 +3194,13 @@ async def run_options_auto_execution_cycle():
         rows = sb.table("opt_settings").select("key,value").execute().data or []
         stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}
         eff = sd.effective_settings(stored)
+
+        # 0.3 Ejecución Autónoma de Señales Cuánticas ETI (Ross Cameron Scalping)
+        try:
+            from app.options.eti_autonomous_dispatcher import run_eti_autonomous_options_cycle
+            await run_eti_autonomous_options_cycle(supabase=sb, config=eff)
+        except Exception as eti_err:
+            log_warning(MODULE, f"Aviso en ciclo de disparo autónomo ETI: {eti_err}")
 
         # 1. Ejecutar selección de cartera greedy para promover elegibles (score >= min_score) a 'selected'
         try:

@@ -1197,10 +1197,11 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
 
             effective_float = (c_mcap / max(0.01, price)) if c_mcap > 0 else 0
 
-            # 1. CANDADO UNIVERSAL VWAP INTRADÍA (Anti Bear Flag / Trampa de Techo)
-            # NUNCA comprar una acción que cotiza por debajo de su precio ponderado por volumen
-            if c_vwap > 0 and price < c_vwap * 0.998:
-                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VWAP INTRADÍA (Precio ${price:.2f} < VWAP ${c_vwap:.2f}). Prohibido comprar bajo VWAP.")
+            # 1. CANDADO UNIVERSAL VWAP INTRADÍA EN 5 MINUTOS (Anti Bear Flag / Trampa de Techo)
+            # Evaluado estrictamente con el precio de cierre de la vela de 5m (price_5m)
+            price_eval_vwap = float(live_intraday.get('price_5m') or price)
+            if c_vwap > 0 and price_eval_vwap < c_vwap * 0.998:
+                log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por VWAP INTRADÍA 5M (Precio 5m ${price_eval_vwap:.2f} < VWAP ${c_vwap:.2f}). Prohibido comprar bajo VWAP.")
                 await _upsert_queue(supabase, candidate, status='blocked')
                 continue
 
@@ -1220,7 +1221,7 @@ async def execute_priority_buys(queue: list, capital: dict, cfg: dict, supabase,
                     open_price=c_open_eval,
                     bb_upper_1d=bb_up_1d_exec,
                     rvol=c_rvol,
-                    min_required_runway_pct=25.0
+                    min_required_runway_pct=5.0
                 )
                 if not runway_res['approved']:
                     log_info(MODULE, f"⛔ {ticker}: BLOQUEADA por ADUANA DAILY RUNWAY ({runway_res['reason']}).")
