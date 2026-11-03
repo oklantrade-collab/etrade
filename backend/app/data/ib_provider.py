@@ -68,6 +68,8 @@ class IBConnection(EWrapper, EClient):
         self.accounts: list[str] = []
         self._positions: Dict[str, dict] = {}
         self._positions_event = threading.Event()
+        self._contract_details: Dict[int, list] = {}
+        self._contract_details_events: Dict[int, threading.Event] = {}
         self._hist_bars: dict = {}
         self._hist_events: dict = {}
         self._realtime_bar_callbacks: dict = {}
@@ -259,6 +261,45 @@ class IBConnection(EWrapper, EClient):
         log_info(MODULE, f"[IB PositionEnd] Positions sync finished. Total active symbols: {len(self._positions)}")
         self._positions_event.set()
 
+    # ── Contract Details Callbacks & Resolver ─────────────
+
+    def contractDetails(self, reqId: int, contractDetails):
+        """Called by TWS with contract details."""
+        if reqId not in self._contract_details:
+            self._contract_details[reqId] = []
+        self._contract_details[reqId].append(contractDetails)
+        con = getattr(contractDetails, "contract", None)
+        if con:
+            log_info(MODULE, f"[IB ContractDetails] reqId={reqId} conId={getattr(con, 'conId', None)} symbol={getattr(con, 'symbol', '')} localSymbol={getattr(con, 'localSymbol', '')}")
+
+    def contractDetailsEnd(self, reqId: int):
+        """Called by TWS when contract details finished."""
+        log_info(MODULE, f"[IB ContractDetailsEnd] reqId={reqId} matched={len(self._contract_details.get(reqId, []))}")
+        evt = self._contract_details_events.get(reqId)
+        if evt:
+            evt.set()
+
+    def resolve_contract(self, contract: "Contract", timeout: float = 5.0) -> Optional["Contract"]:
+        """Resolve a partial contract into a fully qualified contract with conId."""
+        req_id = int(time.time() * 1000) % 90000 + 10000
+        evt = threading.Event()
+        self._contract_details[req_id] = []
+        self._contract_details_events[req_id] = evt
+        try:
+            self.reqContractDetails(req_id, contract)
+            if evt.wait(timeout=timeout) and self._contract_details.get(req_id):
+                matched = self._contract_details[req_id][0].contract
+                log_info(MODULE, f"Successfully resolved contract {contract.symbol} -> conId {matched.conId}")
+                return matched
+            else:
+                log_warning(MODULE, f"Contract resolution timed out or empty for {contract.symbol}")
+        except Exception as e:
+            log_warning(MODULE, f"Error resolving contract: {e}")
+        finally:
+            self._contract_details_events.pop(req_id, None)
+            self._contract_details.pop(req_id, None)
+        return None
+
     def request_broker_positions(self, timeout: float = 6.0) -> Dict[str, dict]:
         """Request all open positions from TWS and wait until positionEnd."""
         if not hasattr(self, "_last_valid_positions"):
@@ -446,7 +487,8 @@ class IBConnection(EWrapper, EClient):
         strike: float,
         right: str = "C",
         multiplier: str = "100",
-        exchange: str = "SMART"
+        exchange: str = "SMART",
+        trading_class: Optional[str] = None
     ) -> "Contract":
         """Create a Contract object for a US stock/ETF option."""
         if not IB_AVAILABLE:
@@ -460,6 +502,10 @@ class IBConnection(EWrapper, EClient):
         contract.strike = float(strike)
         contract.right = right.upper()
         contract.multiplier = str(multiplier)
+        if trading_class:
+            contract.tradingClass = str(trading_class).upper()
+        elif symbol.upper() == "SPY":
+            contract.tradingClass = "SPY"
         return contract
 
     # ── Order Builder ─────────────────────────────────────

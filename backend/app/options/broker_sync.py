@@ -50,8 +50,9 @@ def fetch_live_broker_portfolio_direct(sb) -> tuple[dict[str, Any], float]:
         if not ib:
             return {}, 999999.0
         if not ib.connected:
-            # Usar client_id 95 dedicado para consultas ad-hoc para no colisionar con 25 (Bridge) ni 31 (Worker)
-            ib.connect_tws(client_id=95)
+            # Usar client_id dinámico para consultas ad-hoc para no colisionar con 25 (Bridge) ni 31 (Worker)
+            adhoc_cid = int(time.time() * 7) % 700 + 200
+            ib.connect_tws(client_id=adhoc_cid)
         if ib.connected:
             positions = ib.request_broker_positions(timeout=3.5)
             now_iso = datetime.now(timezone.utc).isoformat()
