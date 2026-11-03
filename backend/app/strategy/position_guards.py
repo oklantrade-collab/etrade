@@ -248,37 +248,67 @@ def can_open_position(
     # ── REGLA 1B: Límite de Monedas Activas Simultáneas ──
     try:
         from app.core.supabase_client import get_supabase
+        from app.core.crypto_symbols import normalize_crypto_symbol
         sb = get_supabase()
-        
+
+        is_crypto = market_type in ('crypto_futures', 'crypto_spot')
+        norm_sym = normalize_crypto_symbol(symbol) if is_crypto else symbol.strip().upper()
+
+        active_symbols = set()
         if open_positions is not None:
-            active_symbols = set(p.get('symbol') for p in open_positions if p.get('status', 'open') == 'open' and p.get('symbol'))
+            for p in open_positions:
+                if p.get('status', 'open') != 'open':
+                    continue
+                p_sym = p.get('symbol') or p.get('ticker')
+                if not p_sym:
+                    continue
+                if is_crypto:
+                    # Filtrar exclusivamente símbolos cripto (excluyendo stocks y pares forex)
+                    if 'USDT' in str(p_sym).upper() or p.get('market_type') in ('crypto', 'crypto_futures', None):
+                        # Descartar si es ticker de acciones puro (sin USDT)
+                        if 'ticker' not in p or 'USDT' in str(p_sym).upper():
+                            active_symbols.add(normalize_crypto_symbol(p_sym))
+                else:
+                    if p.get('market_type') in ('forex', 'forex_futures') or any(c in str(p_sym).upper() for c in ('EUR', 'GBP', 'JPY', 'XAU', 'AUD', 'CAD', 'CHF')):
+                        active_symbols.add(str(p_sym).upper())
         else:
-            tbl = 'forex_positions' if market_type == 'forex_futures' else 'positions'
-            open_res = sb.table(tbl).select('symbol').eq('status', 'open').execute()
-            active_symbols = set(p['symbol'] for p in (open_res.data or []))
-        
-        tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
-        tc_data = tc_res.data if tc_res and tc_res.data else {}
-        reg_params = tc_data.get('regime_params', {}) or {}
-        
-        if market_type in ('crypto_futures', 'crypto_spot'):
-            max_active = int(reg_params.get('max_active_symbols_crypto', 1))
-        else:
-            max_active = int(reg_params.get('max_active_symbols_forex', 1))
-            
-        if symbol not in active_symbols and len(active_symbols) >= max_active:
+            tbl = 'forex_positions' if not is_crypto else 'positions'
+            open_res = sb.table(tbl).select('symbol, status').eq('status', 'open').execute()
+            for p in (open_res.data or []):
+                p_sym = p.get('symbol')
+                if p_sym:
+                    active_symbols.add(normalize_crypto_symbol(p_sym) if is_crypto else str(p_sym).upper())
+
+        # Obtener el límite configurado (por defecto 1 moneda activa)
+        max_active = 1
+        try:
+            tc_res = sb.table('trading_config').select('regime_params').eq('id', 1).maybe_single().execute()
+            reg_params = (tc_res.data or {}).get('regime_params', {}) or {}
+            key = 'max_active_symbols_crypto' if is_crypto else 'max_active_symbols_forex'
+            if key in reg_params and reg_params[key] is not None:
+                max_active = max(1, int(reg_params[key]))
+        except Exception as e:
+            log_warning(MODULE, f"Advertencia al consultar max_active_symbols ({market_type}): {e}")
+
+        # Bloqueo estricto si el símbolo entrante representa una moneda nueva y ya se alcanzó el cupo
+        if norm_sym not in active_symbols and len(active_symbols) >= max_active:
             return {
                 'allowed': False,
-                'reason': f"Cant. Monedas Activas alcanzado ({len(active_symbols)}/{max_active} activas: {list(active_symbols)})"
+                'reason': f"Cant. Monedas Activas alcanzado ({len(active_symbols)}/{max_active} activas: {sorted(list(active_symbols))})"
             }
 
+        # Bloqueo si el número de monedas activas ya está desbordado
         if len(active_symbols) > max_active:
             return {
                 'allowed': False,
-                'reason': f"Cant. Monedas Activas excedido ({len(active_symbols)}/{max_active} activas: {list(active_symbols)})"
+                'reason': f"Cant. Monedas Activas excedido ({len(active_symbols)}/{max_active} activas: {sorted(list(active_symbols))})"
             }
     except Exception as max_sym_err:
-        pass
+        log_error(MODULE, f"Error validando regla de monedas activas: {max_sym_err}")
+        return {
+            'allowed': False,
+            'reason': f"Error en validación de monedas activas: {max_sym_err}"
+        }
 
     # Si es una oportunidad Macro Extrema (UPPER_6 / LOWER_6), levantar cooldowns y circuit breaker de símbolo
     if is_macro_extreme:
