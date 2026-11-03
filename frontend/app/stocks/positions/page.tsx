@@ -112,20 +112,102 @@ export default function StocksPositions() {
       }
 
       if (!loadedClosed) {
-        // Fallback directo a Supabase
-        const { data: dbClosed } = await supabase
-          .from('stocks_journal')
-          .select('*')
-          .order('exit_date', { ascending: false })
-          .limit(100)
-        if (dbClosed) {
-          const filteredClosed = dbClosed.filter((p: any) =>
-            p.group_name !== 'OPTIONS' &&
-            !String(p.ticker || '').includes(':OPT') &&
-            !String(p.strategy || '').toUpperCase().startsWith('OPT')
-          )
-          setClosedPositions(filteredClosed)
+        // Fallback directo a Supabase: trades_journal y stocks_positions cerradas
+        const [tjRes, spRes] = await Promise.all([
+          supabase.from('trades_journal').select('*').order('exit_date', { ascending: false }).limit(100),
+          supabase.from('stocks_positions').select('*').eq('status', 'closed').order('updated_at', { ascending: false }).limit(100)
+        ])
+
+        const combined: any[] = []
+        const seenKeys = new Set<string>()
+
+        // 1. Trades de trades_journal
+        if (tjRes.data && tjRes.data.length > 0) {
+          for (const t of tjRes.data) {
+            const sym = String(t.ticker || '').toUpperCase()
+            if (sym.includes(':OPT') || sym.startsWith('OPT:')) continue
+            const entryP = Number(t.entry_price || 0)
+            const exitP = Number(t.exit_price || entryP)
+            const sh = Number(t.shares || 0)
+            const pnlU = t.pnl_usd !== null && t.pnl_usd !== undefined ? Number(t.pnl_usd) : ((exitP - entryP) * sh)
+            const pnlP = t.pnl_pct !== null && t.pnl_pct !== undefined ? Number(t.pnl_pct) : (entryP > 0 ? ((exitP - entryP) / entryP * 100) : 0)
+
+            const key = `${sym}_${t.entry_date}`
+            seenKeys.add(key)
+            combined.push({
+              id: t.id,
+              ticker: sym,
+              group_name: t.trade_type || 'HOT',
+              strategy: t.trade_type || 'V5_STOCKS',
+              side: 'buy',
+              shares: sh,
+              entry_price: entryP,
+              avg_price: entryP,
+              exit_price: exitP,
+              current_price: exitP,
+              total_cost: Number((entryP * sh).toFixed(2)),
+              pnl_usd: Number(pnlU.toFixed(2)),
+              unrealized_pnl: Number(pnlU.toFixed(2)),
+              pnl_pct: Number(pnlP.toFixed(2)),
+              unrealized_pnl_pct: Number(pnlP.toFixed(2)),
+              exit_reason: t.exit_reason || 'CLOSED',
+              first_buy_at: t.entry_date,
+              entry_date: t.entry_date,
+              updated_at: t.exit_date,
+              exit_date: t.exit_date,
+              status: 'closed'
+            })
+          }
         }
+
+        // 2. Posiciones cerradas en stocks_positions
+        if (spRes.data && spRes.data.length > 0) {
+          for (const p of spRes.data) {
+            const sym = String(p.ticker || '').toUpperCase()
+            const grp = String(p.group_name || '').toUpperCase()
+            if (sym.includes(':OPT') || sym.startsWith('OPT:') || grp.includes('OPTION')) continue
+            const key = `${sym}_${p.first_buy_at}`
+            if (seenKeys.has(key)) continue
+
+            const avgP = Number(p.avg_price || 0)
+            const curP = Number(p.current_price || avgP)
+            const sh = Number(p.shares || 0)
+            const rawPnlU = p.unrealized_pnl
+            const pnlU = (rawPnlU !== null && rawPnlU !== undefined && Math.abs(Number(rawPnlU)) > 0.0001)
+              ? Number(rawPnlU)
+              : (avgP > 0 && curP > 0 && sh > 0 ? (curP - avgP) * sh : 0)
+            const pnlP = (p.unrealized_pnl_pct !== null && p.unrealized_pnl_pct !== undefined && Math.abs(Number(p.unrealized_pnl_pct)) > 0.0001)
+              ? Number(p.unrealized_pnl_pct)
+              : (avgP > 0 && curP > 0 ? ((curP - avgP) / avgP * 100) : 0)
+
+            const reason = p.exit_triggered_by || p.sl_close_reason || (pnlU >= 0 ? 'TAKE_PROFIT' : 'STOP_LOSS')
+            combined.push({
+              id: p.id,
+              ticker: sym,
+              group_name: p.group_name || 'HOT',
+              strategy: p.group_name || 'V5_STOCKS',
+              side: p.direction || 'buy',
+              shares: sh,
+              entry_price: avgP,
+              avg_price: avgP,
+              exit_price: curP,
+              current_price: curP,
+              total_cost: Number((avgP * sh).toFixed(2)),
+              pnl_usd: Number(pnlU.toFixed(2)),
+              unrealized_pnl: Number(pnlU.toFixed(2)),
+              pnl_pct: Number(pnlP.toFixed(2)),
+              unrealized_pnl_pct: Number(pnlP.toFixed(2)),
+              exit_reason: reason,
+              first_buy_at: p.first_buy_at,
+              entry_date: p.first_buy_at,
+              updated_at: p.updated_at,
+              exit_date: p.updated_at,
+              status: 'closed'
+            })
+          }
+        }
+
+        setClosedPositions(combined)
       }
     } catch (err) {
       console.error(err)

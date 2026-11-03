@@ -55,19 +55,42 @@ export default function OptionsPositions() {
       .catch(async () => {
         clearTimeout(timeoutId)
         try {
-          const { data, error } = await supabase
-            .from('opt_paper_trades')
-            .select('*')
-            .eq('status', tab)
-            .order(tab === 'closed' ? 'exit_time' : 'entry_time', { ascending: false })
-            .limit(100)
-          if (!error && data) {
-            setItems(data)
-            setErr(null)
-          } else {
-            setErr(null)
-            setItems([])
-          }
+          const [openRes, closedRes] = await Promise.all([
+            supabase.from('opt_paper_trades').select('*').eq('status', 'open').order('entry_time', { ascending: false }),
+            supabase.from('opt_paper_trades').select('*').eq('status', 'closed').order('exit_time', { ascending: false }).limit(100)
+          ])
+
+          const openTrades = openRes.data || []
+          const closedTrades = closedRes.data || []
+
+          let unrealizedTotal = 0
+          let openRisk = 0
+          openTrades.forEach((p: any) => {
+            unrealizedTotal += Number(p.unrealized_pnl || 0)
+            openRisk += Number(p.entry_debit || 0) * (Number(p.qty) || 1) * 100
+          })
+
+          let realizedTotal = 0
+          let wins = 0
+          closedTrades.forEach((p: any) => {
+            const pnl = Number(p.realized_pnl || 0)
+            realizedTotal += pnl
+            if (pnl > 0) wins++
+          })
+          const winRate = closedTrades.length > 0 ? (wins / closedTrades.length) * 100 : 0
+
+          setSummary({
+            open_positions: openTrades.length,
+            closed_positions: closedTrades.length,
+            unrealized_pnl_usd: Number(unrealizedTotal.toFixed(2)),
+            realized_pnl_usd: Number(realizedTotal.toFixed(2)),
+            open_risk_usd: Number(openRisk.toFixed(2)),
+            max_open_risk_usd: 5000,
+            win_rate_pct: Number(winRate.toFixed(1))
+          })
+
+          setItems(tab === 'open' ? openTrades : closedTrades)
+          setErr(null)
         } catch {
           setErr(null)
           setItems([])
