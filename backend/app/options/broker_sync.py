@@ -45,6 +45,17 @@ def fetch_live_broker_portfolio_direct(sb) -> tuple[dict[str, Any], float]:
     Garantiza que 'lo que existe en el Broker manda' sin depender de un proceso externo.
     """
     try:
+        import socket
+        # Pre-verificar socket con timeout estricto de 0.8s para no colgar procesos web
+        target_host = os.getenv("IB_HOST", "192.168.1.105")
+        target_port = int(os.getenv("IB_PORT", "7497"))
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.8)
+        check = s.connect_ex((target_host, target_port))
+        s.close()
+        if check != 0:
+            return {}, 999999.0
+
         from app.data.ib_provider import get_ib_connection
         ib = get_ib_connection()
         if not ib:
@@ -52,7 +63,7 @@ def fetch_live_broker_portfolio_direct(sb) -> tuple[dict[str, Any], float]:
         if not ib.connected:
             # Usar client_id dinámico para consultas ad-hoc para no colisionar con 25 (Bridge) ni 31 (Worker)
             adhoc_cid = int(time.time() * 7) % 700 + 200
-            ib.connect_tws(client_id=adhoc_cid)
+            ib.connect_tws(host=target_host, port=target_port, client_id=adhoc_cid)
         if ib.connected:
             positions = ib.request_broker_positions(timeout=3.5)
             now_iso = datetime.now(timezone.utc).isoformat()
@@ -66,7 +77,7 @@ def fetch_live_broker_portfolio_direct(sb) -> tuple[dict[str, Any], float]:
                     }, on_conflict="key").execute()
                     sb.table("stocks_config").upsert({
                         "key": "ib_bridge_heartbeat",
-                        "value": str({"connected": True, "host_name": getattr(ib, "host", "192.168.1.105"), "tws_port": 7497, "mode": "PAPER", "timestamp": now_iso}),
+                        "value": str({"connected": True, "host_name": getattr(ib, "host", target_host), "tws_port": target_port, "mode": "PAPER", "timestamp": now_iso}),
                         "description": "Estado en tiempo real del agente IBKR Bridge",
                         "updated_at": now_iso
                     }, on_conflict="key").execute()
@@ -144,7 +155,7 @@ def is_option_held_in_broker(sb, symbol: str, expiry: str, strike: float, right:
     return False, 0
 
 
-def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force: bool = False) -> dict[str, Any]:
+def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force: bool = False, allow_direct_fetch: bool = False) -> dict[str, Any]:
     """
     Sincroniza `opt_paper_trades` y `stocks_positions` con `ib_broker_portfolio`
     para garantizar que lo que está en el Broker TWS sea exactamente lo que está
@@ -155,7 +166,7 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
     if not force and (now_ts - _LAST_SYNC_TS < min_interval_sec):
         return {"skipped": True}
 
-    portfolio, age_sec = load_broker_portfolio_snapshot(sb, allow_direct_fetch=True)
+    portfolio, age_sec = load_broker_portfolio_snapshot(sb, allow_direct_fetch=allow_direct_fetch)
     if portfolio is None or age_sec > 300.0:
         return {"skipped": True, "reason": f"snapshot_stale_or_empty ({age_sec:.0f}s)"}
 

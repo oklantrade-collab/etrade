@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { formatDateInTimezone } from '@/lib/timezone'
+import { supabase } from '@/lib/supabase'
 
 export default function StocksPositions() {
   const [positions, setPositions] = useState<any[]>([])
@@ -54,30 +55,78 @@ export default function StocksPositions() {
 
   const fetchData = async () => {
     try {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 2500)
+
       const [openRes, closedRes] = await Promise.all([
-        fetch('/api/v1/stocks/positions'),
-        fetch('/api/v1/stocks/journal?limit=100')
+        fetch('/api/v1/stocks/positions', { signal: controller.signal }).catch(() => null),
+        fetch('/api/v1/stocks/journal?limit=100', { signal: controller.signal }).catch(() => null)
       ])
-      
-      if (!openRes.ok || !closedRes.ok) throw new Error('API Error')
+      clearTimeout(timeoutId)
 
-      const openData = await openRes.json()
-      const rawOpen = Array.isArray(openData.positions) ? openData.positions : []
-      const filteredOpen = rawOpen.filter((p: any) => 
-        p.group_name !== 'OPTIONS' && 
-        !String(p.ticker || '').includes(':OPT') &&
-        !String(p.strategy || '').toUpperCase().startsWith('OPT')
-      )
-      setPositions(filteredOpen)
+      let loadedOpen = false
+      if (openRes && openRes.ok) {
+        try {
+          const openData = await openRes.json()
+          const rawOpen = Array.isArray(openData.positions) ? openData.positions : []
+          const filteredOpen = rawOpen.filter((p: any) => 
+            p.group_name !== 'OPTIONS' && 
+            !String(p.ticker || '').includes(':OPT') &&
+            !String(p.strategy || '').toUpperCase().startsWith('OPT')
+          )
+          setPositions(filteredOpen)
+          loadedOpen = true
+        } catch {}
+      }
 
-      const closedData = await closedRes.json()
-      const rawClosed = Array.isArray(closedData) ? closedData : (Array.isArray(closedData?.positions) ? closedData.positions : [])
-      const filteredClosed = rawClosed.filter((p: any) =>
-        p.group_name !== 'OPTIONS' &&
-        !String(p.ticker || '').includes(':OPT') &&
-        !String(p.strategy || '').toUpperCase().startsWith('OPT')
-      )
-      setClosedPositions(filteredClosed)
+      if (!loadedOpen) {
+        // Fallback directo a Supabase
+        const { data: dbOpen } = await supabase
+          .from('stocks_positions')
+          .select('*')
+          .eq('status', 'open')
+          .order('first_buy_at', { ascending: false })
+        if (dbOpen) {
+          const filteredOpen = dbOpen.filter((p: any) => 
+            p.group_name !== 'OPTIONS' && 
+            !String(p.ticker || '').includes(':OPT') &&
+            !String(p.strategy || '').toUpperCase().startsWith('OPT')
+          )
+          setPositions(filteredOpen)
+        }
+      }
+
+      let loadedClosed = false
+      if (closedRes && closedRes.ok) {
+        try {
+          const closedData = await closedRes.json()
+          const rawClosed = Array.isArray(closedData) ? closedData : (Array.isArray(closedData?.positions) ? closedData.positions : [])
+          const filteredClosed = rawClosed.filter((p: any) =>
+            p.group_name !== 'OPTIONS' &&
+            !String(p.ticker || '').includes(':OPT') &&
+            !String(p.strategy || '').toUpperCase().startsWith('OPT')
+          )
+          setClosedPositions(filteredClosed)
+          loadedClosed = true
+        } catch {}
+      }
+
+      if (!loadedClosed) {
+        // Fallback directo a Supabase
+        const { data: dbClosed } = await supabase
+          .from('stocks_journal')
+          .select('*')
+          .order('exit_date', { ascending: false })
+          .limit(100)
+        if (dbClosed) {
+          const filteredClosed = dbClosed.filter((p: any) =>
+            p.group_name !== 'OPTIONS' &&
+            !String(p.ticker || '').includes(':OPT') &&
+            !String(p.strategy || '').toUpperCase().startsWith('OPT')
+          )
+          setClosedPositions(filteredClosed)
+        }
+      }
     } catch (err) {
       console.error(err)
     } finally {

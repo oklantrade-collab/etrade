@@ -689,7 +689,7 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
     sb = get_supabase()
     try:
         from app.options.broker_sync import reconcile_with_ib_broker_portfolio
-        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=5.0)
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=30.0, allow_direct_fetch=False)
     except Exception:
         pass
     stored, _, _ = _load_stored()

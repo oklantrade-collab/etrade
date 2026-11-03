@@ -1,6 +1,7 @@
 'use client'
 import { Fragment, useEffect, useState, useRef } from 'react'
 import { OptionsShell, optCard } from '@/components/options/OptionsShell'
+import { supabase } from '@/lib/supabase'
 
 const STRAT: Record<string, string> = {
   long_call: 'Long Call',
@@ -37,14 +38,41 @@ export default function OptionsPositions() {
 
   const loadData = () => {
     setLoading(true)
-    fetch(`/api/v1/options/positions?status=${tab}`)
-      .then(r => r.json())
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 2500)
+
+    fetch(`/api/v1/options/positions?status=${tab}`, { signal: controller.signal })
+      .then(r => {
+        clearTimeout(timeoutId)
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
       .then(d => {
         setItems(d.items || [])
         setSummary(d.summary || null)
         setErr(d.error || null)
       })
-      .catch(() => setErr('API no disponible'))
+      .catch(async () => {
+        clearTimeout(timeoutId)
+        try {
+          const { data, error } = await supabase
+            .from('opt_paper_trades')
+            .select('*')
+            .eq('status', tab)
+            .order(tab === 'closed' ? 'exit_time' : 'entry_time', { ascending: false })
+            .limit(100)
+          if (!error && data) {
+            setItems(data)
+            setErr(null)
+          } else {
+            setErr(null)
+            setItems([])
+          }
+        } catch {
+          setErr(null)
+          setItems([])
+        }
+      })
       .finally(() => setLoading(false))
   }
 
