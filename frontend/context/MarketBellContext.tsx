@@ -448,31 +448,31 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
       })
       .subscribe();
 
-    // 3. Fallback Periodic Poller (every 3 seconds in case WebSocket is unavailable)
+    // 3. Fallback Periodic Poller (lightweight fallback every 30s with minimal egress)
     const pollInterval = setInterval(async () => {
       if (isFirstCheckRef.current) return;
 
       try {
-        // Poll Stocks Orders
+        // Poll Stocks Orders (only essential columns to save Supabase egress)
         const { data: recentOrders } = await supabase
           .from('stocks_orders')
-          .select('*')
+          .select('id, ticker, status, direction, shares, filled_price, filled_at, created_at, target_band, rule_code')
           .eq('status', 'filled')
           .order('created_at', { ascending: false })
           .limit(10);
         (recentOrders || []).forEach((o: any) => handleStockOrderFill(o));
 
-        // Poll Option Trades
+        // Poll Option Trades (only essential columns to save Supabase egress)
         const { data: recentOptions } = await supabase
           .from('opt_paper_trades')
-          .select('*')
+          .select('id, symbol, status, qty, entry_price, entry_debit, entry_time, exit_time')
           .order('entry_time', { ascending: false })
           .limit(10);
         (recentOptions || []).forEach((t: any) => handleOptionTradeChange(t));
       } catch (e) {
         // quiet fallback
       }
-    }, 3000);
+    }, 30000);
 
     return () => {
       supabase.removeChannel(stockChannel);
