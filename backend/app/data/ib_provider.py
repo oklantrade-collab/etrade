@@ -103,53 +103,35 @@ class IBConnection(EWrapper, EClient):
                     host = "192.168.1.105"
                 s.close()
         port = port or int(os.getenv("IB_PORT", "7497"))  # 7497=paper, 7496=live
-        base_client_id = client_id or int(os.getenv("IB_CLIENT_ID", "25"))
+        client_id = client_id or int(os.getenv("IB_CLIENT_ID", "26"))
 
-        # Auto-retry con client_id incremental si TWS reporta error 326 (id en uso)
-        max_attempts = 5
-        for attempt in range(max_attempts):
-            curr_client_id = base_client_id + attempt
-            try:
-                self._errors = []
-                self.connected = False
-                self.connect(host, port, curr_client_id)
-                
-                # Start event loop in background thread
-                self._thread = threading.Thread(
-                    target=self.run, daemon=True, name=f"ib-event-loop-{curr_client_id}"
-                )
-                self._thread.start()
+        try:
+            self._errors = []
+            self.connected = False
+            self.connect(host, port, client_id)
+            
+            # Start event loop in background thread
+            self._thread = threading.Thread(
+                target=self.run, daemon=True, name=f"ib-event-loop-{client_id}"
+            )
+            self._thread.start()
 
-                # Wait for connection confirmation
-                timeout = 5
-                start = time.time()
-                id_in_use = False
-                while not self.connected and (time.time() - start) < timeout:
-                    time.sleep(0.1)
-                    if any(e.get("code") == 326 for e in self._errors):
-                        id_in_use = True
-                        break
+            # Wait for connection confirmation
+            timeout = 7
+            start = time.time()
+            while not self.connected and (time.time() - start) < timeout:
+                time.sleep(0.1)
 
-                if id_in_use:
-                    log_warning(MODULE, f"⚠️ Client ID {curr_client_id} en uso en TWS (Error 326). Reintentando con Client ID {curr_client_id + 1}...")
-                    self.disconnect_tws()
-                    time.sleep(0.5)
-                    continue
+            if self.connected:
+                log_info(MODULE, f"Connected to IB TWS at {host}:{port} (client_id={client_id})")
+                return True
+            else:
+                log_warning(MODULE, f"IB TWS not running at {host}:{port} (expected)")
+                return False
 
-                if self.connected:
-                    log_info(MODULE, f"Connected to IB TWS at {host}:{port} (client_id={curr_client_id})")
-                    return True
-                else:
-                    self.disconnect_tws()
-                    if attempt == max_attempts - 1:
-                        log_warning(MODULE, f"IB TWS not running at {host}:{port} (expected)")
-                        return False
-
-            except Exception as e:
-                log_warning(MODULE, f"IB TWS not available on attempt {attempt}: {e}")
-                self.disconnect_tws()
-
-        return False
+        except Exception as e:
+            log_warning(MODULE, f"IB TWS not available: {e}")
+            return False
 
     def disconnect_tws(self) -> None:
         """Disconnect from TWS gracefully."""

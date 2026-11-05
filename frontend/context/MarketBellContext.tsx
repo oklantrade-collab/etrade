@@ -311,12 +311,31 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
 
   // Real-time Audio Listener for STOCKS & OPTIONS Order Fills (Thinkorswim Ding/Chimes)
   useEffect(() => {
+    // Helper to check if an event is recent (within last 120 seconds)
+    const isRecentEvent = (timeStr?: string | null): boolean => {
+      if (!timeStr) return false;
+      try {
+        const eventTime = new Date(timeStr).getTime();
+        const now = Date.now();
+        // Allow up to 120 seconds in the past, and not more than 60 seconds into the future (clock drift)
+        return (now - eventTime) >= -60000 && (now - eventTime) <= 120000;
+      } catch {
+        return false;
+      }
+    };
+
     // Handler for a filled stock order
     const handleStockOrderFill = async (order: any) => {
       if (!order || order.status !== 'filled') return;
       const idStr = String(order.id);
       if (knownFilledOrdersRef.current.has(idStr)) return;
       knownFilledOrdersRef.current.add(idStr);
+
+      // Protect against stale alerts from past sessions/days
+      const fillTime = order.filled_at || order.created_at;
+      if (!isRecentEvent(fillTime)) {
+        return;
+      }
 
       const isBuy = String(order.direction || '').toLowerCase() === 'buy';
       const isOption = Boolean(order.target_band?.startsWith('OPT:') || order.rule_code?.includes('OPTION'));
@@ -339,10 +358,15 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
       // Brand new trade opened
       if (!prevStatus && currentStatus === 'open') {
         knownOptionTradesRef.current.set(idStr, currentStatus);
+        const tradeTime = trade.entry_time || trade.created_at;
+        if (!isRecentEvent(tradeTime)) {
+          return;
+        }
+
         await playOrderSound('buy', {
           symbol: trade.symbol || trade.ticker || 'OPCIÓN',
-          shares: trade.contracts || 1,
-          price: trade.entry_price || trade.current_price,
+          shares: trade.contracts || trade.qty || 1,
+          price: trade.entry_price || trade.entry_debit || trade.current_price,
           isOption: true
         });
         return;
@@ -351,9 +375,14 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
       // Existing trade closed / sold
       if (prevStatus === 'open' && currentStatus === 'closed') {
         knownOptionTradesRef.current.set(idStr, 'closed');
+        const exitTime = trade.exit_time || trade.updated_at;
+        if (!isRecentEvent(exitTime)) {
+          return;
+        }
+
         await playOrderSound('close', {
           symbol: trade.symbol || trade.ticker || 'OPCIÓN',
-          shares: trade.contracts || 1,
+          shares: trade.contracts || trade.qty || 1,
           price: trade.exit_price || trade.entry_price,
           isOption: true
         });
@@ -366,22 +395,23 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     // 1. Initial State Seeding (so past trades don't chime on page refresh)
     const seedInitialState = async () => {
       try {
-        // Seed Stock Orders
+        // Seed Stock Orders: explicitly query filled orders so historical fills are all known
         const { data: stOrders } = await supabase
           .from('stocks_orders')
           .select('id, status')
+          .eq('status', 'filled')
           .order('created_at', { ascending: false })
-          .limit(50);
+          .limit(200);
         (stOrders || []).forEach((o: any) => {
-          if (o.status === 'filled') knownFilledOrdersRef.current.add(String(o.id));
+          knownFilledOrdersRef.current.add(String(o.id));
         });
 
-        // Seed Option Trades
+        // Seed Option Trades: query all recent trades
         const { data: optTrades } = await supabase
           .from('opt_paper_trades')
           .select('id, status')
           .order('entry_time', { ascending: false })
-          .limit(50);
+          .limit(200);
         (optTrades || []).forEach((t: any) => {
           knownOptionTradesRef.current.set(String(t.id), String(t.status || '').toLowerCase());
         });

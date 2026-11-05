@@ -427,35 +427,44 @@ class IBBridgeWorker:
         global ACTIVE_BRIDGE
         self.host = host or get_default_ib_host()
         self.port = port or int(os.getenv("IB_PORT", "7497"))
-        self.client_id = client_id or int(os.getenv("IB_CLIENT_ID", "25"))
+        self.client_id = client_id or int(os.getenv("IB_CLIENT_ID", "26"))
         self.ib = None
         self.running = True
         ACTIVE_BRIDGE = self
 
     def initialize_ib(self) -> bool:
-        """Establece conexión inicial con TWS en el puerto 7497."""
+        """Establece conexión inicial con TWS en el puerto 7497 con auto-fallback de Client ID."""
         if not IB_AVAILABLE:
             log_error(MODULE, "❌ La librería 'ibapi' no está instalada en este entorno.")
             return False
 
-        try:
-            self.ib = get_ib_connection()
-            self.ib.set_order_callback(on_ib_order_status)
-            log_info(MODULE, f"🔌 Intentando conectar a TWS en {self.host}:{self.port} (Client ID: {self.client_id})...")
-            connected = self.ib.connect_tws(host=self.host, port=self.port, client_id=self.client_id)
-            if connected:
-                log_info(MODULE, f"✅ ¡Conexión exitosa con Interactive Brokers TWS! (Cuentas: {self.ib.accounts or 'Detectando...'})")
-                self._start_micro_pullback_scalper_if_needed()
-                return True
-            else:
-                log_warning(MODULE, "⚠️ No se pudo conectar a TWS. Asegúrate de que TWS esté abierto en modo PAPER (puerto 7497).")
-                return False
-        except Exception as e:
-            log_error(MODULE, f"❌ Error conectando a TWS: {e}")
-            return False
+        # Si el client_id base está bloqueado por una sesión residual de TWS, probar los siguientes 5 IDs
+        for offset in range(5):
+            cid = self.client_id + offset
+            try:
+                import app.data.ib_provider as ib_mod
+                ib_mod._ib_instance = None  # Instancia fresca para cada intento
+                self.ib = ib_mod.get_ib_connection()
+                self.ib.set_order_callback(on_ib_order_status)
+                log_info(MODULE, f"🔌 Intentando conectar a TWS en {self.host}:{self.port} (Client ID: {cid})...")
+                connected = self.ib.connect_tws(host=self.host, port=self.port, client_id=cid)
+                if connected:
+                    self.client_id = cid
+                    log_info(MODULE, f"✅ ¡Conexión exitosa con Interactive Brokers TWS! (Client ID: {cid}) (Cuentas: {self.ib.accounts or 'Detectando...'})")
+                    self._start_micro_pullback_scalper_if_needed()
+                    return True
+                else:
+                    self.ib.disconnect_tws()
+            except Exception as e:
+                log_error(MODULE, f"❌ Error conectando a TWS con client_id {cid}: {e}")
+
+        log_warning(MODULE, "⚠️ No se pudo conectar a TWS tras varios intentos. Asegúrate de que TWS esté abierto en modo PAPER (puerto 7497).")
+        return False
 
     def _start_micro_pullback_scalper_if_needed(self):
-        """Inicia el escáner y motor de micro-pullbacks en APOLO (hilo con event loop dedicado)."""
+        """Inicia el escáner y motor de micro-pullbacks en APOLO si está explícitamente habilitado."""
+        if os.getenv("ENABLE_MICRO_SCALPER", "false").lower() != "true":
+            return
         if getattr(self, "_scalp_scanner_started", False):
             return
         self._scalp_scanner_started = True
@@ -517,8 +526,8 @@ class IBBridgeWorker:
             res = sb.table("stocks_orders")\
                 .select("*")\
                 .eq("status", "pending")\
-                .order("created_at", desc=False)\
-                .limit(10)\
+                .order("created_at", desc=True)\
+                .limit(20)\
                 .execute()
 
             orders = res.data or []
@@ -1103,10 +1112,12 @@ class IBBridgeWorker:
                             et_str = opt_t.get("entry_time") or opt_t.get("updated_at")
                             if et_str:
                                 et_dt = datetime.fromisoformat(str(et_str).replace("Z", "+00:00"))
+                                # Periodo de gracia inviolable de 90s para que TWS refleje la posicion
                                 if (datetime.now(timezone.utc) - et_dt).total_seconds() < 90.0:
-                                    inflight_opt = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing"]).limit(1).execute()
-                                    if inflight_opt.data:
-                                        continue
+                                    continue
+                            inflight_opt = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing"]).limit(1).execute()
+                            if inflight_opt.data:
+                                continue
                         except Exception:
                             pass
 
