@@ -42,6 +42,6 @@ export const config = {
      * - favicon.ico (favicon file)
      * - static assets with extensions (.wav, .mp3, etc.)
      */
-    '/((?!api|_next/static|_next/image|sounds|favicon.ico|.*\\.(?:wav|mp3|ogg|ico|png|jpg|jpeg|svg|webp)$).*)',
+    '/((?!api|rest|_next/static|_next/image|sounds|favicon.ico|.*\\.(?:wav|mp3|ogg|ico|png|jpg|jpeg|svg|webp)$).*)',
   ],
 }
