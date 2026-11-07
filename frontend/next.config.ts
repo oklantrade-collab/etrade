@@ -25,10 +25,11 @@ const nextConfig: NextConfig = {
   // Rewrites para proxy al backend
   async rewrites() {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://165.22.87.171'
+    const restUrl = apiUrl.replace(':8080', '')
     return [
       {
         source: '/rest/v1/:path*',
-        destination: `${apiUrl}/rest/v1/:path*`,
+        destination: `${restUrl}/rest/v1/:path*`,
       },
       {
         source: '/api/v1/:path*',
