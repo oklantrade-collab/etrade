@@ -28,6 +28,7 @@ export default function SettingsPage() {
   const [isRuleModalOpen, setIsRuleModalOpen] = useState(false)
   const [isSweeping, setIsSweeping] = useState(false)
   const [forexEnabled, setForexEnabled] = useState(true)
+  const [cryptoEnabled, setCryptoEnabled] = useState(true)
 
   useEffect(() => {
     loadConfig()
@@ -38,9 +39,15 @@ export default function SettingsPage() {
     const { data: rc } = await supabase.from('risk_config').select('*').limit(1).maybeSingle()
     const { data: us_res } = await supabase.from('universe_settings').select('*').eq('id', 1).limit(1)
     const { data: sysConf } = await supabase.from('system_config').select('*').eq('key', 'forex_enabled').maybeSingle()
+    const { data: sysCrypto } = await supabase.from('system_config').select('*').eq('key', 'crypto_enabled').maybeSingle()
     
     if (sysConf) {
         setForexEnabled(sysConf.value === 'true' || sysConf.value === true);
+    }
+    if (sysCrypto) {
+        setCryptoEnabled(sysCrypto.value === 'true' || sysCrypto.value === true);
+    } else if (rc && rc.bot_active !== undefined && rc.bot_active !== null) {
+        setCryptoEnabled(Boolean(rc.bot_active));
     }
 
     const us = us_res && us_res.length > 0 ? us_res[0] : null
@@ -203,7 +210,7 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      {activeTab === 'crypto' && config && <CryptoSettings config={config} onSave={(data: any) => handleSave('crypto', data)} />}
+      {activeTab === 'crypto' && config && <CryptoSettings config={config} onSave={(data: any) => handleSave('crypto', data)} cryptoEnabled={cryptoEnabled} setCryptoEnabled={setCryptoEnabled} />}
       {activeTab === 'forex' && config && <ForexSettings config={config} onSave={(data: any) => handleSave('forex', data)} forexEnabled={forexEnabled} setForexEnabled={setForexEnabled} />}
       {activeTab === 'stocks' && uSettings && stocksConfig && (
         <StocksSettings 
@@ -463,7 +470,8 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
 /* ════════════════════════════════════════════════
    COMPONENTES Crypto, Forex, System 
    ════════════════════════════════════════════════ */
-const CryptoSettings = ({ config, onSave }: any) => {
+const CryptoSettings = ({ config, onSave, cryptoEnabled, setCryptoEnabled }: any) => {
+  const isConnected = (config.capital_crypto_futures ?? 500) > 0
   const [form, setForm] = useState({ 
     capital_crypto_futures: config.capital_crypto_futures || 500, 
     accumulated_profit_crypto: config.accumulated_profit_crypto || 0,
@@ -501,18 +509,56 @@ const CryptoSettings = ({ config, onSave }: any) => {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
-      {/* Status Badge Crypto */}
+      {/* Status Badge + Toggle Switch Crypto */}
       {(() => {
         const isPaperCrypto = config.paper_trading !== false && config.regime_params?.paper_trading_crypto !== false;
-        const mainColor = isPaperCrypto ? '#F7931A' : '#00C896';
+        const activeColor = cryptoEnabled ? '#00C896' : '#C8C800';
         return (
           <>
-            <StatusBadge 
-              label="Binance Futures" 
-              status="ACTIVO" 
-              color={mainColor} 
-              detail={isPaperCrypto ? "Modo Paper Trading (Simulación)" : "Modo Live Real (Binance Futures)"} 
-            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px 18px', background: `rgba(${isConnected ? (cryptoEnabled ? '0,200,150' : '200,200,0') : '85,85,85'}, 0.05)`, borderRadius: '10px', border: `1px solid ${isConnected ? activeColor : '#555'}22` }}>
+              <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: isConnected ? activeColor : '#555', boxShadow: `0 0 8px ${isConnected ? activeColor : '#555'}` }} />
+              <div style={{ flex: 1 }}>
+                <span style={{ color: '#FFF', fontWeight: 700, fontSize: '14px' }}>Binance Futures</span>
+                <div style={{ color: '#555', fontSize: '11px' }}>
+                  Conexión API {isConnected ? (cryptoEnabled ? (isPaperCrypto ? '(Operando · Modo Paper Simulación)' : '(Operando · Modo Live Real)') : '(Pausado · Operaciones con Binance desactivadas)') : '(Pendiente)'}
+                </div>
+              </div>
+
+              {/* Toggle Switch Activar / Desactivar Binance Futures */}
+              {isConnected && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '11px', color: activeColor, fontWeight: 'bold' }}>
+                    {cryptoEnabled ? 'ACTIVO' : 'SUSPENDIDO'}
+                  </span>
+                  <div
+                    onClick={async () => {
+                      const newVal = !cryptoEnabled;
+                      setCryptoEnabled(newVal);
+
+                      // 1. Guardar en system_config (crypto_enabled)
+                      const { data: exist } = await supabase.from('system_config').select('id').eq('key', 'crypto_enabled').maybeSingle();
+                      if (exist) {
+                        await supabase.from('system_config').update({ value: String(newVal) }).eq('key', 'crypto_enabled');
+                      } else {
+                        await supabase.from('system_config').insert({ key: 'crypto_enabled', value: String(newVal) });
+                      }
+
+                      // 2. Sincronizar bot_active en risk_config para el motor de Crypto
+                      if (config.rc_id) {
+                        await supabase.from('risk_config').update({ bot_active: newVal }).eq('id', config.rc_id);
+                      }
+                    }}
+                    title={cryptoEnabled ? "Pausar / Desactivar operaciones con Binance Futures" : "Activar operaciones con Binance Futures"}
+                    style={{ width: '40px', height: '20px', borderRadius: '10px', background: cryptoEnabled ? '#00C896' : '#222', position: 'relative', cursor: 'pointer' }}
+                  >
+                    <div style={{ position: 'absolute', top: '2px', left: cryptoEnabled ? '22px' : '2px', width: '16px', height: '16px', borderRadius: '50%', background: '#FFF', transition: 'all 0.2s' }} />
+                  </div>
+                </div>
+              )}
+              {!isConnected && (
+                <div style={{ padding: '4px 12px', borderRadius: '20px', background: '#55522', border: '1px solid #55544', color: '#555', fontSize: '10px', fontWeight: 900, letterSpacing: '1px' }}>PENDIENTE</div>
+              )}
+            </div>
 
             {/* Selector de Modo Crypto: PAPER vs LIVE REAL */}
             <div style={{ 

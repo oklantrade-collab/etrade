@@ -1528,7 +1528,24 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
             "timestamp": datetime.now(timezone.utc).isoformat()
         }).execute()
 
+def is_crypto_enabled(sb=None) -> bool:
+    """Verifica si el módulo Crypto / Binance Futures está ACTIVO en system_config / risk_config."""
+    try:
+        if sb is None:
+            sb = get_supabase()
+        ce = sb.table("system_config").select("value").eq("key", "crypto_enabled").maybe_single().execute()
+        if ce and ce.data and "value" in ce.data:
+            return str(ce.data["value"]).lower() in ("true", "1", "yes")
+        if BOT_STATE.config_cache and "bot_active" in BOT_STATE.config_cache:
+            return bool(BOT_STATE.config_cache["bot_active"])
+    except Exception:
+        pass
+    return True
+
 async def cycle_5m():
+    if not is_crypto_enabled():
+        log_info(MODULE, "Crypto / Binance Futures está SUSPENDIDO en Settings. Ciclo 5m omitido.")
+        return
     """Speed 2A: Monitor BE, SL, Emergencies & Reconcile (Parallel)."""
     log_debug(MODULE, "--- Speed 2A: 5m Cycle (Parallel) ---")
     
@@ -2911,6 +2928,9 @@ async def _process_symbol_15m(symbol: str, provider, gs_data, sb):
         except: pass
 
 async def cycle_15m():
+    if not is_crypto_enabled():
+        log_info(MODULE, "Crypto / Binance Futures está SUSPENDIDO en Settings. Ciclo 15m omitido.")
+        return
     """Speed 2B: Main Analysis Pipeline (Parallel Symbols)."""
     log_info(MODULE, f"--- Speed 2B: 15m Cycle (Parallel) ---")
     BOT_STATE.cycle_count_15m += 1
@@ -3036,6 +3056,8 @@ async def main():
 
     # 4.1 Sync Live Broker Positions (Binance Futures & cTrader) every 10 seconds
     async def broker_live_sync_job():
+        if not is_crypto_enabled():
+            return
         try:
             from app.execution.broker_sync import GLOBAL_BROKER_SYNC
             await GLOBAL_BROKER_SYNC.sync_binance_futures()
