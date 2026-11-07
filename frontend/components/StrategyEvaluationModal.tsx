@@ -53,7 +53,7 @@ export default function StrategyEvaluationModal({
   async function fetchEvaluation() {
     setLoading(true)
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || '/api/v1'
+      const baseUrl = '/api/v1'
       const res = await fetch(`${baseUrl}/strategies/live/${symbol}?timeframe=${timeframe}`)
       const json = await res.json()
       
