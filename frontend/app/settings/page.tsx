@@ -34,8 +34,8 @@ export default function SettingsPage() {
   }, [])
 
   const loadConfig = async () => {
-    const { data: tc } = await supabase.from('trading_config').select('*').eq('id', 1).single()
-    const { data: rc } = await supabase.from('risk_config').select('*').single()
+    const { data: tc } = await supabase.from('trading_config').select('*').eq('id', 1).maybeSingle()
+    const { data: rc } = await supabase.from('risk_config').select('*').limit(1).maybeSingle()
     const { data: us_res } = await supabase.from('universe_settings').select('*').eq('id', 1).limit(1)
     const { data: sysConf } = await supabase.from('system_config').select('*').eq('key', 'forex_enabled').maybeSingle()
     
@@ -46,6 +46,7 @@ export default function SettingsPage() {
     const us = us_res && us_res.length > 0 ? us_res[0] : null
     
     if (tc && rc) setConfig({ ...tc, ...rc, tc_id: tc.id, rc_id: rc.id })
+    else if (tc) setConfig({ ...tc, tc_id: tc.id })
     if (us) setUSettings(us)
 
     // Load specialized stocks_config
@@ -58,7 +59,7 @@ export default function SettingsPage() {
   const handleSave = async (section: string, data: any, shouldSweep = false) => {
     if (section === 'stocks') {
       try {
-        const API = 'http://localhost:8080';
+        const API = '';
         const saveRes = await fetch(`${API}/api/v1/stocks/universe/settings`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
