@@ -2022,6 +2022,17 @@ async def _execute_paper_open(
 
     symbol = normalize_crypto_symbol(symbol)
 
+    # === GUARD: Servicio Crypto (Binance Futures) suspendido desde Settings ===
+    try:
+        ce_res = supabase.table('system_config').select('value').eq('key', 'crypto_enabled').maybe_single().execute()
+        if ce_res and ce_res.data:
+            val = ce_res.data.get('value')
+            if val is False or str(val).strip().lower() in ['false', '0', 'none', '']:
+                log_warning(MODULE, f"⏸️ [CRYPTO SUSPENDIDO] {symbol} {side.upper()} rechazado: Servicio Binance Futures desactivado desde Settings.")
+                return None
+    except Exception:
+        pass
+
     # 1. REVERSIÓN FORZADA (Hedge no permitido)
     async with BOT_STATE.order_lock:
         opposite_side = 'SHORT' if side.upper() in ['LONG', 'BUY'] else 'LONG'

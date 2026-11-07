@@ -1529,15 +1529,16 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
         }).execute()
 
 def is_crypto_enabled(sb=None) -> bool:
-    """Verifica si el módulo Crypto / Binance Futures está ACTIVO en system_config / risk_config."""
+    """Verifica si el módulo Crypto / Binance Futures está ACTIVO en system_config."""
     try:
         if sb is None:
             sb = get_supabase()
         ce = sb.table("system_config").select("value").eq("key", "crypto_enabled").maybe_single().execute()
         if ce and ce.data and "value" in ce.data:
-            return str(ce.data["value"]).lower() in ("true", "1", "yes")
-        if BOT_STATE.config_cache and "bot_active" in BOT_STATE.config_cache:
-            return bool(BOT_STATE.config_cache["bot_active"])
+            val = ce.data["value"]
+            if val is False or str(val).strip().lower() in ("false", "0", "no", "none", ""):
+                return False
+            return True
     except Exception:
         pass
     return True

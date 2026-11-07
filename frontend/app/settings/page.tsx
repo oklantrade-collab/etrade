@@ -258,9 +258,37 @@ const StocksSettings = ({ settings, stocksConfig, config, onSave, onSaveAndSweep
   const totalWeight = Number(form.w_rev_growth) + Number(form.w_gross_margin) + Number(form.w_eps_growth) + Number(form.w_rs_score) + Number(form.w_inst_ownership);
   const isValidWeights = Math.abs(totalWeight - 100) < 0.01;
 
+  const isConnected = true
+  const stocksEnabled = !(generalForm.kill_switch_active === true || generalForm.kill_switch_active === 'true')
+
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
-      <StatusBadge label="Stocks Industrial" status="ACTIVO" color="#22C55E" detail="Estrategia Fibonacci + AI" />
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '14px 18px', background: `rgba(${stocksEnabled ? '0,200,150' : '200,200,0'}, 0.05)`, borderRadius: '10px', border: `1px solid ${stocksEnabled ? '#00C896' : '#C8C800'}22` }}>
+        <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: stocksEnabled ? '#00C896' : '#C8C800', boxShadow: `0 0 8px ${stocksEnabled ? '#00C896' : '#C8C800'}` }} />
+        <div style={{ flex: 1 }}>
+          <span style={{ color: '#FFF', fontWeight: 700, fontSize: '14px' }}>Stocks Industrial / Interactive Brokers</span>
+          <div style={{ color: '#555', fontSize: '11px' }}>
+            Conexión API {stocksEnabled ? '(Operando · Estrategia Fibonacci + AI)' : '(Pausado · Operativa con Broker Suspendida)'}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '11px', color: stocksEnabled ? '#00C896' : '#C8C800', fontWeight: 'bold' }}>
+            {stocksEnabled ? 'ACTIVO' : 'SUSPENDIDO'}
+          </span>
+          <div
+            onClick={async () => {
+              const nextEnabled = !stocksEnabled
+              const nextKillSwitch = !nextEnabled
+              setGeneralForm({ ...generalForm, kill_switch_active: String(nextKillSwitch) })
+              await supabase.from('stocks_config').update({ value: String(nextKillSwitch) }).eq('key', 'kill_switch_active')
+            }}
+            title={stocksEnabled ? "Suspender operativa con Interactive Brokers" : "Activar operativa con Interactive Brokers"}
+            style={{ width: '40px', height: '20px', borderRadius: '10px', background: stocksEnabled ? '#00C896' : '#222', position: 'relative', cursor: 'pointer' }}
+          >
+            <div style={{ position: 'absolute', top: '2px', left: stocksEnabled ? '22px' : '2px', width: '16px', height: '16px', borderRadius: '50%', background: '#FFF', transition: 'all 0.2s' }} />
+          </div>
+        </div>
+      </div>
 
       {/* SECCIÓN GENERAL SIEMPRE VISIBLE */}
       <SettingsSection title="💰 Configuración de Cuenta & Riesgo">
@@ -535,17 +563,12 @@ const CryptoSettings = ({ config, onSave, cryptoEnabled, setCryptoEnabled }: any
                       const newVal = !cryptoEnabled;
                       setCryptoEnabled(newVal);
 
-                      // 1. Guardar en system_config (crypto_enabled)
+                      // Guardar en system_config (crypto_enabled) igual que forex_enabled
                       const { data: exist } = await supabase.from('system_config').select('id').eq('key', 'crypto_enabled').maybeSingle();
                       if (exist) {
-                        await supabase.from('system_config').update({ value: String(newVal) }).eq('key', 'crypto_enabled');
+                        await supabase.from('system_config').update({ value: newVal }).eq('key', 'crypto_enabled');
                       } else {
-                        await supabase.from('system_config').insert({ key: 'crypto_enabled', value: String(newVal) });
-                      }
-
-                      // 2. Sincronizar bot_active en risk_config para el motor de Crypto
-                      if (config.rc_id) {
-                        await supabase.from('risk_config').update({ bot_active: newVal }).eq('id', config.rc_id);
+                        await supabase.from('system_config').insert({ key: 'crypto_enabled', value: newVal });
                       }
                     }}
                     title={cryptoEnabled ? "Pausar / Desactivar operaciones con Binance Futures" : "Activar operaciones con Binance Futures"}
