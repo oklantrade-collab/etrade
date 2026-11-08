@@ -132,16 +132,16 @@ def select_best_option_contract(
         dte = (exp_date - ref_date).days
 
         # ── FILTRO DTE: RANGO INSTITUCIONAL O MODO 0DTE / SCALP ──
-        is_zero_dte_mode = selection_mode.upper() in ("0DTE_SCALP", "ETI_SCALP", "WARRIOR_0DTE")
+        is_zero_dte_mode = selection_mode.upper() in ("0DTE_SCALP", "ETI_SCALP", "WARRIOR_0DTE", "OTM_MOMENTUM")
         if is_zero_dte_mode:
-            # En modo Scalping / Radar Cuántico ETI se buscan contratos de hoy (0DTE) o vencimiento semanal próximo (≤ 4d)
+            # En modo Scalping / Radar Cuántico ETI / OTM Momentum se buscan contratos de hoy (0DTE) o vencimiento semanal próximo (≤ 7d)
             if dte < 0 or dte > 7:
                 rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): DTE={dte} fuera del rango 0DTE/Semanal (0 a 7 días)")
                 continue
         else:
-            # Rango Swing / Gap Runner habitual: 10 a 25 días
-            if dte < 10 or dte > 25:
-                rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): DTE={dte} fuera del rango institucional blindado (10 a 21-25 días)")
+            # Rango Swing / Gap Runner habitual: 2 a 25 días
+            if dte < 2 or dte > 25:
+                rejection_reasons.append(f"Strike {strike} {right} ({exp_date}): DTE={dte} fuera del rango institucional blindado (2 a 25 días)")
                 continue
 
         # Obtener cotizaciones latest
@@ -163,8 +163,8 @@ def select_best_option_contract(
         mid = round((bid + ask) / 2.0, 4)
         spread_rel = ((ask - bid) / mid) * 100.0
 
-        # Spread institucional blindado: <= 5.0% (o <= $0.10 si prima < $2.00)
-        eff_max_spread = min(5.0, max_spread_pct)
+        # Spread institucional blindado: <= 3.5% en OTM_MOMENTUM, <= 5.0% en general (o <= $0.10 si prima < $2.00)
+        eff_max_spread = min(3.5, max_spread_pct) if is_otm_momentum else min(5.0, max_spread_pct)
         if spread_rel > eff_max_spread:
             if not (mid < 2.0 and round(ask - bid, 4) <= 0.10):
                 rejection_reasons.append(f"Strike {strike} {right}: Spread excesivo {spread_rel:.1f}% > {eff_max_spread}%")
@@ -331,9 +331,9 @@ def fetch_and_select_best_option_contract(
             return None, rejection_reasons
 
         # Filtrar vencimientos según modo (0DTE/Scalp vs Swing institucional)
-        is_zero_dte_mode = selection_mode.upper() in ("0DTE_SCALP", "ETI_SCALP", "WARRIOR_0DTE")
+        is_zero_dte_mode = selection_mode.upper() in ("0DTE_SCALP", "ETI_SCALP", "WARRIOR_0DTE", "OTM_MOMENTUM")
         if is_zero_dte_mode:
-            # En modo 0DTE/Scalp se prioriza el vencimiento de hoy (DTE=0) o el más cercano (≤ 4d)
+            # En modo 0DTE/Scalp/OTM_MOMENTUM se prioriza el vencimiento de hoy (DTE=0) o el más cercano (≤ 7d)
             valid_exps = [e for e in all_exps if 0 <= (date.fromisoformat(e) - ref_date).days <= 4]
             if not valid_exps:
                 valid_exps = [e for e in all_exps if 0 <= (date.fromisoformat(e) - ref_date).days <= 7]
@@ -341,11 +341,11 @@ def fetch_and_select_best_option_contract(
                 rejection_reasons.append(f"{sym}: No hay vencimientos disponibles para 0DTE/Semanal (0 a 7d).")
                 return None, rejection_reasons
         else:
-            valid_exps = [e for e in all_exps if 10 <= (date.fromisoformat(e) - ref_date).days <= 25]
+            valid_exps = [e for e in all_exps if 2 <= (date.fromisoformat(e) - ref_date).days <= 25]
             if not valid_exps:
-                valid_exps = [e for e in all_exps if 8 <= (date.fromisoformat(e) - ref_date).days <= 30]
+                valid_exps = [e for e in all_exps if 1 <= (date.fromisoformat(e) - ref_date).days <= 30]
             if not valid_exps:
-                rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango institucional DTE (10-25d).")
+                rejection_reasons.append(f"{sym}: No hay vencimientos disponibles en rango institucional DTE (2-25d).")
                 return None, rejection_reasons
 
         is_call = direction.upper() in ("CALL", "BULLISH")

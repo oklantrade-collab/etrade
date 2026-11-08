@@ -193,9 +193,12 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
     const priceStr = details?.price ? ` @ $${details.price.toFixed(2)}` : '';
     const assetKind = details?.isOption ? 'OPCIÓN' : 'STOCK';
 
-    toast.custom(
+    const toastId = toast.custom(
       (t) => (
-        <div className={`${t.visible ? 'animate-enter' : 'animate-leave'} max-w-md w-full bg-[#111622] border-2 ${isBuy ? 'border-cyan-500/80' : 'border-amber-500/80'} shadow-2xl rounded-2xl pointer-events-auto flex p-3.5 text-white ring-1 ring-black ring-opacity-5`}>
+        <div
+          onClick={() => toast.dismiss(t.id)}
+          className={`${t.visible ? 'animate-enter' : 'animate-leave'} cursor-pointer max-w-md w-full bg-[#111622] border-2 ${isBuy ? 'border-cyan-500/80' : 'border-amber-500/80'} shadow-2xl rounded-2xl pointer-events-auto flex items-center justify-between p-3.5 text-white ring-1 ring-black ring-opacity-5`}
+        >
           <div className="flex items-center gap-3">
             <span className="text-2xl">{isBuy ? '🛒' : '💰'}</span>
             <div>
@@ -207,10 +210,22 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
               </p>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toast.dismiss(t.id);
+            }}
+            className="ml-3 text-slate-400 hover:text-white text-xs font-bold px-1.5 py-0.5 rounded"
+            aria-label="Cerrar notificación"
+          >
+            ✕
+          </button>
         </div>
       ),
       { duration: 6000 }
     );
+    setTimeout(() => toast.dismiss(toastId), 6500);
   }, [enabled]);
 
   // Public test trigger
@@ -465,7 +480,7 @@ export function MarketBellProvider({ children }: { children: React.ReactNode }) 
         // Poll Option Trades (only essential columns to save Supabase egress)
         const { data: recentOptions } = await supabase
           .from('opt_paper_trades')
-          .select('id, symbol, status, qty, entry_price, entry_debit, entry_time, exit_time')
+          .select('id, symbol, status, qty, entry_debit, entry_time, exit_time, exit_credit')
           .order('entry_time', { ascending: false })
           .limit(10);
         (recentOptions || []).forEach((t: any) => handleOptionTradeChange(t));

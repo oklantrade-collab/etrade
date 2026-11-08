@@ -1085,23 +1085,24 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                     has_same_vme_pos = any(vme_opt_rule in str(p.get("strategy_type", "")) or (is_call and "call" in str(p.get("strategy_type", "")).lower()) for p in open_opts)
 
                     if not has_same_vme_pos:
-                        delta_range = (0.35, 0.60) if is_call else (-0.60, -0.35)
-                        selected_contract = await fetch_and_select_best_option_contract(
-                            underlying_symbol=ticker,
-                            contract_type=opt_side,
-                            target_delta_range=delta_range,
-                            min_dte=3,
-                            max_dte=14,
-                            min_open_interest=50,
+                        selected_contract, _ = fetch_and_select_best_option_contract(
+                            symbol=ticker,
+                            underlying_price=current_price,
+                            direction=opt_side,
+                            budget_usd=float(config.get("options_trade_budget_usd", 1000.0)),
                             supabase=sb
                         )
 
                         if selected_contract:
-                            opt_price = float(selected_contract.ask or selected_contract.last_price or 1.0)
+                            opt_price = float(selected_contract.ask if selected_contract.ask > 0 else selected_contract.mid or 1.0)
                             opt_trade_cap = float(config.get("options_trade_capital_usd", 200.0))
                             contracts_to_buy = max(1, int(opt_trade_cap // (opt_price * 100)))
                             strike_str = f"{selected_contract.strike:.1f}".replace(".0", "")
-                            expiry_clean = (selected_contract.expiration or "").replace("-", "")[:8]
+                            expiry_clean = (
+                                selected_contract.expiry.strftime("%Y%m%d")
+                                if hasattr(selected_contract.expiry, "strftime")
+                                else str(selected_contract.expiry or "").replace("-", "")[:8]
+                            )
                             opt_ticker_formatted = f"{ticker}:OPT:{expiry_clean}:{strike_str}:{'C' if is_call else 'P'}"
 
                             now_iso = datetime.now(timezone.utc).isoformat()

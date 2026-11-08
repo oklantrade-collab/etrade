@@ -248,17 +248,14 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
         right = "C" if direction == "CALL" else "P"
         current_p = cand["underlying_price"]
 
-        # Buscar contrato semanal con Delta ~0.55 (0.50 - 0.65) y DTE 3 a 7 días
-        contract = fetch_and_select_best_option_contract(
+        # Buscar contrato semanal con Delta ~0.55 (0.50 - 0.65) y DTE 0 a 7 días
+        contract, _ = fetch_and_select_best_option_contract(
             symbol=sym,
             underlying_price=current_p,
-            right=right,
-            budget=min(800.0, max_capital * 0.25),
-            min_dte=3,
-            max_dte=7,
-            target_delta=0.55 if right == "C" else -0.55,
-            max_spread_pct=6.0,
-            tranche_mode="SINGLE"
+            direction=direction,
+            budget_usd=min(800.0, max_capital * 0.25),
+            supabase=sb,
+            selection_mode="WARRIOR_0DTE"
         )
 
         if not contract:
@@ -269,6 +266,20 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
         if current_open_risk + cost_total > max_capital:
             log_info(MODULE, f"⛔ Saldo insuficiente para {sym} ({cost_total:.2f} + {current_open_risk:.2f} > {max_capital:.2f})")
             continue
+
+        # Asegurar underlying_id en opt_underlyings
+        uid = 1
+        try:
+            u_res = sb.table("opt_underlyings").upsert({
+                "symbol": sym,
+                "price": current_p,
+                "optionable": True,
+                "updated_at": now_iso
+            }, on_conflict="symbol").execute()
+            if u_res.data:
+                uid = u_res.data[0]["id"]
+        except Exception:
+            pass
 
         # Crear registro en opt_candidates con estrategia WARRIOR_MOMENTUM
         leg = {
@@ -301,8 +312,7 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
         }
 
         payload = {
-            "symbol": sym,
-            "underlying_id": 1,
+            "underlying_id": uid,
             "strategy_type": "WARRIOR_MOMENTUM",
             "direction": direction,
             "direction_source": "warrior_momentum_engine",
@@ -336,7 +346,7 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
             ins_res = sb.table("opt_candidates").insert(payload).execute()
             if ins_res.data:
                 cand_record = ins_res.data[0]
-                und_dict = {"symbol": sym, "id": 1, "price": current_p}
+                und_dict = {"symbol": sym, "id": uid, "price": current_p}
                 executed_pos = execute_selected_candidate_to_trade(sb, cand_record, eff, und=und_dict, now_dt=now_dt)
                 if executed_pos:
                     log_info(MODULE, f"🚀 [WARRIOR AUTO-DISPATCH] Posición {sym} {direction} {contract.strike} {contract.expiry} abierta exitosamente.")
