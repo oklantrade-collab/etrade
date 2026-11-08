@@ -63,11 +63,18 @@ class IBConnection(EWrapper, EClient):
         self._data_callbacks: dict = {}
         self._errors: list = []
         self._prices: Dict[str, float] = {}  # {ticker: last_price}
+        self._quotes: Dict[str, dict] = {}   # {pos_key: {bid, ask, last, close}}
         self._order_statuses: dict = {}      # {order_id: status_dict}
         self._order_callback: Optional[Callable] = None
         self.accounts: list[str] = []
         self._positions: Dict[str, dict] = {}
         self._positions_event = threading.Event()
+        self._portfolio: Dict[str, dict] = {}
+        self._portfolio_event = threading.Event()
+        self._account_updates_subscribed: bool = False
+        self._pnl_single_reqs: Dict[int, str] = {}
+        self._pnl_single_conids: set[int] = set()
+        self._mkt_data_subscribed: set[str] = set()
         self._contract_details: Dict[int, list] = {}
         self._contract_details_events: Dict[int, threading.Event] = {}
         self._hist_bars: dict = {}
@@ -124,6 +131,11 @@ class IBConnection(EWrapper, EClient):
 
             if self.connected:
                 log_info(MODULE, f"Connected to IB TWS at {host}:{port} (client_id={client_id})")
+                try:
+                    self.reqMarketDataType(4)
+                except Exception:
+                    pass
+                self._ensure_account_updates()
                 return True
             else:
                 log_warning(MODULE, f"IB TWS not running at {host}:{port} (expected)")
@@ -170,22 +182,185 @@ class IBConnection(EWrapper, EClient):
                 log_error(MODULE, f"[IB Error {errorCode}] reqId={reqId}: {errorString}")
     
     def tickPrice(self, reqId: int, tickType: int, price: float, attrib):
-        """Called when a market price update is received."""
-        # tickType 4 is Last Price, 1 is Bid, 2 is Ask
-        if tickType in [1, 2, 4] and price > 0:
+        """Called when a market price update is received (Live + Delayed + Frozen)."""
+        if price is None or price <= 0 or price >= 1e100:
+            return
+        # Live: 1=Bid, 2=Ask, 4=Last, 9=Close | Delayed/Frozen: 66=Bid, 67=Ask, 68=Last, 75=Close
+        if tickType in (1, 2, 4, 9, 66, 67, 68, 75):
             ticker = self._data_callbacks.get(reqId)
-            if ticker:
-                self._prices[ticker] = price
+            if not ticker:
+                return
+            q = self._quotes.setdefault(ticker, {"bid": 0.0, "ask": 0.0, "last": 0.0, "close": 0.0})
+            if tickType in (1, 66):
+                q["bid"] = float(price)
+            elif tickType in (2, 67):
+                q["ask"] = float(price)
+            elif tickType in (4, 68):
+                q["last"] = float(price)
+            elif tickType in (9, 75):
+                q["close"] = float(price)
+
+            if ":OPT:" in ticker:
+                if q["bid"] > 0 and q["ask"] > 0:
+                    best_p = round((q["bid"] + q["ask"]) / 2.0, 4)
+                else:
+                    best_p = q["last"] or q["close"] or q["bid"] or q["ask"]
+            else:
+                if q["last"] > 0:
+                    best_p = q["last"]
+                elif q["bid"] > 0 and q["ask"] > 0:
+                    best_p = round((q["bid"] + q["ask"]) / 2.0, 4)
+                else:
+                    best_p = q["close"] or q["bid"] or q["ask"]
+
+            if best_p > 0:
+                self._prices[ticker] = float(best_p)
 
     def connectionClosed(self):
         """Called when connection is lost."""
         self.connected = False
+        self._account_updates_subscribed = False
+        self._mkt_data_subscribed.clear()
+        self._pnl_single_conids.clear()
         log_warning(MODULE, "IB TWS connection closed")
 
     def managedAccounts(self, accountsList: str):
         """Called when account list is received from TWS."""
         self.accounts = [a.strip() for a in accountsList.split(",") if a.strip()]
         log_info(MODULE, f"[IB Accounts] Connected accounts: {self.accounts}")
+        try:
+            self.reqMarketDataType(4)
+        except Exception:
+            pass
+        self._ensure_account_updates()
+
+    def _ensure_account_updates(self):
+        """Subscribe to TWS reqAccountUpdates to receive real-time updatePortfolio (marketPrice and unrealizedPNL)."""
+        if not self.connected or self._account_updates_subscribed:
+            return
+        try:
+            acct = self.accounts[0] if self.accounts else ""
+            self.reqAccountUpdates(True, acct)
+            self._account_updates_subscribed = True
+            log_info(MODULE, f"[IB Portfolio] Subscribed to reqAccountUpdates for account='{acct or 'DEFAULT'}'")
+        except Exception as e:
+            log_warning(MODULE, f"Could not subscribe reqAccountUpdates: {e}")
+
+    def updatePortfolio(
+        self,
+        contract: "Contract",
+        position: float,
+        marketPrice: float,
+        marketValue: float,
+        averageCost: float,
+        unrealizedPNL: float,
+        realizedPNL: float,
+        accountName: str,
+    ):
+        """Called by TWS with real-time marketPrice, marketValue, averageCost, and unrealizedPNL."""
+        if not contract:
+            return
+        symbol = getattr(contract, "symbol", "").upper()
+        if not symbol:
+            return
+        sec_type = str(getattr(contract, "secType", "STK") or "STK").upper()
+        if sec_type == "OPT":
+            right = str(getattr(contract, "right", "") or "").upper()
+            strike = float(getattr(contract, "strike", 0.0) or 0.0)
+            expiry = str(getattr(contract, "lastTradeDateOrContractMonth", "") or "")
+            pos_key = f"{symbol}:OPT:{expiry}:{strike}:{right}"
+        else:
+            pos_key = symbol
+
+        def _clean(val: float) -> float:
+            try:
+                v = float(val)
+                return 0.0 if (abs(v) >= 1e100 or v != v) else v
+            except Exception:
+                return 0.0
+
+        qty = _clean(position)
+        mkt_p = _clean(marketPrice)
+        mkt_v = _clean(marketValue)
+        avg_c = _clean(averageCost)
+        unr_pnl = _clean(unrealizedPNL)
+        real_pnl = _clean(realizedPNL)
+
+        if sec_type == "OPT" and qty != 0 and abs(mkt_v) > 0:
+            calc_opt_p = round(abs(mkt_v) / (abs(qty) * 100.0), 4)
+            if mkt_p <= 0 or mkt_p > calc_opt_p * 20:
+                mkt_p = calc_opt_p
+        elif sec_type == "STK" and qty != 0 and abs(mkt_v) > 0 and mkt_p <= 0:
+            mkt_p = round(abs(mkt_v) / abs(qty), 4)
+
+        if mkt_p > 0:
+            self._prices[pos_key] = mkt_p
+            if sec_type == "STK":
+                self._prices[symbol] = mkt_p
+
+        self._portfolio[pos_key] = {
+            "account": accountName,
+            "symbol": pos_key,
+            "sec_type": sec_type,
+            "underlying": symbol,
+            "shares": qty,
+            "avg_cost": avg_c,
+            "market_price": mkt_p,
+            "market_value": mkt_v,
+            "unrealized_pnl": unr_pnl,
+            "realized_pnl": real_pnl,
+            "conid": getattr(contract, "conId", None),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if pos_key in self._positions:
+            self._positions[pos_key].update({
+                "market_price": mkt_p,
+                "market_value": mkt_v,
+                "unrealized_pnl": unr_pnl,
+                "realized_pnl": real_pnl,
+            })
+        log_info(MODULE, f"[IB UpdatePortfolio] {pos_key} Qty={qty} Avg=${avg_c:.4f} MktPrice=${mkt_p:.4f} UnrealizedPnL=${unr_pnl:+.2f}")
+
+    def updateAccountValue(self, key: str, val: str, currency: str, accountName: str):
+        pass
+
+    def updateAccountTime(self, timeStamp: str):
+        pass
+
+    def accountDownloadEnd(self, accountName: str):
+        self._portfolio_event.set()
+
+    def pnlSingle(self, reqId: int, pos: int, dailyPnL: float, unrealizedPnL: float, realizedPnL: float, value: float):
+        """Real-time single position PnL callback from TWS reqPnLSingle."""
+        pos_key = self._pnl_single_reqs.get(reqId)
+        if not pos_key:
+            return
+        def _clean(val: float) -> float:
+            try:
+                v = float(val)
+                return 0.0 if (abs(v) >= 1e100 or v != v) else v
+            except Exception:
+                return 0.0
+        unr = _clean(unrealizedPnL)
+        real_p = _clean(realizedPnL)
+        val_clean = _clean(value)
+        qty = float(pos or 0)
+        mkt_p = 0.0
+        if qty != 0 and abs(val_clean) > 0:
+            if ":OPT:" in pos_key:
+                mkt_p = round(abs(val_clean) / (abs(qty) * 100.0), 4)
+            else:
+                mkt_p = round(abs(val_clean) / abs(qty), 4)
+        if mkt_p > 0:
+            self._prices[pos_key] = mkt_p
+        p_entry = self._portfolio.setdefault(pos_key, {})
+        if mkt_p > 0:
+            p_entry["market_price"] = mkt_p
+        if abs(val_clean) > 0:
+            p_entry["market_value"] = val_clean
+        if abs(unr) > 0 or mkt_p > 0:
+            p_entry["unrealized_pnl"] = unr
+        p_entry["realized_pnl"] = real_p
 
     def orderStatus(
         self,
@@ -301,23 +476,145 @@ class IBConnection(EWrapper, EClient):
             self._contract_details.pop(req_id, None)
         return None
 
+    def _ensure_position_streams(self, pos_key: str, p_data: dict):
+        """Subscribe open STK/OPT position to TWS reqMktData and reqPnLSingle for continuous live updates."""
+        if not self.connected:
+            return
+        try:
+            sec_type = str(p_data.get("sec_type") or "STK").upper()
+            underlying = str(p_data.get("underlying") or pos_key.split(":")[0]).upper()
+            conid = p_data.get("conid")
+            acct = str(p_data.get("account") or (self.accounts[0] if self.accounts else ""))
+
+            # 1. Subscribe reqPnLSingle by conId
+            if conid and acct and int(conid) not in self._pnl_single_conids:
+                req_id = self.get_next_order_id()
+                self._pnl_single_reqs[req_id] = pos_key
+                self._pnl_single_conids.add(int(conid))
+                try:
+                    self.reqPnLSingle(req_id, acct, "", int(conid))
+                except Exception:
+                    pass
+
+            # 2. Subscribe reqMktData
+            if pos_key not in self._mkt_data_subscribed:
+                req_id = self.get_next_order_id()
+                self._data_callbacks[req_id] = pos_key
+                self._mkt_data_subscribed.add(pos_key)
+                if sec_type == "OPT":
+                    exp_s = str(p_data.get("expiry") or "")
+                    stk_f = float(p_data.get("strike") or 0.0)
+                    rgt_s = str(p_data.get("right") or "C")
+                    contract = self.us_option_contract(underlying, exp_s, stk_f, rgt_s)
+                    if conid:
+                        contract.conId = int(conid)
+                else:
+                    contract = self.us_stock_contract(underlying)
+                    if conid:
+                        contract.conId = int(conid)
+                self.reqMktData(req_id, contract, "", False, False, [])
+        except Exception as e:
+            log_warning(MODULE, f"Error subscribing streams for {pos_key}: {e}")
+
     def request_broker_positions(self, timeout: float = 6.0) -> Dict[str, dict]:
-        """Request all open positions from TWS and wait until positionEnd."""
+        """Request all open positions from TWS and enrich with real-time marketPrice & unrealizedPNL."""
         if not hasattr(self, "_last_valid_positions"):
             self._last_valid_positions = {}
         self._positions = {}
         self._positions_event.clear()
         self._positions_sync_ok = False
         try:
+            try:
+                self.reqMarketDataType(4)
+            except Exception:
+                pass
+            self._ensure_account_updates()
+
             self.reqPositions()
             finished = self._positions_event.wait(timeout=timeout)
             self.cancelPositions()
-            if finished:
-                self._positions_sync_ok = True
-                self._last_valid_positions = dict(self._positions)
-            else:
+            if not finished:
                 log_warning(MODULE, f"[IB Positions] Timeout ({timeout}s) waiting for positionEnd; preserving last valid snapshot ({len(self._last_valid_positions)} items).")
                 return dict(self._last_valid_positions)
+
+            self._positions_sync_ok = True
+
+            # Wait briefly if updatePortfolio has not arrived yet
+            if self._positions and not self._portfolio:
+                self._portfolio_event.wait(timeout=2.0)
+
+            # Subscribe streams and merge portfolio / tick prices
+            missing_price_keys = []
+            for pos_key, p_data in self._positions.items():
+                qty = float(p_data.get("shares") or 0.0)
+                if qty == 0:
+                    continue
+                self._ensure_position_streams(pos_key, p_data)
+                port_info = self._portfolio.get(pos_key) or {}
+                mkt_p = float(port_info.get("market_price") or self._prices.get(pos_key) or 0.0)
+                if mkt_p <= 0:
+                    missing_price_keys.append(pos_key)
+
+            # Wait up to 1.2s for initial ticks if any position still lacks a price
+            if missing_price_keys:
+                for _ in range(12):
+                    time.sleep(0.1)
+                    if all(
+                        (float((self._portfolio.get(k) or {}).get("market_price") or self._prices.get(k) or 0.0) > 0)
+                        for k in missing_price_keys
+                    ):
+                        break
+
+            # Finalize market_price, market_value, and unrealized_pnl for every open position
+            for pos_key, p_data in self._positions.items():
+                qty = float(p_data.get("shares") or 0.0)
+                if qty == 0:
+                    continue
+                sec_type = str(p_data.get("sec_type") or "STK").upper()
+                underlying = str(p_data.get("underlying") or pos_key.split(":")[0]).upper()
+                avg_c = float(p_data.get("avg_cost") or 0.0)
+                port_info = self._portfolio.get(pos_key) or {}
+
+                # Priority 1: Live tick from reqMktData / reqPnLSingle
+                # Priority 2: TWS updatePortfolio market_price
+                tick_p = float(self._prices.get(pos_key) or (self._prices.get(underlying) if sec_type == "STK" else 0.0) or 0.0)
+                port_p = float(port_info.get("market_price") or 0.0)
+                mkt_p = tick_p if tick_p > 0 else port_p
+
+                # Priority 3: If TWS still reports 0 (e.g. weekend reset before market data server responds), fetch latest quote
+                if mkt_p <= 0 and sec_type == "STK":
+                    try:
+                        import yfinance as yf
+                        fi = yf.Ticker(underlying).fast_info
+                        lp = float(getattr(fi, "last_price", 0.0) or 0.0)
+                        if lp > 0:
+                            mkt_p = round(lp, 4)
+                            self._prices[pos_key] = mkt_p
+                            self._prices[underlying] = mkt_p
+                    except Exception:
+                        pass
+
+                if mkt_p <= 0:
+                    mkt_p = round(avg_c / 100.0, 4) if sec_type == "OPT" else avg_c
+
+                port_unr = float(port_info.get("unrealized_pnl") or 0.0)
+                if sec_type == "OPT":
+                    entry_deb = avg_c / 100.0 if avg_c > 0 else mkt_p
+                    calc_unr = round((mkt_p - entry_deb) * 100.0 * qty, 2)
+                    mkt_v = round(mkt_p * 100.0 * qty, 2)
+                else:
+                    calc_unr = round((mkt_p - avg_c) * qty, 2)
+                    mkt_v = round(mkt_p * qty, 2)
+
+                # Use TWS unrealized_pnl if valid and consistent, otherwise exact calculated PnL from live TWS price
+                unr_pnl = calc_unr if (abs(mkt_p - (avg_c / 100.0 if sec_type == "OPT" else avg_c)) > 0.0001 and abs(port_unr) < 0.0001) else (port_unr if abs(port_unr) > 0.0001 else calc_unr)
+
+                p_data["market_price"] = round(mkt_p, 4)
+                p_data["market_value"] = round(float(port_info.get("market_value") or mkt_v), 2)
+                p_data["unrealized_pnl"] = round(unr_pnl, 2)
+                p_data["realized_pnl"] = round(float(port_info.get("realized_pnl") or 0.0), 2)
+
+            self._last_valid_positions = dict(self._positions)
         except Exception as e:
             log_warning(MODULE, f"Error requesting positions from TWS: {e}")
             return dict(self._last_valid_positions)

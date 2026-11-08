@@ -685,13 +685,15 @@ def get_portfolio_selections(limit: int = 10):
 # ---------------------------------------------------------------------------
 @router.get("/positions")
 def list_positions(status: str = "open", symbol: str | None = None, strategy: str | None = None, limit: int = 100):
-    """Lista posiciones de Paper Trading (abiertas y/o cerradas) con metricas agregadas."""
+    """Lista posiciones de Paper Trading (abiertas y/o cerradas) con metricas agregadas en tiempo real desde TWS/IB."""
     sb = get_supabase()
+    broker_portfolio = {}
     try:
-        from app.options.broker_sync import reconcile_with_ib_broker_portfolio
-        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=30.0, allow_direct_fetch=False)
+        from app.options.broker_sync import reconcile_with_ib_broker_portfolio, load_broker_portfolio_snapshot, _row_contract_key, _fmt_exp
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=10.0, allow_direct_fetch=False)
+        broker_portfolio, _ = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
     except Exception:
-        pass
+        broker_portfolio = {}
     stored, _, _ = _load_stored()
     eff = sd.effective_settings(stored)
     try:
@@ -706,6 +708,37 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
         items = q.order(order_col, desc=True).limit(min(limit, 300)).execute().data or []
     except Exception as e:
         return {"items": [], "error": str(e)[:200]}
+
+    # Enriquecer posiciones abiertas de opciones con mark_price y unrealized_pnl en tiempo real de TWS
+    try:
+        from app.options.broker_sync import _row_contract_key, _fmt_exp
+        tws_opt_by_ck = {}
+        for opt_k, b_d in (broker_portfolio or {}).items():
+            if str(b_d.get("sec_type") or "").upper() == "OPT" or ":OPT:" in str(opt_k):
+                u_s = str(b_d.get("underlying") or str(opt_k).split(":")[0]).upper()
+                e_s = _fmt_exp(b_d.get("expiry") or "")
+                st_f = round(float(b_d.get("strike") or 0.0), 2)
+                rg_s = str(b_d.get("right") or "C").upper()
+                tws_opt_by_ck[(u_s, e_s, st_f, rg_s)] = b_d
+
+        for it in items:
+            if it.get("status") != "open":
+                continue
+            ck = _row_contract_key(it)
+            b_d = tws_opt_by_ck.get(ck)
+            qty = int(it.get("qty") or 1)
+            entry_deb = float(it.get("entry_debit") or 0.0)
+            if b_d:
+                mp = float(b_d.get("market_price") or 0.0)
+                if mp > 0:
+                    it["last_mark_price"] = round(mp, 4)
+                    tws_unr = b_d.get("unrealized_pnl")
+                    if tws_unr is not None and abs(float(tws_unr)) > 0.0001:
+                        it["unrealized_pnl"] = round(float(tws_unr), 2)
+                    else:
+                        it["unrealized_pnl"] = round((mp - entry_deb) * 100.0 * qty, 2)
+    except Exception:
+        pass
 
     try:
         all_rows = sb.table("opt_paper_trades").select("status,unrealized_pnl,realized_pnl,max_loss_total").limit(500).execute().data or []

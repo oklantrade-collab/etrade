@@ -254,14 +254,35 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
             if ck in in_flight_sell_keys:
                 continue
 
+            mark_p = float(b_data.get("market_price") or 0.0)
+            if mark_p <= 0 and ck in sb_open_by_key:
+                old_mp = float(sb_open_by_key[ck].get("last_mark_price") or 0.0)
+                if old_mp > 0 and abs(old_mp - entry_debit) > 0.0001:
+                    mark_p = old_mp
+            if mark_p <= 0:
+                mark_p = entry_debit
+            tws_opt_pnl = b_data.get("unrealized_pnl")
+            calc_opt_pnl = round((mark_p - entry_debit) * 100.0 * qty, 2)
+            opt_pnl_usd = round(float(tws_opt_pnl), 2) if (tws_opt_pnl is not None and abs(float(tws_opt_pnl)) > 0.0001) else calc_opt_pnl
+
             if ck in sb_open_by_key:
                 ex_row = sb_open_by_key[ck]
-                if int(ex_row.get("qty") or 0) != qty or abs(float(ex_row.get("entry_debit") or 0) - entry_debit) > 0.02:
+                old_mp = float(ex_row.get("last_mark_price") or 0.0)
+                old_opnl = float(ex_row.get("unrealized_pnl") or 0.0)
+                if (
+                    int(ex_row.get("qty") or 0) != qty
+                    or abs(float(ex_row.get("entry_debit") or 0) - entry_debit) > 0.02
+                    or abs(old_mp - mark_p) >= 0.001
+                    or abs(old_opnl - opt_pnl_usd) >= 0.01
+                ):
                     sb.table("opt_paper_trades").update({
                         "qty": qty,
                         "entry_debit": entry_debit,
                         "entry_total_invested": total_invested,
                         "max_loss_total": total_invested,
+                        "last_mark_price": round(mark_p, 4),
+                        "last_mark_at": now_iso,
+                        "unrealized_pnl": opt_pnl_usd,
                         "updated_at": now_iso,
                     }).eq("id", ex_row["id"]).execute()
                     opt_synced += 1
@@ -429,15 +450,37 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
             if qty <= 0:
                 continue
             avg_cost = float(b_data.get("avg_cost") or 0.0)
+            cur_p = float(b_data.get("market_price") or 0.0)
+            if cur_p <= 0 and sym in sb_open_stocks:
+                old_cp = float(sb_open_stocks[sym].get("current_price") or 0.0)
+                if old_cp > 0 and abs(old_cp - avg_cost) > 0.0001:
+                    cur_p = old_cp
+            if cur_p <= 0:
+                cur_p = avg_cost
+            tws_pnl = b_data.get("unrealized_pnl")
+            calc_pnl = round((cur_p - avg_cost) * qty, 2)
+            pnl_usd = round(float(tws_pnl), 2) if (tws_pnl is not None and abs(float(tws_pnl)) > 0.0001) else calc_pnl
+            pnl_pct = round(((cur_p - avg_cost) / avg_cost * 100.0), 2) if avg_cost > 0 else 0.0
+
             if sym in sb_open_stocks:
                 ex_p = sb_open_stocks[sym]
-                if int(ex_p.get("shares") or 0) != qty or abs(float(ex_p.get("avg_price") or 0) - avg_cost) > 0.02:
+                old_cur = float(ex_p.get("current_price") or 0.0)
+                old_pnl = float(ex_p.get("unrealized_pnl") or 0.0)
+                if (
+                    int(ex_p.get("shares") or 0) != qty
+                    or abs(float(ex_p.get("avg_price") or 0) - avg_cost) > 0.02
+                    or abs(old_cur - cur_p) >= 0.001
+                    or abs(old_pnl - pnl_usd) >= 0.01
+                ):
                     sb.table("stocks_positions").update({
                         "status": "open",
                         "shares": qty,
                         "shares_remaining": qty,
                         "avg_price": round(avg_cost, 4),
                         "total_cost": round(qty * avg_cost, 2),
+                        "current_price": round(cur_p, 4),
+                        "unrealized_pnl": pnl_usd,
+                        "unrealized_pnl_pct": pnl_pct,
                         "updated_at": now_iso,
                     }).eq("id", ex_p["id"]).execute()
                     stk_synced += 1

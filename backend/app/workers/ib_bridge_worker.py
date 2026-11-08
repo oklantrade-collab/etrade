@@ -803,30 +803,45 @@ class IBBridgeWorker:
                     continue
                 avg_cost = float(b_data["avg_cost"])
 
-                cur_p = self.ib._prices.get(sym, avg_cost) if hasattr(self.ib, '_prices') else avg_cost
+                cur_p = float(b_data.get("market_price") or (self.ib._prices.get(sym, 0.0) if hasattr(self.ib, '_prices') else 0.0) or 0.0)
+                if cur_p <= 0 and sym in sb_open_stocks:
+                    old_cp = float(sb_open_stocks[sym].get("current_price") or 0.0)
+                    if old_cp > 0 and abs(old_cp - avg_cost) > 0.0001:
+                        cur_p = old_cp
                 if cur_p <= 0:
                     cur_p = avg_cost
 
                 atr_fb = max(0.05, cur_p * 0.02)
                 sl_calc = round(max(0.01, avg_cost - (atr_fb * 2.0)), 2)
                 tp_calc = round(avg_cost + (atr_fb * 5.0), 2)
-                pnl_usd = round((cur_p - avg_cost) * qty, 2)
+                tws_pnl = b_data.get("unrealized_pnl")
+                calc_pnl = round((cur_p - avg_cost) * qty, 2)
+                pnl_usd = round(float(tws_pnl), 2) if (tws_pnl is not None and abs(float(tws_pnl)) > 0.0001) else calc_pnl
                 pnl_pct = round(((cur_p - avg_cost) / avg_cost * 100), 2) if avg_cost > 0 else 0.0
 
                 if sym in sb_open_stocks:
                     existing_pos = sb_open_stocks[sym]
                     old_shares = int(existing_pos.get("shares") or 0)
                     old_avg = float(existing_pos.get("avg_price") or 0)
-                    if old_shares != qty or abs(old_avg - avg_cost) > 0.01 or existing_pos.get("status") == "closing":
+                    old_cur = float(existing_pos.get("current_price") or 0)
+                    old_pnl = float(existing_pos.get("unrealized_pnl") or 0)
+                    if (
+                        old_shares != qty
+                        or abs(old_avg - avg_cost) > 0.01
+                        or abs(old_cur - cur_p) >= 0.001
+                        or abs(old_pnl - pnl_usd) >= 0.01
+                        or existing_pos.get("status") == "closing"
+                    ):
                         update_payload = {
                             "status": "open",
                             "shares": qty,
                             "shares_remaining": qty,
                             "avg_price": round(avg_cost, 4),
                             "total_cost": round(qty * avg_cost, 2),
-                            "current_price": cur_p,
+                            "current_price": round(cur_p, 4),
                             "unrealized_pnl": pnl_usd,
                             "unrealized_pnl_pct": pnl_pct,
+                            "highest_price_reached": round(max(float(existing_pos.get("highest_price_reached") or 0.0), avg_cost, cur_p), 4),
                             "updated_at": now_iso
                         }
                         if not existing_pos.get("stop_loss") or float(existing_pos.get("stop_loss")) <= 0:
@@ -836,7 +851,7 @@ class IBBridgeWorker:
                             update_payload["take_profit"] = tp_calc
 
                         sb.table("stocks_positions").update(update_payload).eq("id", existing_pos["id"]).execute()
-                        log_info(MODULE, f"🔄 [SYNC STOCKS] Posición ajustada para {sym}: {old_shares} -> {qty} acc @ ${avg_cost:.2f}")
+                        log_info(MODULE, f"🔄 [SYNC STOCKS] {sym}: {qty} acc | Avg=${avg_cost:.2f} | Actual=${cur_p:.2f} | PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
                 else:
                     # HEALING: Comprobar si existía una posición cerrada prematuramente por simulación local
                     recent_closed = sb.table("stocks_positions")\
@@ -1009,17 +1024,42 @@ class IBBridgeWorker:
                     ck = (und_sym, exp_iso, strike_v, right_v)
                     active_broker_keys.add(ck)
 
+                    mark_p = float(b_data.get("market_price") or (self.ib._prices.get(opt_key, 0.0) if hasattr(self.ib, '_prices') else 0.0) or 0.0)
+                    if mark_p <= 0 and ck in sb_open_by_key:
+                        old_mp = float(sb_open_by_key[ck].get("last_mark_price") or 0.0)
+                        if old_mp > 0 and abs(old_mp - entry_debit) > 0.0001:
+                            mark_p = old_mp
+                    if mark_p <= 0:
+                        mark_p = entry_debit
+
+                    tws_opt_pnl = b_data.get("unrealized_pnl")
+                    calc_opt_pnl = round((mark_p - entry_debit) * 100.0 * qty, 2)
+                    opt_pnl_usd = round(float(tws_opt_pnl), 2) if (tws_opt_pnl is not None and abs(float(tws_opt_pnl)) > 0.0001) else calc_opt_pnl
+
                     if ck in sb_open_by_key:
                         ex_row = sb_open_by_key[ck]
-                        if int(ex_row.get("qty") or 0) != qty or abs(float(ex_row.get("entry_debit") or 0) - entry_debit) > 0.02:
+                        old_mp = float(ex_row.get("last_mark_price") or 0.0)
+                        old_opnl = float(ex_row.get("unrealized_pnl") or 0.0)
+                        if (
+                            int(ex_row.get("qty") or 0) != qty
+                            or abs(float(ex_row.get("entry_debit") or 0) - entry_debit) > 0.02
+                            or abs(old_mp - mark_p) >= 0.001
+                            or abs(old_opnl - opt_pnl_usd) >= 0.01
+                        ):
+                            ex_plan = dict(ex_row.get("exit_plan") or {})
+                            ex_plan["highest_premium_seen"] = round(max(float(ex_plan.get("highest_premium_seen") or 0.0), entry_debit, mark_p), 4)
                             sb.table("opt_paper_trades").update({
                                 "qty": qty,
                                 "entry_debit": entry_debit,
                                 "entry_total_invested": total_invested,
                                 "max_loss_total": total_invested,
+                                "last_mark_price": round(mark_p, 4),
+                                "last_mark_at": now_iso,
+                                "unrealized_pnl": opt_pnl_usd,
+                                "exit_plan": ex_plan,
                                 "updated_at": now_iso
                             }).eq("id", ex_row["id"]).execute()
-                            log_info(MODULE, f"🔄 [SYNC OPTIONS] Contrato ajustado en opt_paper_trades: {und_sym} {exp_iso} {strike_v}{right_v} -> {qty}x @ ${entry_debit:.2f}")
+                            log_info(MODULE, f"🔄 [SYNC OPTIONS] {und_sym} {exp_iso} {strike_v}{right_v}: {qty}x | Entry=${entry_debit:.2f} | Mark=${mark_p:.2f} | PnL=${opt_pnl_usd:+.2f}")
                     else:
                         uid = 1
                         try:
@@ -1069,6 +1109,9 @@ class IBBridgeWorker:
                                 "entry_fills": leg_fill,
                                 "entry_total_invested": total_invested,
                                 "max_loss_total": total_invested,
+                                "last_mark_price": round(mark_p, 4),
+                                "last_mark_at": now_iso,
+                                "unrealized_pnl": opt_pnl_usd,
                                 "exit_time": None,
                                 "exit_credit": None,
                                 "exit_fills": [],
@@ -1076,7 +1119,7 @@ class IBBridgeWorker:
                                 "realized_pnl": None,
                                 "updated_at": now_iso
                             }).eq("id", target_heal["id"]).execute()
-                            log_info(MODULE, f"♻️ [HEALING OPTIONS] Opción {und_sym} {exp_iso} {strike_v}{right_v} reabierta en opt_paper_trades ({qty}x @ ${entry_debit:.2f})")
+                            log_info(MODULE, f"♻️ [HEALING OPTIONS] Opción {und_sym} {exp_iso} {strike_v}{right_v} reabierta ({qty}x @ ${entry_debit:.2f} | Mark=${mark_p:.2f} | PnL=${opt_pnl_usd:+.2f})")
                         else:
                             sb.table("opt_paper_trades").insert({
                                 "underlying_id": uid,
@@ -1094,15 +1137,15 @@ class IBBridgeWorker:
                                 "max_loss_total": total_invested,
                                 "max_profit_total": round(total_invested * 2.0, 2),
                                 "breakeven": round(strike_v + entry_debit, 2) if right_v == "C" else round(strike_v - entry_debit, 2),
-                                "unrealized_pnl": 0.0,
-                                "last_mark_price": entry_debit,
+                                "unrealized_pnl": opt_pnl_usd,
+                                "last_mark_price": round(mark_p, 4),
                                 "last_mark_at": now_iso,
-                                "exit_plan": {"trailing_sl_type": "INITIAL", "highest_premium_seen": entry_debit},
+                                "exit_plan": {"trailing_sl_type": "INITIAL", "highest_premium_seen": max(entry_debit, mark_p)},
                                 "model_version": "v1.0-tws-sync",
                                 "settings_version": 1,
                                 "updated_at": now_iso
                             }).execute()
-                            log_info(MODULE, f"📥 [SYNC OPTIONS] Opción del Broker agregada a opt_paper_trades: {und_sym} {exp_iso} {strike_v}{right_v} ({qty}x @ ${entry_debit:.2f})")
+                            log_info(MODULE, f"📥 [SYNC OPTIONS] Opción del Broker agregada: {und_sym} {exp_iso} {strike_v}{right_v} ({qty}x @ ${entry_debit:.2f} | Mark=${mark_p:.2f} | PnL=${opt_pnl_usd:+.2f})")
 
                 # Cerrar o limpiar en opt_paper_trades cualquier posición que NO esté en el broker
                 for ck, opt_t in sb_open_by_key.items():
@@ -1183,7 +1226,7 @@ class IBBridgeWorker:
                     last_heartbeat = time.time()
 
                 # 2.5 Reconciliación continua con el Broker cada 30 segundos
-                if self.ib and self.ib.connected and (time.time() - last_reconcile > 30):
+                if self.ib and self.ib.connected and (time.time() - last_reconcile > 15):
                     self.reconcile_broker_portfolio()
                     last_reconcile = time.time()
 

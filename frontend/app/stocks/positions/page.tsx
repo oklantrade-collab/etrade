@@ -49,14 +49,14 @@ export default function StocksPositions() {
   useEffect(() => {
     setHasMounted(true)
     fetchData()
-    const interval = setInterval(fetchData, 30000)
+    const interval = setInterval(fetchData, 15000)
     return () => clearInterval(interval)
   }, [])
 
   const fetchData = async () => {
     try {
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 2500)
+      const timeoutId = setTimeout(() => controller.abort(), 8000)
 
       const [openRes, closedRes] = await Promise.all([
         fetch('/api/v1/stocks/positions', { signal: controller.signal }).catch(() => null),

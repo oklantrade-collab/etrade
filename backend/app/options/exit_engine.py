@@ -1000,6 +1000,26 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
             if conid:
                 quotes_map[conid] = q
 
+    # Priorizar cotización en vivo de TWS desde ib_broker_portfolio para contratos abiertos
+    try:
+        from app.options.broker_sync import load_broker_portfolio_snapshot
+        broker_port, _ = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
+        for _, b_d in (broker_port or {}).items():
+            if str(b_d.get("sec_type") or "").upper() == "OPT":
+                b_conid = b_d.get("conid")
+                b_mp = float(b_d.get("market_price") or 0.0)
+                if b_conid and b_mp > 0:
+                    quotes_map[int(b_conid)] = {
+                        "conid": int(b_conid),
+                        "bid": b_mp,
+                        "ask": b_mp,
+                        "mid": b_mp,
+                        "last": b_mp,
+                        "market_data_type": "LIVE",
+                    }
+    except Exception:
+        pass
+
     # Cargar contexto técnico de 15m y 1H para cada símbolo de subyacente
     symbols = list(set(p["symbol"] for p in positions if p.get("symbol")))
     tech_map: dict[str, dict[str, Any]] = {}

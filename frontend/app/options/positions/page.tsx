@@ -39,7 +39,7 @@ export default function OptionsPositions() {
   const loadData = () => {
     setLoading(true)
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 2500)
+    const timeoutId = setTimeout(() => controller.abort(), 8000)
 
     fetch(`/api/v1/options/positions?status=${tab}`, { signal: controller.signal })
       .then(r => {
@@ -101,6 +101,8 @@ export default function OptionsPositions() {
 
   useEffect(() => {
     loadData()
+    const interval = setInterval(loadData, 15000)
+    return () => clearInterval(interval)
   }, [tab])
 
   const openRow = async (id: number) => {

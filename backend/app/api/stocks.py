@@ -437,7 +437,7 @@ async def get_stocks_positions():
     sb = get_supabase()
     try:
         from app.options.broker_sync import reconcile_with_ib_broker_portfolio
-        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=30.0, allow_direct_fetch=False)
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=10.0, allow_direct_fetch=False)
     except Exception:
         pass
 
@@ -486,13 +486,20 @@ async def get_stocks_positions():
                         strategy_map[o["ticker"]] = o["rule_code"]
             except: pass
 
-            # 2.5 Only use IB prices if already connected (never block HTTP request)
+            # 2.5 Obtener precios y PnL en vivo desde TWS/IB (conexión local o snapshot en vivo desde APOLO)
             live_prices = {}
             if _ib.conn and _ib.conn.connected:
                 try:
                     live_prices = await _ib.get_multiple_prices(tickers)
                 except Exception:
                     pass
+
+            broker_portfolio = {}
+            try:
+                from app.options.broker_sync import load_broker_portfolio_snapshot
+                broker_portfolio, _ = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
+            except Exception:
+                broker_portfolio = {}
 
             # 3.1 Fetch Market Snapshots para diagnósticos
             snap_map = {}
@@ -501,29 +508,41 @@ async def get_stocks_positions():
                 for s in (snap_res.data or []):
                     snap_map[s["symbol"]] = s
             except Exception as snap_e:
-                log_debug("stocks_api", f"Error fetching snapshot map: {snap_e}")
+                pass
 
             from app.stocks.diagnostic_validator import build_position_diagnostics, check_and_auto_establish_trailing
 
             for pos in positions:
                 ticker = pos["ticker"]
-                
-                # Obtener precio real de IB (en memoria)
-                cur_price = live_prices.get(ticker, 0)
-                
-                # Fallback a market_snapshot (cotizaciones reales actualizadas minuto a minuto en DB)
+                avg_entry = float(pos.get("avg_price") or 0)
+                shares = float(pos.get("shares") or 0)
+                b_info = (broker_portfolio or {}).get(ticker) or {}
+
+                # Prioridad 1: Precio en tiempo real de TWS/IB (memoria local o snapshot APOLO ib_broker_portfolio)
+                cur_price = float(live_prices.get(ticker, 0) or b_info.get("market_price") or 0)
+
+                # Prioridad 2: Precio sincronizado por ib_bridge_worker en stocks_positions (si difiere del costo promedio)
+                db_cur_price = float(pos.get("current_price") or 0)
+                if cur_price <= 0 and db_cur_price > 0 and abs(db_cur_price - avg_entry) > 0.0001:
+                    cur_price = db_cur_price
+
+                # Prioridad 3: Fallback a market_snapshot
                 if cur_price <= 0 and ticker in snap_map and snap_map[ticker].get("price"):
                     try:
                         cur_price = float(snap_map[ticker]["price"])
                     except Exception:
                         pass
 
-                # Fallback a DB si IB ni snapshot tienen el dato todavía
+                # Prioridad 4: Fallback final a DB
                 if cur_price <= 0:
-                    cur_price = float(pos.get("current_price") or pos.get("avg_price") or 0)
-                
-                avg_entry = float(pos.get("avg_price") or 0)
-                shares = float(pos.get("shares") or 0)
+                    cur_price = db_cur_price if db_cur_price > 0 else avg_entry
+
+                tws_unr_pnl = b_info.get("unrealized_pnl")
+                calc_pnl = round((cur_price - avg_entry) * shares, 2)
+                if tws_unr_pnl is not None and abs(float(tws_unr_pnl)) > 0.0001 and abs(cur_price - float(b_info.get("market_price") or cur_price)) < 0.01:
+                    pnl_usd = round(float(tws_unr_pnl), 2)
+                else:
+                    pnl_usd = calc_pnl
 
                 pos["company_name"] = ticker
                 pos["sector"] = "Stocks"
@@ -531,7 +550,7 @@ async def get_stocks_positions():
                 pos["strategy"] = strategy_map.get(ticker) or "V5_INDUSTRIAL"
                 pos["current_price"] = round(cur_price, 2)
                 
-                pos["unrealized_pnl"] = round((cur_price - avg_entry) * shares, 2)
+                pos["unrealized_pnl"] = pnl_usd
                 pos["unrealized_pnl_pct"] = round(((cur_price - avg_entry) / avg_entry * 100), 2) if avg_entry > 0 else 0
                 pos["total_cost"] = round(avg_entry * shares, 2)
 

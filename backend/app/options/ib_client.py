@@ -169,8 +169,14 @@ def option_contract(sym: str, expiry: str, strike: float, right: str, trading_cl
 class IBSession:
     def __init__(self, allow_delayed: bool = True, host: str | None = None, port: int | None = None,
                  client_id: int | None = None, rate_per_sec: float = 20.0):
+        import socket
         self.allow_delayed = allow_delayed
-        self.host = host or os.getenv("OPTIONS_IB_HOST") or os.getenv("IB_HOST", "127.0.0.1")
+        if host:
+            self.host = host
+        elif "APOLO" in socket.gethostname().upper():
+            self.host = "127.0.0.1"
+        else:
+            self.host = os.getenv("OPTIONS_IB_HOST") or os.getenv("IB_HOST", "127.0.0.1")
         self.port = port or int(os.getenv("OPTIONS_IB_PORT") or os.getenv("IB_PORT", "7497"))
         self.client_id = client_id or int(os.getenv("OPTIONS_IB_CLIENT_ID") or os.getenv("OPT_IB_CLIENT_ID", "31"))
         self.limiter = RateLimiter(rate_per_sec)
