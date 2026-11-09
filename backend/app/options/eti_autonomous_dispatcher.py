@@ -64,7 +64,8 @@ async def run_eti_autonomous_options_cycle(
 
     # 1. Sincronización periódica con ETI (cada 5 minutos o si la memoria está vacía)
     active_signals = get_active_eti_signals()
-    if not active_signals or (now_ts - _LAST_ETI_SYNC_TS >= 300.0):
+    sync_interval = 30.0 if (is_open or force) else 300.0
+    if not active_signals or (now_ts - _LAST_ETI_SYNC_TS >= sync_interval):
         _LAST_ETI_SYNC_TS = now_ts
         try:
             log_info(MODULE, "🔄 Sincronizando señales activas desde servicio ETI en vivo...")

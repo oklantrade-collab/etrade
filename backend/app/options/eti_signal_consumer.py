@@ -106,10 +106,31 @@ def ingest_raw_eti_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def sync_signals_from_live_eti() -> Dict[str, Any]:
     """
     Sincroniza señales activas directamente desde el servicio ETI desplegado.
-    Intenta REST y, en caso de Vercel/Next.js frontend, parsea la Matriz de Apertura en tiempo real.
+    Intenta REST nativo (/api/eti/v1/etrade/signals/active) y, en fallback, parsea la Matriz de Apertura en tiempo real.
     """
-    url = f"{ETI_BASE_URL}/"
     headers = {"User-Agent": "Mozilla/5.0 eTrade/1.0 (Windows NT 10.0; Win64; x64)"}
+
+    # 1. Fast-path REST JSON nativo (Latencia ultra-baja en milisegundos)
+    rest_url = f"{ETI_BASE_URL}/api/eti/v1/etrade/signals/active"
+    try:
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+            resp_rest = await client.get(rest_url, headers=headers)
+            if resp_rest.status_code == 200:
+                data = resp_rest.json()
+                signals = data.get("signals", [])
+                if signals:
+                    ingested_count = 0
+                    for raw_sig in signals:
+                        res = ingest_raw_eti_signal(raw_sig)
+                        if res.get("ok"):
+                            ingested_count += 1
+                    log_info(MODULE, f"✓ Sincronización REST JSON nativa ETI completada: {ingested_count} señales 0DTE ingestadas.")
+                    return {"ok": True, "source": "REST_JSON_NATIVE", "ingested_count": ingested_count}
+    except Exception as e_rest:
+        log_warning(MODULE, f"Endpoint REST JSON ETI no disponible ({e_rest}), ejecutando fallback HTML.")
+
+    # 2. Fallback: Parseo HTML de la Matriz de Apertura
+    url = f"{ETI_BASE_URL}/"
 
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
