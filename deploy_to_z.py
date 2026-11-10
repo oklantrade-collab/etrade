@@ -13,6 +13,8 @@ folders_to_sync = [
     "backend/app/workers",
     "backend/app/data",
     "backend/app/api",
+    "backend/app/scripts",
+    "backend/scripts",
     "backend/data",
 ]
 

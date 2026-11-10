@@ -1156,6 +1156,17 @@ def evaluate_exits(user: dict = ceo_only):
     return {"ok": True, "result": result}
 
 
+@router.post("/positions/close-all")
+def close_all_positions(reason: str = "manual_api"):
+    """
+    Cierra inmediatamente todas las posiciones de opciones abiertas en opt_paper_trades
+    y despacha órdenes de venta MARKET a stocks_orders para ejecución en TWS.
+    """
+    from app.options.close_all import close_all_open_options
+    res = close_all_open_options(reason=reason)
+    return {"ok": res.get("success", False), "result": res}
+
+
 @router.delete("/positions/{position_id}")
 def delete_position(position_id: int):
     """Elimina permanentemente una posición de opciones (opt_paper_trades)."""

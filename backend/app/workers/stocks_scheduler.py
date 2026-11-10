@@ -3601,6 +3601,29 @@ async def start_stocks_scheduler(force=False):
         replace_existing=True
     )
 
+    # 5. MARKET OPEN OPTIONS LIQUIDATION (Trigger programado a las 09:30 ET)
+    async def market_open_options_check():
+        try:
+            sb = get_supabase()
+            cfg_res = sb.table("bot_config").select("value").eq("key", "close_all_options_at_market_open").limit(1).execute()
+            if cfg_res.data and bool(cfg_res.data[0].get("value")):
+                log_info(MODULE, "🚨 [CRON 09:30 ET] Flag 'close_all_options_at_market_open' ACTIVO. Ejecutando liquidación de opciones...")
+                sb.table("bot_config").update({"value": False, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("key", "close_all_options_at_market_open").execute()
+                from app.options.close_all import close_all_open_options
+                close_all_open_options(sb=sb, reason="market_open_liquidation")
+        except Exception as e_cron:
+            log_warning(MODULE, f"Aviso en cron market_open_options_check: {e_cron}")
+
+    scheduler.add_job(
+        market_open_options_check,
+        trigger=CronTrigger(day_of_week='mon-fri', hour=9, minute=30, second=15, timezone='US/Eastern'),
+        id="market_open_options_liquidation",
+        name="Market Open Options Liquidation Check",
+        replace_existing=True,
+        misfire_grace_time=300,
+        coalesce=True,
+    )
+
     scheduler.start()
     is_open, status_txt = is_market_open()
     log_info(MODULE, f"Stocks scheduler started (Market: {status_txt}). Tasks: Hot(15m) + Pro(16:05ET) + Sweep(16:01ET)")
@@ -3634,6 +3657,19 @@ async def start_stocks_scheduler(force=False):
                 elif not m_open and scalp_scanner.is_running:
                     scalp_scanner.stop()
                     log_info(MODULE, '🛑 [15:00 PM Lima / 16:00 PM ET] Cierre de mercado detectado: Micro-Pullback Scanner DETENIDO.')
+
+                # Verificación continua de flag de liquidación de opciones a la apertura
+                if m_open:
+                    try:
+                        sb_check = get_supabase()
+                        cfg_res = sb_check.table("bot_config").select("value").eq("key", "close_all_options_at_market_open").limit(1).execute()
+                        if cfg_res.data and bool(cfg_res.data[0].get("value")):
+                            log_info(MODULE, "🚨 [LOOP 15s] Flag 'close_all_options_at_market_open' detectado como ACTIVO a mercado abierto. Ejecutando liquidación...")
+                            sb_check.table("bot_config").update({"value": False, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("key", "close_all_options_at_market_open").execute()
+                            from app.options.close_all import close_all_open_options
+                            close_all_open_options(sb=sb_check, reason="market_open_liquidation")
+                    except Exception as e_liq_loop:
+                        log_warning(MODULE, f"Aviso verificando flag close_all_options_at_market_open: {e_liq_loop}")
             except Exception:
                 pass
     except (KeyboardInterrupt, SystemExit):
