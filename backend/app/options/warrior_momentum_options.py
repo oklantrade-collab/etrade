@@ -92,8 +92,8 @@ def evaluate_warrior_momentum_setup(
     bb_lower_slope = float(lower_bb.diff(3).iloc[-1]) / max(current_price, 1.0) * 100.0 if len(lower_bb) >= 4 else 0.0
     is_bb_expanding = (bb_upper_slope > 0.0001 and bb_lower_slope < -0.0001)
 
-    # Volumen relativo en 15m
-    avg_vol_15m = float(v_15.tail(15).mean()) if len(v_15) >= 15 else 1.0
+    # Volumen relativo en 15m (excluyendo la vela actual en formacion)
+    avg_vol_15m = float(v_15.iloc[-16:-1].mean()) if len(v_15) >= 16 else (float(v_15.mean()) or 1.0)
     curr_vol_15m = float(v_15.iloc[-1])
     rvol_15m = curr_vol_15m / max(avg_vol_15m, 1.0)
 
@@ -146,6 +146,7 @@ def evaluate_warrior_momentum_setup(
             "underlying_price": current_price,
             "bb_expanding": is_bb_expanding,
             "rvol_15m": rvol_15m,
+            "ema9_15m": round(float(ema9_15m.iloc[-1]), 2),
             "reason": f"Ross Cameron Call Breakout: First Candle New High en 5m tras pullback + Expansión Bollinger 15m (RVOL {rvol_15m:.1f}x)"
         }
 
@@ -182,6 +183,7 @@ def evaluate_warrior_momentum_setup(
             "underlying_price": current_price,
             "bb_expanding": is_bb_expanding,
             "rvol_15m": rvol_15m,
+            "ema9_15m": round(float(ema9_15m.iloc[-1]), 2),
             "reason": f"Ross Cameron Put Breakdown: First Candle New Low en 5m tras rebote + Expansión Bollinger 15m (RVOL {rvol_15m:.1f}x)"
         }
 
@@ -203,7 +205,7 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
     # Cargar configuración de opciones
     eff = {}
     try:
-        cfg_rows = sb.table("opt_user_settings").select("key, value").execute().data or []
+        cfg_rows = sb.table("opt_settings").select("key, value").execute().data or []
         for r in cfg_rows:
             eff[r["key"]] = r["value"]
     except Exception as e_cfg:
@@ -302,13 +304,17 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
             "cost_contract": contract.cost_per_contract
         }
 
+        init_sl = cand.get("ema9_15m") or (round(current_p * 0.985, 2) if direction == "CALL" else round(current_p * 1.015, 2))
         exit_plan = {
+            "initial_sl": init_sl,
+            "stop_loss_underlying": init_sl,
+            "entry_underlying_price": current_p,
+            "trailing_sl_type": "EMA9_15M",
             "tp_half_pct": 20.0,              # TP1 al +20% (vender 50%)
             "breakeven_on_tp1": True,          # Mover stop a breakeven
             "trailing_runner": True,           # 50% restante protegido con candado Bollinger 15m
             "candado_bollinger_15m": True,
             "exit_ema3_flat_1h": True,
-            "stop_loss_underlying_pct": -5.0   # Stop loss de -5% en el subyacente
         }
 
         payload = {
@@ -350,6 +356,22 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
                 executed_pos = execute_selected_candidate_to_trade(sb, cand_record, eff, und=und_dict, now_dt=now_dt)
                 if executed_pos:
                     log_info(MODULE, f"🚀 [WARRIOR AUTO-DISPATCH] Posición {sym} {direction} {contract.strike} {contract.expiry} abierta exitosamente.")
+                    try:
+                        import asyncio
+                        from app.workers.alerts_service import send_telegram_message
+                        tg_opt_msg = (
+                            f"⚡ <b>[ROSS CAMERON - OPCIONES] AUTO-DISPATCH</b>\n\n"
+                            f"🎯 <b>Subyacente:</b> {sym} @ ${current_p:.2f}\n"
+                            f"📑 <b>Contrato:</b> {direction} Strike ${contract.strike} (Vence: {contract.expiry})\n"
+                            f"💵 <b>Prima:</b> ${contract.mid:.2f} (x{contract.target_total_contracts} contratos)\n"
+                            f"💰 <b>Inversión Total:</b> ${cost_total:.2f} USD\n"
+                            f"🛑 <b>SL Técnico Subyacente:</b> ${init_sl:.2f} (EMA9 15m)\n"
+                            f"⭐ <b>Score:</b> {cand['score']:.1f} pts | RVOL: {cand['rvol_15m']:.2f}x\n"
+                            f"💡 <i>{cand['reason']}</i>"
+                        )
+                        asyncio.create_task(send_telegram_message(tg_opt_msg))
+                    except Exception as e_tg:
+                        log_warning(MODULE, f"Aviso enviando alerta Telegram opciones: {e_tg}")
                     dispatched_count += 1
                     current_open_risk += cost_total
                     open_symbols.add(sym)

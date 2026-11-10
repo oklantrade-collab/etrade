@@ -10,7 +10,7 @@ feeds de barras de 5 segundos directamente con Interactive Brokers TWS.
 import asyncio
 import time
 from typing import List, Dict, Set
-from app.core.logger import log_info, log_warning, log_error
+from app.core.logger import log_info, log_warning, log_error, log_debug
 from app.stocks.micro_pullback_engine import get_micro_pullback_engine
 from app.stocks.velocity_ranking import load_velocity_config_cached, rank_by_velocity
 

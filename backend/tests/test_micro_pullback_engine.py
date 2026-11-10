@@ -125,6 +125,7 @@ class TestMicroPullbackAndGapRunner(unittest.TestCase):
 
     def test_cascade_exit_tramo_1_2_3(self):
         """Valida la cascada completa: Tramo 1 (50% HOD), Tramo 2 (60% runner en 15m), Tramo 3 (40% golden runner en 1H)."""
+        self.engine.enable_runners_15m_1h = True
         self.cand.in_trade = True
         self.cand.phase = "IN_TRADE"
         self.cand.entry_price = 50.0
@@ -375,6 +376,43 @@ class TestMicroPullbackAndGapRunner(unittest.TestCase):
             self.assertEqual(self.cand.phase, "WAITING_DIP_5M")
             self.assertFalse(self.cand.in_trade)
             self.assertEqual(self.cand.shares, 0)
+
+
+    def test_fast_exit_small_caps_default(self):
+        """Valida salida rapida Ross Cameron (runners desactivados): 50% en HOD y 50% en primer giro rojo 5s."""
+        self.assertFalse(self.engine.enable_runners_15m_1h)
+        self.cand.in_trade = True
+        self.cand.phase = "IN_TRADE"
+        self.cand.entry_price = 50.0
+        self.cand.target_hod = 52.0
+        self.cand.stop_loss = 48.0
+        self.cand.shares = 100
+        self.cand.initial_shares = 100
+        self.cand.bars_in_trade = 2
+        self.engine.active_scalps[self.ticker] = self.cand
+
+        with patch("app.stocks.micro_pullback_engine.get_ib_connection") as mock_ib:
+            mock_conn = MagicMock()
+            mock_conn.connected = True
+            mock_conn.get_next_order_id.return_value = 8888
+            mock_conn.us_stock_contract.return_value = MagicMock()
+            mock_ib.return_value = mock_conn
+
+            # Tramo 1: Breakout HOD
+            bar_breakout = {"time": 1700000020, "open": 51.9, "high": 52.3, "low": 51.8, "close": 52.2, "volume": 60000}
+            self.engine.process_5s_bar(self.ticker, bar_breakout)
+
+            self.assertEqual(self.cand.shares, 50)
+            self.assertEqual(self.cand.phase, "FAST_EXIT_5S_MODE")
+            self.assertAlmostEqual(self.cand.stop_loss, 50.02)
+
+            # Vela siguiente: primera vela roja de 5s -> salida inmediata del 50% restante
+            bar_red = {"time": 1700000025, "open": 52.2, "high": 52.2, "low": 51.9, "close": 52.0, "volume": 15000}
+            self.engine.process_5s_bar(self.ticker, bar_red)
+
+            self.assertEqual(self.cand.shares, 0)
+            self.assertFalse(self.cand.in_trade)
+            self.assertEqual(self.cand.phase, "IDLE")
 
 
 if __name__ == "__main__":

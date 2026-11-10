@@ -24,8 +24,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 # ─────────────────────────────────────────────────────────────
 DEFAULT_VELOCITY_CONFIG: Dict[str, float] = {
     "scanner_min_change_pct": 3.0,
-    "scanner_min_rvol": 1.5,
-    "scanner_min_adx_5m": 20.0,
+    "scanner_min_rvol": 3.0,
+    "scanner_min_adx_5m": 0.0,
     "scanner_min_volume": 300_000.0,
     "scanner_min_dp5m_pct": 0.0,
     "velocity_w_rvol": 0.35,
@@ -232,9 +232,11 @@ def passes_velocity_minimums(item: Dict[str, Any], cfg: Optional[Dict[str, float
     if vol < cfg["scanner_min_volume"]:
         return False, f"volume {int(vol)} < min {int(cfg['scanner_min_volume'])}"
 
-    adx = _to_float(item.get("adx_5m"), 0.0)
-    if adx < cfg["scanner_min_adx_5m"]:
-        return False, f"adx_5m {adx:.1f} < min {cfg['scanner_min_adx_5m']:.1f}"
+    min_adx = cfg.get("scanner_min_adx_5m", 0.0)
+    if min_adx > 0:
+        adx = _to_float(item.get("adx_5m"), 0.0)
+        if adx < min_adx:
+            return False, f"adx_5m {adx:.1f} < min {min_adx:.1f}"
 
     return True, ""
 

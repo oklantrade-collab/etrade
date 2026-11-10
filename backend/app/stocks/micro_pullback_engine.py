@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Set
 
-from app.core.logger import log_info, log_warning, log_error
+from app.core.logger import log_info, log_warning, log_error, log_debug
 from app.core.supabase_client import get_supabase
 from app.data.ib_provider import get_ib_connection, IB_AVAILABLE
 
@@ -86,8 +86,17 @@ class MicroPullbackEngine:
         self.active_scalps: Dict[str, ScalpCandidateState] = {}
         self.closed_tickers_today: Set[str] = set()  # Lista negra intradía: One-and-Done por ticker
         self.daily_cushion_usd: float = 0.0
+        self.enable_runners_15m_1h: bool = False  # Ross Cameron: Salida rapida 5s por defecto para Small Caps
         self.is_running: bool = False
         self._bg_tasks = set()
+
+    def _notify_telegram(self, message: str):
+        """Envia alerta Telegram en background sin bloquear la toma de decisiones."""
+        try:
+            from app.workers.alerts_service import send_telegram_message
+            self._safe_create_task(send_telegram_message(message))
+        except Exception as e:
+            log_warning(MODULE, f"Aviso enviando Telegram: {e}")
         
     def start(self):
         """Inicia el motor en memoria."""
@@ -394,6 +403,15 @@ class MicroPullbackEngine:
 
         # Despacho en memoria
         ib.placeOrder(order_id, contract, ib_ord)
+        self._notify_telegram(
+            f"🚀 <b>[ROSS CAMERON - STOCKS] COMPRA EJECUTADA</b>\n\n"
+            f"🎯 <b>Ticker:</b> <code>{cand.ticker}</code>\n"
+            f"📦 <b>Cantidad:</b> {shares} acciones @ LMT ${limit_exec_price:.2f}\n"
+            f"🛑 <b>Stop Loss:</b> ${stop_loss_price:.2f}\n"
+            f"🎯 <b>Target (HOD):</b> ${target_hod_price:.2f}\n"
+            f"📋 <b>Estrategia:</b> {rule_code}\n"
+            f"💰 <b>Colchon Previo:</b> ${self.daily_cushion_usd:+.2f} USD"
+        )
         log_info(MODULE, f"🚀 [ORDEN ENVIADA A TWS] BUY {shares}x {cand.ticker} ({rule_code}) @ LMT ${limit_exec_price:.2f} (SL: ${stop_loss_price:.2f}, TP HOD: ${target_hod_price:.2f})")
 
         # Actualizar estado de posición
@@ -473,6 +491,22 @@ class MicroPullbackEngine:
                         self._close_scalp(cand, reason="BREAKOUT_OR_BAILOUT")
                         return
 
+        # ── FASE 1.5: FAST_EXIT_5S_MODE (Ross Cameron Small Caps: salida rapida del 50% restante) ──
+        elif cand.phase == "FAST_EXIT_5S_MODE":
+            cand.bars_in_trade += 1
+            if current_p > cand.highest_price_reached:
+                cand.highest_price_reached = current_p
+
+            has_topping_tail = bar.get("upper_wick_ratio", 0.0) >= 0.35
+            is_red_turn = (not bar["is_green"])
+            pierced_be = current_p <= cand.stop_loss
+
+            if is_red_turn or has_topping_tail or pierced_be:
+                exit_reason = "BREAKEVEN_PROTECTED" if pierced_be else ("TOPPING_TAIL_REJECTION" if has_topping_tail else "FIRST_RED_5S_CANDLE")
+                log_info(MODULE, f"⚡ [{cand.ticker}] SALIDA RAPIDA SCALP (50% remanente @ ${current_p:.2f}): {exit_reason}.")
+                self._close_scalp(cand, reason=exit_reason)
+                return
+
         # ── FASE 2: RUNNER_15M_MODE (60% DEL RUNNER VENDIDO EN GIRO DE 15M) ──
         elif cand.phase == "RUNNER_15M_MODE":
             # 1. Evaluar si hay dip para recompra (máximo 3)
@@ -507,8 +541,16 @@ class MicroPullbackEngine:
 
         if shares_runner > 0:
             cand.shares = shares_runner
+            cand.phase = "RUNNER_15M_MODE" if self.enable_runners_15m_1h else "FAST_EXIT_5S_MODE"
+            self._notify_telegram(
+                f"🎉 <b>[ROSS CAMERON - STOCKS] TOMA PARCIAL 50%</b>\n\n"
+                f"🎯 <b>Ticker:</b> <code>{cand.ticker}</code>\n"
+                f"💵 <b>Venta Parcial:</b> {shares_to_sell} acc @ ${current_p:.2f}\n"
+                f"💰 <b>Ganancia Parcial:</b> +${profit_leg1:.2f} USD\n"
+                f"🛡️ <b>Stop Loss Movido a Breakeven:</b> ${cand.stop_loss:.2f}\n"
+                f"📦 <b>Acciones Restantes:</b> {shares_runner} acc"
+            )
             cand.stop_loss = round(cand.entry_price + 0.02, 2)  # Breakeven asegurado
-            cand.phase = "RUNNER_15M_MODE"
             log_info(MODULE, f"🎉 [{cand.ticker}] TRAMO 1 EJECUTADO: 50% vendido ({shares_to_sell} acc @ ${current_p:.2f}). Profit: +${profit_leg1:.2f}. "
                              f"Stop Loss protegido en Breakeven (${cand.stop_loss:.2f}). Pasando a RUNNER 15m ({shares_runner} acc).")
         else:
@@ -707,21 +749,39 @@ class MicroPullbackEngine:
 
     def _close_scalp(self, cand: ScalpCandidateState, reason: str):
         """Envía orden de venta de cierre a TWS y resetea estado."""
+        closing_shares = cand.shares
+        curr_p = cand.bars[-1]["close"] if cand.bars else cand.entry_price
+        leg_pnl = round((curr_p - cand.entry_price) * closing_shares, 2) if closing_shares > 0 else 0.0
+        total_pnl = round(cand.realized_scalp_profit + leg_pnl, 2)
+
         ib = get_ib_connection()
-        if ib and ib.connected and cand.shares > 0:
+        if ib and ib.connected and closing_shares > 0:
             from ibapi.order import Order
             sell_ord = Order()
             sell_ord.action = "SELL"
-            sell_ord.totalQuantity = cand.shares
+            sell_ord.totalQuantity = closing_shares
             sell_ord.orderType = "MKT"
             sell_ord.transmit = True
 
             sell_id = ib.get_next_order_id()
             contract = ib.us_stock_contract(cand.ticker)
             ib.placeOrder(sell_id, contract, sell_ord)
-            log_info(MODULE, f"🔻 [CIERRE ENVIADO A TWS] SELL {cand.shares}x {cand.ticker} (Razón: {reason})")
-            self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, cand.shares, reason))
+            log_info(MODULE, f"🔻 [CIERRE ENVIADO A TWS] SELL {closing_shares}x {cand.ticker} (Razón: {reason})")
+            self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, closing_shares, reason))
 
+        # Notificar por Telegram
+        pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        tg_msg = (
+            f"📊 <b>[ROSS CAMERON - STOCKS] CIERRE DE OPERACIÓN</b>\n\n"
+            f"🎯 <b>Ticker:</b> <code>{cand.ticker}</code>\n"
+            f"📋 <b>Motivo:</b> {reason}\n"
+            f"💵 <b>Precio de Salida:</b> ${curr_p:.2f} (Entrada: ${cand.entry_price:.2f})\n"
+            f"{pnl_emoji} <b>PnL Total Operación:</b> ${total_pnl:+.2f} USD\n"
+            f"💰 <b>Colchón Diario Acumulado:</b> ${(self.daily_cushion_usd + leg_pnl):+.2f} USD"
+        )
+        self._notify_telegram(tg_msg)
+
+        self.daily_cushion_usd += leg_pnl
         cand.in_trade = False
         cand.shares = 0
         self.active_scalps.pop(cand.ticker, None)
@@ -741,7 +801,7 @@ class MicroPullbackEngine:
             log_info(MODULE, f"🚫 [{cand.ticker}] Añadido a Lista Negra Intradía (One-and-Done). Posición cerrada y desuscrito de barras 5s; no se volverá a operar hoy.")
 
         # Actualizar journal y colchón en background
-        self._safe_create_task(self._async_log_trade_close(cand, reason))
+        self._safe_create_task(self._async_log_trade_close(cand, reason, closing_pnl=leg_pnl))
 
     def _safe_create_task(self, coro):
         """Lanza tareas asíncronas en background de forma segura contra hilos sin event loop."""
@@ -870,14 +930,10 @@ class MicroPullbackEngine:
         except Exception as e:
             log_warning(MODULE, f"Aviso al guardar orden de venta de scalp en Supabase: {e}")
 
-    async def _async_log_trade_close(self, cand: ScalpCandidateState, reason: str):
+    async def _async_log_trade_close(self, cand: ScalpCandidateState, reason: str, closing_pnl: float = 0.0):
         """Registra el resultado de la operación en Supabase y actualiza colchón."""
         try:
-            sb = get_supabase()
-            last_p = cand.bars[-1]["close"] if cand.bars else cand.entry_price
-            pnl_usd = round((last_p - cand.entry_price) * cand.shares, 2)
-            self.daily_cushion_usd += pnl_usd
-            log_info(MODULE, f"📊 Scalp cerrado: {cand.ticker} PnL: ${pnl_usd:+.2f} USD | Nuevo Colchón: ${self.daily_cushion_usd:+.2f} USD")
+            log_info(MODULE, f"📊 Scalp cerrado: {cand.ticker} PnL Tramo Final: ${closing_pnl:+.2f} USD | Colchón Actual: ${self.daily_cushion_usd:+.2f} USD")
         except Exception as e:
             log_warning(MODULE, f"Aviso al registrar cierre de scalp: {e}")
 
@@ -890,3 +946,4 @@ def get_micro_pullback_engine() -> MicroPullbackEngine:
     if _scalp_engine is None:
         _scalp_engine = MicroPullbackEngine()
     return _scalp_engine
+

@@ -935,6 +935,31 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 )
 
                 if opt_gap_eval.get("should_enter"):
+                    # P1: Control de Riesgo Institucional en Opciones (Tope de Exposición y Circuit Breaker)
+                    MAX_ACTIVE_OPT_POS = 3
+                    MAX_TOTAL_OPT_INV = 5000.0  # Max $5,000 acumulado en primas abiertas
+
+                    open_opts_q = sb.table("opt_paper_trades").select("id, symbol, entry_total_invested").eq("status", "open").execute().data or []
+                    open_opt_tickers = set(str(p.get("symbol", "")).upper() for p in open_opts_q if p.get("symbol"))
+                    total_opt_inv = sum(float(p.get("entry_total_invested") or 0.0) for p in open_opts_q)
+
+                    can_proceed_opt = True
+                    if active_opt_pos is None and len(open_opt_tickers) >= MAX_ACTIVE_OPT_POS:
+                        log_info(MODULE, f"⏸️ Opciones {ticker}: Cupo máximo de activos en opciones alcanzado ({len(open_opt_tickers)}/{MAX_ACTIVE_OPT_POS}).")
+                        can_proceed_opt = False
+
+                    if total_opt_inv >= MAX_TOTAL_OPT_INV:
+                        log_info(MODULE, f"⏸️ Opciones {ticker}: Límite de exposición total alcanzado (${total_opt_inv:.2f} >= ${MAX_TOTAL_OPT_INV:.2f}).")
+                        can_proceed_opt = False
+
+                    # P0: Verificar órdenes de compra de opciones en vuelo para evitar compras en bucle
+                    in_flight_opt = sb.table("stocks_orders").select("id").like("ticker", f"{ticker}%").eq("direction", "buy").in_("status", ["pending", "processing", "submitted"]).execute().data or []
+                    if in_flight_opt:
+                        log_info(MODULE, f"⏸️ Opciones {ticker}: Orden de compra ya en vuelo ({len(in_flight_opt)} pendientes). Omitiendo duplicado.")
+                        can_proceed_opt = False
+
+                    if not can_proceed_opt:
+                        opt_gap_eval["should_enter"] = False
                     opt_rule_cd = opt_gap_eval.get("rule_code", f"OPT_GAP_{opt_direction}")
                     opt_t_step = opt_gap_eval.get("tranche_step", 1)
 
@@ -958,6 +983,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         else:
                             contracts_to_buy = max(1, best_contract.tranche_3_contracts)
 
+                        # P1: Límite estricto de máximo 2 contratos por orden para controlar apalancamiento
+                        contracts_to_buy = min(2, contracts_to_buy)
                         now_iso = datetime.now(timezone.utc).isoformat()
                         opt_price = best_contract.ask if best_contract.ask > 0 else best_contract.mid
 
@@ -992,8 +1019,14 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             )
                             send_telegram_opt_alert(opt_msg)
 
-                        elif active_opt_pos is not None and opt_t_step in [2, 3]:
-                            # Piramidación Livermore en Opciones
+                        elif active_opt_pos is not None and opt_t_step in [2, 3] and int((active_opt_pos.get("exit_plan") or {}).get("reentry_count") or active_opt_pos.get("dca_count") or 0) == 0:
+
+
+
+
+
+
+                            # Piramidación Livermore en Opciones (Máximo 1 recompra institucional, solo en ganancia)
                             old_qty = int(active_opt_pos.get("qty") or 1)
                             old_debit = float(active_opt_pos.get("entry_debit") or opt_price)
                             new_total_qty = old_qty + contracts_to_buy
@@ -1105,6 +1138,8 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             )
                             opt_ticker_formatted = f"{ticker}:OPT:{expiry_clean}:{strike_str}:{'C' if is_call else 'P'}"
 
+                            # P1: Límite estricto de máximo 2 contratos por orden para controlar apalancamiento
+                            contracts_to_buy = min(2, contracts_to_buy)
                             now_iso = datetime.now(timezone.utc).isoformat()
                             # Principio Broker-First: NO insertar en opt_paper_trades antes del fill.
                             # La posición en opt_paper_trades se crea cuando el broker confirma la compra en TWS.
@@ -2909,7 +2944,7 @@ async def run_options_gap_defense_cycle():
                 opt_tb = f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
                 try:
                     held_in_tws, tws_qty = is_option_held_in_broker(sb, symbol, expiry_str, strike, "C" if is_call else "P")
-                    if held_in_tws:
+                    if held_in_tws and tws_qty > 0:
                         existing_sell = sb.table("stocks_orders").select("id").eq("ticker", symbol[:10]).eq("target_band", opt_tb).eq("direction", "sell").in_("status", ["pending", "processing"]).limit(1).execute()
                         if not existing_sell.data:
                             sb.table("stocks_orders").insert({
@@ -2921,7 +2956,7 @@ async def run_options_gap_defense_cycle():
                                 "direction": "sell",
                                 "shares": min(qty_to_close, tws_qty) if tws_qty > 0 else qty_to_close,
                                 "market_price": cur_opt_premium,
-                                "limit_price": 0.05,
+                                "limit_price": round(cur_opt_premium, 2) if cur_opt_premium > 0 else 0.05,
                                 "status": "pending",
                                 "created_at": now_iso
                             }).execute()

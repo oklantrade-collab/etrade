@@ -387,7 +387,7 @@ def compute_bollinger_bands(series: pd.Series, period: int = 20, num_std: float 
 
 
 def compute_vwap(df: pd.DataFrame) -> pd.Series:
-    """Calcula el VWAP intradía a partir de velas OHLCV."""
+    """Calcula el VWAP intradía reseteado por sesión diaria a partir de velas OHLCV."""
     if df is None or df.empty:
         return pd.Series(dtype=float)
     h = _safe_col(df, "high")
@@ -395,8 +395,21 @@ def compute_vwap(df: pd.DataFrame) -> pd.Series:
     c = _safe_col(df, "close")
     v = _safe_col(df, "volume")
     typical_price = (h + l + c) / 3.0
-    cum_vol = v.cumsum()
-    cum_pv = (typical_price * v).cumsum()
+    pv = typical_price * v
+
+    # Si tiene DatetimeIndex, resetear cumsum por día (sesión intradía)
+    if isinstance(df.index, pd.DatetimeIndex):
+        dates = df.index.date
+        cum_pv = pv.groupby(dates).cumsum()
+        cum_vol = v.groupby(dates).cumsum()
+    elif "date" in df.columns or "Date" in df.columns:
+        col = "date" if "date" in df.columns else "Date"
+        cum_pv = pv.groupby(df[col]).cumsum()
+        cum_vol = v.groupby(df[col]).cumsum()
+    else:
+        cum_vol = v.cumsum()
+        cum_pv = pv.cumsum()
+
     vwap = cum_pv / cum_vol.replace(0, np.nan)
     return vwap.ffill()
 
@@ -532,7 +545,7 @@ def evaluate_options_gap_entry_tranches(
             return res
 
     is_open_pos = bool(active_position and str(active_position.get("status", "")).lower() == "open")
-    reentry_count = int(active_position.get("reentry_count") or 0) if is_open_pos else 0
+    reentry_count = int((active_position.get("exit_plan") or {}).get("reentry_count") or active_position.get("reentry_count") or 0) if is_open_pos else 0
 
     cur_p = float(_safe_col(df_5m, "close").iloc[-1]) if df_5m is not None and not df_5m.empty else 0.0
 
@@ -982,6 +995,22 @@ def evaluate_options_gap_entry_tranches(
     # CASO B: TRANCHE 2 (Segundo Tranche)
     # ─────────────────────────────────────────────────────────────
     elif is_open_pos and reentry_count == 0:
+        # P0/P1: Bloqueo estricto anti-promediado a la baja (Averaging down prohibited)
+        act_exit_p = active_position.get("exit_plan") if isinstance(active_position.get("exit_plan"), dict) else {}
+        entry_underlying_p = float(act_exit_p.get("entry_underlying_price") or active_position.get("entry_underlying_price") or 0.0)
+        unrealized_pnl_val = float(active_position.get("unrealized_pnl") or 0.0)
+
+        if unrealized_pnl_val < 0:
+            res["reason"] = f"Tranche 2 bloqueado: Opción en pérdida (${unrealized_pnl_val:.2f}). Prohibido promediar a la baja."
+            return res
+
+        if entry_underlying_p > 0:
+            if is_call and cur_p < entry_underlying_p:
+                res["reason"] = f"Tranche 2 CALL bloqueado: Subyacente (${cur_p:.2f}) bajo entrada (${entry_underlying_p:.2f}). Prohibido promediar a la baja."
+                return res
+            elif not is_call and cur_p > entry_underlying_p:
+                res["reason"] = f"Tranche 2 PUT bloqueado: Subyacente (${cur_p:.2f}) sobre entrada (${entry_underlying_p:.2f}). Prohibido promediar a la baja."
+                return res
         is_continuation_15m = False
         is_breakout_5m = False
         hod_or_lod = 0.0
@@ -1025,7 +1054,7 @@ def evaluate_options_gap_entry_tranches(
             return res
 
         # Al entrar en Tranche 2, el SL se ajusta a Breakeven
-        entry_avg = float(active_position.get("avg_price") or cur_p)
+        entry_avg = entry_underlying_p if entry_underlying_p > 0 else float(active_position.get("avg_price") or cur_p)
         new_sl = entry_avg
         rule_code = (
             f"OPT_GAP_TRANCHE_2_{'CALL' if is_call else 'PUT'}"
@@ -1047,6 +1076,20 @@ def evaluate_options_gap_entry_tranches(
     # CASO C: TRANCHE 3 (Tercer Tranche - Posición Completa)
     # ─────────────────────────────────────────────────────────────
     elif is_open_pos and reentry_count == 1:
+        # P0/P1: Tranche 3 exige que la posición completa esté en ganancia firme
+        act_exit_p = active_position.get("exit_plan") if isinstance(active_position.get("exit_plan"), dict) else {}
+        entry_underlying_p = float(act_exit_p.get("entry_underlying_price") or active_position.get("entry_underlying_price") or 0.0)
+        unrealized_pnl_val = float(active_position.get("unrealized_pnl") or 0.0)
+        if unrealized_pnl_val <= 0:
+            res["reason"] = f"Tranche 3 bloqueado: Posición sin beneficio consolidado (${unrealized_pnl_val:.2f})"
+            return res
+        if entry_underlying_p > 0:
+            if is_call and cur_p <= entry_underlying_p * 1.005:
+                res["reason"] = "Tranche 3 CALL bloqueado: Subyacente no supera holgadamente el punto de entrada"
+                return res
+            elif not is_call and cur_p >= entry_underlying_p * 0.995:
+                res["reason"] = "Tranche 3 PUT bloqueado: Subyacente no perfora holgadamente el punto de entrada"
+                return res
         # Validación de RSI 1H antes de completar
         if df_1h is not None and len(df_1h) >= 15:
             rsi_1h_series = compute_rsi(_safe_col(df_1h, "close"), period=14)
@@ -1152,13 +1195,14 @@ def evaluate_options_gap_aduana_exit(
 
     # 1. HARD STOP LOSS EN PRIMA (-35%) — Solo si tiene >= 5 min de maduración y cotización real
     has_live_quote = bool(position.get("has_live_opt_quote", True))
-    if (position_age_minutes >= 5.0 or position_age_minutes == 0.0) and has_live_quote and unrealized_pnl_pct <= -35.0:
+    # P0/P1: Hard Stop Loss inmediato al perforar -30%
+    if unrealized_pnl_pct <= -30.0:
         res.update({
             "should_exit": True,
             "exit_type": "hard_stop",
             "contracts_ratio_to_exit": 1.0,
             "rule_code": "OPT_GAP_HARD_SL_PREM",
-            "reason": f"Hard SL activado: Prima cae {unrealized_pnl_pct:.1f}% <= -35.0% (${current_option_premium:.2f} vs compra ${entry_premium:.2f})"
+            "reason": f"Hard SL activado: Prima cae {unrealized_pnl_pct:.1f}% <= -30.0% (${current_option_premium:.2f} vs compra ${entry_premium:.2f})"
         })
         return res
 

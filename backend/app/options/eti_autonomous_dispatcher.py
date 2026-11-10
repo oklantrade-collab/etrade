@@ -133,7 +133,7 @@ async def run_eti_autonomous_options_cycle(
 
         # Validar si cumple el modelo de Scalping de Ross Cameron (Prioridad 1)
         # O en su defecto el gatillo táctico validado por ETI
-        is_ross_cameron = gate_res.is_triggered and (gate_res.selected_route == "PRIORITY_1_ROSS_CAMERON")
+        is_ross_cameron = gate_res.is_triggered and (gate_res.selected_route in ("PRIORITY_1_ROSS_CAMERON", "OPTION_2_FALLBACK_ETI"))
         if not is_ross_cameron:
             log_info(
                 MODULE,
@@ -197,7 +197,8 @@ async def run_eti_autonomous_options_cycle(
             "last_mark_at": now_iso,
             "exit_plan": {
                 **cand["exit_plan"],
-                "execution_route": "PRIORITY_1_ROSS_CAMERON",
+                "execution_route": gate_res.selected_route,
+                "tp_half_pct": sig.risk_management.take_profit_1_pct,
                 "invalidation_underlying": sig.risk_management.invalidation_underlying,
                 "is_zero_dte": True,
                 "horizon": "SCALPING",
@@ -231,14 +232,14 @@ async def run_eti_autonomous_options_cycle(
             log_warning(MODULE, f"Aviso despachando orden a stocks_orders: {e_ord}")
 
         # 7. Actualizar estado de la señal en disco
-        update_eti_signal_status(sig.signal_id, "TRIGGERED", route_used="PRIORITY_1_ROSS_CAMERON")
+        update_eti_signal_status(sig.signal_id, "TRIGGERED", route_used=gate_res.selected_route)
 
         # 8. Feedback a ETI Cloud
         try:
             fb_coro = send_signal_feedback_to_eti(
                 sig.signal_id,
                 status="TRIGGERED_AND_FILLED",
-                route_used="PRIORITY_1_ROSS_CAMERON",
+                route_used=gate_res.selected_route,
                 fill_price=est_price,
                 slippage_pct=0.5,
                 notes=f"Auto-Disparo Ross Cameron Scalping: {gate_res.reason}. TP1: +{sig.risk_management.take_profit_1_pct}%"
@@ -251,7 +252,7 @@ async def run_eti_autonomous_options_cycle(
         _send_telegram_opt(
             f"🎯 [ETI AUTONOMOUS OPTIONS] Disparo Ross Cameron Ejecutado\n"
             f"Ticker: {sym} ({sig.strategy.bias} 0DTE)\n"
-            f"Ruta: PRIORITY_1_ROSS_CAMERON\n"
+            f"Ruta: {gate_res.selected_route}\n"
             f"Contrato: {opt_target_band} ({rgt} Strike ${stk})\n"
             f"Precio Entrada Estimado: ${est_price:.2f} | Cantidad: {qty}\n"
             f"Motivo Técnico: {gate_res.reason}\n"

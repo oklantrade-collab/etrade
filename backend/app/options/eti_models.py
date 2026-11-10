@@ -209,6 +209,7 @@ class ETISignal(BaseModel):
             "is_eti_signal": True,
             "horizon": self.strategy.horizon,
             "take_profit_1_pct": self.risk_management.take_profit_1_pct,
+            "tp_half_pct": self.risk_management.take_profit_1_pct,
             "take_profit_2_pct": self.risk_management.take_profit_2_pct,
             "stop_loss_pct": self.risk_management.stop_loss_contract_pct,
             "invalidation_underlying": self.risk_management.invalidation_underlying,

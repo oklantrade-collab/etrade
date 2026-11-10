@@ -131,7 +131,8 @@ def is_option_held_in_broker(sb, symbol: str, expiry: str, strike: float, right:
     portfolio, age_sec = load_broker_portfolio_snapshot(sb)
     if not portfolio or age_sec > 900.0:
         # Si el snapshot no está disponible, permitir por fallback
-        return True, 0
+        # P0/P1: Si el snapshot no está disponible o es viejo, no asumir tenencia (evitar órdenes fantasma)
+        return False, 0
 
     sym_u = str(symbol or "").upper().strip()
     exp_iso = _fmt_exp(expiry)
@@ -328,7 +329,11 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                         target_heal = cand_r
                         break
 
-                if target_heal:
+                # P0/P1: Si la opción ya fue cerrada en DB, NUNCA reabrirla ni borrar su PnL realizado.
+                if target_heal and target_heal.get("status") == "closed":
+                    log_warning(MODULE, f"⏸️ [BROKER SYNC] TWS aún reporta {qty}x de {und_sym} {exp_iso} {strike_v}{right_v}, pero ya fue cerrada en DB. Omitiendo reapertura zombi.")
+                    continue
+                elif target_heal and target_heal.get("status") == "open":
                     sb.table("opt_paper_trades").update({
                         "status": "open",
                         "qty": qty,
@@ -337,14 +342,14 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                         "entry_fills": leg_fill,
                         "entry_total_invested": total_invested,
                         "max_loss_total": total_invested,
-                        "exit_time": None,
-                        "exit_credit": None,
-                        "exit_fills": [],
-                        "exit_reason": None,
-                        "realized_pnl": None,
+
+
+
+
+
                         "updated_at": now_iso,
                     }).eq("id", target_heal["id"]).execute()
-                    log_info(MODULE, f"♻️ [BROKER SYNC] Opción {und_sym} {exp_iso} {strike_v}{right_v} reabierta desde TWS ({qty}x @ ${entry_debit:.2f})")
+                    log_info(MODULE, f"🔄 [BROKER SYNC] Opción {und_sym} {exp_iso} {strike_v}{right_v} sincronizada desde TWS ({qty}x @ ${entry_debit:.2f})")
                 else:
                     sb.table("opt_paper_trades").insert({
                         "underlying_id": uid,

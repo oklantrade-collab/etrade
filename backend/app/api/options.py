@@ -1106,7 +1106,7 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
                 "rule_code": "OPT_CALL" if right == "C" else "APEX_AUTO",
                 "direction": "sell",
                 "order_type": "market",
-                "limit_price": 0.05,
+                "limit_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else 0.05,
                 "market_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else 0.05,
                 "shares": qty,
                 "target_band": target_band,

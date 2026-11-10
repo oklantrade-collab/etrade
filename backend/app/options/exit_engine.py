@@ -360,10 +360,23 @@ def check_options_dip_rebuy_opportunity(
 
     exit_plan = position.get("exit_plan") or {}
     rebuys_done = int(exit_plan.get("rebuys_count", 0))
-    if rebuys_done >= 2:
+    # P0/P1: Límite estricto de máximo 1 recompra institucional por posición (evitar bucle de acumulación)
+    if rebuys_done >= 1:
+        return None
+
+    # P0/P1: Prohibición absoluta de promediar a la baja (Averaging Down) si la posición está en pérdida
+    unr_pnl = float(position.get("unrealized_pnl") or 0.0)
+    unr_pnl_pct = float(position.get("unrealized_pnl_pct") or 0.0)
+    if unr_pnl < 0 or unr_pnl_pct <= -10.0:
         return None
 
     opt_dir = "CALL" if str(position.get("direction", "")).lower() in ("bullish", "call") or position.get("strategy_type") == "long_call" else "PUT"
+    entry_underlying = float(exit_plan.get("entry_underlying_price") or position.get("entry_underlying_price") or 0.0)
+    if entry_underlying > 0.0:
+        if opt_dir == "CALL" and current_price < entry_underlying:
+            return None
+        elif opt_dir == "PUT" and current_price > entry_underlying:
+            return None
     stop_loss = float(exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0)
 
     ema3_1h = float(tech.get("ema3_1h") or 0.0)
@@ -579,6 +592,16 @@ def evaluate_technical_rules_and_stops(
             pos_age_min = 999.0
 
     # ─────────────────────────────────────────────────────────────
+    # ── REGLA P0/P1: HARD STOP LOSS EN PRIMA (-30%) ──
+    # Cortar inmediatamente si la prima cae -30.0% o peor, sin esperar minutos de maduración
+    if unr_pnl_pct <= -30.0:
+        record_options_sl_cooldown(symbol, "CALL" if is_call else "PUT", current_price, new_sl)
+        return True, "stop_loss", {
+            "detail": f"Hard Stop Loss de Prima activado: PnL {unr_pnl_pct:.1f}% <= -30.0% (Límite institucional de riesgo)",
+            "exit_plan": exit_plan,
+            "exit_ratio": 1.0,
+        }
+
     # FASE 2: VERIFICAR SI EL STOP LOSS DEL SUBYACENTE FUE PERFORADO
     # (Con colchón mínimo de 5 min tras la apertura para evitar cierres a los 15 segundos)
     # ─────────────────────────────────────────────────────────────
@@ -634,6 +657,16 @@ def evaluate_technical_rules_and_stops(
         return False, None, {
             "exit_plan": exit_plan, 
             "detail": f"Candado de Momentum activo: Bandas en expansión con RVOL {rvol_15m:.2f}x y ADX {adx_15m:.1f} (dejar correr tendencia)"
+        }
+
+    # ── REGLA ROSS CAMERON TP1: TOMA PARCIAL 50% AL ALCANZAR TP_HALF_PCT (ej. +20%) ──
+    tp_half = float(exit_plan.get("tp_half_pct") or exit_plan.get("take_profit_1_pct") or 0.0)
+    if tp_half > 0 and unr_pnl_pct >= tp_half and not partial_taken and pos_age_min >= 2.0:
+        ratio = 0.5 if pos_qty >= 2 else 1.0
+        return True, "tp_bb_climax_partial", {
+            "detail": f"Take Profit Parcial (50%) Ross Cameron TP1: PnL +{unr_pnl_pct:.1f}% >= +{tp_half:.1f}%. Bloqueando Breakeven.",
+            "exit_plan": exit_plan,
+            "exit_ratio": ratio,
         }
 
     # ── REGLA ROSS CAMERON 1: TOMA PARCIAL 50% AL PERFORAR BANDA BOLLINGER (2.0σ) ──
@@ -1089,6 +1122,20 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
                 }
                 sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
                 log_info(MODULE, f"🎯 TOMA PARCIAL 50%: {pos['symbol']} cerró {qty_to_close} contratos a ${exit_fill_res.exit_credit:.2f} (PnL parcial: +${exit_fill_res.realized_pnl:.2f}). Quedan {remaining_qty} contratos con Trailing SL.")
+                try:
+                    import asyncio
+                    from app.workers.alerts_service import send_telegram_message
+                    tg_p_msg = (
+                        f"🎯 <b>[ROSS CAMERON - OPCIONES] TOMA PARCIAL 50%</b>\n\n"
+                        f"📑 <b>Posición:</b> {pos.get('symbol')} ({pos.get('strategy_type')})\n"
+                        f"💵 <b>Venta:</b> {qty_to_close} contratos @ ${exit_fill_res.exit_credit:.2f}\n"
+                        f"💰 <b>PnL Parcial:</b> +${exit_fill_res.realized_pnl:.2f} USD\n"
+                        f"🛡️ <b>Stop Subyacente Movido a Breakeven</b>\n"
+                        f"📦 <b>Contratos Restantes:</b> {remaining_qty}"
+                    )
+                    asyncio.create_task(send_telegram_message(tg_p_msg))
+                except Exception as e_tg:
+                    log_warning(MODULE, f"Aviso enviando Telegram opciones parcial: {e_tg}")
             else:
                 # Cierre Total (100%)
                 cur_realized = float(pos.get("realized_pnl") or 0.0)
@@ -1110,6 +1157,20 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
                 }
                 sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
                 closed_count += 1
+                try:
+                    import asyncio
+                    from app.workers.alerts_service import send_telegram_message
+                    pnl_emo = "🟢" if total_realized >= 0 else "🔴"
+                    tg_c_msg = (
+                        f"📊 <b>[ROSS CAMERON - OPCIONES] CIERRE DE POSICIÓN</b>\n\n"
+                        f"📑 <b>Posición:</b> {pos.get('symbol')} ({pos.get('strategy_type')})\n"
+                        f"📋 <b>Motivo:</b> {reason} ({info.get('detail', '')})\n"
+                        f"💵 <b>Crédito Salida:</b> ${exit_fill_res.exit_credit:.2f}\n"
+                        f"{pnl_emo} <b>PnL Total Realizado:</b> ${total_realized:+.2f} USD"
+                    )
+                    asyncio.create_task(send_telegram_message(tg_c_msg))
+                except Exception as e_tg:
+                    log_warning(MODULE, f"Aviso enviando Telegram opciones cierre: {e_tg}")
 
             # Despachar orden de salida a stocks_orders para ejecución en TWS / IB Bridge
             try:

@@ -147,7 +147,8 @@ def dispatch_autonomous_option_trade(
         opt_ticker_formatted = f"{ticker}:OPT:{opt_exp_compact}:{best_contract.strike}:{best_contract.right}"
         target_band_str = f"OPT:{opt_exp_compact}:{best_contract.strike}:{best_contract.right}"
 
-        contracts_to_buy = max(1, getattr(best_contract, "tranche_1_contracts", 1))
+        # P1: Límite estricto de máximo 2 contratos por orden
+        contracts_to_buy = min(2, max(1, getattr(best_contract, "tranche_1_contracts", 1)))
         opt_price = best_contract.ask if best_contract.ask > 0 else (best_contract.mid if best_contract.mid > 0 else 1.0)
         total_invested = round(opt_price * 100 * contracts_to_buy, 2)
         now_iso = datetime.now(timezone.utc).isoformat()
