@@ -86,9 +86,32 @@ class MicroPullbackEngine:
         self.active_scalps: Dict[str, ScalpCandidateState] = {}
         self.closed_tickers_today: Set[str] = set()  # Lista negra intradía: One-and-Done por ticker
         self.daily_cushion_usd: float = 0.0
+        self.consecutive_losses: int = 0
+        self.max_consecutive_losses: int = 2
+        self.daily_max_loss_usd: float = -150.0
+        self.trading_blocked: bool = False
+        self.block_reason: Optional[str] = None
         self.enable_runners_15m_1h: bool = False  # Ross Cameron: Salida rapida 5s por defecto para Small Caps
         self.is_running: bool = False
         self._bg_tasks = set()
+
+    def check_daily_circuit_breaker(self, current_time_est: Optional[str] = None) -> tuple[bool, Optional[str]]:
+        """
+        Evalúa los guardarraíles diarios de Ross Cameron (RP_WARRIOR_03_CUSHION_TRADE_SIZING):
+        1. Máximo 2 pérdidas consecutivas (CIRCUIT_BREAKER_2_CONSECUTIVE_LOSSES).
+        2. Pérdida máxima diaria de -$150.00 USD (MAX_DAILY_LOSS_REACHED).
+        3. Ventana horaria de momentum <= 11:00 EST si se especifica current_time_est.
+        """
+        from app.stocks.warrior_momentum_engine import DailySession, check_safety_guardrails
+        session = DailySession(
+            consecutive_losses=self.consecutive_losses,
+            realized_pnl_usd=self.daily_cushion_usd,
+            current_time_est=current_time_est or "09:45",
+        )
+        allowed = check_safety_guardrails(session)
+        self.trading_blocked = session.trading_blocked
+        self.block_reason = session.block_reason
+        return allowed, self.block_reason
 
     def _notify_telegram(self, message: str):
         """Envia alerta Telegram en background sin bloquear la toma de decisiones."""
@@ -342,6 +365,13 @@ class MicroPullbackEngine:
     # ──────────────────────────────────────────────────────────
     def _trigger_entry(self, cand: ScalpCandidateState, entry_price: float, rule_code: str = "SCALP_MICRO_PULLBACK"):
         """Calcula tamaño Icebreaker, Stop Loss y despacha la orden por socket a TWS."""
+        # 0.A GUARDARRAÍL DIARIO ROSS CAMERON (RP_WARRIOR_03: 2 pérdidas consecutivas o -$150 USD)
+        cb_allowed, cb_reason = self.check_daily_circuit_breaker()
+        if not cb_allowed:
+            log_warning(MODULE, f"🛑 [{cand.ticker}] CIRCUIT BREAKER DIARIO ACTIVO ({cb_reason}): Nuevas entradas suspendidas por el resto de la sesión.")
+            cand.phase = "IDLE"
+            return
+
         if len(self.active_scalps) >= MAX_CONCURRENT_SCALPS:
             log_warning(MODULE, f"Límite de scalps simultáneos ({MAX_CONCURRENT_SCALPS}) alcanzado. Omitiendo.")
             cand.phase = "IDLE"
@@ -463,10 +493,11 @@ class MicroPullbackEngine:
         if cand.phase == "IN_TRADE":
             cand.bars_in_trade += 1
 
-            # RUPTURA HOD O IMPULSO ALCISTA -> TRAMO 1: VENTA DEL 50% Y PASE A RUNNER 15M
-            gain_pct = ((current_p - cand.entry_price) / cand.entry_price * 100.0) if cand.entry_price > 0 else 0.0
-            is_push_gain = (gain_pct >= 2.5)
-            is_near_hod = (current_p >= cand.target_hod * 0.995)
+            # RUPTURA HOD O IMPULSO ALCISTA -> TRAMO 1: VENTA DEL 50% Y PASE A RUNNER 15M ("Pay the Trader" >= $0.15)
+            profit_per_share = current_p - cand.entry_price
+            gain_pct = (profit_per_share / cand.entry_price * 100.0) if cand.entry_price > 0 else 0.0
+            is_push_gain = (gain_pct >= 2.5 and profit_per_share >= 0.15)
+            is_near_hod = (current_p >= cand.target_hod * 0.995 and profit_per_share >= 0.15)
 
             if is_near_hod or is_push_gain:
                 self._execute_tramo_1_hod(cand, current_p)
@@ -576,20 +607,23 @@ class MicroPullbackEngine:
             self._close_scalp(cand, reason="RUNNER_15M_EXIT")
 
     def _send_partial_sell_to_tws(self, cand: ScalpCandidateState, shares: int, reason: str):
-        """Envía una orden parcial de venta a TWS."""
+        """Envía una orden parcial de venta a TWS con protección LMT Marketable."""
         ib = get_ib_connection()
         if ib and ib.connected and shares > 0:
+            curr_p = cand.bars[-1]["close"] if cand.bars else cand.entry_price
+            limit_sell_price = round(max(0.01, curr_p - 0.03), 2)
             from ibapi.order import Order
             sell_ord = Order()
             sell_ord.action = "SELL"
             sell_ord.totalQuantity = shares
-            sell_ord.orderType = "MKT"
+            sell_ord.orderType = "LMT"
+            sell_ord.lmtPrice = limit_sell_price
             sell_ord.transmit = True
 
             sell_id = ib.get_next_order_id()
             contract = ib.us_stock_contract(cand.ticker)
             ib.placeOrder(sell_id, contract, sell_ord)
-            log_info(MODULE, f"🔻 [VENTA PARCIAL TWS] SELL {shares}x {cand.ticker} (Razón: {reason})")
+            log_info(MODULE, f"🔻 [VENTA PARCIAL TWS] SELL {shares}x {cand.ticker} @ LMT ${limit_sell_price:.2f} (Razón: {reason})")
             self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, shares, reason))
 
     def _is_15m_trend_exhausted(self, cand: ScalpCandidateState, current_p: float) -> bool:
@@ -748,7 +782,7 @@ class MicroPullbackEngine:
             log_debug(MODULE, f"Error evaluando dip re-entry para {cand.ticker}: {dip_err}")
 
     def _close_scalp(self, cand: ScalpCandidateState, reason: str):
-        """Envía orden de venta de cierre a TWS y resetea estado."""
+        """Envía orden de venta de cierre a TWS con protección LMT Marketable y resetea estado."""
         closing_shares = cand.shares
         curr_p = cand.bars[-1]["close"] if cand.bars else cand.entry_price
         leg_pnl = round((curr_p - cand.entry_price) * closing_shares, 2) if closing_shares > 0 else 0.0
@@ -756,17 +790,19 @@ class MicroPullbackEngine:
 
         ib = get_ib_connection()
         if ib and ib.connected and closing_shares > 0:
+            limit_sell_price = round(max(0.01, curr_p - 0.03), 2)
             from ibapi.order import Order
             sell_ord = Order()
             sell_ord.action = "SELL"
             sell_ord.totalQuantity = closing_shares
-            sell_ord.orderType = "MKT"
+            sell_ord.orderType = "LMT"
+            sell_ord.lmtPrice = limit_sell_price
             sell_ord.transmit = True
 
             sell_id = ib.get_next_order_id()
             contract = ib.us_stock_contract(cand.ticker)
             ib.placeOrder(sell_id, contract, sell_ord)
-            log_info(MODULE, f"🔻 [CIERRE ENVIADO A TWS] SELL {closing_shares}x {cand.ticker} (Razón: {reason})")
+            log_info(MODULE, f"🔻 [CIERRE ENVIADO A TWS] SELL {closing_shares}x {cand.ticker} @ LMT ${limit_sell_price:.2f} (Razón: {reason})")
             self._safe_create_task(self._async_log_sell_order_to_supabase(cand, sell_id, closing_shares, reason))
 
         # Notificar por Telegram
@@ -782,6 +818,11 @@ class MicroPullbackEngine:
         self._notify_telegram(tg_msg)
 
         self.daily_cushion_usd += leg_pnl
+        if total_pnl < 0:
+            self.consecutive_losses += 1
+        elif total_pnl > 0:
+            self.consecutive_losses = 0
+        self.check_daily_circuit_breaker()
         cand.in_trade = False
         cand.shares = 0
         self.active_scalps.pop(cand.ticker, None)

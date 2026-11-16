@@ -35,6 +35,10 @@ const nextConfig: NextConfig = {
         source: '/api/v1/:path*',
         destination: `${apiUrl}/api/v1/:path*`,
       },
+      {
+        source: '/api/eti/:path*',
+        destination: `${apiUrl}/api/eti/:path*`,
+      },
       // Soporte para forex
       {
         source: '/api/v1/forex/:path*',

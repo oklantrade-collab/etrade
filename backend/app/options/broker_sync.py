@@ -17,6 +17,25 @@ MODULE = "BROKER_SYNC"
 _LAST_SYNC_TS: float = 0.0
 
 
+def is_within_options_sync_import_window(now_dt: datetime | None = None) -> bool:
+    """
+    Verifica si el horario actual en Nueva York está dentro de la ventana permitida
+    para importar nuevas posiciones de opciones desde TWS (09:30 a 15:30 ET, lunes a viernes).
+    Evita re-importaciones fantasma al cierre (15:50 ET) o durante la noche (22:00 ET).
+    """
+    from datetime import time as dt_time, timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        dt_et = (now_dt or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        dt_et = (now_dt or datetime.now(timezone.utc)) - timedelta(hours=5)
+
+    if dt_et.weekday() >= 5:
+        return False
+    t = dt_et.time()
+    return dt_time(9, 30) <= t <= dt_time(15, 30)
+
+
 def _fmt_exp(raw_e: str) -> str:
     s = str(raw_e or "").strip().replace("-", "")
     if len(s) == 8 and s.isdigit():
@@ -123,6 +142,98 @@ def load_broker_portfolio_snapshot(sb, allow_direct_fetch: bool = True) -> tuple
     return {}, 999999.0
 
 
+def parse_option_order_contract_key(ticker: str, target_band: str = "") -> tuple[str, str, float, str] | None:
+    """Extrae (symbol, YYYY-MM-DD, strike, right) desde ticker / target_band de stocks_orders."""
+    t_u = str(ticker or "").strip().upper()
+    tb_u = str(target_band or "").strip().upper()
+    und_sym = t_u.split(":")[0].replace("OPT", "").strip(":")
+    raw = tb_u if "OPT:" in tb_u else (t_u if "OPT:" in t_u else "")
+    if not raw:
+        return None
+    parts = raw.split(":")
+    try:
+        if len(parts) == 4 and parts[0] == "OPT":
+            exp_d, stk_s, rgt_s = parts[1], parts[2], parts[3]
+        elif len(parts) >= 5:
+            und_sym = parts[0] if parts[0] != "OPT" else parts[1]
+            exp_d, stk_s, rgt_s = parts[2], parts[3], parts[-1]
+        else:
+            return None
+        return (und_sym, _fmt_exp(exp_d), round(float(stk_s), 2), rgt_s.upper())
+    except Exception:
+        return None
+
+
+def get_in_flight_option_sell_keys(sb, max_age_sec: float = 120.0) -> set[tuple[str, str, float, str]]:
+    """Devuelve contratos OPT con orden SELL pendiente/en proceso reciente (< max_age_sec)."""
+    keys: set[tuple[str, str, float, str]] = set()
+    now_dt = datetime.now(timezone.utc)
+    recent_sells = (
+        sb.table("stocks_orders")
+        .select("ticker, target_band, created_at, status")
+        .eq("direction", "sell")
+        .in_("status", ["pending", "processing"])
+        .execute()
+        .data or []
+    )
+    for so in recent_sells:
+        c_str = so.get("created_at")
+        if not c_str:
+            continue
+        try:
+            c_dt = datetime.fromisoformat(str(c_str).replace("Z", "+00:00"))
+            if (now_dt - c_dt).total_seconds() < max_age_sec:
+                ck = parse_option_order_contract_key(so.get("ticker", ""), so.get("target_band", ""))
+                if ck:
+                    keys.add(ck)
+        except Exception:
+            pass
+    return keys
+
+
+def find_existing_option_trade_for_contract(sb, ck: tuple[str, str, float, str], strat_v: str, limit: int = 200) -> tuple[dict[str, Any] | None, bool]:
+    """Busca trade previo del contrato y determina si está cerrado (protección anti-reapertura zombi)."""
+    und_sym, exp_iso, strike_v, right_v = ck
+    recent_opt = (
+        sb.table("opt_paper_trades")
+        .select("*")
+        .eq("symbol", und_sym)
+        .eq("strategy_type", strat_v)
+        .order("id", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    target_row = None
+    for cand_r in (recent_opt.data or []):
+        if _row_contract_key(cand_r) == ck:
+            if cand_r.get("status") == "open":
+                return cand_r, False
+            if target_row is None:
+                target_row = cand_r
+    if target_row and target_row.get("status") == "closed":
+        exit_t_str = target_row.get("exit_time")
+        if exit_t_str:
+            try:
+                tb_c = f"OPT:{exp_iso.replace('-', '')}:{strike_v}:{right_v}"
+                newer_res = (
+                    sb.table("stocks_orders")
+                    .select("id")
+                    .eq("ticker", und_sym)
+                    .eq("target_band", tb_c)
+                    .eq("direction", "buy")
+                    .eq("status", "filled")
+                    .gt("filled_at", exit_t_str)
+                    .limit(1)
+                    .execute()
+                )
+                if newer_res.data:
+                    return None, False
+            except Exception:
+                pass
+        return target_row, True
+    return target_row, False
+
+
 def is_option_held_in_broker(sb, symbol: str, expiry: str, strike: float, right: str) -> tuple[bool, int]:
     """
     Verifica si el contrato de opción existe con qty > 0 en `ib_broker_portfolio`.
@@ -156,7 +267,7 @@ def is_option_held_in_broker(sb, symbol: str, expiry: str, strike: float, right:
     return False, 0
 
 
-def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force: bool = False, allow_direct_fetch: bool = False) -> dict[str, Any]:
+def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force: bool = False, allow_direct_fetch: bool = False, max_age_sec: float = 300.0) -> dict[str, Any]:
     """
     Sincroniza `opt_paper_trades` y `stocks_positions` con `ib_broker_portfolio`
     para garantizar que lo que está en el Broker TWS sea exactamente lo que está
@@ -168,7 +279,7 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
         return {"skipped": True}
 
     portfolio, age_sec = load_broker_portfolio_snapshot(sb, allow_direct_fetch=allow_direct_fetch)
-    if portfolio is None or age_sec > 300.0:
+    if portfolio is None or age_sec > max_age_sec:
         return {"skipped": True, "reason": f"snapshot_stale_or_empty ({age_sec:.0f}s)"}
 
     _LAST_SYNC_TS = now_ts
@@ -205,33 +316,7 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                 # Eliminar duplicado abierto del mismo contrato
                 sb.table("opt_paper_trades").delete().eq("id", r["id"]).execute()
 
-        # Verificar órdenes SELL de opciones en vuelo (< 45 segundos) para no reabrir mientras TWS está ejecutando el cierre
-        recent_sells = (
-            sb.table("stocks_orders")
-            .select("ticker, target_band, created_at, status")
-            .eq("direction", "sell")
-            .in_("status", ["pending", "processing"])
-            .execute()
-            .data or []
-        )
-        in_flight_sell_keys: set[tuple[str, str, float, str]] = set()
-        for so in recent_sells:
-            tb = str(so.get("target_band") or "").upper()
-            c_str = so.get("created_at")
-            if "OPT:" in tb and c_str:
-                try:
-                    c_dt = datetime.fromisoformat(str(c_str).replace("Z", "+00:00"))
-                    if (now_dt - c_dt).total_seconds() < 45.0:
-                        parts = tb.split(":")
-                        if len(parts) == 4 and parts[0] == "OPT":
-                            in_flight_sell_keys.add((
-                                str(so.get("ticker") or "").upper(),
-                                _fmt_exp(parts[1]),
-                                round(float(parts[2]), 2),
-                                parts[3].upper()
-                            ))
-                except Exception:
-                    pass
+        in_flight_sell_keys = get_in_flight_option_sell_keys(sb, max_age_sec=120.0)
 
         active_broker_keys: set[tuple[str, str, float, str]] = set()
         for opt_key, b_data in broker_options.items():
@@ -314,26 +399,15 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                     "fee_usd": 0.70,
                 }]
 
-                recent_opt = (
-                    sb.table("opt_paper_trades")
-                    .select("*")
-                    .eq("symbol", und_sym)
-                    .eq("strategy_type", strat_v)
-                    .order("id", desc=True)
-                    .limit(8)
-                    .execute()
-                )
-                target_heal = None
-                for cand_r in (recent_opt.data or []):
-                    if _row_contract_key(cand_r) == ck:
-                        target_heal = cand_r
-                        break
+                target_heal, is_zombie_closed = find_existing_option_trade_for_contract(sb, ck, strat_v, limit=200)
 
-                # P0/P1: Si la opción ya fue cerrada en DB, NUNCA reabrirla ni borrar su PnL realizado.
-                if target_heal and target_heal.get("status") == "closed":
-                    log_warning(MODULE, f"⏸️ [BROKER SYNC] TWS aún reporta {qty}x de {und_sym} {exp_iso} {strike_v}{right_v}, pero ya fue cerrada en DB. Omitiendo reapertura zombi.")
+                # Fase 6 Blindaje: Si la opción ya fue cerrada en DB sin nueva orden de compra (is_zombie_closed),
+                # NUNCA re-importarla como nueva compra para evitar duplicados nocturnos/overnight.
+                if is_zombie_closed and target_heal:
+                    log_warning(MODULE, f"🚫 [BROKER SYNC] Bloqueada re-apertura zombi de {und_sym} {exp_iso} {strike_v}{right_v} ({qty}x en TWS tras cierre previo sin nueva orden BUY).")
                     continue
-                elif target_heal and target_heal.get("status") == "open":
+
+                if not is_zombie_closed and target_heal and target_heal.get("status") == "open":
                     sb.table("opt_paper_trades").update({
                         "status": "open",
                         "qty": qty,
@@ -342,15 +416,16 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                         "entry_fills": leg_fill,
                         "entry_total_invested": total_invested,
                         "max_loss_total": total_invested,
-
-
-
-
-
+                        "last_mark_price": round(mark_p, 4),
+                        "last_mark_at": now_iso,
+                        "unrealized_pnl": opt_pnl_usd,
                         "updated_at": now_iso,
                     }).eq("id", target_heal["id"]).execute()
                     log_info(MODULE, f"🔄 [BROKER SYNC] Opción {und_sym} {exp_iso} {strike_v}{right_v} sincronizada desde TWS ({qty}x @ ${entry_debit:.2f})")
                 else:
+                    if not is_within_options_sync_import_window(now_dt):
+                        log_warning(MODULE, f"🚫 [BROKER SYNC] Bloqueada importación fuera de horario (09:30-15:30 ET) para {und_sym} {exp_iso} {strike_v}{right_v} ({qty}x).")
+                        continue
                     sb.table("opt_paper_trades").insert({
                         "underlying_id": uid,
                         "symbol": und_sym,
@@ -367,10 +442,10 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                         "max_loss_total": total_invested,
                         "max_profit_total": round(total_invested * 2.0, 2),
                         "breakeven": round(strike_v + entry_debit, 2) if right_v == "C" else round(strike_v - entry_debit, 2),
-                        "unrealized_pnl": 0.0,
-                        "last_mark_price": entry_debit,
+                        "unrealized_pnl": opt_pnl_usd,
+                        "last_mark_price": round(mark_p, 4),
                         "last_mark_at": now_iso,
-                        "exit_plan": {"trailing_sl_type": "INITIAL", "highest_premium_seen": entry_debit},
+                        "exit_plan": {"trailing_sl_type": "INITIAL", "highest_premium_seen": max(entry_debit, round(mark_p, 4)), "tp_half_pct": 20.0, "take_profit_1_pct": 20.0},
                         "model_version": "v1.0-tws-sync",
                         "settings_version": 1,
                         "updated_at": now_iso,
@@ -490,48 +565,49 @@ def reconcile_with_ib_broker_portfolio(sb, min_interval_sec: float = 8.0, force:
                     }).eq("id", ex_p["id"]).execute()
                     stk_synced += 1
             else:
-                recent_closed = (
-                    sb.table("stocks_positions")
-                    .select("*")
-                    .eq("ticker", sym)
-                    .order("updated_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
-                if recent_closed.data:
-                    sb.table("stocks_positions").update({
-                        "status": "open",
-                        "shares": qty,
-                        "shares_remaining": qty,
-                        "avg_price": round(avg_cost, 4),
-                        "total_cost": round(qty * avg_cost, 2),
-                        "sl_close_reason": None,
-                        "exit_triggered_by": None,
-                        "updated_at": now_iso,
-                    }).eq("id", recent_closed.data[0]["id"]).execute()
-                else:
-                    atr_fb = max(0.05, avg_cost * 0.02)
-                    sl_calc = round(max(0.01, avg_cost - (atr_fb * 2.0)), 2)
-                    tp_calc = round(avg_cost + (atr_fb * 5.0), 2)
-                    sb.table("stocks_positions").insert({
-                        "ticker": sym,
-                        "direction": "long",
-                        "shares": qty,
-                        "shares_remaining": qty,
-                        "avg_price": round(avg_cost, 4),
-                        "total_cost": round(qty * avg_cost, 2),
-                        "current_price": avg_cost,
-                        "unrealized_pnl": 0.0,
-                        "unrealized_pnl_pct": 0.0,
-                        "stop_loss": sl_calc,
-                        "trailing_sl_price": sl_calc,
-                        "highest_price_reached": avg_cost,
-                        "take_profit": tp_calc,
-                        "group_name": "IB_PAPER",
-                        "first_buy_at": now_iso,
-                        "status": "open",
-                        "updated_at": now_iso,
-                    }).execute()
+                # Evitar reinsertar si hubo un cierre hace <45s y TWS aún no refresca el snapshot
+                skip_recent_close = False
+                try:
+                    recent_closed = (
+                        sb.table("stocks_positions")
+                        .select("id, updated_at")
+                        .eq("ticker", sym)
+                        .eq("status", "closed")
+                        .order("updated_at", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                    if recent_closed.data and recent_closed.data[0].get("updated_at"):
+                        rc_dt = datetime.fromisoformat(str(recent_closed.data[0]["updated_at"]).replace("Z", "+00:00"))
+                        if (now_dt - rc_dt).total_seconds() < 45.0:
+                            skip_recent_close = True
+                except Exception:
+                    pass
+                if skip_recent_close:
+                    continue
+
+                atr_fb = max(0.05, avg_cost * 0.02)
+                sl_calc = round(max(0.01, avg_cost - (atr_fb * 2.0)), 2)
+                tp_calc = round(avg_cost + (atr_fb * 5.0), 2)
+                sb.table("stocks_positions").insert({
+                    "ticker": sym,
+                    "direction": "long",
+                    "shares": qty,
+                    "shares_remaining": qty,
+                    "avg_price": round(avg_cost, 4),
+                    "total_cost": round(qty * avg_cost, 2),
+                    "current_price": round(cur_p, 4),
+                    "unrealized_pnl": pnl_usd,
+                    "unrealized_pnl_pct": pnl_pct,
+                    "stop_loss": sl_calc,
+                    "trailing_sl_price": sl_calc,
+                    "highest_price_reached": max(avg_cost, round(cur_p, 4)),
+                    "take_profit": tp_calc,
+                    "group_name": "IB_PAPER",
+                    "first_buy_at": now_iso,
+                    "status": "open",
+                    "updated_at": now_iso,
+                }).execute()
                 stk_synced += 1
 
         for sym, p_data in sb_open_stocks.items():

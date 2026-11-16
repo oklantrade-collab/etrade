@@ -140,6 +140,10 @@ class OrderExecutor:
             if entry_price <= 0:
                 return await self._mark_failed(opp_id, "Invalid entry price")
 
+            # Blindaje: Asegurar que stop_loss nunca sea >= entry_price
+            if stop_loss >= entry_price:
+                stop_loss = round(entry_price * 0.96, 2)
+
             # 2. CALCULAR TAMAÑO POR INVERSIÓN FIJA (5% = $250)
             invest_amount_usd = self.total_capital * (self.max_pct_per_trade / 100)
             shares = int(invest_amount_usd / entry_price)

@@ -114,7 +114,14 @@ export default function StocksPositions() {
       if (!loadedClosed) {
         // Fallback directo a Supabase: trades_journal y stocks_positions cerradas
         const [tjRes, spRes] = await Promise.all([
-          supabase.from('trades_journal').select('*').order('exit_date', { ascending: false }).limit(100),
+          supabase
+            .from('trades_journal')
+            .select('*')
+            .not('ticker', 'ilike', '%:OPT:%')
+            .not('ticker', 'ilike', 'OPT:%')
+            .or('trade_type.is.null,trade_type.not.ilike.%OPT%')
+            .order('exit_date', { ascending: false })
+            .limit(100),
           supabase.from('stocks_positions').select('*').eq('status', 'closed').order('updated_at', { ascending: false }).limit(100)
         ])
 

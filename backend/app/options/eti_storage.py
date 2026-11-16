@@ -102,9 +102,7 @@ def get_active_eti_signals() -> List[ETISignal]:
     """Retorna las señales que están en estado ACTIVE y cuyo TTL no ha expirado."""
     signals = load_signals_from_disk()
     if not signals:
-        # Sembrar señal de demostración si está vacía
-        seed_default_sample_signal()
-        signals = load_signals_from_disk()
+        return []
 
     now_dt = datetime.now(timezone.utc)
     active: List[ETISignal] = []

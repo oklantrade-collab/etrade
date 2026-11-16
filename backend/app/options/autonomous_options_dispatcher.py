@@ -149,7 +149,14 @@ def dispatch_autonomous_option_trade(
 
         # P1: Límite estricto de máximo 2 contratos por orden
         contracts_to_buy = min(2, max(1, getattr(best_contract, "tranche_1_contracts", 1)))
-        opt_price = best_contract.ask if best_contract.ask > 0 else (best_contract.mid if best_contract.mid > 0 else 1.0)
+        # Entrada en MIDPOINT (+ pequeño margen de llenado, nunca por encima del ask) en lugar de pagar el ask completo
+        _bid = float(getattr(best_contract, "bid", 0.0) or 0.0)
+        _ask = float(getattr(best_contract, "ask", 0.0) or 0.0)
+        if _bid > 0 and _ask > 0 and _ask >= _bid:
+            _mid = (_bid + _ask) / 2.0
+            opt_price = round(min(_ask, _mid + min(0.03, (_ask - _bid) * 0.20)), 2)
+        else:
+            opt_price = best_contract.mid if best_contract.mid > 0 else (best_contract.ask if best_contract.ask > 0 else 1.0)
         total_invested = round(opt_price * 100 * contracts_to_buy, 2)
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -220,6 +227,7 @@ def dispatch_autonomous_option_trade(
             "direction": "buy",
             "shares": contracts_to_buy,
             "market_price": opt_price,
+            "limit_price": opt_price,
             "target_band": target_band_str,
             "status": "pending",
             "created_at": now_iso

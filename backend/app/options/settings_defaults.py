@@ -101,6 +101,14 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     "entry_start_min_after_open": (15, 0, 60),
     "entry_end_min_before_close": (30, 15, 120),
     "force_close_min_before_close": (15, 5, 60),
+    # D-bis. Cosecha de ganancias en la ultima hora (EOD Profit Harvest)
+    "eod_profit_lock_enabled": (True, None, None),
+    "eod_profit_lock_minutes_before": (60, 15, 90),      # 60 min antes del cierre = 15:00 ET
+    "eod_profit_lock_min_pnl_pct": (2.0, 0.0, 20.0),      # ganancia neta minima para cosechar
+    # Preferencia SUAVE por entradas antes de la ultima hora (no bloquea, exige mas score)
+    "late_session_soft_preference": (True, None, None),
+    "late_session_start_min_before_close": (60, 15, 120),
+    "late_session_min_score_bump": (10, 0, 30),
     "scanner_freq_min": (15, 5, 60),
     "snapshot_freq_min": (5, 1, 30),
     "snapshot_retention_days": (90, 30, 365),
@@ -132,9 +140,16 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     # G. Salidas
     "long_tp_pct": (75, 10, 300),
     "long_sl_pct": (50, 10, 100),
+    "partial_tp_pct": (20, 5, 100),
+    "partial_tp_ratio": (0.5, 0.1, 1.0),
+    "breakeven_lock_buffer_pct": (1.0, 0.0, 5.0),
     "spread_tp_pct": (60, 10, 100),
     "spread_sl_pct": (50, 10, 100),
     "exit_on_direction_flip": (True, None, None),
+    # Valuacion justa Mid-Market (evita nacer en perdida contable por el spread Bid/Ask)
+    "use_mid_pricing": (True, None, None),
+    # Posiciones long call/put sin techo de ganancia fijo cuando hay contexto tecnico (trailing/ratchet)
+    "long_tp_uncapped": (True, None, None),
     # H. Gates
     "g1_min_sessions": (5, 1, 60),
     "g1_pct_sessions": (60, 10, 100),

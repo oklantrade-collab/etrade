@@ -710,9 +710,9 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
         return {"items": [], "error": str(e)[:200]}
 
     # Enriquecer posiciones abiertas de opciones con mark_price y unrealized_pnl en tiempo real de TWS
+    from app.options.broker_sync import _row_contract_key, _fmt_exp
+    tws_opt_by_ck = {}
     try:
-        from app.options.broker_sync import _row_contract_key, _fmt_exp
-        tws_opt_by_ck = {}
         for opt_k, b_d in (broker_portfolio or {}).items():
             if str(b_d.get("sec_type") or "").upper() == "OPT" or ":OPT:" in str(opt_k):
                 u_s = str(b_d.get("underlying") or str(opt_k).split(":")[0]).upper()
@@ -741,9 +741,21 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
         pass
 
     try:
-        all_rows = sb.table("opt_paper_trades").select("status,unrealized_pnl,realized_pnl,max_loss_total").limit(500).execute().data or []
-        open_pos = [p for p in all_rows if p.get("status") == "open"]
-        closed_pos = [p for p in all_rows if p.get("status") == "closed"]
+        open_pos = sb.table("opt_paper_trades").select("id,symbol,strategy_type,expiry,qty,entry_debit,entry_fills,unrealized_pnl,max_loss_total").eq("status", "open").execute().data or []
+        for op in open_pos:
+            ck = _row_contract_key(op)
+            b_d = tws_opt_by_ck.get(ck)
+            if b_d:
+                mp = float(b_d.get("market_price") or 0.0)
+                if mp > 0:
+                    tws_unr = b_d.get("unrealized_pnl")
+                    if tws_unr is not None and abs(float(tws_unr)) > 0.0001:
+                        op["unrealized_pnl"] = round(float(tws_unr), 2)
+                    else:
+                        qty_o = int(op.get("qty") or 1)
+                        ed_o = float(op.get("entry_debit") or 0.0)
+                        op["unrealized_pnl"] = round((mp - ed_o) * 100.0 * qty_o, 2)
+        closed_pos = sb.table("opt_paper_trades").select("status,realized_pnl").eq("status", "closed").order("exit_time", desc=True).limit(500).execute().data or []
     except Exception:
         open_pos = [p for p in items if p.get("status") == "open"]
         closed_pos = [p for p in items if p.get("status") == "closed"]

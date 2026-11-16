@@ -451,21 +451,11 @@ async def get_stocks_positions():
                 .neq("group_name", "OPTIONS")\
                 .order("first_buy_at", desc=True)\
                 .execute()
-            
-            # Obtener símbolos con opciones abiertas (ej. SPY) para excluirlos de STOCKS
-            open_opt_symbols = set()
-            try:
-                opt_res = sb.table("opt_paper_trades").select("symbol").eq("status", "open").execute()
-                for o in (opt_res.data or []):
-                    open_opt_symbols.add(str(o.get("symbol", "")).upper())
-            except Exception:
-                pass
 
             positions = [
                 p for p in (res.data or [])
                 if ":OPT:" not in str(p.get("ticker", ""))
                 and p.get("group_name") != "OPTIONS"
-                and str(p.get("ticker", "")).upper() not in open_opt_symbols
             ]
             if not positions:
                 return {"positions": []}
@@ -609,22 +599,34 @@ async def get_stocks_status():
 
 @router.get("/orders")
 async def get_stocks_orders(limit: int = 100):
-    """Get stock orders history from stocks_orders table."""
+    """Get stock orders history from stocks_orders table (excluding options contracts)."""
     try:
         sb = get_supabase()
         res = sb.table("stocks_orders")\
             .select("*")\
+            .not_.ilike("ticker", "%:OPT:%")\
+            .not_.ilike("ticker", "OPT:%")\
+            .or_("target_band.is.null,target_band.not.ilike.*OPT*")\
+            .or_("group_name.is.null,group_name.not.ilike.*OPT*")\
             .order("created_at", desc=True)\
             .limit(limit)\
             .execute()
-        return res.data or []
+        rows = []
+        for r in (res.data or []):
+            t_u = str(r.get("ticker") or "").upper()
+            tb_u = str(r.get("target_band") or "").upper()
+            gp_u = str(r.get("group_name") or "").upper()
+            if ":OPT:" in t_u or t_u.startswith("OPT:") or "OPT:" in tb_u or "OPTION" in gp_u or "_OPT" in gp_u:
+                continue
+            rows.append(r)
+        return rows
     except Exception as e:
         log_error("stocks_api", f"Error in get_stocks_orders: {e}")
         return []
 
 @router.get("/journal")
 async def get_stocks_journal(limit: int = 100):
-    """Get trade journal history from trades_journal (real executions) and stocks_positions, filtering out 0.00 ghost sync rows."""
+    """Get trade journal history from trades_journal (real executions) and stocks_positions, filtering out 0.00 ghost sync rows and options."""
     sb = get_supabase()
     entries = []
 
@@ -632,13 +634,25 @@ async def get_stocks_journal(limit: int = 100):
     try:
         t_res = sb.table("trades_journal")\
             .select("*")\
+            .not_.ilike("ticker", "%:OPT:%")\
+            .not_.ilike("ticker", "OPT:%")\
+            .or_("trade_type.is.null,trade_type.not.ilike.*OPT*")\
             .order("exit_date", desc=True)\
             .limit(limit)\
             .execute()
         for t in (t_res.data or []):
             ticker_str = str(t.get("ticker", "")).upper()
             tt_str = str(t.get("trade_type") or t.get("group_name") or "").upper()
-            if ":OPT:" in ticker_str or ticker_str.startswith("OPT:") or tt_str.startswith("OPT") or "OPTION" in tt_str:
+            er_str = str(t.get("exit_reason") or "").upper()
+            if (
+                ":OPT:" in ticker_str
+                or ticker_str.startswith("OPT:")
+                or "OPT" in tt_str
+                or "CALL" in tt_str
+                or "PUT" in tt_str
+                or er_str.startswith("OPT_")
+                or "SL_UNDERLYING_PIERCED" in er_str
+            ):
                 continue
 
             entry_p = float(t.get("entry_price") or 0.0)

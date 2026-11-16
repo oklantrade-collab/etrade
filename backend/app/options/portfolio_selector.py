@@ -96,6 +96,17 @@ def select_portfolio(candidates: list[dict[str, Any]],
     max_per_expiry = int(eff.get("max_positions_per_expiry") or 2)
     min_score = float(eff.get("min_score") or 60.0)
 
+    # Preferencia SUAVE por entradas antes de la ultima hora: no se bloquea, se exige mas score.
+    try:
+        if eff.get("late_session_soft_preference", True):
+            from datetime import datetime as _dt, timezone as _tz
+            from app.options import market_calendar as _mc
+            _mtc = _mc.minutes_to_close(eff.get("_now_override") or _dt.now(_tz.utc))
+            if _mtc is not None and _mtc <= float(eff.get("late_session_start_min_before_close") or 60):
+                min_score += float(eff.get("late_session_min_score_bump") or 0.0)
+    except Exception:
+        pass
+
     # Contabilidad inicial del portafolio existente
     used_underlyings = set(p.underlying_id for p in open_pos)
     direction_counts = Counter(p.direction for p in open_pos)

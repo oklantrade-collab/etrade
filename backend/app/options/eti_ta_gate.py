@@ -136,11 +136,33 @@ def evaluate_eti_ta_gate(
         )
 
     # ─────────────────────────────────────────────────────────────────────────
+    # 0.B CONTROL DE GUARDARRAÍLES ETI (O-13 / CIRCUIT BREAKER)
+    # ─────────────────────────────────────────────────────────────────────────
+    if (not signal.safety_guardrails.execution_allowed) or signal.safety_guardrails.circuit_breaker_active:
+        return TAGateEvaluationResult(
+            signal_id=signal.signal_id,
+            symbol=sym,
+            is_triggered=False,
+            selected_route="NONE",
+            status_p1="NOT_MET",
+            status_p2="INVALIDATED",
+            is_invalidated=True,
+            current_price=current_price,
+            current_vwap=current_vwap,
+            current_rvol=current_rvol,
+            reason="⛔ Ejecución bloqueada por Safety Guardrails ETI (O-13 / Circuit Breaker)."
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
     # 1. EVALUACIÓN PRIORIDAD 1: ESTRATEGIA ROSS CAMERON (SCALPING)
     # ─────────────────────────────────────────────────────────────────────────
     p1_triggered = False
     p1_status = "WAITING_PULLBACK"
     p1_reason = ""
+
+    min_rvol = gate.indicator_requirements.min_relative_volume or 1.20
+    volume_ok_p1 = (current_rvol >= min_rvol)
+    trigger_p = gate.underlying_trigger_price
 
     last_green = float(c.iloc[-1]) >= float(o.iloc[-1])
     last_red = float(c.iloc[-1]) < float(o.iloc[-1])
@@ -150,29 +172,33 @@ def evaluate_eti_ta_gate(
     if is_call:
         # Tendencia alcista: EMA3 >= EMA9 y precio sobre VWAP
         is_trend_call = (float(ema3.iloc[-1]) >= float(ema9.iloc[-1])) and (current_price >= current_vwap * 0.998)
+        # Proximidad al nivel de activación ETI (dentro del 0.3% o ya superado)
+        near_or_past_trigger = (trigger_p <= 0.0) or (current_price >= trigger_p * 0.997)
         # Pullback en velas previas (al menos 1 vela roja descansando a EMA9)
         had_pullback = any(float(c.iloc[idx]) < float(o.iloc[idx]) for idx in range(-4, -1)) if len(c) >= 4 else False
         if had_pullback:
             p1_status = "PULLBACK_FORMED"
-        # First Candle to Make a New High
+        # First Candle to Make a New High + RVOL + Zona Trigger
         first_candle_high = last_green and (float(c.iloc[-1]) > prev_high or float(h.iloc[-1]) > prev_high)
-        if is_trend_call and had_pullback and first_candle_high:
+        if is_trend_call and had_pullback and first_candle_high and volume_ok_p1 and near_or_past_trigger:
             p1_triggered = True
             p1_status = "TRIGGERED"
-            p1_reason = f"Ross Cameron P1 CALL: First Candle New High tras pullback (RVOL {current_rvol:.1f}x > 1.35x)"
+            p1_reason = f"Ross Cameron P1 CALL: First Candle New High tras pullback (RVOL {current_rvol:.1f}x >= {min_rvol:.2f}x)"
     else:
         # Tendencia bajista: EMA3 <= EMA9 y precio bajo VWAP
         is_trend_put = (float(ema3.iloc[-1]) <= float(ema9.iloc[-1])) and (current_price <= current_vwap * 1.002)
+        # Proximidad al nivel de activación ETI (dentro del 0.3% o ya perforado)
+        near_or_past_trigger = (trigger_p <= 0.0) or (current_price <= trigger_p * 1.003)
         # Rebote previo en velas (al menos 1 vela verde hacia resistencia/EMA9)
         had_rebound = any(float(c.iloc[idx]) > float(o.iloc[idx]) for idx in range(-4, -1)) if len(c) >= 4 else False
         if had_rebound:
             p1_status = "PULLBACK_FORMED"
-        # First Candle to Make a New Low
+        # First Candle to Make a New Low + RVOL + Zona Trigger
         first_candle_low = last_red and (float(c.iloc[-1]) < prev_low or float(l.iloc[-1]) < prev_low)
-        if is_trend_put and had_rebound and first_candle_low:
+        if is_trend_put and had_rebound and first_candle_low and volume_ok_p1 and near_or_past_trigger:
             p1_triggered = True
             p1_status = "TRIGGERED"
-            p1_reason = f"Ross Cameron P1 PUT: First Candle New Low tras rebote a EMA9/VWAP (RVOL {current_rvol:.1f}x > 1.35x)"
+            p1_reason = f"Ross Cameron P1 PUT: First Candle New Low tras rebote a EMA9/VWAP (RVOL {current_rvol:.1f}x >= {min_rvol:.2f}x)"
 
     # Si la Prioridad 1 gatilla, tiene prelación absoluta
     if p1_triggered:

@@ -80,6 +80,8 @@ class IBConnection(EWrapper, EClient):
         self._hist_bars: dict = {}
         self._hist_events: dict = {}
         self._realtime_bar_callbacks: dict = {}
+        self._open_orders: Dict[int, dict] = {}
+        self._open_orders_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     # ── Connection ────────────────────────────────────────
@@ -398,6 +400,75 @@ class IBConnection(EWrapper, EClient):
     def set_order_callback(self, callback: Callable):
         """Register a callback function to receive orderStatus events."""
         self._order_callback = callback
+
+    def openOrder(self, orderId: int, contract: "Contract", order, orderState):
+        """Track open working orders reported by TWS (for opposing-side Error 201 prevention)."""
+        if not contract or not order:
+            return
+        sec_type = str(getattr(contract, "secType", "STK") or "STK").upper()
+        symbol = str(getattr(contract, "symbol", "") or "").upper()
+        self._open_orders[int(orderId)] = {
+            "order_id": int(orderId),
+            "symbol": symbol,
+            "sec_type": sec_type,
+            "expiry": str(getattr(contract, "lastTradeDateOrContractMonth", "") or "").replace("-", ""),
+            "strike": round(float(getattr(contract, "strike", 0.0) or 0.0), 2),
+            "right": str(getattr(contract, "right", "") or "").upper(),
+            "action": str(getattr(order, "action", "") or "").upper(),
+            "status": str(getattr(orderState, "status", "") or "").lower() if orderState else "",
+        }
+
+    def openOrderEnd(self):
+        """Signal completion of reqOpenOrders / reqAllOpenOrders stream."""
+        self._open_orders_event.set()
+
+    def cancel_opposing_option_orders(
+        self,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        closing_action: str = "SELL",
+        timeout: float = 2.5,
+    ) -> int:
+        """Cancel opposing working TWS orders on the same US option contract to prevent IB Error 201."""
+        if not self.connected:
+            return 0
+        opposing_action = "BUY" if closing_action.upper() == "SELL" else "SELL"
+        sym_u = str(symbol or "").upper().strip()
+        exp_clean = str(expiry or "").replace("-", "")[:8]
+        strike_r = round(float(strike or 0.0), 2)
+        right_u = str(right or "C").upper().strip()
+
+        self._open_orders = {}
+        self._open_orders_event.clear()
+        try:
+            self.reqAllOpenOrders()
+            self._open_orders_event.wait(timeout=timeout)
+        except Exception as e:
+            log_warning(MODULE, f"Error consultando órdenes abiertas en TWS para {sym_u}: {e}")
+            return 0
+
+        cancelled_count = 0
+        for oid, info in list(self._open_orders.items()):
+            if info.get("sec_type") != "OPT":
+                continue
+            if info.get("status") in ("cancelled", "filled", "inactive", "pendingcancel"):
+                continue
+            if (
+                info.get("symbol") == sym_u
+                and info.get("expiry") == exp_clean
+                and abs(float(info.get("strike") or 0.0) - strike_r) <= 0.05
+                and info.get("right") == right_u
+                and info.get("action") == opposing_action
+            ):
+                try:
+                    self.cancelOrder(int(oid))
+                    cancelled_count += 1
+                    log_info(MODULE, f"🧹 Cancelada orden opuesta {opposing_action} #{oid} en TWS para {sym_u} {exp_clean} {strike_r}{right_u} (prevención Error 201)")
+                except Exception as cancel_e:
+                    log_warning(MODULE, f"No se pudo cancelar orden #{oid} en TWS: {cancel_e}")
+        return cancelled_count
 
     # ── Portfolio & Positions Callbacks ────────────────────
 

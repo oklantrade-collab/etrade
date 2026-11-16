@@ -252,6 +252,7 @@ DB_EXIT_REASONS_MAP = {
     "bad_data_close": "bad_data_close",
     "manual_simulated": "manual_simulated",
     "sl_be_lock_1pct": "take_profit",
+    "opt_eod_profit_harvest": "take_profit",
     "tp_rsi_climax_1h": "take_profit",
     "tp_upper_5_6": "take_profit",
     "tp_lower_5_6": "take_profit",
@@ -457,7 +458,7 @@ def evaluate_technical_rules_and_stops(
         return False, None, {}
 
     exit_plan = dict(position.get("exit_plan") or {})
-    current_sl = float(exit_plan.get("stop_loss_underlying") or 0.0)
+    current_sl = float(exit_plan.get("stop_loss_underlying") or exit_plan.get("invalidation_underlying") or exit_plan.get("initial_sl") or 0.0)
     current_sl_type = str(exit_plan.get("trailing_sl_type") or "INITIAL")
 
     # ─────────────────────────────────────────────────────────────
@@ -592,12 +593,21 @@ def evaluate_technical_rules_and_stops(
             pos_age_min = 999.0
 
     # ─────────────────────────────────────────────────────────────
-    # ── REGLA P0/P1: HARD STOP LOSS EN PRIMA (-30%) ──
-    # Cortar inmediatamente si la prima cae -30.0% o peor, sin esperar minutos de maduración
-    if unr_pnl_pct <= -30.0:
+    # ── REGLA P0/P1: HARD STOP LOSS EN PRIMA (-30% o personalizado ETI ej. -20%) ──
+    # Cortar inmediatamente si la prima cae por debajo del umbral, sin esperar minutos de maduración
+    raw_sl_pct = exit_plan.get("stop_loss_pct") or exit_plan.get("stop_loss_contract_pct")
+    try:
+        custom_sl_pct = float(raw_sl_pct) if raw_sl_pct is not None else -30.0
+    except (TypeError, ValueError):
+        custom_sl_pct = -30.0
+    if custom_sl_pct > 0:
+        custom_sl_pct = -custom_sl_pct
+    hard_sl_pct = max(-30.0, min(-5.0, custom_sl_pct))
+
+    if unr_pnl_pct <= hard_sl_pct and pos_age_min >= 2.0:
         record_options_sl_cooldown(symbol, "CALL" if is_call else "PUT", current_price, new_sl)
         return True, "stop_loss", {
-            "detail": f"Hard Stop Loss de Prima activado: PnL {unr_pnl_pct:.1f}% <= -30.0% (Límite institucional de riesgo)",
+            "detail": f"Hard Stop Loss de Prima activado: PnL {unr_pnl_pct:.1f}% <= {hard_sl_pct:.1f}% (Límite de riesgo)",
             "exit_plan": exit_plan,
             "exit_ratio": 1.0,
         }
@@ -643,9 +653,38 @@ def evaluate_technical_rules_and_stops(
         highest_pnl_usd = unr_pnl_usd
         exit_plan["highest_pnl_usd"] = highest_pnl_usd
 
+    partial_taken = bool(exit_plan.get("partial_tp_taken", False))
+
+    # ── REGLA FIJA INSTITUCIONAL: TOMA DE BENEFICIOS PARCIAL 50% AL +20% + BREAKEVEN LOCK (+1%) ──
+    # Si la ganancia no realizada alcanza o supera el +20.0%:
+    # 1. Si la posición tiene >= 2 contratos y no ha tomado parcial: se cierra el 50%.
+    # 2. Si tiene 1 contrato y no ha tomado parcial: se cierra 100% para asegurar el beneficio.
+    # 3. Se blinda el restante con Trailing Stop a Breakeven +1% garantizado.
+    tp_half = float(exit_plan.get("tp_half_pct") or exit_plan.get("take_profit_1_pct") or 20.0)
+    if tp_half > 0 and unr_pnl_pct >= tp_half and not partial_taken and pos_age_min >= 1.0:
+        ratio = 0.5 if pos_qty >= 2 else 1.0
+        exit_plan["partial_tp_taken"] = True
+        exit_plan["be_locked"] = True
+        exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
+        entry_debit = float(position.get("entry_debit") or 0.0)
+        if entry_debit > 0:
+            be_prem = round(entry_debit * 1.01, 4)
+            exit_plan["be_floor_premium"] = be_prem
+            exit_plan["stop_loss_premium"] = max(float(exit_plan.get("stop_loss_premium") or 0.0), be_prem)
+        if entry_stock_p > 0:
+            exit_plan["be_lock_trigger_price"] = round(entry_stock_p * (1.02 if is_call else 0.98), 2)
+            exit_plan["be_lock_sl_price"] = round(entry_stock_p * (1.01 if is_call else 0.99), 2)
+            exit_plan["stop_loss_underlying"] = max(float(exit_plan.get("stop_loss_underlying") or 0.0), exit_plan["be_lock_sl_price"]) if is_call else min(float(exit_plan.get("stop_loss_underlying") or 999999.0), exit_plan["be_lock_sl_price"])
+
+        return True, "tp_bb_climax_partial", {
+            "detail": f"Take Profit Fijo +20% ({int(ratio*100)}% cerrado): PnL +{unr_pnl_pct:.1f}% >= +{tp_half:.1f}%. Candado Breakeven +1% activado para el resto (Piso SL: ${exit_plan.get('stop_loss_premium', 0):.2f}).",
+            "exit_plan": exit_plan,
+            "exit_ratio": ratio,
+        }
+
     # GUARDIA DE MOMENTUM MULTIVARIADA (Ross Cameron / Usuario):
     # Si hay empuje institucional vigoroso con volumen (RVOL >= 1.3x) y ADX acelerando,
-    # NO cortar el trade alcista/bajista prematuramente; dejar correr la tendencia.
+    # NO cortar el trade alcista/bajista prematuramente; dejar correr la tendencia para el restante.
     is_strong_momentum = (
         is_bb_expanding_15m and 
         rvol_15m >= 1.30 and 
@@ -657,16 +696,6 @@ def evaluate_technical_rules_and_stops(
         return False, None, {
             "exit_plan": exit_plan, 
             "detail": f"Candado de Momentum activo: Bandas en expansión con RVOL {rvol_15m:.2f}x y ADX {adx_15m:.1f} (dejar correr tendencia)"
-        }
-
-    # ── REGLA ROSS CAMERON TP1: TOMA PARCIAL 50% AL ALCANZAR TP_HALF_PCT (ej. +20%) ──
-    tp_half = float(exit_plan.get("tp_half_pct") or exit_plan.get("take_profit_1_pct") or 0.0)
-    if tp_half > 0 and unr_pnl_pct >= tp_half and not partial_taken and pos_age_min >= 2.0:
-        ratio = 0.5 if pos_qty >= 2 else 1.0
-        return True, "tp_bb_climax_partial", {
-            "detail": f"Take Profit Parcial (50%) Ross Cameron TP1: PnL +{unr_pnl_pct:.1f}% >= +{tp_half:.1f}%. Bloqueando Breakeven.",
-            "exit_plan": exit_plan,
-            "exit_ratio": ratio,
         }
 
     # ── REGLA ROSS CAMERON 1: TOMA PARCIAL 50% AL PERFORAR BANDA BOLLINGER (2.0σ) ──
@@ -899,9 +928,9 @@ def should_exit_stop_loss(position: dict[str, Any], unrealized_pnl: float, eff: 
     highest_seen = float(exit_plan.get("highest_premium_seen") or max(entry_debit, last_mark))
     be_locked = bool(exit_plan.get("be_locked") or (entry_debit > 0 and highest_seen >= round(entry_debit * 1.05, 4)))
     if be_locked and entry_debit > 0 and last_mark > 0:
-        be_floor_prem = round(entry_debit * 1.01, 4)
+        be_floor_prem = float(exit_plan.get("stop_loss_premium") or round(entry_debit * 1.01, 4))
         if last_mark <= be_floor_prem:
-            return True, f"Stop Loss BE Lock (+1% Protegido): Prima ${last_mark:.2f} <= ${be_floor_prem:.2f} (+1% de compra tras avance previo +5%)"
+            return True, f"Stop Loss BE Lock (+1% Protegido): Prima ${last_mark:.2f} <= ${be_floor_prem:.2f} (+1% de compra tras avance previo)"
 
     if stype in ("long_call", "long_put"):
         sl_pct = float(eff.get("long_sl_pct") or 50.0)
@@ -930,6 +959,34 @@ def should_exit_by_time(position: dict[str, Any], now: datetime, eff: dict[str, 
         if now >= force_time:
             return True, f"Cierre forzado por tiempo: vencimiento hoy y hora actual supera {force_time.strftime('%H:%M %Z')}"
 
+    return False, None
+
+
+def should_exit_eod_profit_harvest(unrealized_pnl: float,
+                                   unrealized_pnl_pct: float,
+                                   now: datetime,
+                                   eff: dict[str, Any] | None = None) -> tuple[bool, str | None]:
+    """Cosecha de ganancias en la ultima hora de la sesion (por defecto desde 15:00 ET hasta el cierre).
+
+    Si la posicion tiene ganancia neta >= umbral (default +2%), se liquida el 100%: en la ultima hora el
+    Theta se acelera, los spreads se ensanchan y el gap nocturno puede destruir el valor extrinseco.
+    """
+    from app.options import settings_defaults as sd
+    cfg = eff or sd.default_settings()
+    if not cfg.get("eod_profit_lock_enabled", True):
+        return False, None
+    mtc = mc.minutes_to_close(now)
+    if mtc is None:
+        return False, None
+    window = cfg.get("eod_profit_lock_minutes_before")
+    window = 60.0 if window is None else float(window)
+    if mtc > window:
+        return False, None
+    min_pct = cfg.get("eod_profit_lock_min_pnl_pct")
+    min_pct = 2.0 if min_pct is None else float(min_pct)
+    if unrealized_pnl > 0 and unrealized_pnl_pct >= min_pct:
+        return True, (f"EOD Profit Harvest: faltan {mtc:.0f} min para el cierre y la posicion tiene "
+                      f"+{unrealized_pnl_pct:.1f}% (+${unrealized_pnl:.2f}) >= +{min_pct:.1f}%. Cosechando ganancia antes del cierre.")
     return False, None
 
 
@@ -969,13 +1026,27 @@ def evaluate_position_exit(position: dict[str, Any],
     if by_time:
         return True, "forced_close_time", {"detail": reason_time, "mark": mark}
 
+    # 2.5 EOD Profit Harvest: ultima hora de la sesion con ganancia neta >= umbral
+    if mark.get("valid"):
+        by_eod, reason_eod = should_exit_eod_profit_harvest(unrealized_pnl, float(mark.get("unrealized_pnl_pct") or 0.0), now_dt, eff)
+        if by_eod:
+            return True, "opt_eod_profit_harvest", {"detail": reason_eod, "mark": mark, "exit_ratio": 1.0}
+
     # 3. Stop Loss en prima (-50%)
     by_sl, reason_sl = should_exit_stop_loss(position, unrealized_pnl, eff)
     if by_sl:
         return True, "stop_loss", {"detail": reason_sl, "mark": mark}
 
     # 4. Take Profit en prima (+75% / +60%)
-    by_tp, reason_tp = should_exit_take_profit(position, unrealized_pnl, eff)
+    # Long call/put: SIN techo de ganancia cuando hay contexto tecnico valido (la ganancia se protege con
+    # trailing / peak-profit ratchet / reglas tecnicas). Sin contexto tecnico se conserva el TP fijo de respaldo.
+    tech_valid = bool(tech_context and tech_context.get("valid"))
+    tp_uncapped = (
+        bool(eff.get("long_tp_uncapped", True))
+        and str(position.get("strategy_type") or "") in ("long_call", "long_put")
+        and tech_valid
+    )
+    by_tp, reason_tp = (False, None) if tp_uncapped else should_exit_take_profit(position, unrealized_pnl, eff)
     if by_tp:
         return True, "take_profit", {"detail": reason_tp, "mark": mark}
 
@@ -1095,6 +1166,12 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
             exit_fill_res = pe.simulate_exit_fill(pos, quotes_map, eff, reason, adverse=adverse, now=now_dt, qty_override=qty_to_close)
 
             db_exit_reason = DB_EXIT_REASONS_MAP.get(reason, "signal_invalidation" if "flip" in reason or "cross" in reason else ("take_profit" if "tp" in reason else "stop_loss"))
+            # Coherencia: el motivo debe reflejar el resultado financiero real (nunca take_profit con perdida)
+            net_pnl_for_label = float(pos.get("realized_pnl") or 0.0) + float(exit_fill_res.realized_pnl or 0.0)
+            if db_exit_reason == "take_profit" and net_pnl_for_label < 0:
+                db_exit_reason = "stop_loss"
+            elif db_exit_reason == "stop_loss" and net_pnl_for_label > 0:
+                db_exit_reason = "take_profit"
             active_plan = dict(info.get("exit_plan") or pos.get("exit_plan") or {})
             active_plan["detailed_exit_reason"] = reason
             active_plan["detailed_exit_text"] = info.get("detail", reason)

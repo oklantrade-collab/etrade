@@ -68,6 +68,23 @@ def _is_after_1515_et(now_dt=None) -> bool:
     return now_dt.time() >= dt_time(15, 15)
 
 
+def _is_outside_ross_momentum_window_et(now_dt=None) -> bool:
+    """Retorna True si la hora de Nueva York es >= 11:00 ET (fuera de ventana Ross Cameron)."""
+    from datetime import time as dt_time
+    from zoneinfo import ZoneInfo
+    if now_dt is None:
+        try:
+            now_dt = datetime.now(timezone.utc).astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            now_dt = datetime.now().astimezone(ZoneInfo('America/New_York'))
+    elif getattr(now_dt, 'tzinfo', None) is not None:
+        try:
+            now_dt = now_dt.astimezone(ZoneInfo('America/New_York'))
+        except Exception:
+            pass
+    return now_dt.time() >= dt_time(11, 0)
+
+
 def _get_config() -> dict:
     """Load stocks configuration from DB."""
     sb = get_supabase()
@@ -157,7 +174,7 @@ def execute_market_order(
         log_warning(MODULE, f"Aborting MARKET order for {ticker}: Invalid price ${price}")
         return {"success": False, "reason": "Precio inválido"}
 
-    # ── VALIDACIÓN 0: CUTOFF INTRADÍA 15:15 ET (ÚLTIMAS 3 VELAS) ──
+    # ── VALIDACIÓN 0: CUTOFF INTRADÍA 15:15 ET (ÚLTIMAS 3 VELAS) Y VENTANA ROSS CAMERON 11:00 ET ──
     if direction.lower() == "buy":
         mock_now = context.get("now_dt")
         if _is_after_1515_et(mock_now):
@@ -165,6 +182,24 @@ def execute_market_order(
             return {
                 "success": False,
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
+            }
+
+        enforce_ross = bool(context.get("enforce_ross_window", False) or str(rule_code).startswith("RP_WARRIOR_"))
+        if enforce_ross and _is_outside_ross_momentum_window_et(mock_now):
+            log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Fuera de ventana de momentum Ross Cameron (>= 11:00 ET). Apertura {rule_code} bloqueada.")
+            return {
+                "success": False,
+                "reason": "OUTSIDE_MOMENTUM_WINDOW: Nuevas compras de momentum Ross Cameron bloqueadas después de las 11:00 ET."
+            }
+
+        # ── VALIDACIÓN 0.05: FILTRO ANTI-CHASE ROSS CAMERON (Precio <= EMA9_5m + 1.5x ATR) ──
+        ema9_5m_ctx = float(context.get("ema9_5m") or 0.0)
+        atr_5m_ctx = float(context.get("atr_5m") or 0.0)
+        if ema9_5m_ctx > 0 and atr_5m_ctx > 0 and price > (ema9_5m_ctx + 1.5 * atr_5m_ctx):
+            log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Filtro Anti-Chase Ross Cameron (${price:.2f} > EMA9_5m ${ema9_5m_ctx:.2f} + 1.5x ATR ${atr_5m_ctx:.2f}).")
+            return {
+                "success": False,
+                "reason": f"Filtro Anti-Chase Ross Cameron: Precio (${price:.2f}) sobreextendido por encima de EMA9 5m (${ema9_5m_ctx:.2f}) + 1.5x ATR."
             }
 
         # ── VALIDACIÓN 0.1: CHOKE POINT INVIOLABLE ADUANA 1H (EMA3 > EMA9) ──
@@ -1085,8 +1120,13 @@ def _open_or_update_position(
         # New position
         # --- SL/TP LOGIC: Swing 4H (Same as Crypto) ---
         # Default: ATR=2% of price, SL=2xATR (4%), TP=2.5xSL (10%)
-        atr_fallback = price * 0.02
-        sl_price = round(price - (atr_fallback * 2.0), 2)
+        atr_fallback = max(price * 0.02, 0.05)
+        calculated_sl = round(price - (atr_fallback * 2.0), 2)
+        # Blindaje: SL debe estar al menos 1.5% o $0.04 por debajo del precio de compra
+        max_allowed_sl = round(price * 0.985, 2)
+        sl_price = min(calculated_sl, max_allowed_sl)
+        if sl_price >= price:
+            sl_price = round(price - 0.05, 2)
         tp_price = round(price + (atr_fallback * 2.0 * 2.5), 2)
 
         # ── SLVM: Calcular Stop Loss Virtual ──

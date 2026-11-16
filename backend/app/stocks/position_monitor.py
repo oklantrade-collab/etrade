@@ -394,10 +394,16 @@ class PositionMonitor:
                 sl_action = 'none'
 
             # Evaluación de Stop Loss con Escudo de Tendencia:
-            # Si el precio toca el SL intradía, verificamos si está protegido por el Escudo de Tendencia
+            is_profit_sl = stop_loss > entry_price
+
             if stop_loss > 0 and current_price <= stop_loss:
+                # Si el SL alcanzado estaba por encima de la entrada, es una salida asegurando ganancia/breakeven
+                if is_profit_sl:
+                    log_warning(MODULE, f"🎯 TRAILING / PROFIT LOCK HIT: {ticker} @ ${current_price:.2f} <= SL ${stop_loss:.2f} (Entrada: ${entry_price:.2f}). Asegurando ganancia...")
+                    await self._close_position(trade, current_price, "trailing_profit_lock")
+                    return
                 # Si el régimen 1H es defensivo (impulso 1H frenado o en agotamiento) O si la tendencia 15m ya se quebró:
-                if opt3_gap or regime_1h_defensive or not trend_15m_bullish:
+                elif opt3_gap or regime_1h_defensive or not trend_15m_bullish:
                     log_warning(MODULE, f"🔴 STOP LOSS CONFIRMADO: {ticker} @ ${current_price:.2f} <= SL ${stop_loss:.2f} con tendencia rota/defensiva (1H slope={slope_1h:.2f}%, 15m bullish={trend_15m_bullish}). Cerrando...")
                     await self._close_position(trade, current_price, "sl_hard_exit_defensive")
                     return
@@ -502,11 +508,12 @@ class PositionMonitor:
                 proposed_sl = max(proposed_sl, bb_floor)
 
             # 4.5 MODO DEFENSIVO POR RÉGIMEN 1H (Slope <= 0 o Agotamiento BB Upper): Asegurar ganancias
-            if regime_1h_defensive and pnl_pct > 0:
+            # Requiere al menos +1.2% de ganancia real y buffer de 0.5% bajo precio actual para evitar asfixia por spread o centavos
+            if regime_1h_defensive and pnl_pct >= 1.2:
                 defensive_floor = round(entry_price * 1.002, 2)  # Breakeven + fees
                 if bb_1h_exhaustion and l_curr_1h > 0 and l_curr_1h < current_price:
                     defensive_floor = max(defensive_floor, round(l_curr_1h, 2))  # Lock al mínimo de la vela 1H de agotamiento
-                if defensive_floor > proposed_sl and defensive_floor < current_price:
+                if defensive_floor > proposed_sl and defensive_floor < (current_price * 0.995):
                     proposed_sl = defensive_floor
                     ratchet_reason = "1H Defensive Regime Profit Lock"
 
@@ -662,8 +669,7 @@ class PositionMonitor:
                     elif action == 'CLOSE_PARTIAL_50' or pct == 50:
                         shares_to_close = sharp_exit_res.get('shares_to_close', max(1, int(trade.get('shares', 0) * 0.5)))
                         log_warning(MODULE, f"🎯 CLÍMAX MULTIVARIABLE PARCIAL 50%: {ticker} {shares_to_close} sh @ ${current_price:.2f} | Reason: {reason}")
-                        await self._execute_partial_close(trade, current_price, shares_to_close, "climax_50", reason)
-                        sb.table("stocks_positions").update({"tp_block1_executed": True}).eq("id", trade["id"]).execute()
+                        await self._execute_partial_close(trade, current_price, shares_to_close, "block1", reason)
                         trade["tp_block1_executed"] = True
             except Exception as e_sharp:
                 log_debug(MODULE, f"Error en evaluate_alpha_runner_sharp_exit para {ticker}: {e_sharp}")
@@ -841,19 +847,29 @@ class PositionMonitor:
                     "updated_at": now
                 }).eq("id", trade["id"]).execute()
 
-                sell_rule = "ADUANA_TP_CLOSE" if pnl_usd > 0 else "STOP_LOSS_INITIAL"
-                if exit_reason in [
-                    "STOP_LOSS_INITIAL", "ADUANA_TP_CLOSE", "EMERGENCY_EXIT",
-                    "PRO_CANDLE_SELL", "HOT_CANDLE_SELL", "ADUANA_STRUCTURAL_1H_BREAK_EXIT",
-                    "PULLBACK_ZOMBIE_TIME_EXIT", "BOLLINGER_EXPLOSION"
-                ]:
-                    sell_rule = exit_reason
-                elif "tp" in str(exit_reason).lower() or "profit" in str(exit_reason).lower():
-                    sell_rule = "ADUANA_TP_CLOSE"
-                elif "sl" in str(exit_reason).lower() or "stop" in str(exit_reason).lower() or "loss" in str(exit_reason).lower():
-                    sell_rule = "STOP_LOSS_INITIAL"
+                if pnl_usd > 0:
+                    if "trail" in str(exit_reason).lower() or "ratchet" in str(exit_reason).lower():
+                        sell_rule = "TRAILING_PROFIT_LOCK"
+                    elif "tp" in str(exit_reason).lower() or "profit" in str(exit_reason).lower() or exit_reason == "ADUANA_TP_CLOSE":
+                        sell_rule = "ADUANA_TP_CLOSE"
+                    elif exit_reason in [
+                        "PRO_CANDLE_SELL", "HOT_CANDLE_SELL", "ADUANA_STRUCTURAL_1H_BREAK_EXIT",
+                        "PULLBACK_ZOMBIE_TIME_EXIT", "BOLLINGER_EXPLOSION"
+                    ]:
+                        sell_rule = exit_reason
+                    else:
+                        sell_rule = "ADUANA_TP_CLOSE"
                 else:
-                    sell_rule = "EMERGENCY_EXIT"
+                    if "defensive" in str(exit_reason).lower() or "shield" in str(exit_reason).lower():
+                        sell_rule = "DEFENSIVE_REGIME_CUT"
+                    elif "sl" in str(exit_reason).lower() or "stop" in str(exit_reason).lower() or "loss" in str(exit_reason).lower() or exit_reason == "STOP_LOSS_INITIAL":
+                        sell_rule = "STOP_LOSS_INITIAL"
+                    elif "emergency" in str(exit_reason).lower() or "panic" in str(exit_reason).lower():
+                        sell_rule = "EMERGENCY_EXIT"
+                    elif "tp" in str(exit_reason).lower() or "profit" in str(exit_reason).lower():
+                        sell_rule = "SLIPPAGE_DEFENSIVE_EXIT"
+                    else:
+                        sell_rule = "STOP_LOSS_INITIAL"
 
                 # DEDUPLICACIÓN: Comprobar si ya existe una orden de venta pendiente para este ticker
                 try:
@@ -947,12 +963,17 @@ class PositionMonitor:
             be_sl = round(entry_price * 1.01, 2)
             new_sl = max(cur_sl, be_sl) if entry_price > 0 else cur_sl
 
+            # Sanitizar block_name para que coincida con columnas existentes en stocks_positions (block1, block2, block3)
+            valid_blocks = {"block1", "block2", "block3"}
+            db_block = block_name if block_name in valid_blocks else "block1"
+
             update_data = {
-                f"tp_{block_name}_executed": True,
-                f"tp_{block_name}_price": exit_price,
-                f"tp_{block_name}_pnl": pnl_usd,
+                f"tp_{db_block}_executed": True,
+                f"tp_{db_block}_price": exit_price,
+                f"tp_{db_block}_pnl": pnl_usd,
                 "shares_remaining": shares_rem,
                 "stop_loss": new_sl,
+                "trailing_sl_price": new_sl,
                 "sl_type": "breakeven_plus_1pct"[:20],
                 "sl_activation_reason": f"Blindaje tras parcial {block_name} (+1.0% garantizado @ ${new_sl:.2f})"[:100],
                 "updated_at": now

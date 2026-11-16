@@ -1,0 +1,122 @@
+{
+  "rule_pack_id": "RP_WARRIOR_MOMENTUM_V1",
+  "version": "1.0.0",
+  "hash_sha256": "e8d19fbc746830d55e8841a0e1c2579b8a3e792c019d3851aaa7c93e4bf18290e2",
+  "lifecycle_status": "INFORMATIVE",
+  "target_horizon": "INTRADAY_SCALPING",
+  "time_window_est": {
+    "market_prep": "07:00-09:15",
+    "active_trading": "09:30-10:45",
+    "hard_stop_time": "11:00"
+  },
+  "pre_trade_screener": {
+    "price_range_usd": {
+      "min": 2.0,
+      "max": 10.0,
+      "hard_ceiling": 20.0
+    },
+    "float_shares_max": 20000000,
+    "ideal_float_shares_max": 10000000,
+    "relative_volume_min": 5.0,
+    "premarket_volume_min": 500000,
+    "gap_up_pct_min": 10.0,
+    "catalyst_required": true,
+    "catalyst_types": [
+      "FDA_APPROVAL",
+      "EARNINGS_BEAT",
+      "CONTRACT_WIN",
+      "PR_EXPANSION",
+      "MERGER_ACQUISITION"
+    ]
+  },
+  "rules": [
+    {
+      "rule_code": "RP_WARRIOR_01_HOD_MOMENTUM_BREAK",
+      "category": "MOMENTUM_BREAKOUT",
+      "priority": 1,
+      "conditions": {
+        "pattern": "HIGH_OF_DAY_BREAK",
+        "timeframe": "1m",
+        "pre_breakout_consolidation_candles": {
+          "min": 2,
+          "max": 6
+        },
+        "level_2_gates": {
+          "max_spread_usd": 0.05,
+          "tape_speed_green_prints_per_sec_min": 12,
+          "ask_resistance_wall_absorption_pct": 70.0
+        }
+      },
+      "execution": {
+        "order_type": "LIMIT",
+        "limit_offset_usd": 0.05,
+        "slippage_protection": "STRICT"
+      }
+    },
+    {
+      "rule_code": "RP_WARRIOR_04_MICRO_PULLBACK_EMA9",
+      "category": "PULLBACK_ENTRY",
+      "priority": 2,
+      "conditions": {
+        "pattern": "BULL_FLAG_MICRO_PULLBACK",
+        "trend_indicator": "EMA_9",
+        "benchmark_indicator": "VWAP",
+        "price_vs_vwap": "GREATER_THAN",
+        "pullback_depth_max_pct_of_pole": 50.0,
+        "pullback_candles_max": 3,
+        "pullback_volume_decay": true,
+        "entry_trigger": "FIRST_1M_CANDLE_NEW_HIGH"
+      },
+      "stop_loss": {
+        "type": "CANDLE_LOW_TECHNICAL",
+        "reference": "LOW_OF_PULLBACK_CANDLE",
+        "max_risk_cents_per_share": 0.12
+      }
+    },
+    {
+      "rule_code": "RP_WARRIOR_08_SMALL_ACCOUNT_COMPOUNDING",
+      "category": "TRADE_MANAGEMENT_AND_EXIT",
+      "priority": 1,
+      "conditions": {
+        "account_equity_tier": "SMALL_ACCOUNT_2K_TO_20K"
+      },
+      "position_sizing": {
+        "base_tier_usd_2000": {
+          "shares": 500,
+          "max_risk_usd": 50.0
+        },
+        "tier_usd_5000": {
+          "shares": 1000,
+          "max_risk_usd": 100.0
+        },
+        "tier_usd_10000": {
+          "shares": 2000,
+          "max_risk_usd": 200.0
+        }
+      },
+      "exit_logic": {
+        "tp1": {
+          "trigger_gain_usd": 0.15,
+          "sell_quantity_pct": 50.0,
+          "action_on_fill": "MOVE_STOP_TO_BREAKEVEN"
+        },
+        "tp2_runner": {
+          "quantity_pct": 50.0,
+          "trailing_type": "EMA_9_1M_CLOSE_BELOW",
+          "high_of_day_test_target": true
+        }
+      }
+    },
+    {
+      "rule_code": "RP_WARRIOR_03_CUSHION_TRADE_SIZING",
+      "category": "RISK_PRESERVATION_GATE",
+      "priority": 0,
+      "circuit_breakers": {
+        "first_trade_of_day_multiplier": 0.25,
+        "max_consecutive_losses": 2,
+        "daily_max_loss_usd": 150.0,
+        "action_on_circuit_break": "SUSPEND_NEW_ENTRIES_UNTIL_NEXT_SESSION"
+      }
+    }
+  ]
+}

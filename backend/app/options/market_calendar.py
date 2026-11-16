@@ -70,6 +70,17 @@ def entry_window(now: datetime, start_after_open_min: int, end_before_close_min:
     return True, "ok"
 
 
+def minutes_to_close(now: datetime) -> float | None:
+    """Minutos que faltan para el cierre de la sesion regular de `now` (None si no hay sesion abierta)."""
+    s = current_session(now)
+    if not s:
+        return None
+    o, c = s
+    if now < o or now >= c:
+        return None
+    return (c - now).total_seconds() / 60.0
+
+
 def force_close_time(now: datetime, force_close_min_before_close: int) -> datetime | None:
     s = current_session(now)
     return (s[1] - timedelta(minutes=force_close_min_before_close)) if s else None

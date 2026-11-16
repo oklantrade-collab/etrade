@@ -972,7 +972,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         supabase=sb
                     )
 
-                    if best_contract:
+                    if can_proceed_opt and best_contract:
                         opt_exp_compact = best_contract.expiry.strftime("%Y%m%d")
                         opt_ticker_formatted = f"{ticker}:OPT:{opt_exp_compact}:{best_contract.strike}:{best_contract.right}"
 
@@ -983,7 +983,7 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         else:
                             contracts_to_buy = max(1, best_contract.tranche_3_contracts)
 
-                        # P1: Límite estricto de máximo 2 contratos por orden para controlar apalancamiento
+                        # P1: Límite estricto de máximo 2 contratos por orden y tope total de 3 contratos por símbolo
                         contracts_to_buy = min(2, contracts_to_buy)
                         now_iso = datetime.now(timezone.utc).isoformat()
                         opt_price = best_contract.ask if best_contract.ask > 0 else best_contract.mid
@@ -1019,15 +1019,16 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             )
                             send_telegram_opt_alert(opt_msg)
 
-                        elif active_opt_pos is not None and opt_t_step in [2, 3] and int((active_opt_pos.get("exit_plan") or {}).get("reentry_count") or active_opt_pos.get("dca_count") or 0) == 0:
-
-
-
-
-
-
-                            # Piramidación Livermore en Opciones (Máximo 1 recompra institucional, solo en ganancia)
+                        elif (
+                            active_opt_pos is not None
+                            and opt_t_step in [2, 3]
+                            and int((active_opt_pos.get("exit_plan") or {}).get("reentry_count") or active_opt_pos.get("dca_count") or 0) == 0
+                            and int(active_opt_pos.get("qty") or 1) < 3
+                            and float(active_opt_pos.get("unrealized_pnl") or 0.0) > 0
+                        ):
+                            # Piramidación Livermore en Opciones (Máximo 1 recompra institucional, solo en ganancia, tope 3 contratos)
                             old_qty = int(active_opt_pos.get("qty") or 1)
+                            contracts_to_buy = max(1, min(contracts_to_buy, 3 - old_qty))
                             old_debit = float(active_opt_pos.get("entry_debit") or opt_price)
                             new_total_qty = old_qty + contracts_to_buy
                             new_avg_debit = round(((old_debit * old_qty) + (opt_price * contracts_to_buy)) / new_total_qty, 4)
@@ -2687,11 +2688,18 @@ async def run_options_gap_defense_cycle():
                 except Exception:
                     pass
 
+            # PnL no realizado actual (calculado antes de evaluar Hard Stop Loss -30%)
+            unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
+            cur_pnl_pct = round(((cur_opt_premium - entry_debit) / entry_debit * 100.0), 2) if entry_debit > 0 else 0.0
+
             # Posición formateada para la evaluación
             eval_pos = dict(pos)
             eval_pos["direction"] = "CALL" if is_call else "PUT"
             eval_pos["has_live_opt_quote"] = has_live_opt_quote
             eval_pos["highest_premium_seen"] = highest_seen
+            eval_pos["last_mark_price"] = cur_opt_premium
+            eval_pos["unrealized_pnl"] = unrealized_pnl_usd
+            eval_pos["unrealized_pnl_pct"] = cur_pnl_pct
             eval_pos["stop_loss_underlying"] = exit_plan.get("stop_loss_underlying") or exit_plan.get("initial_sl") or 0.0
             eval_pos["reentry_count"] = exit_plan.get("reentry_count", 0)
 
@@ -2760,17 +2768,14 @@ async def run_options_gap_defense_cycle():
                             "reason": f"Hard Stop Loss Swing (-50%): PnL={pnl_pct:.1f}%",
                             "contracts_ratio_to_exit": 1.0
                         }
-                    elif pnl_pct >= 60.0:
+                    elif pnl_pct >= 60.0 and not bool(tech_ctx.get("valid")):
+                        # TP fijo solo como respaldo cuando no hay contexto tecnico (sin techo si hay trailing tecnico)
                         eval_res = {
                             "should_exit": True,
                             "rule_code": "OPT_SWING_TP",
                             "reason": f"Take Profit Swing (+60%): PnL=+{pnl_pct:.1f}%",
                             "contracts_ratio_to_exit": 1.0
                         }
-
-            # PnL no realizado actual
-            unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
-            cur_pnl_pct = round(((cur_opt_premium - entry_debit) / entry_debit * 100.0), 2) if entry_debit > 0 else 0.0
 
             # ── CANDADO REGLA DE NEGOCIO: OPCIONES MULTI-SEMANA (DTE >= 4) ──
             # "Si la opción vence la próxima semana o posterior y queremos cerrar esta semana,
@@ -2786,6 +2791,22 @@ async def run_options_gap_defense_cycle():
             is_swing_multiweek = (dte_days_v >= 4)
 
             eval_pos["unrealized_pnl_pct"] = cur_pnl_pct
+
+            # ── EOD PROFIT HARVEST: ultima hora de la sesion (por defecto 15:00 ET -> cierre) ──
+            # Toda posicion con ganancia neta >= +2% se liquida al 100% (Theta acelerado, spreads amplios, gap nocturno).
+            try:
+                from app.options.exit_engine import should_exit_eod_profit_harvest
+                if has_live_opt_quote:
+                    by_eod, reason_eod = should_exit_eod_profit_harvest(unrealized_pnl_usd, cur_pnl_pct, now_dt)
+                    if by_eod and (not eval_res.get("should_exit") or float(eval_res.get("contracts_ratio_to_exit") or 1.0) < 1.0):
+                        eval_res = {
+                            "should_exit": True,
+                            "rule_code": "OPT_EOD_PROFIT_HARVEST",
+                            "reason": reason_eod,
+                            "contracts_ratio_to_exit": 1.0
+                        }
+            except Exception as e_eod:
+                log_warning(MODULE, f"Aviso evaluando EOD Profit Harvest para {symbol}: {e_eod}")
 
             # ── CANDADO TIME-DECAY GUARD PARA OPCIONES 0DTE & SCALPING (ETI / ROSS CAMERON) ──
             # En opciones 0DTE, Theta acelera exponencialmente la pérdida si el trade no despega.
@@ -2810,44 +2831,94 @@ async def run_options_gap_defense_cycle():
                     exit_plan["stop_loss_premium"] = max(float(exit_plan.get("stop_loss_premium") or 0.0), be_prem)
                     log_info(MODULE, f"🛡️ [TIME-DECAY GUARD] Breakeven asegurado a los 15m para {symbol} 0DTE: SL=${be_prem:.2f} (+1% neto protegido).")
 
-                # 2. Hard Stop Loss Rápido 0DTE (-25%):
-                # Cortar pérdidas ágilmente si la prima cae -25%, evitando la sangría de los swings (-50%).
-                if cur_pnl_pct <= -25.0 and has_live_opt_quote and (pos_age_min >= 2.0 or pos_age_min == 0.0):
+                # 2. Hard Stop Loss Rápido 0DTE (-25% o personalizado ETI ej. -20%):
+                # Cortar pérdidas ágilmente si la prima cae por debajo del umbral, evitando la sangría de los swings (-50%).
+                _raw_fast_sl = exit_plan.get("stop_loss_pct") or exit_plan.get("stop_loss_contract_pct")
+                try:
+                    _custom_fast_sl = float(_raw_fast_sl) if _raw_fast_sl is not None else -25.0
+                except (TypeError, ValueError):
+                    _custom_fast_sl = -25.0
+                if _custom_fast_sl > 0:
+                    _custom_fast_sl = -_custom_fast_sl
+                _fast_sl_pct = max(-25.0, min(-5.0, _custom_fast_sl))
+
+                if cur_pnl_pct <= _fast_sl_pct and has_live_opt_quote and (pos_age_min >= 2.0 or pos_age_min == 0.0):
                     eval_res = {
                         "should_exit": True,
                         "rule_code": "OPT_0DTE_FAST_SL",
-                        "reason": f"Hard Stop 0DTE (-25%): PnL={cur_pnl_pct:.1f}%. Corte estricto de scalping.",
+                        "reason": f"Hard Stop 0DTE ({_fast_sl_pct:.0f}%): PnL={cur_pnl_pct:.1f}%. Corte estricto de scalping.",
                         "contracts_ratio_to_exit": 1.0
                     }
 
-                # 3. Cierre Defensivo por Estancamiento Temporal (20 minutos):
-                # Si transcurrieron 20 min y no despegó, cerrando si cae por Theta (<= -10%) o a los 25m si está en pérdida (< 0%).
-                elif (pos_age_min >= 20.0 and cur_pnl_pct <= -10.0) or (pos_age_min >= 25.0 and cur_pnl_pct < 0.0):
-                    eval_res = {
-                        "should_exit": True,
-                        "rule_code": "OPT_0DTE_TIME_DECAY_GUARD",
-                        "reason": f"Time-Decay Guard: Contrato 0DTE estancado por {pos_age_min:.0f}m sin despegue (PnL: {cur_pnl_pct:+.1f}%). Cierre defensivo ante erosión de Theta.",
-                        "contracts_ratio_to_exit": 1.0
-                    }
+                # 3. Cierre Defensivo por Estancamiento Temporal (20-25 minutos):
+                # No liquida por fluctuación de spread (-1% a -5%) a los 25m si el subyacente sostiene EMA3 >= EMA9 en 15m.
+                else:
+                    e3_15_td = float(tech_ctx.get("ema3_15m") or 0.0)
+                    e9_15_td = float(tech_ctx.get("ema9_15m") or 0.0)
+                    p_und_td = float(tech_ctx.get("current_price") or 0.0)
+                    if is_call:
+                        is_15m_intact_td = (e3_15_td > 0 and e9_15_td > 0 and e3_15_td >= e9_15_td and p_und_td >= e9_15_td)
+                    else:
+                        is_15m_intact_td = (e3_15_td > 0 and e9_15_td > 0 and e3_15_td <= e9_15_td and p_und_td <= e9_15_td)
 
-                # 4. Take Profit Rápido de Scalping (+35% a +40%):
-                elif cur_pnl_pct >= 35.0 and not exit_plan.get("tp_scalp_executed"):
-                    exit_plan["tp_scalp_executed"] = True
-                    eval_res = {
-                        "should_exit": True,
-                        "rule_code": "OPT_0DTE_TAKE_PROFIT_35",
-                        "reason": f"Take Profit Scalping 0DTE (+{cur_pnl_pct:.1f}%): Objetivo de scalping alcanzado.",
-                        "contracts_ratio_to_exit": 1.0 if qty == 1 else 0.5
-                    }
+                    should_trigger_td = (
+                        (pos_age_min >= 20.0 and cur_pnl_pct <= -10.0)
+                        or (pos_age_min >= 25.0 and cur_pnl_pct <= -6.0)
+                        or (pos_age_min >= 25.0 and cur_pnl_pct < 0.0 and (not is_15m_intact_td or pos_age_min >= 45.0))
+                    )
+                    if should_trigger_td:
+                        eval_res = {
+                            "should_exit": True,
+                            "rule_code": "OPT_0DTE_TIME_DECAY_GUARD",
+                            "reason": f"Time-Decay Guard: Contrato 0DTE estancado por {pos_age_min:.0f}m sin despegue (PnL: {cur_pnl_pct:+.1f}%). Cierre defensivo ante erosión de Theta.",
+                            "contracts_ratio_to_exit": 1.0
+                        }
+
+                # 4. (Eliminado) Take Profit fijo de scalping +35%: sin techo de ganancia.
+                # La toma parcial al +20% (TP_FIXED_20_RATCHET) + Breakeven +1% + trailing gobiernan el resto.
+
+            # ── REGLA FIJA INSTITUCIONAL: ASEGURAR BENEFICIOS EN OPCIONES A PARTIR DE +20% ──
+            # Al llegar a +20%: Cierra el 50% de la posición (o 100% si qty == 1) y blinda Breakeven (+1%).
+            if cur_pnl_pct >= 20.0 and not exit_plan.get("partial_tp_taken") and not eval_res.get("should_exit"):
+                ratio = 0.5 if qty >= 2 else 1.0
+                exit_plan["partial_tp_taken"] = True
+                exit_plan["be_locked"] = True
+                exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
+                be_prem = round(entry_debit * 1.01, 2)
+                exit_plan["stop_loss_premium"] = max(float(exit_plan.get("stop_loss_premium") or 0.0), be_prem)
+                if entry_stock_p > 0:
+                    exit_plan["be_lock_trigger_price"] = round(entry_stock_p * (1.02 if is_call else 0.98), 2)
+                    exit_plan["be_lock_sl_price"] = round(entry_stock_p * (1.01 if is_call else 0.99), 2)
+                    exit_plan["stop_loss_underlying"] = max(float(exit_plan.get("stop_loss_underlying") or 0.0), exit_plan["be_lock_sl_price"]) if is_call else min(float(exit_plan.get("stop_loss_underlying") or 999999.0), exit_plan["be_lock_sl_price"])
+
+                eval_res = {
+                    "should_exit": True,
+                    "rule_code": "TP_FIXED_20_RATCHET",
+                    "reason": f"Take Profit Fijo +20% ({int(ratio*100)}% cerrado): PnL actual +{cur_pnl_pct:.1f}% >= +20.0%. Candado Breakeven +1% activado para el resto (Piso SL: ${be_prem:.2f}).",
+                    "contracts_ratio_to_exit": ratio
+                }
+
+            # ── EVALUACIÓN DE STOP LOSS BREAKEVEN +1% LOCK (RESTO DE LA POSICIÓN) ──
+            sl_prem_floor = float(exit_plan.get("stop_loss_premium") or 0.0)
+            if sl_prem_floor > 0.0 and cur_opt_premium is not None and cur_opt_premium <= sl_prem_floor and not eval_res.get("should_exit"):
+                eval_res = {
+                    "should_exit": True,
+                    "rule_code": "OPT_BREAKEVEN_LOCK_SL",
+                    "reason": f"Stop Loss BE Lock (+1% Protegido): Prima ${cur_opt_premium:.2f} <= ${sl_prem_floor:.2f} (+1% sobre compra ${entry_debit:.2f}). Asegurando beneficio neto.",
+                    "contracts_ratio_to_exit": 1.0
+                }
 
             if eval_res.get("should_exit"):
                 exit_code_cand = str(eval_res.get("rule_code") or "OPT_GAP_EXIT")
                 exit_code_lower = exit_code_cand.lower()
-                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in ("sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap", "time_decay"))
+                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in ("sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap", "time_decay", "breakeven_lock"))
+                is_partial_tp = "partial" in exit_code_lower or "20" in exit_code_lower or float(eval_res.get("contracts_ratio_to_exit") or 1.0) < 1.0
+                is_eod_harvest = "eod_profit_harvest" in exit_code_lower
 
                 # Candados restrictivos (Candado 1 Bollinger y Candado 2 Swing Multi-Semana)
-                # NUNCA deben bloquear un Stop Loss técnico ni un corte defensivo de pérdidas!
-                if not is_stop_loss_or_invalidation:
+                # NUNCA deben bloquear un Stop Loss técnico, corte defensivo de pérdidas, ni toma parcial al +20%!
+                if not is_stop_loss_or_invalidation and not is_partial_tp and not is_eod_harvest:
+                    # (El EOD Profit Harvest jamás es bloqueado por los candados Bollinger / Swing Multi-Semana)
                     # Candado 1: Expansión de Bandas de Bollinger en 15m (solo si momentum es favorable a la posición)
                     is_expanding = bool(tech_ctx.get("is_bb_expanding_15m"))
                     p_di = float(tech_ctx.get("plus_di_15m") or 20.0)
@@ -2897,6 +2968,12 @@ async def run_options_gap_defense_cycle():
                 else:
                     mapped_reason = "manual_simulated"
 
+                # Coherencia: el motivo refleja el resultado financiero real (nunca take_profit con pérdida)
+                if mapped_reason == "take_profit" and realized_pnl_usd < 0:
+                    mapped_reason = "stop_loss"
+                elif mapped_reason == "stop_loss" and realized_pnl_usd > 0:
+                    mapped_reason = "take_profit"
+
                 # Cierre Parcial (Escalonado Agresivo) vs Cierre Total
                 exit_ratio = float(eval_res.get("contracts_ratio_to_exit") or 1.0)
                 is_partial = (exit_ratio < 1.0 and qty >= 2)
@@ -2945,7 +3022,18 @@ async def run_options_gap_defense_cycle():
                 try:
                     held_in_tws, tws_qty = is_option_held_in_broker(sb, symbol, expiry_str, strike, "C" if is_call else "P")
                     if held_in_tws and tws_qty > 0:
-                        existing_sell = sb.table("stocks_orders").select("id").eq("ticker", symbol[:10]).eq("target_band", opt_tb).eq("direction", "sell").in_("status", ["pending", "processing"]).limit(1).execute()
+                        cutoff_30m = (now_dt - timedelta(minutes=30)).isoformat()
+                        existing_sell = (
+                            sb.table("stocks_orders")
+                            .select("id")
+                            .eq("ticker", symbol[:10])
+                            .eq("target_band", opt_tb)
+                            .eq("direction", "sell")
+                            .in_("status", ["pending", "processing"])
+                            .gte("created_at", cutoff_30m)
+                            .limit(1)
+                            .execute()
+                        )
                         if not existing_sell.data:
                             sb.table("stocks_orders").insert({
                                 "ticker": symbol[:10],

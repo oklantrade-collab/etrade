@@ -43,12 +43,37 @@ from app.options.opt_contract_picker import fetch_and_select_best_option_contrac
 from app.options.paper_execution import execute_selected_candidate_to_trade
 
 MODULE = "WARRIOR_MOMENTUM_OPTIONS"
+MAX_CONTRACTS_PER_SYMBOL = 3
 
 # Universo élite de subyacentes con alto volumen y cadenas de opciones líquidas
 WARRIOR_OPTIONS_UNIVERSE = [
     "NVDA", "TSLA", "AMD", "AAPL", "MSFT", "MARA", "COIN",
     "PLTR", "SOFI", "SPY", "QQQ", "IWM", "AMZN", "META"
 ]
+
+
+def is_warrior_options_golden_window(dt: Optional[datetime] = None) -> Tuple[bool, str]:
+    """
+    Valida si la hora actual en Nueva York está dentro de la Ventana de Oro de Ross Cameron
+    para Opciones (09:35 a 11:30 ET). Bloquea el cementerio del mediodía (11:30-14:45 ET)
+    y la última hora (15:00+ ET) para evitar sangría por Theta y retenciones overnight.
+    """
+    from datetime import timedelta
+    try:
+        from zoneinfo import ZoneInfo
+        now_et = (dt or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        now_et = dt or (datetime.now(timezone.utc) - timedelta(hours=5))
+
+    t = now_et.time()
+    t_start = datetime.strptime("09:35", "%H:%M").time()
+    t_end = datetime.strptime("11:30", "%H:%M").time()
+
+    if t < t_start:
+        return False, f"Fuera de Ventana de Oro Warrior ({now_et.strftime('%H:%M')} ET < 09:35 ET)"
+    if t > t_end:
+        return False, f"Fuera de Ventana de Oro Warrior ({now_et.strftime('%H:%M')} ET > 11:30 ET, bloqueo anti-chop/overnight)"
+    return True, f"Ventana de Oro Warrior activa ({now_et.strftime('%H:%M')} ET)"
 
 
 def evaluate_warrior_momentum_setup(
@@ -130,7 +155,7 @@ def evaluate_warrior_momentum_setup(
     # Gatillo: Vela actual es verde y superó el máximo de la vela previa (First Candle New High)
     first_candle_new_high = last_candle_green and (float(c_5.iloc[-1]) > prev_candle_high or float(h_5.iloc[-1]) > prev_candle_high)
 
-    if is_trend_bull_15m and is_trend_bull_5m and (had_pullback_call or is_bb_expanding) and first_candle_new_high:
+    if is_trend_bull_15m and is_trend_bull_5m and (had_pullback_call and is_bb_expanding) and first_candle_new_high:
         score = 70.0
         if is_bb_expanding:
             score += 20.0
@@ -167,7 +192,7 @@ def evaluate_warrior_momentum_setup(
     # Gatillo: Vela actual es roja y perforó el mínimo de la vela previa (First Candle New Low)
     first_candle_new_low = last_candle_red and (float(c_5.iloc[-1]) < prev_candle_low or float(l_5.iloc[-1]) < prev_candle_low)
 
-    if is_trend_bear_15m and is_trend_bear_5m and (had_pullback_put or is_bb_expanding) and first_candle_new_low:
+    if is_trend_bear_15m and is_trend_bear_5m and (had_pullback_put and is_bb_expanding) and first_candle_new_low:
         score = 70.0
         if is_bb_expanding:
             score += 20.0
@@ -190,17 +215,25 @@ def evaluate_warrior_momentum_setup(
     return None
 
 
-async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
+async def run_warrior_momentum_options_scan(limit: int = 2, skip_time_window_check: bool = False) -> Dict[str, Any]:
     """
     Ejecuta el ciclo de escaneo y despacho de Warrior Momentum Options.
-    1. Descarga datos 5m y 15m de los subyacentes líderes.
-    2. Identifica rupturas de momentum tipo Ross Cameron.
-    3. Selecciona contratos Delta 0.50-0.65 con DTE 3-7 días.
-    4. Auto-dispara vía Adaptive Midpoint si el capital lo permite.
+    1. Valida la Ventana de Oro (09:35 a 11:30 ET).
+    2. Descarga datos 5m y 15m de los subyacentes líderes.
+    3. Identifica rupturas de momentum tipo Ross Cameron con pullback confirmado.
+    4. Selecciona contratos Delta 0.50-0.65 con DTE 3-7 días (tope MAX_CONTRACTS_PER_SYMBOL = 3).
+    5. Auto-dispara vía Adaptive Midpoint si el capital lo permite.
     """
-    sb = get_supabase()
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
+
+    if not skip_time_window_check:
+        in_window, win_msg = is_warrior_options_golden_window(now_dt)
+        if not in_window:
+            log_info(MODULE, f"⏸️ [WARRIOR OPTIONS] {win_msg}. Escaneo omitido.")
+            return {"ok": True, "count": 0, "dispatched": 0, "skipped_reason": win_msg, "timestamp": now_iso}
+
+    sb = get_supabase()
 
     # Cargar configuración de opciones
     eff = {}
@@ -264,7 +297,8 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
             log_info(MODULE, f"⏸️ No se encontró contrato óptimo para {sym} {direction} con Delta 0.50-0.65 y DTE 3-7d.")
             continue
 
-        cost_total = contract.cost_per_contract * contract.target_total_contracts
+        capped_qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, int(contract.target_total_contracts or 1)))
+        cost_total = round(contract.cost_per_contract * capped_qty, 2)
         if current_open_risk + cost_total > max_capital:
             log_info(MODULE, f"⛔ Saldo insuficiente para {sym} ({cost_total:.2f} + {current_open_risk:.2f} > {max_capital:.2f})")
             continue
@@ -324,7 +358,7 @@ async def run_warrior_momentum_options_scan(limit: int = 2) -> Dict[str, Any]:
             "direction_source": "warrior_momentum_engine",
             "expiry": contract.expiry.isoformat(),
             "legs": [leg],
-            "qty": contract.target_total_contracts,
+            "qty": capped_qty,
             "entry_debit": contract.mid,
             "mid_debit": contract.mid,
             "max_loss_contract": round(contract.mid * 100, 2),

@@ -550,6 +550,12 @@ def evaluate_options_gap_entry_tranches(
     cur_p = float(_safe_col(df_5m, "close").iloc[-1]) if df_5m is not None and not df_5m.empty else 0.0
 
     cfg = config or {}
+    max_contracts_per_sym = int(cfg.get("max_contracts_per_symbol", 3))
+    if is_open_pos:
+        cur_pos_qty = int(active_position.get("qty") or 1)
+        if cur_pos_qty >= max_contracts_per_sym:
+            res["reason"] = f"Tope Anti-Stacking alcanzado: Posición ya tiene {cur_pos_qty} contratos (máximo permitido: {max_contracts_per_sym})."
+            return res
 
     # ─────────────────────────────────────────────────────────────
     # CASO A: TRANCHE 1 (Entrada Inicial)

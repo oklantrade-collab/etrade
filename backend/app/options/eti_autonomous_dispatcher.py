@@ -6,8 +6,10 @@ Conecta las señales del Radar Cuántico ETI con el bucle de ejecución de merca
 aplicando la microestructura de scalping de Ross Cameron:
 - Micro-pullback hacia EMA9/VWAP
 - First Candle New High (CALL) / First Candle New Low (PUT)
-- RVOL >= 1.35x y alineación tendencial con VWAP
-- Despacho automático a opt_paper_trades y a stocks_orders (TWS IB Bridge)
+- RVOL >= min_rvol y alineación tendencial con VWAP
+- Selección real de contrato en cadena viva (0DTE_SCALP) + Tope MAX_CONTRACTS_PER_SYMBOL = 3
+- Ventana de Oro (09:35-11:30 ET) para señales PRE_MARKET / 0DTE y Guardarraíl O-13
+- Despacho Broker-First a stocks_orders (TWS IB Bridge)
 """
 
 from __future__ import annotations
@@ -23,6 +25,8 @@ from app.core.market_hours import is_options_market_open
 from app.options.eti_storage import get_active_eti_signals, update_eti_signal_status
 from app.options.eti_signal_consumer import sync_signals_from_live_eti, send_signal_feedback_to_eti
 from app.options.eti_ta_gate import evaluate_eti_ta_gate
+from app.options.opt_contract_picker import fetch_and_select_best_option_contract
+from app.options.warrior_momentum_options import is_warrior_options_golden_window, MAX_CONTRACTS_PER_SYMBOL
 from app.workers.alerts_service import send_telegram_message
 
 MODULE = "ETI_OPTIONS_DISPATCHER"
@@ -50,8 +54,9 @@ async def run_eti_autonomous_options_cycle(
     Ciclo de supervisión y disparo autónomo para señales ETI en Opciones.
     1. Verifica horario de mercado de opciones (salvo force=True).
     2. Sincroniza señales activas si es necesario.
-    3. Evalúa TA Gate (Modelo de Scalping Ross Cameron).
-    4. Si se gatilla, ejecuta en opt_paper_trades y despacha a TWS (stocks_orders).
+    3. Valida Guardarraíles (O-13, Circuit Breaker y Ventana de Oro 09:35-11:30 ET).
+    4. Evalúa TA Gate (Modelo de Scalping Ross Cameron).
+    5. Selecciona contrato líquido real vía opt_contract_picker (0DTE_SCALP) y despacha a TWS.
     """
     global _LAST_ETI_SYNC_TS
 
@@ -62,7 +67,7 @@ async def run_eti_autonomous_options_cycle(
     sb = supabase or get_supabase()
     now_ts = time.time()
 
-    # 1. Sincronización periódica con ETI (cada 5 minutos o si la memoria está vacía)
+    # 1. Sincronización periódica con ETI (cada 30s en mercado o si la memoria está vacía)
     active_signals = get_active_eti_signals()
     sync_interval = 30.0 if (is_open or force) else 300.0
     if not active_signals or (now_ts - _LAST_ETI_SYNC_TS >= sync_interval):
@@ -82,6 +87,8 @@ async def run_eti_autonomous_options_cycle(
     cfg = config or {}
     max_positions = int(cfg.get("max_open_positions", 3))
     capital_limit = float(cfg.get("max_open_risk_usd", 5000.0))
+    skip_time_window = bool(cfg.get("skip_time_window_check", False) or force)
+    allow_est_fallback = bool(cfg.get("allow_estimated_contract_fallback", False))
 
     open_trades = sb.table("opt_paper_trades").select("id, max_loss_total, symbol, status").eq("status", "open").execute().data or []
     current_open_risk = sum(float(t.get("max_loss_total") or 0.0) for t in open_trades)
@@ -125,6 +132,23 @@ async def run_eti_autonomous_options_cycle(
         if sym in active_symbols:
             continue
 
+        # 3.A Control de Guardarraíles ETI (O-13 / Circuit Breaker)
+        if (not sig.safety_guardrails.execution_allowed) or sig.safety_guardrails.circuit_breaker_active:
+            log_info(MODULE, f"⛔ {sym} bloqueado por Safety Guardrails ETI (execution_allowed={sig.safety_guardrails.execution_allowed}).")
+            continue
+
+        cat_summary = str(sig.causal_context.catalyst_summary or "")
+        if "ALLOW_PUTS_ONLY" in cat_summary and sig.strategy.bias == "BULLISH":
+            log_info(MODULE, f"⛔ {sym} CALL bloqueado por Guardarraíl O-13 (ALLOW_PUTS_ONLY).")
+            continue
+
+        # 3.B Ventana de Oro (09:35-11:30 ET) para señales PRE_MARKET o 0DTE
+        if not skip_time_window and (sig.cadence == "PRE_MARKET" or "0DTE" in str(sig.asset_class)):
+            in_win, win_msg = is_warrior_options_golden_window()
+            if not in_win:
+                log_info(MODULE, f"⏸️ {sym} ETI omitido fuera de Ventana de Oro: {win_msg}")
+                continue
+
         try:
             gate_res = evaluate_eti_ta_gate(sig)
         except Exception as e_gate:
@@ -142,71 +166,49 @@ async def run_eti_autonomous_options_cycle(
             )
             continue
 
-        # 4. Señal Gatillada por Ross Cameron: Construir Ejecución
+        # 4. Señal Gatillada por Ross Cameron: Selección Real de Contrato Líquido
         log_info(MODULE, f"🚀 GATILLO AUTÓNOMO ROSS CAMERON: {sym} cumplió condición técnica! {gate_res.reason}")
 
         cand = sig.to_opportunities_candidate(current_price=gate_res.current_price)
-        est_price = sig.options_contract.estimated_contract_price if sig.options_contract else 2.50
-        qty = int(cand.get("qty") or 1)
-        invested = est_price * 100.0 * qty
-
-        if total_occupied_risk + invested > capital_limit:
-            log_warning(MODULE, f"Presupuesto excedido para {sym} (${total_occupied_risk + invested:.2f} > ${capital_limit:.2f})")
-            continue
+        is_call = (cand.get("direction") == "bullish")
+        opt_dir = "CALL" if is_call else "PUT"
 
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
 
-        # Parámetros del contrato
-        stk = sig.options_contract.strike if sig.options_contract else round(gate_res.current_price, 2)
-        exp_raw = sig.options_contract.expiration_date if sig.options_contract else now_dt.strftime("%Y-%m-%d")
-        exp_compact = exp_raw.replace("-", "")[:8]
-        is_call = (cand.get("direction") == "bullish")
-        rgt = "C" if is_call else "P"
-        opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
+        best_contract, rej_reasons = fetch_and_select_best_option_contract(
+            symbol=sym,
+            underlying_price=gate_res.current_price,
+            direction=opt_dir,
+            budget_usd=min(800.0, capital_limit * 0.20),
+            supabase=sb,
+            selection_mode="0DTE_SCALP"
+        )
 
-        pos_data = {
-            "symbol": sym,
-            "strategy_type": cand["strategy_type"],
-            "direction": cand["direction"],
-            "status": "open",
-            "qty": qty,
-            "expiry": cand["expiry"],
-            "entry_time": now_iso,
-            "entry_debit": est_price,
-            "entry_fills": [{
-                "conid": None,
-                "side": "buy",
-                "closing_side": "sell",
-                "right": rgt,
-                "strike": stk,
-                "bid": est_price * 0.98,
-                "ask": est_price * 1.02,
-                "fill_price": est_price,
-                "slippage_applied": 0.02,
-                "market_data_type": "LIVE",
-                "fee_usd": 0.70 * qty
-            }],
-            "entry_costs": 0.70 * qty,
-            "entry_total_invested": invested + (0.70 * qty),
-            "max_loss_total": invested,
-            "max_profit_total": invested * (sig.risk_management.take_profit_1_pct / 100.0),
-            "breakeven": cand.get("breakeven"),
-            "unrealized_pnl": 0.0,
-            "last_mark_price": est_price,
-            "last_mark_at": now_iso,
-            "exit_plan": {
-                **cand["exit_plan"],
-                "execution_route": gate_res.selected_route,
-                "tp_half_pct": sig.risk_management.take_profit_1_pct,
-                "invalidation_underlying": sig.risk_management.invalidation_underlying,
-                "is_zero_dte": True,
-                "horizon": "SCALPING",
-                "time_decay_guard_enabled": True,
-            },
-            "model_version": "ETI-ROSS-CAMERON-v1.0",
-            "settings_version": "AUTONOMOUS",
-        }
+        if best_contract is not None:
+            stk = best_contract.strike
+            exp_raw = best_contract.expiry.isoformat()
+            rgt = best_contract.right
+            est_price = best_contract.ask if best_contract.ask > 0 else best_contract.mid
+            qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, int(best_contract.tranche_1_contracts or 1)))
+        elif allow_est_fallback:
+            est_price = sig.options_contract.estimated_contract_price if sig.options_contract else 2.50
+            qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, int(cand.get("qty") or 1)))
+            stk = sig.options_contract.strike if sig.options_contract else round(gate_res.current_price, 2)
+            exp_raw = sig.options_contract.expiration_date if sig.options_contract else now_dt.strftime("%Y-%m-%d")
+            rgt = "C" if is_call else "P"
+        else:
+            log_warning(MODULE, f"⏸️ [{sym}] ETI gatillado pero sin contrato real líquido en cadena ({rej_reasons[:2]}). Orden omitida para evitar rechazo TWS.")
+            continue
+
+        invested = est_price * 100.0 * qty
+        if total_occupied_risk + invested > capital_limit:
+            log_warning(MODULE, f"Presupuesto excedido para {sym} (${total_occupied_risk + invested:.2f} > ${capital_limit:.2f})")
+            continue
+
+        exp_compact = exp_raw.replace("-", "")[:8]
+        opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
+        limit_exec_price = round(est_price * 1.01, 2)
 
         # 5. Principio Broker-First: NO insertar optimísticamente en opt_paper_trades.
         # La posición se creará en opt_paper_trades ÚNICAMENTE cuando el broker confirme el fill
@@ -220,14 +222,14 @@ async def run_eti_autonomous_options_cycle(
                 "group_name": "OPTIONS_AUTONOMOUS",
                 "rule_code": "ROSS_CAMERON_ETI",
                 "order_type": "limit",
-                "limit_price": round(est_price, 2),
+                "limit_price": limit_exec_price,
                 "direction": "buy",
                 "shares": qty,
                 "market_price": round(est_price, 2),
                 "status": "pending",
                 "created_at": now_iso,
             }).execute()
-            log_info(MODULE, f"📡 Orden despachada a TWS Bridge: {sym} {opt_target_band} @ ${est_price:.2f}")
+            log_info(MODULE, f"📡 Orden despachada a TWS Bridge: {sym} {opt_target_band} | {qty}x @ LMT ${limit_exec_price:.2f}")
         except Exception as e_ord:
             log_warning(MODULE, f"Aviso despachando orden a stocks_orders: {e_ord}")
 
@@ -254,7 +256,8 @@ async def run_eti_autonomous_options_cycle(
             f"Ticker: {sym} ({sig.strategy.bias} 0DTE)\n"
             f"Ruta: {gate_res.selected_route}\n"
             f"Contrato: {opt_target_band} ({rgt} Strike ${stk})\n"
-            f"Precio Entrada Estimado: ${est_price:.2f} | Cantidad: {qty}\n"
+            f"Precio LMT: ${limit_exec_price:.2f} | Cantidad: {qty}\n"
+            f"Stop Forrester: ${sig.risk_management.invalidation_underlying:.2f} | SL Prima: {sig.risk_management.stop_loss_contract_pct}%\n"
             f"Motivo Técnico: {gate_res.reason}\n"
             f"Estado: Orden PENDING enviada al Broker TWS para confirmación de fill."
         )

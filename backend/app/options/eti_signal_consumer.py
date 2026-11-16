@@ -196,7 +196,16 @@ async def sync_signals_from_live_eti() -> Dict[str, Any]:
                 is_put = "PUT" in scenario.upper() or "BEARISH" in scenario.upper()
                 is_0dte = "0DTE" in scenario.upper()
                 opt_type = "PUT" if is_put else "CALL"
-                strike = round(trigger * 0.995, 1) if is_put else round(trigger * 1.005, 1)
+                raw_target_strike = trigger * 0.995 if is_put else trigger * 1.005
+                if trigger >= 500:
+                    strike = round(raw_target_strike / 5.0) * 5.0
+                elif trigger >= 100:
+                    strike = round(raw_target_strike / 2.5) * 2.5
+                elif trigger >= 25:
+                    strike = round(raw_target_strike)
+                else:
+                    strike = round(raw_target_strike * 2.0) / 2.0
+                o13_allowed = (not has_o13_puts_only) or is_put
 
                 sig_dict = {
                     "signal_id": f"eti-live-{sym.lower()}-{now_str}",
@@ -251,7 +260,7 @@ async def sync_signals_from_live_eti() -> Dict[str, Any]:
                         "max_account_risk_pct": 2.5
                     },
                     "safety_guardrails": {
-                        "execution_allowed": True,
+                        "execution_allowed": o13_allowed,
                         "max_slippage_pct": 1.5,
                         "circuit_breaker_active": False
                     }

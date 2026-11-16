@@ -53,6 +53,7 @@ from app.api.halcon import router as halcon_router
 from app.api.radar_cascada import router as radar_cascada_router
 from app.api.options import router as options_router
 from app.api.warrior_playbook import router as warrior_playbook_router
+from app.api.eti_context import router as eti_context_router
 
 app.include_router(auth_router, prefix="/api/v1/auth", tags=["Autenticación"])
 app.include_router(admin_router, prefix="/api/v1/admin", tags=["Administración"])
@@ -73,4 +74,5 @@ app.include_router(options_router, prefix="/api/options/v1", tags=["Options V1 A
 app.include_router(halcon_router)
 app.include_router(radar_cascada_router)
 app.include_router(warrior_playbook_router)
+app.include_router(eti_context_router)
 
