@@ -690,7 +690,7 @@ def list_positions(status: str = "open", symbol: str | None = None, strategy: st
     broker_portfolio = {}
     try:
         from app.options.broker_sync import reconcile_with_ib_broker_portfolio, load_broker_portfolio_snapshot, _row_contract_key, _fmt_exp
-        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=10.0, allow_direct_fetch=False)
+        reconcile_with_ib_broker_portfolio(sb, min_interval_sec=10.0, allow_direct_fetch=False, max_age_sec=86400.0)
         broker_portfolio, _ = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
     except Exception:
         broker_portfolio = {}
@@ -1098,45 +1098,45 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
             if cid:
                 quotes_by_contract[cid] = fake_q
 
-    # 2. Transmitir orden de cierre al broker (vía stocks_orders para que el bridge local de APOLO la envíe a TWS)
-    sym = pos.get("symbol", "").upper()
-    qty = int(pos.get("qty") or 1)
-    exp = str(pos.get("expiry", "")).replace("-", "")
-    strike = None
-    right = "C" if pos.get("strategy_type", "").lower() == "long_call" else "P"
-    if entry_fills:
-        strike = entry_fills[0].get("strike")
-        right = entry_fills[0].get("right") or right
+    # 2. Protocolo Broker-First: solicitar cierre al broker via request_broker_option_close
+    # No marcar 'closed' en opt_paper_trades hasta confirmar fill o que un snapshot fresco (<=180s) confirme 0 contratos.
+    from app.options.broker_sync import request_broker_option_close
 
-    if sym and strike:
-        try:
-            mark_or_exit_px = float(pos.get("last_mark_price") or pos.get("entry_debit") or 0.05)
-            target_band = f"OPT:{exp}:{strike}:{right}"
-            sb.table("stocks_orders").insert({
-                "ticker": sym,
-                "group_name": "OPTIONS",
-                "rule_code": "OPT_CALL" if right == "C" else "APEX_AUTO",
-                "direction": "sell",
-                "order_type": "market",
-                "limit_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else 0.05,
-                "market_price": round(mark_or_exit_px, 2) if mark_or_exit_px > 0 else 0.05,
-                "shares": qty,
-                "target_band": target_band,
-                "status": "pending",
-                "created_at": now_iso
-            }).execute()
-            log_info("options_api", f"Orden SELL MARKET de cierre para opción {sym} {target_band} ({qty}x) encolada para TWS en stocks_orders")
-        except Exception as o_err:
-            log_warning("options_api", f"Aviso al encolar orden de cierre en stocks_orders: {o_err}")
-
-    # 3. Calcular salida con cotizaciones de mercado
+    mark_or_exit_px = float(pos.get("last_mark_price") or pos.get("entry_debit") or 0.05)
     exit_fill = pe.simulate_exit_fill(pos, quotes_by_contract, eff, reason, adverse=False, now=now_dt)
-
     realized_val = exit_fill.realized_pnl
-    # Asegurar que exit_reason sea válido según el constraint opt_paper_trades_exit_reason_check
     db_reason = "take_profit" if realized_val >= 0 else "stop_loss"
     if reason in ["take_profit", "stop_loss", "manual_simulated", "forced_close_time", "signal_invalidation", "bad_data_close"]:
         db_reason = reason
+
+    qty = int(pos.get("qty") or 1)
+    close_req = request_broker_option_close(
+        sb=sb,
+        pos=pos,
+        qty_to_close=qty,
+        exit_price_est=float(exit_fill.exit_credit or mark_or_exit_px),
+        mapped_reason=db_reason,
+        detailed_reason=reason,
+        detailed_text=f"Cierre manual ({reason})",
+        is_partial=False,
+        group_name="OPTIONS",
+        now_dt=now_dt,
+    )
+    if close_req.get("status") == "closing_pending":
+        updated_plan = dict(pos.get("exit_plan") or {})
+        updated_plan.update({
+            "closing_pending": True,
+            "closing_requested_at": now_iso,
+            "pending_exit_reason": db_reason,
+            "detailed_exit_reason": reason,
+        })
+        return {
+            "ok": True,
+            "status": "closing_pending",
+            "order_enqueued": close_req.get("order_enqueued", False),
+            "realized_pnl": 0.0,
+            "position": {**pos, "exit_plan": updated_plan},
+        }
 
     upd = {
         "status": "closed",
@@ -1154,7 +1154,7 @@ def simulate_exit(position_id: int, payload: dict | None = None, user: dict = ce
     }
     sb.table("opt_paper_trades").update(upd).eq("id", position_id).execute()
 
-    return {"ok": True, "realized_pnl": exit_fill.realized_pnl, "position": {**pos, **upd}}
+    return {"ok": True, "status": "closed", "realized_pnl": exit_fill.realized_pnl, "position": {**pos, **upd}}
 
 
 @router.post("/positions/evaluate-exits")

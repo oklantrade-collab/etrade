@@ -37,7 +37,10 @@ def close_all_open_options(sb=None, reason: str = "forced_close_time") -> Dict[s
 
     log_info("CLOSE_ALL", f"🚨 Iniciando liquidación de {len(open_positions)} posiciones de opciones abiertas...")
 
+    from app.options.broker_sync import request_broker_option_close
+
     closed_positions: List[Dict[str, Any]] = []
+    pending_broker_count = 0
 
     for pos in open_positions:
         pid = pos["id"]
@@ -53,40 +56,24 @@ def close_all_open_options(sb=None, reason: str = "forced_close_time") -> Dict[s
         realized_pnl = round((last_mark - entry_deb) * 100.0 * qty, 2)
         total_rec = round(last_mark * 100.0 * qty, 2)
 
-        # 1. Despachar orden SELL a stocks_orders para ejecución en TWS
-        if sym and strike:
-            opt_tb = f"OPT:{exp}:{strike}:{right}"
-            try:
-                # Comprobar si ya hay una orden sell pendiente en stocks_orders
-                existing_sell = (
-                    sb.table("stocks_orders")
-                    .select("id")
-                    .eq("ticker", sym[:10])
-                    .eq("target_band", opt_tb)
-                    .eq("direction", "sell")
-                    .in_("status", ["pending", "processing"])
-                    .limit(1)
-                    .execute()
-                )
-                if not existing_sell.data:
-                    sb.table("stocks_orders").insert({
-                        "ticker": sym[:10],
-                        "target_band": opt_tb,
-                        "group_name": "OPTIONS",
-                        "rule_code": "APEX_AUTO",
-                        "direction": "sell",
-                        "order_type": "market",
-                        "shares": qty,
-                        "market_price": last_mark,
-                        "limit_price": round(last_mark, 2) if last_mark > 0 else 0.05,
-                        "status": "pending",
-                        "created_at": now_iso
-                    }).execute()
-                    log_info("CLOSE_ALL", f"📤 Orden SELL MARKET enviada a stocks_orders para TWS: {sym} {opt_tb} ({qty}x)")
-            except Exception as e_ord:
-                log_warning("CLOSE_ALL", f"Aviso al encolar orden SELL para {sym}: {e_ord}")
+        close_req = request_broker_option_close(
+            sb=sb,
+            pos=pos,
+            qty_to_close=qty,
+            exit_price_est=last_mark,
+            mapped_reason="forced_close_time",
+            detailed_reason=reason,
+            detailed_text="MARKET_OPEN_LIQUIDATION",
+            is_partial=False,
+            group_name="OPTIONS",
+            now_dt=now_dt,
+        )
+        if close_req.get("status") == "closing_pending":
+            pending_broker_count += 1
+            log_info("CLOSE_ALL", f"⏳ Posición {pid} ({sym} {exp} {strike}{right}) esperando confirmación SELL en TWS.")
+            continue
 
-        # 2. Actualizar estado a 'closed' en opt_paper_trades
+        # 2. Actualizar estado a 'closed' en opt_paper_trades solo si TWS confirmó flat / sin bridge
         try:
             exit_plan = dict(pos.get("exit_plan") or {})
             exit_plan["closed_at"] = now_iso
@@ -129,7 +116,8 @@ def close_all_open_options(sb=None, reason: str = "forced_close_time") -> Dict[s
         tg_text = (
             f"🚨 <b>[eTrade] LIQUIDACIÓN DE TODAS LAS OPCIONES A LA APERTURA</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 <b>Posiciones Cerradas:</b> {len(closed_positions)}\n"
+            f"📦 <b>Posiciones Cerradas (confirmadas):</b> {len(closed_positions)}\n"
+            f"⏳ <b>Pendientes de Confirmación TWS:</b> {pending_broker_count}\n"
             f"{emo} <b>PnL Realizado Estimado:</b> ${pnl_total:+.2f} USD\n"
             f"📋 <b>Motivo:</b> Orden de Cierre de Mercado Programada\n"
             f"🕒 <b>Fecha/Hora UTC:</b> {now_iso}\n\n"
@@ -146,5 +134,6 @@ def close_all_open_options(sb=None, reason: str = "forced_close_time") -> Dict[s
     return {
         "success": True,
         "closed_count": len(closed_positions),
+        "pending_broker_count": pending_broker_count,
         "positions": closed_positions
     }

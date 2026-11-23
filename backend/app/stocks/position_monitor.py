@@ -19,6 +19,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.core.supabase_client import get_supabase
+from app.core.time_utils import parse_iso_utc
+from app.core.bb15m_exhaustion import evaluate_bb15m_post_breakout_exhaustion
 from app.strategy.proactive_exit import evaluate_proactive_exit
 from app.strategy.dynamic_sl_manager import evaluate_sl_action
 from app.analysis.fibonacci_utils import calculate_fibonacci_zone
@@ -46,8 +48,107 @@ def _safe_col(df, col_name: str):
     return None
 
 
+def compute_dynamic_stock_trailing_sl(
+    entry_price: float,
+    current_price: float,
+    highest_price: float = 0.0,
+    current_sl: float = 0.0,
+    atr: float = 0.0,
+    side: str = "long",
+    lowest_price: float = 0.0,
+) -> tuple[float, str]:
+    """
+    Calcula Trailing Stop continuo y estrictamente monotónico para Stocks (LONG y SHORT).
+    Sin zonas muertas entre 0% y +10%; el SL nunca retrocede ni supera el precio actual.
+    """
+    entry_p = float(entry_price or 0.0)
+    cur_p = float(current_price or 0.0)
+    cur_sl_r = round(float(current_sl or 0.0), 2)
+    if entry_p <= 0.0 or cur_p <= 0.0:
+        return cur_sl_r, ""
+
+    is_short = str(side or "long").lower() in ("short", "sell")
+    atr_pct = (float(atr) / cur_p) if (atr and float(atr) > 0.0) else 0.0
+
+    def _trail_band(peak_gain_pct: float) -> float:
+        if peak_gain_pct < 2.0:
+            return min(0.035, max(0.025, 1.5 * atr_pct)) if atr_pct > 0.0 else 0.030
+        if peak_gain_pct < 5.0:
+            return 0.025
+        if peak_gain_pct < 15.0:
+            return 0.020
+        return 0.015
+
+    if not is_short:
+        hi = max(float(highest_price or 0.0), cur_p)
+        peak_gain_pct = ((hi - entry_p) / entry_p) * 100.0
+        trail_pct = _trail_band(peak_gain_pct)
+
+        if peak_gain_pct >= 100.0:
+            profit_floor = max(hi * 0.80, entry_p * (1.0 + (peak_gain_pct * 0.82) / 100.0))
+        elif peak_gain_pct >= 50.0:
+            profit_floor = max(hi * 0.75, entry_p * (1.0 + (peak_gain_pct * 0.78) / 100.0))
+        elif peak_gain_pct >= 15.0:
+            profit_floor = entry_p * (1.0 + (peak_gain_pct * 0.70) / 100.0)
+        elif peak_gain_pct >= 5.0:
+            profit_floor = entry_p * (1.0 + (peak_gain_pct * 0.50) / 100.0)
+        else:
+            profit_floor = 0.0
+
+        raw_cand = max(hi * (1.0 - trail_pct), profit_floor)
+        max_allowed = round(cur_p * 0.995, 2)
+        cand = round(min(raw_cand, max_allowed), 2)
+        if cand > cur_sl_r and cand < cur_p:
+            return cand, f"Dynamic Trail (+{peak_gain_pct:.1f}% pico, -{trail_pct*100:.1f}% -> SL ${cand:.2f})"
+        return cur_sl_r, ""
+
+    lo_base = float(lowest_price or 0.0)
+    lo = min(lo_base, cur_p) if lo_base > 0.0 else cur_p
+    peak_gain_pct = ((entry_p - lo) / entry_p) * 100.0
+    trail_pct = _trail_band(peak_gain_pct)
+
+    profit_ceiling = None
+    if peak_gain_pct >= 100.0:
+        profit_ceiling = min(lo * 1.20, entry_p * (1.0 - (peak_gain_pct * 0.82) / 100.0))
+    elif peak_gain_pct >= 50.0:
+        profit_ceiling = min(lo * 1.25, entry_p * (1.0 - (peak_gain_pct * 0.78) / 100.0))
+    elif peak_gain_pct >= 15.0:
+        profit_ceiling = entry_p * (1.0 - (peak_gain_pct * 0.70) / 100.0)
+    elif peak_gain_pct >= 5.0:
+        profit_ceiling = entry_p * (1.0 - (peak_gain_pct * 0.50) / 100.0)
+
+    raw_cand = min(lo * (1.0 + trail_pct), profit_ceiling) if profit_ceiling is not None else (lo * (1.0 + trail_pct))
+    min_allowed = round(cur_p * 1.005, 2)
+    cand = round(max(raw_cand, min_allowed), 2)
+    if (cur_sl_r <= 0.0 or cand < cur_sl_r) and cand > cur_p:
+        return cand, f"Dynamic Trail SHORT (+{peak_gain_pct:.1f}% pico, +{trail_pct*100:.1f}% -> SL ${cand:.2f})"
+    return cur_sl_r, ""
+
+
 class PositionMonitor:
     """Monitors active stock positions and manages exits."""
+
+    def _eval_bb15m_exhaustion(self, trade: dict, df_15m, is_bullish: bool, current_price: float, age_mins: float) -> dict:
+        cache = getattr(self, "_bb15m_state", None)
+        if cache is None:
+            cache = {}
+            self._bb15m_state = cache
+        pos_key = str(trade.get("id") or trade.get("ticker") or "")
+        st = dict(cache.get(pos_key) or {})
+        if isinstance(trade.get("diagnostics"), dict):
+            for k, v in trade["diagnostics"].items():
+                st.setdefault(k, v)
+        res = evaluate_bb15m_post_breakout_exhaustion(
+            df_15m=df_15m,
+            is_bullish=is_bullish,
+            state=st,
+            current_price=current_price,
+            position_age_minutes=age_mins,
+            asset_type="stock",
+        )
+        if isinstance(res.get("state"), dict):
+            cache[pos_key] = res["state"]
+        return res
 
     async def check_all_positions(self):
         """Main cycle: check every active position."""
@@ -92,15 +193,32 @@ class PositionMonitor:
         ticker = trade["ticker"]
         
         try:
-            # Get real-time price from IB first, fallback to YFinance
+            sb = get_supabase()
+            # 1. Prioridad 1: Precio en tiempo real desde snapshot del broker (ib_broker_portfolio <= 90s)
             current_price = 0.0
             try:
-                from app.data.ib_provider import IBProvider
-                ib_prov = IBProvider()
-                await ib_prov.connect()
-                current_price = await ib_prov.get_current_price(ticker)
-            except Exception as e:
-                log_warning(MODULE, f"IB price fallback for {ticker}: {e}")
+                from app.options.broker_sync import load_broker_portfolio_snapshot
+                b_port, b_age = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
+                if b_port and b_age <= 90.0:
+                    b_entry = b_port.get(ticker.upper()) or {}
+                    b_px = safe_float(b_entry.get("market_price"))
+                    if b_px > 0:
+                        current_price = b_px
+            except Exception:
+                pass
+
+            # 2. Prioridad 2: Conexión IB directa si ya está conectada o en host local
+            if current_price <= 0:
+                try:
+                    import app.data.ib_provider as _ib_mod
+                    ib_host = str(os.getenv("IB_HOST", "127.0.0.1")).strip()
+                    can_try_ib = bool(_ib_mod._ib_instance and _ib_mod._ib_instance.connected) or ib_host in ("127.0.0.1", "localhost")
+                    if can_try_ib:
+                        ib_prov = _ib_mod.IBProvider()
+                        await ib_prov.connect()
+                        current_price = await ib_prov.get_current_price(ticker)
+                except Exception as e:
+                    log_warning(MODULE, f"IB price fallback for {ticker}: {e}")
 
             if current_price <= 0:
                 from app.data.yfinance_provider import YFinanceProvider
@@ -116,20 +234,24 @@ class PositionMonitor:
             if current_price <= 0:
                 return
 
+            is_short = str(trade.get("direction") or trade.get("side") or "long").lower() in ("short", "sell")
             entry_price = safe_float(trade.get("avg_price") or trade.get("entry_price"))
             stop_loss = safe_float(trade.get("stop_loss"))
             target_price = safe_float(trade.get("take_profit"))
-            shares = int(safe_float(trade.get("shares", 0)))
+            shares = abs(int(safe_float(trade.get("shares", 0))))
 
             if entry_price <= 0 or shares <= 0:
                 return
 
             # Calculate unrealized P&L
-            pnl_usd = (current_price - entry_price) * shares
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+            if is_short:
+                pnl_usd = (entry_price - current_price) * shares
+                pnl_pct = ((entry_price - current_price) / entry_price) * 100
+            else:
+                pnl_usd = (current_price - entry_price) * shares
+                pnl_pct = ((current_price - entry_price) / entry_price) * 100
 
             # Update unrealized P&L in DB
-            sb = get_supabase()
             sb.table("stocks_positions").update({
                 "unrealized_pnl": round(pnl_usd, 2),
                 "unrealized_pnl_pct": round(pnl_pct, 2),
@@ -241,6 +363,63 @@ class PositionMonitor:
                 except Exception as rep_err:
                     log_warning(MODULE, f"Error actualizando auto-repair para {ticker}: {rep_err}")
 
+            # ── SOPORTE DEDICADO SHORT EN STOCKS (Trailing Stop descendente y Hard Cut) ──
+            if is_short:
+                panic_threshold_cfg = safe_float(stocks_config.get("sl_wait_threshold") or stocks_config.get("sl_max_loss_hard"), 8.0)
+                if pnl_pct <= -abs(panic_threshold_cfg):
+                    log_warning(MODULE, f"🛑 HARD PANIC CUT SHORT HIT: {ticker} @ ${current_price:.2f} ({pnl_pct:.2f}%).")
+                    await self._close_position(trade, current_price, "hard_panic_cut_exit")
+                    return
+
+                db_lowest = safe_float(trade.get("lowest_price_reached"))
+                lowest = min(db_lowest, current_price) if db_lowest > 0 else current_price
+                if db_lowest <= 0 or current_price < db_lowest:
+                    sb.table("stocks_positions").update({"lowest_price_reached": round(lowest, 4)}).eq("id", trade["id"]).execute()
+                    trade["lowest_price_reached"] = lowest
+
+                cur_sl_s = safe_float(trade.get("stop_loss") or 0.0)
+                if cur_sl_s > 0 and current_price >= cur_sl_s:
+                    close_tag = "trailing_profit_lock" if cur_sl_s < entry_price else "sl_hard_exit_defensive"
+                    log_warning(MODULE, f"🔴 STOP LOSS SHORT HIT: {ticker} @ ${current_price:.2f} >= SL ${cur_sl_s:.2f}")
+                    await self._close_position(trade, current_price, close_tag)
+                    return
+
+                # Agotamiento Post-Bollinger 15m para SHORT (ruptura bajo BB_Lower 15m -> lateral o alcista)
+                try:
+                    import yfinance as yf_s
+                    hist_15m_s = yf_s.Ticker(ticker).history(period="5d", interval="15m")
+                    e_s_dt = parse_iso_utc(trade.get("first_buy_at") or trade.get("entry_time"))
+                    age_s = ((datetime.now(timezone.utc) - e_s_dt).total_seconds() / 60.0) if e_s_dt is not None else 0.0
+                    bb_s_res = self._eval_bb15m_exhaustion(trade, hist_15m_s, False, current_price, age_s)
+                    if bb_s_res.get("should_exit"):
+                        log_warning(MODULE, f"⚡ [BB15M EXHAUSTION SHORT] {ticker} @ ${current_price:.2f} | {bb_s_res.get('reason')}")
+                        await self._close_position(trade, current_price, bb_s_res.get("rule_code") or "STK_BB15M_EXHAUSTION_EXIT")
+                        return
+                except Exception as bb_s_e:
+                    log_debug(MODULE, f"Aviso BB15m SHORT para {ticker}: {bb_s_e}")
+
+                snap_s_res = sb.table("market_snapshot").select("atr").eq("symbol", ticker).limit(1).execute()
+                atr_s = safe_float((snap_s_res.data or [{}])[0].get("atr") or 0.0)
+                dyn_sl_s, dyn_reason_s = compute_dynamic_stock_trailing_sl(
+                    entry_price=entry_price,
+                    current_price=current_price,
+                    current_sl=cur_sl_s,
+                    atr=atr_s,
+                    side="short",
+                    lowest_price=lowest,
+                )
+                if dyn_reason_s and (cur_sl_s <= 0 or dyn_sl_s < cur_sl_s) and dyn_sl_s > current_price:
+                    sb.table("stocks_positions").update({
+                        "stop_loss": dyn_sl_s,
+                        "trailing_sl_price": dyn_sl_s,
+                        "lowest_price_reached": round(lowest, 4),
+                        "sl_type": "trailing_ratchet",
+                        "sl_activation_reason": str(dyn_reason_s)[:100],
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", trade["id"]).execute()
+                    log_info(MODULE, f"🛡️ TRAILING SHORT ACTUALIZADO: {ticker} SL ${cur_sl_s:.2f} -> ${dyn_sl_s:.2f} ({dyn_reason_s})")
+                return
+
             # ── 1.5 AUDITORÍA DE SEGURIDAD DIAGNÓSTICA (AUTO-REPARAR, PRESERVAR POSICIÓN) ──
             from app.stocks.diagnostic_validator import build_position_diagnostics
             snap_res = sb.table("market_snapshot").select("*").eq("symbol", ticker).limit(1).execute()
@@ -268,11 +447,9 @@ class PositionMonitor:
             entry_time_str = trade.get("first_buy_at") or trade.get("entry_time")
             age_mins = 0.0
             if entry_time_str:
-                try:
-                    entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                entry_dt = parse_iso_utc(entry_time_str)
+                if entry_dt is not None:
                     age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
-                except Exception as age_e:
-                    log_debug(MODULE, f"Error calculando age para {ticker}: {age_e}")
 
             # ── MODELO DE SALIDA OPT3 (flag GAP_EXIT_MODEL=OPT3, solo posiciones GAP) ──
             # En OPT3 las salidas las gobierna gap_exit_opt3 (SL duro, TSL 15m al cierre, tramos 25/50/25).
@@ -299,6 +476,16 @@ class PositionMonitor:
             hist_1d = t_obj.history(period="30d", interval="1d")
             hist_15m = t_obj.history(period="5d", interval="15m")
             hist_5m = t_obj.history(period="2d", interval="5m")
+
+            # Agotamiento Post-Bollinger 15m para LONG (ruptura sobre BB_Upper 15m -> lateral o descendente)
+            try:
+                bb_res = self._eval_bb15m_exhaustion(trade, hist_15m, True, current_price, age_mins)
+                if bb_res.get("should_exit"):
+                    log_warning(MODULE, f"⚡ [BB15M EXHAUSTION LONG] {ticker} @ ${current_price:.2f} | {bb_res.get('reason')}")
+                    await self._close_position(trade, current_price, bb_res.get("rule_code") or "STK_BB15M_EXHAUSTION_EXIT")
+                    return
+            except Exception as bb_e:
+                log_debug(MODULE, f"Aviso BB15m LONG para {ticker}: {bb_e}")
             hist_4h = None
             if not hist_1h.empty:
                 try:
@@ -433,13 +620,23 @@ class PositionMonitor:
                 log_info(MODULE, f"⚡ ACTIVANDO SL DINÁMICO: {ticker} @ ${new_sl:.2f}")
 
             if sl_action == 'update_trailing':
-                new_trailing = sl_res['sl_price']
-                sb.table("stocks_positions").update({
-                    "trailing_sl_price": new_trailing,
-                    "highest_price_reached": sl_res.get('new_max'),
-                    "stop_loss": new_trailing # En Stocks protegemos el stop_loss directamente
-                }).eq("id", trade["id"]).execute()
-                log_info(MODULE, f"📈 TRAILING STOP ACTIVO: {ticker} SL movido a ${new_trailing:.2f}")
+                new_trailing = round(safe_float(sl_res.get('sl_price')), 2)
+                cur_sl_now = safe_float(trade.get("stop_loss") or 0.0)
+                max_safe_now = round(current_price * 0.995, 2)
+                if new_trailing > cur_sl_now and new_trailing <= max_safe_now and new_trailing < current_price:
+                    upd_trail = {
+                        "trailing_sl_price": new_trailing,
+                        "stop_loss": new_trailing, # Monotónico: nunca retrocede el SL
+                        "sl_type": "trailing_ratchet",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if sl_res.get('new_max'):
+                        upd_trail["highest_price_reached"] = sl_res.get('new_max')
+                        trade["highest_price_reached"] = sl_res.get('new_max')
+                    sb.table("stocks_positions").update(upd_trail).eq("id", trade["id"]).execute()
+                    trade["stop_loss"] = new_trailing
+                    trade["trailing_sl_price"] = new_trailing
+                    log_info(MODULE, f"📈 TRAILING STOP ACTIVO: {ticker} SL movido a ${new_trailing:.2f}")
 
             # ── MOTOR UNIVERSAL DE TRAILING STOP Y BLOQUEO BOLLINGER PARA STOCKS ──
             # 1. Rastrear incondicionalmente el máximo alcanzado para TODAS las posiciones
@@ -454,15 +651,19 @@ class PositionMonitor:
             proposed_sl = cur_sl
             ratchet_reason = f"Trailing Ratchet (+{peak_gain_pct:.1f}% pico -> SL ${proposed_sl:.2f})"
 
-            # 2. Protección de Ganancia Escalonada (Ratchet Trailing)
-            if peak_gain_pct >= 10.0:
-                proposed_sl = max(proposed_sl, round(entry_price * 1.05, 2))  # Bloquea al menos +5%
-            if peak_gain_pct >= 25.0:
-                proposed_sl = max(proposed_sl, round(entry_price * 1.15, 2))  # Bloquea al menos +15%
-            if peak_gain_pct >= 50.0:
-                proposed_sl = max(proposed_sl, round(highest * 0.75, 2))      # Bloquea al menos 75% del pico
-            if peak_gain_pct >= 100.0:
-                proposed_sl = max(proposed_sl, round(highest * 0.80, 2))      # Bloquea al menos 80% del pico
+            # 2. Trailing Stop Dinámico Continuo (sin zona muerta 0%..10%)
+            atr_snap = safe_float(snap_val.get("atr") or 0.0)
+            dyn_sl, dyn_reason = compute_dynamic_stock_trailing_sl(
+                entry_price=entry_price,
+                current_price=current_price,
+                highest_price=highest,
+                current_sl=cur_sl,
+                atr=atr_snap,
+                side="long",
+            )
+            if dyn_reason and dyn_sl > proposed_sl:
+                proposed_sl = dyn_sl
+                ratchet_reason = dyn_reason
 
             # 2.5 NUEVO: TRAILING STOP ESCALONADO EN 3 ETAPAS (SECCIÓN B.5 & 2C)
             try:
@@ -526,7 +727,7 @@ class PositionMonitor:
                     proposed_sl = max(cur_sl, round(entry_price * 1.15, 2))
                 else:
                     proposed_sl = cur_sl
-            if proposed_sl > cur_sl and proposed_sl < current_price:
+            if proposed_sl > cur_sl and proposed_sl <= round(current_price * 0.995, 2) and proposed_sl < current_price:
                 sb.table("stocks_positions").update({
                     "stop_loss": proposed_sl,
                     "trailing_sl_price": proposed_sl,
@@ -815,29 +1016,43 @@ class PositionMonitor:
 
 
     async def _close_position(self, trade: dict, exit_price: float, exit_reason: str):
-        """Close a position and record in journal."""
+        """Close a position via Broker-First protocol (no local simulated closes when broker holds it or offline)."""
         sb = get_supabase()
         now = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
         ticker = trade["ticker"]
+        is_short = str(trade.get("direction") or trade.get("side") or "long").lower() in ("short", "sell")
+        close_dir = "buy" if is_short else "sell"
         entry_price = safe_float(trade.get("entry_price") or trade.get("avg_price"))
-        shares = int(safe_float(trade.get("shares")))
+        shares = abs(int(safe_float(trade.get("shares"))))
         # Tras cierres parciales (tramos TP) solo queda 'shares_remaining' por vender: evita sobre-vender el original.
-        _rem = safe_float(trade.get("shares_remaining"))
+        _rem = abs(safe_float(trade.get("shares_remaining")))
         if _rem > 0:
             shares = min(shares, int(_rem)) if shares > 0 else int(_rem)
 
-        pnl_usd = round((exit_price - entry_price) * shares, 2)
-        pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
+        if is_short:
+            pnl_usd = round((entry_price - exit_price) * shares, 2)
+            pnl_pct = round(((entry_price - exit_price) / entry_price) * 100, 2) if entry_price > 0 else 0
+        else:
+            pnl_usd = round((exit_price - entry_price) * shares, 2)
+            pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
         result = "win" if pnl_usd > 0 else "loss"
 
         try:
-            from app.stocks.stocks_order_executor import is_ib_bridge_alive
-            bridge_active = is_ib_bridge_alive()
+            # Solo cerrar directamente si un snapshot TWS fresco (<=120s) confirma explícitamente 0 acciones en broker
+            broker_flat_confirmed = False
+            try:
+                from app.options.broker_sync import load_broker_portfolio_snapshot
+                portfolio, age_sec = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
+                if portfolio is not None and age_sec <= 120.0:
+                    b_pos = portfolio.get(ticker.upper())
+                    b_shares = abs(float(b_pos.get("shares") or 0.0)) if b_pos else 0.0
+                    broker_flat_confirmed = (b_shares <= 0.0)
+            except Exception:
+                broker_flat_confirmed = False
 
-            if bridge_active:
-                # Si el puente IBKR está activo: NO cerrar inmediatamente para evitar cierres ficticios.
-                # Se marca 'closing' y se envía la orden 'pending' a TWS. El cierre real en Supabase
-                # y en trades_journal se ejecutará cuando el Broker confirme la ejecución.
+            if not broker_flat_confirmed:
+                # Protocolo Broker-First: marcar 'closing' y encolar orden a TWS sin inventar cierre local
                 sb.table("stocks_positions").update({
                     "status": "closing",
                     "current_price": exit_price,
@@ -871,17 +1086,25 @@ class PositionMonitor:
                     else:
                         sell_rule = "STOP_LOSS_INITIAL"
 
-                # DEDUPLICACIÓN: Comprobar si ya existe una orden de venta pendiente para este ticker
+                # DEDUPLICACIÓN: Comprobar si ya existe una orden de cierre fresca (<120s) para este ticker
                 try:
                     existing_so = sb.table("stocks_orders")\
-                        .select("id")\
+                        .select("id, created_at")\
                         .eq("ticker", ticker)\
-                        .eq("direction", "sell")\
-                        .in_("status", ["pending", "processing"])\
-                        .limit(1)\
+                        .eq("direction", close_dir)\
+                        .in_("status", ["pending", "processing", "submitted"])\
+                        .limit(5)\
                         .execute()
-                    if existing_so.data:
-                        log_warning(MODULE, f"⛔ [DEDUPLICATE] Orden SELL para {ticker} ya encolada (ID #{existing_so.data[0]['id']}). Omitiendo duplicado.")
+                    has_fresh = False
+                    for eo in (existing_so.data or []):
+                        c_str = eo.get("created_at")
+                        if c_str:
+                            c_dt = parse_iso_utc(c_str)
+                            if c_dt is not None and (now_dt - c_dt).total_seconds() <= 120.0:
+                                has_fresh = True
+                                break
+                    if has_fresh:
+                        log_warning(MODULE, f"⛔ [DEDUPLICATE] Orden {close_dir.upper()} para {ticker} ya encolada. Omitiendo duplicado.")
                         return
                 except Exception:
                     pass
@@ -891,50 +1114,50 @@ class PositionMonitor:
                     "group_name": trade.get("group_name", "STOCKS"),
                     "rule_code": sell_rule,
                     "order_type": "market",
-                    "direction": "sell",
+                    "direction": close_dir,
                     "shares": shares,
                     "market_price": exit_price,
                     "status": "pending",
                     "created_at": now
                 }).execute()
-                log_info(MODULE, f"📡 [IBKR BRIDGE] Orden SELL enviada a APOLO para liquidar {shares}x {ticker} en TWS Paper (regla: {sell_rule}). Posición en espera de confirmación broker.")
+                log_info(MODULE, f"⏳ [CIERRE PENDIENTE BROKER] Orden {close_dir.upper()} enviada a APOLO para liquidar {shares}x {ticker} ({sell_rule}). Esperando fill en TWS.")
+                return
 
-            else:
-                # Modo simulación puro (sin puente activo)
-                journal_entry = {
-                    "ticker": ticker,
-                    "shares": shares,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "entry_date": trade.get("entry_time") or trade.get("first_buy_at"),
-                    "exit_date": now,
-                    "pnl_usd": pnl_usd,
-                    "pnl_pct": pnl_pct,
-                    "result": result,
-                    "exit_reason": str(exit_reason)[:50] if exit_reason else "closed",
-                    "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
-                }
-                sb.table("trades_journal").insert(journal_entry).execute()
+            # Solo si el broker TWS ya confirmó 0 acciones en snapshot fresco: consolidar cierre en DB
+            journal_entry = {
+                "ticker": ticker,
+                "shares": shares,
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "entry_date": trade.get("entry_time") or trade.get("first_buy_at"),
+                "exit_date": now,
+                "pnl_usd": pnl_usd,
+                "pnl_pct": pnl_pct,
+                "result": result,
+                "exit_reason": str(exit_reason)[:50] if exit_reason else "closed",
+                "trade_type": str(trade.get("strategy") or trade.get("rule_code") or "V5_INDUSTRIAL")[:20]
+            }
+            sb.table("trades_journal").insert(journal_entry).execute()
 
-                sb.table("stocks_positions").update({
-                    "status": "closed",
-                    "current_price": exit_price,
-                    "unrealized_pnl": pnl_usd,
-                    "unrealized_pnl_pct": pnl_pct,
-                    "updated_at": now
-                }).eq("id", trade["id"]).execute()
+            sb.table("stocks_positions").update({
+                "status": "closed",
+                "current_price": exit_price,
+                "unrealized_pnl": pnl_usd,
+                "unrealized_pnl_pct": pnl_pct,
+                "sl_close_reason": str(exit_reason)[:50],
+                "updated_at": now
+            }).eq("id", trade["id"]).execute()
 
-                try:
-                    from app.core.capital_manager import register_realized_pnl
-                    register_realized_pnl('stocks', pnl_usd)
-                except Exception as cap_e:
-                    log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
+            try:
+                from app.core.capital_manager import register_realized_pnl
+                register_realized_pnl('stocks', pnl_usd)
+            except Exception as cap_e:
+                log_error(MODULE, f"Error registrando profit acumulado: {cap_e}")
 
             emoji = "🟢" if result == "win" else "🔴"
-            log_info(MODULE, f"{emoji} CLOSED: {ticker} | {exit_reason} | "
+            log_info(MODULE, f"{emoji} CLOSED (BROKER FLAT): {ticker} | {exit_reason} | "
                              f"P&L: ${pnl_usd:+.2f} ({pnl_pct:+.1f}%)")
 
-            # 4. Send Telegram notification
             await self._notify_close(ticker, result, pnl_usd, pnl_pct, exit_reason)
 
         except Exception as e:

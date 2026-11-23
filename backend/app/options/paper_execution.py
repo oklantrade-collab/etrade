@@ -8,11 +8,12 @@ cotizaciones reales persistidas:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.logger import log_info, log_warning
 from app.core.market_hours import is_market_open
+from app.core.time_utils import parse_iso_utc
 from app.options import strategies as st
 
 MODULE = "PAPER_EXECUTION"
@@ -298,6 +299,34 @@ def mark_position_to_market(position: dict[str, Any],
     }
 
 
+def _is_ib_bridge_alive_sb(sb, max_age_sec: float = 180.0) -> bool:
+    """Comprueba usando el cliente Supabase dado si el bridge APOLO está activo."""
+    try:
+        res = sb.table("stocks_config").select("value").eq("key", "ib_bridge_heartbeat").limit(1).execute()
+        rows = getattr(res, "data", None)
+        if not isinstance(rows, list) or not rows:
+            return False
+        val = rows[0].get("value") if isinstance(rows[0], dict) else None
+        if not isinstance(val, str) or not val:
+            return False
+        import ast, json
+        try:
+            data = json.loads(val)
+        except Exception:
+            data = ast.literal_eval(val)
+        if not isinstance(data, dict) or not data.get("connected"):
+            return False
+        ts_str = data.get("timestamp")
+        if not ts_str:
+            return False
+        ts = parse_iso_utc(ts_str)
+        if ts is None:
+            return False
+        return (datetime.now(timezone.utc) - ts).total_seconds() <= max_age_sec
+    except Exception:
+        return False
+
+
 def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str, Any],
                                         und: dict[str, Any] | None = None,
                                         now_dt: datetime | None = None) -> dict[str, Any] | None:
@@ -306,6 +335,10 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     y despachando las piernas de la orden a stocks_orders para que el puente
     de Interactive Brokers (ib_bridge_worker / TWS) las ejecute en el broker.
     """
+    from app.options.warrior_momentum_options import is_warrior_options_golden_window, MAX_CONTRACTS_PER_SYMBOL
+    from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+    from app.options.order_execution_plan import snap_option_tick
+
     now_dt = now_dt or datetime.now(timezone.utc)
     is_open = is_market_open()
     market_open = is_open[0] if isinstance(is_open, tuple) else bool(is_open)
@@ -313,10 +346,71 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
         log_info(MODULE, f"Mercado cerrado. No se ejecutan nuevas posiciones de opciones para candidata {cand.get('id')}")
         return None
 
+    # 0.A Ventana de Oro Única (09:35-11:30 ET)
+    if eff.get("enforce_golden_window", True):
+        in_win, win_msg = is_warrior_options_golden_window(now_dt)
+        if not in_win:
+            log_info(MODULE, f"⏸️ [PAPER EXEC BLOCKED] Fuera de Ventana de Oro 09:35-11:30 ET: {win_msg}")
+            return None
+
     cid = cand["id"]
     uid = cand.get("underlying_id")
+    sym_check = str((und or {}).get("symbol") or cand.get("symbol") or "").upper().strip()
+    cand_dir_raw = str(cand.get("direction") or cand.get("strategy_type") or "").lower()
+    opt_dir = "CALL" if ("call" in cand_dir_raw or cand_dir_raw == "bullish") else "PUT"
 
-    # 0. Rechazar candidatas obsoletas (de días anteriores) o con vencimiento 0DTE
+    # 0.B Disyuntor Diario Global & Cooldown
+    try:
+        from app.core.circuit_breaker import can_open_new_trade
+        if sym_check:
+            can_open, cb_reason = can_open_new_trade(sym_check, sb=sb)
+            if not can_open:
+                log_warning(MODULE, f"⛔ [PAPER EXEC] Compra bloqueada por Disyuntor para {sym_check}: {cb_reason}")
+                return None
+    except Exception:
+        pass
+
+    try:
+        from app.options.exit_engine import is_ticker_in_options_cooldown
+        if sym_check:
+            in_cd, cd_msg = is_ticker_in_options_cooldown(sym_check, opt_dir)
+            if in_cd:
+                log_info(MODULE, f"⏸️ [PAPER EXEC] Ticker {sym_check} ({opt_dir}) en cooldown: {cd_msg}")
+                return None
+    except Exception:
+        pass
+
+    # 0.C Veto Macro Diario SPY/QQQ 1D para CALLs
+    if opt_dir == "CALL":
+        try:
+            from app.core.structural_regime_engine import evaluate_macro_daily_bias
+            macro_bias = evaluate_macro_daily_bias()
+            if macro_bias.get("veto_calls"):
+                log_warning(MODULE, f"⛔ [PAPER EXEC] CALL bloqueado para {sym_check}: {macro_bias.get('reason')}")
+                return None
+        except Exception:
+            pass
+
+    # 0.D Filtro Anti-Clímax RSI 1H al entrar (PUT <= 20 / CALL >= 80)
+    rsi_1h_raw = (
+        cand.get("rsi_1h")
+        or (cand.get("metrics") or {}).get("rsi_1h")
+        or (cand.get("exit_plan") or {}).get("rsi_1h")
+        or (und or {}).get("rsi_1h")
+    )
+    if rsi_1h_raw is not None:
+        try:
+            rsi_1h_v = float(rsi_1h_raw)
+            if opt_dir == "PUT" and rsi_1h_v <= 20.0:
+                log_info(MODULE, f"⛔ [PAPER EXEC] PUT bloqueado por sobreventa extrema (RSI 1H={rsi_1h_v:.1f} <= 20)")
+                return None
+            if opt_dir == "CALL" and rsi_1h_v >= 80.0:
+                log_info(MODULE, f"⛔ [PAPER EXEC] CALL bloqueado por sobrecompra extrema (RSI 1H={rsi_1h_v:.1f} >= 80)")
+                return None
+        except (TypeError, ValueError):
+            pass
+
+    # 0.E Rechazar candidatas obsoletas (de días anteriores) o con vencimiento 0DTE
     today_iso = now_dt.date().isoformat()
     cand_created = str(cand.get("created_at") or "")[:10]
     cand_expiry = str(cand.get("expiry") or "")[:10]
@@ -329,7 +423,6 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
 
     # 1. Comprobar si ya existe posición abierta para esta candidata o subyacente en la misma dirección
     try:
-        sym_check = und.get("symbol") or cand.get("symbol") or ""
         if sym_check:
             existing = sb.table("opt_paper_trades").select("*").eq("symbol", sym_check).eq("direction", cand.get("direction")).eq("status", "open").execute().data
             if existing:
@@ -337,8 +430,8 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
             # Si ya se envió una orden hoy para este símbolo en los últimos 30 minutos, evitar bucle de órdenes repetidas
             recent_ord = sb.table("stocks_orders").select("id, created_at").eq("ticker", sym_check[:10]).eq("direction", "buy").order("created_at", desc=True).limit(1).execute().data
             if recent_ord and recent_ord[0].get("created_at"):
-                o_dt = datetime.fromisoformat(str(recent_ord[0]["created_at"]).replace("Z", "+00:00"))
-                if (now_dt - o_dt).total_seconds() < 1800.0:
+                o_dt = parse_iso_utc(recent_ord[0]["created_at"])
+                if o_dt is not None and (now_dt - o_dt).total_seconds() < 1800.0:
                     return None
         existing_cand = sb.table("opt_paper_trades").select("*").eq("candidate_id", cid).eq("status", "open").execute().data
         if existing_cand:
@@ -360,9 +453,12 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
     ctx = aduana.static_context(uid, event_flags, underlying=und)
     ctx.now = now_dt
 
-    # Cargar posiciones abiertas reales para evaluar límite de capital de Settings/Opciones
+    # Cargar posiciones abiertas reales para evaluar límite de capital y cupo de contratos
+    open_rows = []
     try:
         open_rows = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
+        if not isinstance(open_rows, list):
+            open_rows = []
         current_open_risk = sum(float(p.get("max_loss_total") or p.get("entry_total_invested") or 0.0) for p in open_rows)
         max_capital = float(eff.get("max_open_risk_usd", 5000.0))
         cand_max_loss = float(cand.get("max_loss_total") or 0.0)
@@ -379,53 +475,101 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
             for p in open_rows
         ]
     except Exception:
-        pass
+        open_rows = []
 
     aduana_res = aduana.validate_entry(cand, ctx, eff)
     if not aduana_res.approved:
         return None
 
-    fill_res = simulate_entry_fill(cand, None, eff, now_dt)
-    sym = und.get("symbol") or cand.get("symbol") or "UNKNOWN"
-    qty = cand.get("qty") or 1
-
-    pos_data = {
-        "candidate_id": cid,
-        "underlying_id": uid,
-        "symbol": sym,
-        "strategy_type": cand["strategy_type"],
-        "direction": cand["direction"],
-        "status": "open",
-        "qty": qty,
-        "expiry": cand["expiry"],
-        "entry_time": fill_res.entry_time,
-        "entry_debit": fill_res.entry_debit,
-        "entry_fills": fill_res.entry_fills,
-        "entry_costs": fill_res.entry_costs,
-        "entry_total_invested": fill_res.entry_total_invested,
-        "max_loss_total": float(cand.get("max_loss_total") or fill_res.entry_total_invested),
-        "max_profit_total": (float(cand["max_profit_contract"]) * qty) if cand.get("max_profit_contract") else None,
-        "breakeven": cand.get("breakeven"),
-        "unrealized_pnl": 0.0,
-        "last_mark_price": fill_res.entry_debit,
-        "last_mark_at": fill_res.entry_time,
-        "exit_plan": cand.get("exit_plan") or {},
-        "model_version": MODEL_VERSION,
-        "settings_version": int(eff.get("config_version") or 1),
-    }
-
-    try:
-        inserted = sb.table("opt_paper_trades").insert(pos_data).execute().data[0]
-    except Exception:
+    sym = str(und.get("symbol") or cand.get("symbol") or "UNKNOWN").upper()
+    open_sym_qty = sum(int(p.get("qty") or 1) for p in open_rows if str(p.get("symbol") or "").upper() == sym)
+    if open_sym_qty >= MAX_CONTRACTS_PER_SYMBOL:
+        log_info(MODULE, f"⛔ [PAPER EXEC] Límite Anti-Stacking para {sym}: {open_sym_qty}/{MAX_CONTRACTS_PER_SYMBOL} contratos ya abiertos.")
         return None
+
+    # Evaluar Structural Regime & ADUANA Gatekeeper si está habilitado
+    if eff.get("enforce_options_gatekeeper", True):
+        try:
+            u_px = float(und.get("price") or cand.get("underlying_price") or 0.0)
+            if u_px > 0:
+                from app.core.structural_regime_engine import evaluate_structural_regime
+                st_reg = evaluate_structural_regime(sym, u_px)
+                if opt_dir == "CALL" and not st_reg.get("can_enter_call", True):
+                    log_info(MODULE, f"⛔ [PAPER EXEC] {sym} CALL bloqueado por Régimen Estructural: {st_reg.get('call_veto_reason')}")
+                    return None
+                if opt_dir == "PUT" and not st_reg.get("can_enter_put", True):
+                    log_info(MODULE, f"⛔ [PAPER EXEC] {sym} PUT bloqueado por Régimen Estructural: {st_reg.get('put_veto_reason')}")
+                    return None
+        except Exception:
+            pass
+        try:
+            u_px = float(und.get("price") or cand.get("underlying_price") or 0.0)
+            if u_px > 0:
+                from app.options.aduana_gap_runner_options import fetch_and_evaluate_options_gatekeeper
+                gate = fetch_and_evaluate_options_gatekeeper(sym, opt_dir, u_px)
+                if not gate.get("approved", True):
+                    log_info(MODULE, f"⛔ [PAPER EXEC] {sym} ({opt_dir}) bloqueado por ADUANA Gatekeeper: {gate.get('reason')}")
+                    return None
+        except Exception:
+            pass
+
+    fill_res = simulate_entry_fill(cand, None, eff, now_dt)
+
+    # Tope estricto de Settings ("Riesgo máximo por operación" = $800) y MAX_CONTRACTS_PER_SYMBOL = 3
+    max_risk_usd = get_effective_max_risk_per_trade_usd(sb, eff)
+    qty = min(MAX_CONTRACTS_PER_SYMBOL - open_sym_qty, max(1, int(cand.get("qty") or 1)))
+    unit_cost = float(fill_res.entry_debit or cand.get("entry_debit") or 0.0) * 100.0
+    if unit_cost > max_risk_usd + 1e-9:
+        log_warning(MODULE, f"⛔ [PAPER EXEC] {sym} rechazado: 1 contrato (${unit_cost:.2f}) excede Riesgo máximo por operación (${max_risk_usd:.2f}).")
+        return None
+    if unit_cost > 0 and (unit_cost * qty) > max_risk_usd + 1e-9:
+        qty = max(1, min(qty, int(max_risk_usd // unit_cost)))
+        cand_adj = dict(cand, qty=qty)
+        fill_res = simulate_entry_fill(cand_adj, None, eff, now_dt)
+
+    # Con puente IBKR activo: protocolo Broker-First estricto (despachar BUY a TWS y crear en opt_paper_trades tras fill)
+    bridge_live = _is_ib_bridge_alive_sb(sb)
+    inserted = None
+    if not bridge_live:
+        pos_data = {
+            "candidate_id": cid,
+            "underlying_id": uid,
+            "symbol": sym,
+            "strategy_type": cand["strategy_type"],
+            "direction": cand["direction"],
+            "status": "open",
+            "qty": qty,
+            "expiry": cand["expiry"],
+            "entry_time": fill_res.entry_time,
+            "entry_debit": fill_res.entry_debit,
+            "entry_fills": fill_res.entry_fills,
+            "entry_costs": fill_res.entry_costs,
+            "entry_total_invested": fill_res.entry_total_invested,
+            "max_loss_total": float(cand.get("max_loss_total") or fill_res.entry_total_invested),
+            "max_profit_total": (float(cand["max_profit_contract"]) * qty) if cand.get("max_profit_contract") else None,
+            "breakeven": cand.get("breakeven"),
+            "unrealized_pnl": 0.0,
+            "last_mark_price": fill_res.entry_debit,
+            "last_mark_at": fill_res.entry_time,
+            "exit_plan": cand.get("exit_plan") or {},
+            "model_version": MODEL_VERSION,
+            "settings_version": int(eff.get("config_version") or 1),
+        }
+
+        try:
+            inserted = sb.table("opt_paper_trades").insert(pos_data).execute().data[0]
+        except Exception:
+            return None
 
     # Despachar las piernas de la orden a stocks_orders para ejecución en TWS / IB Bridge
     exp_compact = (cand.get("expiry") or "20261026").replace("-", "")[:8]
+    expires_iso = (now_dt + timedelta(seconds=90)).isoformat()
     for f in fill_res.entry_fills:
         stk = f.get("strike")
         rgt = f.get("right")
         side = f.get("side") or "buy"
-        px = f.get("fill_price") or 0.0
+        px = float(f.get("fill_price") or 0.0)
+        lmt_px = snap_option_tick(px, mode="nearest") if px > 0 else 0.05
         opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
         try:
             sb.table("stocks_orders").insert({
@@ -437,11 +581,27 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
                 "direction": side,
                 "shares": qty,
                 "market_price": px,
-                "limit_price": round(px, 2),
+                "limit_price": lmt_px,
                 "status": "pending",
+                "expires_at": expires_iso,
                 "created_at": fill_res.entry_time,
             }).execute()
         except Exception:
             pass
 
-    return inserted
+    if inserted is not None:
+        return inserted
+
+    return {
+        "status": "order_dispatched",
+        "candidate_id": cid,
+        "symbol": sym,
+        "strategy_type": cand["strategy_type"],
+        "direction": cand["direction"],
+        "qty": qty,
+        "expiry": cand["expiry"],
+        "entry_debit": fill_res.entry_debit,
+        "entry_total_invested": fill_res.entry_total_invested,
+        "max_loss_total": float(cand.get("max_loss_total") or fill_res.entry_total_invested),
+        "max_profit_total": (float(cand["max_profit_contract"]) * qty) if cand.get("max_profit_contract") else None,
+    }

@@ -747,199 +747,217 @@ async def check_subprocesses_safety(supabase) -> dict:
     forex_checks = {}
     crypto_checks = {}
     pos_monitor_mem_alive = check_worker_alive('position_monitor')
-    try:
-        # Check 2.1: Heartbeat de forex_worker y horario de mercado
-        from app.core.market_hours import is_forex_market_open
-        fx_open = is_forex_market_open()
-        forex_worker_mem_alive = check_worker_alive('forex_worker')
+    from app.core.config import is_forex_enabled, is_crypto_enabled
+    forex_on = is_forex_enabled(supabase)
+    crypto_on = is_crypto_enabled(supabase)
+
+    if not forex_on:
+        forex_checks = {'suspended': True}
+        forex_failed = False
+    else:
+        try:
+            # Check 2.1: Heartbeat de forex_worker y horario de mercado
+            from app.core.market_hours import is_forex_market_open, get_nyc_now
+            fx_open = is_forex_market_open()
+            nyc_now = get_nyc_now()
+            # Periodo de gracia de 20 min tras la apertura semanal del domingo (17:00-17:20 NYC)
+            fx_opening_grace = (nyc_now.weekday() == 6 and nyc_now.hour == 17 and nyc_now.minute < 20)
+            fx_check_active = fx_open and not fx_opening_grace
+            forex_worker_mem_alive = check_worker_alive('forex_worker')
+            
+            # Check 2.2: Frescura de datos en snapshot (Feed Price)
+            forex_symbols = ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY']
+            snap_res = supabase.table('market_snapshot').select('symbol, price, updated_at, atr, basis').in_('symbol', forex_symbols).execute()
+            
+            snaps = {r['symbol']: r for r in snap_res.data} if snap_res and snap_res.data else {}
+            
+            stale_forex = False
+            indicators_crashed_forex = False
+            if fx_check_active:
+                for sym in forex_symbols:
+                    s_data = snaps.get(sym)
+                    if not s_data:
+                        stale_forex = True
+                        continue
+                    
+                    ts_str = s_data.get('updated_at')
+                    if ts_str:
+                        ts = _safe_parse_iso(ts_str)
+                        if (now - ts).total_seconds() > 900: # 15 minutos
+                            stale_forex = True
+                    else:
+                        stale_forex = True
+                        
+                    # Check 2.5: Indicadores Adaptativos (basis)
+                    basis_val = float(s_data.get('basis') or s_data.get('price') or 0)
+                    if basis_val <= 0:
+                        indicators_crashed_forex = True
+            else:
+                # Fin de semana / mercado cerrado: no llegan ticks, feed se considera normal en pausa
+                stale_forex = False
+                indicators_crashed_forex = False
+            
+            # Check 2.3: Integridad de Stop Loss en posiciones abiertas (exceptuando si EREP está activo o son de ApexEma/QSHR/Hot)
+            pos_res = supabase.table('forex_positions').select('id, symbol, sl_price, tp_price, erep_active, erep_phase, rule_code').eq('status', 'open').execute()
+            open_pos_list = pos_res.data or []
+            
+            pos_missing_sl_forex = False
+            for pos in open_pos_list:
+                if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
+                    continue
+                rule_c = str(pos.get('rule_code') or '')
+                if any(k in rule_c for k in ('ApexEma', 'Manual', 'MANUAL', 'QSHR', 'Qshr', 'qshr', 'Hot', 'HOT', 'Bb33', 'Aa33', 'Bb13', 'Aa13', 'Bb21', 'Aa21', 'Bb25', 'Aa61', 'FLIP', 'HEDGE', 'BOOSTER', 'cTrader_Direct', 'EXTERNAL_ICMARKETS')):
+                    continue
+                sl = float(pos.get('sl_price') or 0)
+                if sl <= 0:
+                    sym = pos.get('symbol', 'EURUSD')
+                    entry_p = float(pos.get('entry_price') or 0)
+                    side_str = str(pos.get('side', 'long')).lower()
+                    pip_sz = 0.01 if sym in ('USDJPY', 'XAUUSD') else 0.0001
+                    if entry_p > 0:
+                        auto_sl = entry_p - (25 * pip_sz) if side_str in ('long', 'buy') else entry_p + (25 * pip_sz)
+                        try:
+                            supabase.table('forex_positions').update({'sl_price': round(auto_sl, 5)}).eq('id', pos['id']).execute()
+                            log_info('SAFETY', f"Auto-asignado Stop Loss preventivo para {sym} (ID {pos['id']}): {auto_sl:.5f}")
+                            continue
+                        except Exception:
+                            pass
+                    pos_missing_sl_forex = True
+                    
+            # Consolidar Checks de Forex
+            forex_checks['worker_heartbeat'] = (forex_worker_mem_alive or not stale_forex) if fx_check_active else True
+            forex_checks['feed_freshness'] = (not stale_forex) if fx_check_active else True
+            forex_checks['stop_loss_integrity'] = not pos_missing_sl_forex
+            forex_checks['adaptive_indicators'] = not indicators_crashed_forex
+            forex_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive if fx_check_active else True
+            
+            # Check 2.4: Integridad del SLVM (Modo Recuperación)
+            forex_checks['slvm_integrity'] = True
+            
+        except Exception as e:
+            err_str = str(e).lower()
+            if "402" in err_str or "quota" in err_str or "restricted" in err_str or "spend caps" in err_str:
+                trigger_db_circuit_breaker(str(e))
+                return {'forex_blocked': False, 'crypto_blocked': False}
+            log_error('SAFETY', f"Error ejecutando checklist de FOREX: {e}")
+            forex_checks['system_error'] = False
+            
+        # Calcular resultado Forex
+        forex_failed = any(v is False for v in forex_checks.values())
         
-        # Check 2.2: Frescura de datos en snapshot (Feed Price)
-        forex_symbols = ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY']
-        snap_res = supabase.table('market_snapshot').select('symbol, price, updated_at, atr, basis').in_('symbol', forex_symbols).execute()
-        
-        snaps = {r['symbol']: r for r in snap_res.data} if snap_res and snap_res.data else {}
-        
-        stale_forex = False
-        indicators_crashed_forex = False
-        if fx_open:
-            for sym in forex_symbols:
-                s_data = snaps.get(sym)
+        # ── EMERGENCY GUARDS HOOK (FOREX) ──
+        from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
+        was_forex_blocked = check_db_safety_block('forex_futures')
+        if forex_failed and not was_forex_blocked:
+            # Acaba de entrar en emergencia (solo si el mercado Forex está abierto)
+            if fx_open:
+                import asyncio
+                asyncio.create_task(trigger_emergency_protection('forex_futures'))
+        elif not forex_failed and was_forex_blocked:
+            # Acaba de salir de emergencia
+            import asyncio
+            asyncio.create_task(restore_emergency_protection('forex_futures'))
+
+        set_forex_safety_block(forex_failed)
+        update_db_safety_block('forex_futures', forex_failed)
+    
+    # ────────────────────────────────────────────────────────────────
+    # CRYPTO SAFETY CHECKLIST
+    # ────────────────────────────────────────────────────────────────
+    if not crypto_on:
+        crypto_checks = {'suspended': True}
+        crypto_failed = False
+    else:
+        try:
+            # Check 1.1: Heartbeat de crypto_scheduler
+            crypto_worker_mem_alive = check_worker_alive('crypto_scheduler')
+            
+            # Check 1.2: Frescura de datos en snapshot (Feed Price)
+            crypto_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
+            snap_res_crypto = supabase.table('market_snapshot').select('symbol, price, updated_at, atr, basis').in_('symbol', crypto_symbols).execute()
+            
+            snaps_crypto = {r['symbol']: r for r in snap_res_crypto.data} if snap_res_crypto and snap_res_crypto.data else {}
+            
+            stale_crypto = False
+            indicators_crashed_crypto = False
+            stale_count_crypto = 0
+            for sym in crypto_symbols:
+                s_data = snaps_crypto.get(sym)
                 if not s_data:
-                    stale_forex = True
+                    stale_count_crypto += 1
                     continue
                 
                 ts_str = s_data.get('updated_at')
                 if ts_str:
                     ts = _safe_parse_iso(ts_str)
-                    if (now - ts).total_seconds() > 900: # 15 minutos
-                        stale_forex = True
+                    if (now - ts).total_seconds() > 1800: # V6: 30 minutos (antes: 15 min) - tolerancia para ciclos crypto
+                        stale_count_crypto += 1
                 else:
-                    stale_forex = True
+                    stale_count_crypto += 1
                     
-                # Check 2.5: Indicadores Adaptativos (basis)
+                # Check 1.4: Indicadores Adaptativos (basis)
                 basis_val = float(s_data.get('basis') or s_data.get('price') or 0)
                 if basis_val <= 0:
-                    indicators_crashed_forex = True
-        else:
-            # Fin de semana / mercado cerrado: no llegan ticks, feed se considera normal en pausa
-            stale_forex = False
-            indicators_crashed_forex = False
-        
-        # Check 2.3: Integridad de Stop Loss en posiciones abiertas (exceptuando si EREP está activo o son de ApexEma/QSHR/Hot)
-        pos_res = supabase.table('forex_positions').select('id, symbol, sl_price, tp_price, erep_active, erep_phase, rule_code').eq('status', 'open').execute()
-        open_pos_list = pos_res.data or []
-        
-        pos_missing_sl_forex = False
-        for pos in open_pos_list:
-            if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
-                continue
-            rule_c = str(pos.get('rule_code') or '')
-            if any(k in rule_c for k in ('ApexEma', 'Manual', 'MANUAL', 'QSHR', 'Qshr', 'qshr', 'Hot', 'HOT', 'Bb33', 'Aa33', 'Bb13', 'Aa13', 'Bb21', 'Aa21', 'Bb25', 'Aa61', 'FLIP', 'HEDGE', 'BOOSTER', 'cTrader_Direct', 'EXTERNAL_ICMARKETS')):
-                continue
-            sl = float(pos.get('sl_price') or 0)
-            if sl <= 0:
-                sym = pos.get('symbol', 'EURUSD')
-                entry_p = float(pos.get('entry_price') or 0)
-                side_str = str(pos.get('side', 'long')).lower()
-                pip_sz = 0.01 if sym in ('USDJPY', 'XAUUSD') else 0.0001
-                if entry_p > 0:
-                    auto_sl = entry_p - (25 * pip_sz) if side_str in ('long', 'buy') else entry_p + (25 * pip_sz)
-                    try:
-                        supabase.table('forex_positions').update({'sl_price': round(auto_sl, 5)}).eq('id', pos['id']).execute()
-                        log_info('SAFETY', f"Auto-asignado Stop Loss preventivo para {sym} (ID {pos['id']}): {auto_sl:.5f}")
-                        continue
-                    except Exception:
-                        pass
-                pos_missing_sl_forex = True
-                
-        # Consolidar Checks de Forex
-        forex_checks['worker_heartbeat'] = (forex_worker_mem_alive or not stale_forex) if fx_open else True
-        forex_checks['feed_freshness'] = (not stale_forex) if fx_open else True
-        forex_checks['stop_loss_integrity'] = not pos_missing_sl_forex
-        forex_checks['adaptive_indicators'] = not indicators_crashed_forex
-        forex_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive if fx_open else True
-        
-        # Check 2.4: Integridad del SLVM (Modo Recuperación)
-        forex_checks['slvm_integrity'] = True
-        
-    except Exception as e:
-        err_str = str(e).lower()
-        if "402" in err_str or "quota" in err_str or "restricted" in err_str or "spend caps" in err_str:
-            trigger_db_circuit_breaker(str(e))
-            return {'forex_blocked': False, 'crypto_blocked': False}
-        log_error('SAFETY', f"Error ejecutando checklist de FOREX: {e}")
-        forex_checks['system_error'] = False
-        
-    # Calcular resultado Forex
-    forex_failed = any(v is False for v in forex_checks.values())
-    
-    # ── EMERGENCY GUARDS HOOK (FOREX) ──
-    from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
-    was_forex_blocked = check_db_safety_block('forex_futures')
-    if forex_failed and not was_forex_blocked:
-        # Acaba de entrar en emergencia (solo si el mercado Forex está abierto)
-        if fx_open:
-            import asyncio
-            asyncio.create_task(trigger_emergency_protection('forex_futures'))
-    elif not forex_failed and was_forex_blocked:
-        # Acaba de salir de emergencia
-        import asyncio
-        asyncio.create_task(restore_emergency_protection('forex_futures'))
-
-    set_forex_safety_block(forex_failed)
-    update_db_safety_block('forex_futures', forex_failed)
-    
-    # ────────────────────────────────────────────────────────────────
-    # CRYPTO SAFETY CHECKLIST
-    # ────────────────────────────────────────────────────────────────
-    try:
-        # Check 1.1: Heartbeat de crypto_scheduler
-        crypto_worker_mem_alive = check_worker_alive('crypto_scheduler')
-        
-        # Check 1.2: Frescura de datos en snapshot (Feed Price)
-        crypto_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']
-        snap_res_crypto = supabase.table('market_snapshot').select('symbol, price, updated_at, atr, basis').in_('symbol', crypto_symbols).execute()
-        
-        snaps_crypto = {r['symbol']: r for r in snap_res_crypto.data} if snap_res_crypto and snap_res_crypto.data else {}
-        
-        stale_crypto = False
-        indicators_crashed_crypto = False
-        stale_count_crypto = 0
-        for sym in crypto_symbols:
-            s_data = snaps_crypto.get(sym)
-            if not s_data:
-                stale_count_crypto += 1
-                continue
+                    indicators_crashed_crypto = True
             
-            ts_str = s_data.get('updated_at')
-            if ts_str:
-                ts = _safe_parse_iso(ts_str)
-                if (now - ts).total_seconds() > 1800: # V6: 30 minutos (antes: 15 min) - tolerancia para ciclos crypto
-                    stale_count_crypto += 1
-            else:
-                stale_count_crypto += 1
-                
-            # Check 1.4: Indicadores Adaptativos (basis)
-            basis_val = float(s_data.get('basis') or s_data.get('price') or 0)
-            if basis_val <= 0:
-                indicators_crashed_crypto = True
+            # V6: Solo marcar stale si la MAYORÍA de símbolos están desactualizados (2+ de 3)
+            stale_crypto = stale_count_crypto >= 2
+                    
+            # Check 1.3: Integridad de Stop Loss en posiciones abiertas de Crypto (exceptuando si EREP está activo o son de ApexEma/QSHR/Hot)
+            pos_res_crypto = supabase.table('positions').select('id, symbol, sl_price, tp_full_price, erep_active, erep_phase, rule_code').eq('status', 'open').execute()
+            open_pos_list_crypto = pos_res_crypto.data or []
+            
+            pos_missing_sl_crypto = False
+            for pos in open_pos_list_crypto:
+                if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
+                    continue
+                rule_c = str(pos.get('rule_code') or '')
+                if any(k in rule_c for k in ('ApexEma', 'Manual', 'MANUAL', 'QSHR', 'Qshr', 'qshr', 'Hot', 'HOT', 'Bb33', 'Aa33', 'Bb13', 'Aa13', 'Bb21', 'Aa21', 'Bb25', 'Aa61', 'FLIP', 'HEDGE', 'BOOSTER')):
+                    continue
+                sl = float(pos.get('sl_price') or 0)
+                if sl <= 0:
+                    pos_missing_sl_crypto = True
+                    
+            # Consolidar Checks de Crypto
+            crypto_checks['worker_heartbeat'] = crypto_worker_mem_alive or not stale_crypto
+            crypto_checks['feed_freshness'] = not stale_crypto
+            crypto_checks['stop_loss_integrity'] = not pos_missing_sl_crypto
+            crypto_checks['adaptive_indicators'] = not indicators_crashed_crypto
+            crypto_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive
+            
+        except Exception as e:
+            err_str = str(e).lower()
+            if "402" in err_str or "quota" in err_str or "restricted" in err_str or "spend caps" in err_str:
+                trigger_db_circuit_breaker(str(e))
+                return {'forex_blocked': False, 'crypto_blocked': False}
+            log_error('SAFETY', f"Error ejecutando checklist de CRYPTO: {e}")
+            crypto_checks['system_error'] = False
+            
+        # Calcular resultado Crypto
+        crypto_failed = any(v is False for v in crypto_checks.values())
         
-        # V6: Solo marcar stale si la MAYORÍA de símbolos están desactualizados (2+ de 3)
-        stale_crypto = stale_count_crypto >= 2
-                
-        # Check 1.3: Integridad de Stop Loss en posiciones abiertas de Crypto (exceptuando si EREP está activo o son de ApexEma/QSHR/Hot)
-        pos_res_crypto = supabase.table('positions').select('id, symbol, sl_price, tp_full_price, erep_active, erep_phase, rule_code').eq('status', 'open').execute()
-        open_pos_list_crypto = pos_res_crypto.data or []
-        
-        pos_missing_sl_crypto = False
-        for pos in open_pos_list_crypto:
-            if bool(pos.get('erep_active')) or safe_int(pos.get('erep_phase')) > 0:
-                continue
-            rule_c = str(pos.get('rule_code') or '')
-            if any(k in rule_c for k in ('ApexEma', 'Manual', 'MANUAL', 'QSHR', 'Qshr', 'qshr', 'Hot', 'HOT', 'Bb33', 'Aa33', 'Bb13', 'Aa13', 'Bb21', 'Aa21', 'Bb25', 'Aa61', 'FLIP', 'HEDGE', 'BOOSTER')):
-                continue
-            sl = float(pos.get('sl_price') or 0)
-            if sl <= 0:
-                pos_missing_sl_crypto = True
-                
-        # Consolidar Checks de Crypto
-        crypto_checks['worker_heartbeat'] = crypto_worker_mem_alive or not stale_crypto
-        crypto_checks['feed_freshness'] = not stale_crypto
-        crypto_checks['stop_loss_integrity'] = not pos_missing_sl_crypto
-        crypto_checks['adaptive_indicators'] = not indicators_crashed_crypto
-        crypto_checks['position_monitor_heartbeat'] = pos_monitor_mem_alive
-        
-    except Exception as e:
-        err_str = str(e).lower()
-        if "402" in err_str or "quota" in err_str or "restricted" in err_str or "spend caps" in err_str:
-            trigger_db_circuit_breaker(str(e))
-            return {'forex_blocked': False, 'crypto_blocked': False}
-        log_error('SAFETY', f"Error ejecutando checklist de CRYPTO: {e}")
-        crypto_checks['system_error'] = False
-        
-    # Calcular resultado Crypto
-    crypto_failed = any(v is False for v in crypto_checks.values())
-    
-    # ── EMERGENCY GUARDS HOOK (CRYPTO) ──
-    from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
-    was_crypto_blocked = check_db_safety_block('crypto_futures')
-    if crypto_failed and not was_crypto_blocked:
-        # Acaba de entrar en emergencia
-        import asyncio
-        asyncio.create_task(trigger_emergency_protection('crypto_futures'))
-    elif not crypto_failed and was_crypto_blocked:
-        # Acaba de salir de emergencia
-        import asyncio
-        asyncio.create_task(restore_emergency_protection('crypto_futures'))
+        # ── EMERGENCY GUARDS HOOK (CRYPTO) ──
+        from app.strategy.emergency_guards import trigger_emergency_protection, restore_emergency_protection
+        was_crypto_blocked = check_db_safety_block('crypto_futures')
+        if crypto_failed and not was_crypto_blocked:
+            # Acaba de entrar en emergencia
+            import asyncio
+            asyncio.create_task(trigger_emergency_protection('crypto_futures'))
+        elif not crypto_failed and was_crypto_blocked:
+            # Acaba de salir de emergencia
+            import asyncio
+            asyncio.create_task(restore_emergency_protection('crypto_futures'))
 
-    set_crypto_safety_block(crypto_failed)
-    update_db_safety_block('crypto_futures', crypto_failed)
+        set_crypto_safety_block(crypto_failed)
+        update_db_safety_block('crypto_futures', crypto_failed)
     
     # ────────────────────────────────────────────────────────────────
     # REPORTING & TELEGRAM ALERTS
     # ────────────────────────────────────────────────────────────────
     # Alerta Forex
-    if forex_failed:
+    if not forex_on:
+        log_info('SAFETY', "Control de Seguridad FOREX omitido (mercado suspendido en Settings).")
+    elif forex_failed:
         # Solo alertar a Telegram al entrar en estado bloqueado para evitar spam recurrente cada 15m
         if not was_forex_blocked:
             report_msg = (
@@ -962,7 +980,9 @@ async def check_subprocesses_safety(supabase) -> dict:
         log_info('SAFETY', "✅ Control de Seguridad de 15m para FOREX completado exitosamente (Sin fallos).")
         
     # Alerta Crypto
-    if crypto_failed:
+    if not crypto_on:
+        log_info('SAFETY', "Control de Seguridad CRYPTO omitido (mercado suspendido en Settings).")
+    elif crypto_failed:
         from app.execution.data_provider import BinanceCryptoProvider
         if BinanceCryptoProvider.is_banned() and crypto_checks.get('stop_loss_integrity') and crypto_checks.get('adaptive_indicators'):
             log_info('SAFETY', f"Bloqueo de Seguridad CRYPTO mantenido por BAN de Binance. Diagnóstico: {crypto_checks}. Omitiendo alerta de Telegram.")
@@ -1011,7 +1031,16 @@ async def check_all_heartbeats() -> list:
     now = datetime.now(timezone.utc)
     max_age = SAFETY_CONFIG['worker_heartbeat_minutes']
     
+    from app.core.config import is_crypto_enabled, is_forex_enabled
+    crypto_on = is_crypto_enabled(sb)
+    forex_on = is_forex_enabled(sb)
+
     for w_name, symbols in workers_map.items():
+        if w_name == 'crypto_scheduler' and not crypto_on:
+            continue
+        if w_name == 'forex_worker' and not forex_on:
+            continue
+
         # 1. Si es el worker actual en este proceso, está ejecutando código activamente
         if w_name == _current_worker:
             register_heartbeat(w_name)

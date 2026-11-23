@@ -1234,37 +1234,9 @@ def evaluate_options_gap_aduana_exit(
         })
         return res
 
-    # 3. TRAILING RATCHET POR TIERS DE GANANCIA EN PRIMA
-    # Tier 3 (Super Runner >= +50% PnL de prima): blindar al menos el 70% del beneficio pico
+    # 3. TRAILING RATCHET CONTINUO POR PICO DE GANANCIA EN PRIMA (Profit Guardian)
     peak_pnl_pct = ((highest_premium_seen - entry_premium) / entry_premium) * 100.0 if entry_premium > 0 else 0.0
-    if peak_pnl_pct >= 50.0:
-        guaranteed_pnl_pct = peak_pnl_pct * 0.70
-        guaranteed_premium = entry_premium * (1.0 + guaranteed_pnl_pct / 100.0)
 
-        if current_option_premium <= guaranteed_premium:
-            res.update({
-                "should_exit": True,
-                "exit_type": "trailing_stop",
-                "contracts_ratio_to_exit": 1.0,
-                "rule_code": "OPT_GAP_TRAIL_TIER3",
-                "reason": f"Tier 3 Ratchet activado: Prima (${current_option_premium:.2f}) perfora blindaje del 70% pico (${guaranteed_premium:.2f}, +{guaranteed_pnl_pct:.1f}% neto)"
-            })
-            return res
-
-    # Tier 2 (Runner >= +25% PnL de prima): piso garantizado de al menos +15% neto
-    elif peak_pnl_pct >= 25.0:
-        guaranteed_premium = entry_premium * 1.15
-        if current_option_premium <= guaranteed_premium:
-            res.update({
-                "should_exit": True,
-                "exit_type": "trailing_stop",
-                "contracts_ratio_to_exit": 1.0,
-                "rule_code": "OPT_GAP_TRAIL_TIER2",
-                "reason": f"Tier 2 Ratchet activado: Prima (${current_option_premium:.2f}) perfora piso garantizado de +15% (${guaranteed_premium:.2f})"
-            })
-            return res
-
-    # Identificación temprana de modo OTM_MOMENTUM / GAMMA_IGNITION
     exit_p = position.get("exit_plan") or {}
     sel_mode = str(position.get("selection_mode") or exit_p.get("selection_mode") or "").upper()
     rule_cd = str(position.get("rule_code") or exit_p.get("rule_code") or "").upper()
@@ -1275,25 +1247,39 @@ def evaluate_options_gap_aduana_exit(
         or bool(position.get("use_momentum_exhaustion_exit", False))
     )
 
-    # PILAR 3 (OPCIONES): BLINDAJE RÁPIDO BREAKEVEN PARA CALLs Y PUTs (+5.0% subyacente o prima -> BE + 1% Lock)
     und_entry_p = float(position.get("entry_underlying_price") or position.get("entry_price") or 0.0)
     und_pnl_pct = 0.0
     if und_entry_p > 0:
-        und_pnl_pct = ((current_underlying_price - und_entry_p) / und_entry_p * 100.0) if is_call else ((und_entry_p - current_underlying_price) / und_entry_p * 100.0)
+        und_pnl_pct = (
+            ((current_underlying_price - und_entry_p) / und_entry_p * 100.0)
+            if is_call
+            else ((und_entry_p - current_underlying_price) / und_entry_p * 100.0)
+        )
 
-    # Regla Institucional: Al avanzar en subyacente o prima, blindar en (precio compra + 1%)
-    # En OTM_MOMENTUM se calibra a +12% de avance en prima para evitar ruido de bid-ask spread
-    be_threshold = 12.0 if is_otm_momentum else 5.0
-    if (peak_pnl_pct >= be_threshold or und_pnl_pct >= 5.0) and peak_pnl_pct < 25.0:
-        if current_option_premium <= entry_premium * 1.01:
-            res.update({
-                "should_exit": True,
-                "exit_type": "trailing_stop",
-                "contracts_ratio_to_exit": 1.0,
-                "rule_code": "OPT_GAP_BE_LOCK_PLUS_1PCT",
-                "reason": f"Breakeven Lock (+1% Protegido) {'CALL' if is_call else 'PUT'}: Ganancia previa superó +{be_threshold:.0f}% (prima +{peak_pnl_pct:.1f}%, subyacente +{und_pnl_pct:.2f}%). Prima protege compra + 1% (${entry_premium*1.01:.2f})"
-            })
-            return res
+    from app.options.profit_guardian import evaluate_option_profit_ratchet
+    prev_floor_prem = float(exit_p.get("stop_loss_premium") or 0.0)
+    ratchet_res = evaluate_option_profit_ratchet(
+        entry_premium=entry_premium,
+        current_premium=current_option_premium,
+        highest_premium_seen=highest_premium_seen,
+        peak_pnl_pct=peak_pnl_pct,
+        is_otm_momentum=is_otm_momentum,
+        und_pnl_pct=und_pnl_pct,
+        prev_floor_premium=prev_floor_prem,
+    )
+    if float(ratchet_res.get("floor_premium") or 0.0) > 0.0:
+        res["new_stop_loss_premium"] = float(ratchet_res["floor_premium"])
+    elif entry_premium > 0.0 and prev_floor_prem <= 0.0:
+        res["new_stop_loss_premium"] = round(entry_premium * 0.70, 4)
+    if ratchet_res.get("should_exit"):
+        res.update({
+            "should_exit": True,
+            "exit_type": "trailing_stop",
+            "contracts_ratio_to_exit": 1.0,
+            "rule_code": ratchet_res["rule_code"],
+            "reason": ratchet_res["reason"],
+        })
+        return res
 
     # SALIDAS DEFENSIVAS ANTE ROTURA DE VWAP EN SUBYACENTE (CALLs y PUTs)
     if df_5m is not None and len(df_5m) >= 3:
@@ -1463,8 +1449,8 @@ def evaluate_options_gap_aduana_exit(
         except Exception:
             pass
 
-    # 4. CLÍMAX TOTAL RSI 1H (> 85 en CALLs / < 15 en PUTs)
-    if df_1h is not None and len(df_1h) >= 15:
+    # 4. CLÍMAX TOTAL RSI 1H (> 85 en CALLs / < 15 en PUTs) — Exige ganancia mínima >= +5.0%
+    if unrealized_pnl_pct >= 5.0 and df_1h is not None and len(df_1h) >= 15:
         rsi_1h = float(compute_rsi(_safe_col(df_1h, "close"), period=14).iloc[-1])
         if is_call and rsi_1h >= 85.0:
             res.update({
@@ -1472,7 +1458,7 @@ def evaluate_options_gap_aduana_exit(
                 "exit_type": "climax_total",
                 "contracts_ratio_to_exit": 1.0,
                 "rule_code": "OPT_GAP_TP_CLIMAX",
-                "reason": f"Take Profit Clímax Total: RSI 1H ({rsi_1h:.1f}) >= 85.0 en subyacente. Liquidación 100% de CALLs."
+                "reason": f"Take Profit Clímax Total: RSI 1H ({rsi_1h:.1f}) >= 85.0 y PnL +{unrealized_pnl_pct:.1f}% (>= +5%). Liquidación 100% de CALLs."
             })
             return res
         elif not is_call and rsi_1h <= 15.0:
@@ -1481,13 +1467,13 @@ def evaluate_options_gap_aduana_exit(
                 "exit_type": "climax_total",
                 "contracts_ratio_to_exit": 1.0,
                 "rule_code": "OPT_GAP_TP_CLIMAX",
-                "reason": f"Take Profit Clímax Total: RSI 1H ({rsi_1h:.1f}) <= 15.0 en subyacente. Liquidación 100% de PUTs."
+                "reason": f"Take Profit Clímax Total: RSI 1H ({rsi_1h:.1f}) <= 15.0 y PnL +{unrealized_pnl_pct:.1f}% (>= +5%). Liquidación 100% de PUTs."
             })
             return res
 
-    # 5. TAKE PROFIT PARCIAL (50% de contratos en Upper/Lower 6 o RSI 5m Extremo)
+    # 5. TAKE PROFIT PARCIAL (50% de contratos en Upper/Lower 6 o RSI 5m Extremo) — Exige ganancia >= +5.0%
     tp_block1 = bool(position.get("tp_block1_executed", False))
-    if not tp_block1 and df_5m is not None and len(df_5m) >= 15:
+    if not tp_block1 and unrealized_pnl_pct >= 5.0 and df_5m is not None and len(df_5m) >= 15:
         c5 = _safe_col(df_5m, "close")
         rsi_5m = float(compute_rsi(c5, period=14).iloc[-1])
         c_now = float(c5.iloc[-1])
@@ -1506,7 +1492,7 @@ def evaluate_options_gap_aduana_exit(
                     "exit_type": "take_profit_partial",
                     "contracts_ratio_to_exit": 0.50,
                     "rule_code": "OPT_GAP_TP_UPPER6_PARTIAL",
-                    "reason": f"TP Parcial 50% contratos: Subyacente en zona extrema RSI 5m ({rsi_5m:.1f} >= 80.0)."
+                    "reason": f"TP Parcial 50% contratos: Subyacente en zona extrema RSI 5m ({rsi_5m:.1f} >= 80.0) con PnL +{unrealized_pnl_pct:.1f}%."
                 })
                 return res
         else:
@@ -1517,50 +1503,46 @@ def evaluate_options_gap_aduana_exit(
                     "exit_type": "take_profit_partial",
                     "contracts_ratio_to_exit": 0.50,
                     "rule_code": "OPT_GAP_TP_LOWER6_PARTIAL",
-                    "reason": f"TP Parcial 50% contratos: Subyacente en zona de soporte extremo RSI 5m ({rsi_5m:.1f} <= 20.0)."
+                    "reason": f"TP Parcial 50% contratos: Subyacente en zona de soporte extremo RSI 5m ({rsi_5m:.1f} <= 20.0) con PnL +{unrealized_pnl_pct:.1f}%."
                 })
                 return res
 
-    # 6. STOP LOSS TÉCNICO EN SUBYACENTE (EMA9 15m)
+    # 6. STOP LOSS TÉCNICO Y TRAILING CONTINUO EN SUBYACENTE (EMA9 15m + TRAIL PUT/CALL)
     current_sl = float(position.get("stop_loss_underlying") or 0.0)
+    prev_lo_u = float(exit_p.get("lowest_underlying_seen") or 0.0)
+    prev_hi_u = float(exit_p.get("highest_underlying_seen") or 0.0)
+    atr_15m_val = 0.0
+
     if df_15m is not None and len(df_15m) >= 10:
         c15 = _safe_col(df_15m, "close")
+        h15 = _safe_col(df_15m, "high")
+        l15 = _safe_col(df_15m, "low")
+        if h15 is not None and l15 is not None and len(h15) >= 14:
+            atr_15m_val = float((h15 - l15).rolling(14).mean().iloc[-1] or 0.0)
         ema9_15m = c15.ewm(span=9, adjust=False).mean()
         cur_ema9_15m = float(ema9_15m.iloc[-1])
         prev_ema9_15m = float(ema9_15m.iloc[-2]) if len(ema9_15m) >= 2 else cur_ema9_15m
         delta_sl = 0.002 * cur_ema9_15m
 
         if is_call:
-            # Si EMA9 sube, elevar SL dinámico
+            # Si EMA9 sube, elevar SL dinámico sin superar el precio actual
             if cur_ema9_15m > prev_ema9_15m:
                 proposed_sl = round(cur_ema9_15m - delta_sl, 2)
-                if proposed_sl > current_sl:
+                if proposed_sl > current_sl and (current_underlying_price <= 0 or proposed_sl < round(current_underlying_price * 0.997, 2)):
                     res["new_stop_loss_underlying"] = proposed_sl
                     res["rule_code"] = "OPT_GAP_SL_EMA9_15M"
 
             # Breakeven Lock + 1% para CALLs (+5% subyacente -> SL al precio de compra + 1%)
             if und_entry_p > 0 and current_underlying_price >= round(und_entry_p * 1.05, 2):
                 sl_be_plus_1 = round(und_entry_p * 1.01, 2)
-                if sl_be_plus_1 > (res["new_stop_loss_underlying"] or current_sl):
+                if sl_be_plus_1 > (res["new_stop_loss_underlying"] or current_sl) and sl_be_plus_1 < round(current_underlying_price * 0.997, 2):
                     res["new_stop_loss_underlying"] = sl_be_plus_1
                     res["rule_code"] = "BE_LOCK_PLUS_1PCT"
-
-            # Si el precio perfora el SL actual (con ventana mínima de 5 min tras la apertura)
-            active_sl = res["new_stop_loss_underlying"] or current_sl
-            if position_age_minutes >= 5.0 and active_sl > 0.0 and current_underlying_price <= active_sl:
-                res.update({
-                    "should_exit": True,
-                    "exit_type": "stop_loss_underlying",
-                    "contracts_ratio_to_exit": 1.0,
-                    "rule_code": res.get("rule_code") or "OPT_GAP_SL_EMA9_15M",
-                    "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) <= SL (${active_sl:.2f})"
-                })
-                return res
         else:
-            # En PUTs, el SL del subyacente es un techo. Si EMA9 baja, reducir techo
+            # En PUTs, el SL del subyacente es un techo. Si EMA9 baja, reducir techo manteniendo colchón sobre precio actual
             if cur_ema9_15m < prev_ema9_15m:
                 proposed_sl = round(cur_ema9_15m + delta_sl, 2)
-                if current_sl == 0.0 or proposed_sl < current_sl:
+                if (current_sl == 0.0 or proposed_sl < current_sl) and (current_underlying_price <= 0 or proposed_sl > round(current_underlying_price * 1.003, 2)):
                     res["new_stop_loss_underlying"] = proposed_sl
                     res["rule_code"] = "OPT_GAP_SL_EMA9_15M"
 
@@ -1568,20 +1550,49 @@ def evaluate_options_gap_aduana_exit(
             if und_entry_p > 0 and current_underlying_price <= round(und_entry_p * 0.95, 2):
                 sl_be_minus_1 = round(und_entry_p * 0.99, 2)
                 curr_sl_target = res["new_stop_loss_underlying"] or current_sl
-                if curr_sl_target == 0.0 or sl_be_minus_1 < curr_sl_target:
+                if (curr_sl_target == 0.0 or sl_be_minus_1 < curr_sl_target) and sl_be_minus_1 > round(current_underlying_price * 1.003, 2):
                     res["new_stop_loss_underlying"] = sl_be_minus_1
                     res["rule_code"] = "BE_LOCK_PLUS_1PCT"
 
-            active_sl = res["new_stop_loss_underlying"] or current_sl
-            if position_age_minutes >= 5.0 and active_sl > 0.0 and current_underlying_price >= active_sl:
-                res.update({
-                    "should_exit": True,
-                    "exit_type": "stop_loss_underlying",
-                    "contracts_ratio_to_exit": 1.0,
-                    "rule_code": res.get("rule_code") or "OPT_GAP_SL_EMA9_15M",
-                    "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) >= SL (${active_sl:.2f})"
-                })
-                return res
+    if current_underlying_price > 0.0:
+        from app.options.profit_guardian import compute_dynamic_underlying_trailing_sl
+        dyn_u = compute_dynamic_underlying_trailing_sl(
+            entry_underlying=und_entry_p,
+            current_underlying=current_underlying_price,
+            current_sl=float(res["new_stop_loss_underlying"] or current_sl or 0.0),
+            atr_15m=atr_15m_val,
+            is_put=(not is_call),
+            lowest_underlying_seen=prev_lo_u,
+            highest_underlying_seen=prev_hi_u,
+        )
+        if not is_call and float(dyn_u.get("lowest_underlying_seen") or 0.0) > 0.0:
+            res["lowest_underlying_seen"] = dyn_u["lowest_underlying_seen"]
+        elif is_call and float(dyn_u.get("highest_underlying_seen") or 0.0) > 0.0:
+            res["highest_underlying_seen"] = dyn_u["highest_underlying_seen"]
+        if dyn_u.get("updated"):
+            res["new_stop_loss_underlying"] = dyn_u["stop_loss_underlying"]
+            res["rule_code"] = dyn_u["trailing_sl_type"]
+
+    active_sl = float(res["new_stop_loss_underlying"] or current_sl or 0.0)
+    if position_age_minutes >= 5.0 and active_sl > 0.0 and current_underlying_price > 0.0:
+        if is_call and current_underlying_price <= active_sl:
+            res.update({
+                "should_exit": True,
+                "exit_type": "stop_loss_underlying",
+                "contracts_ratio_to_exit": 1.0,
+                "rule_code": res.get("rule_code") or "OPT_GAP_SL_EMA9_15M",
+                "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) <= SL (${active_sl:.2f})"
+            })
+            return res
+        if (not is_call) and current_underlying_price >= active_sl:
+            res.update({
+                "should_exit": True,
+                "exit_type": "stop_loss_underlying",
+                "contracts_ratio_to_exit": 1.0,
+                "rule_code": res.get("rule_code") or "OPT_GAP_SL_EMA9_15M",
+                "reason": f"SL Técnico perforado: Subyacente (${current_underlying_price:.2f}) >= SL (${active_sl:.2f})"
+            })
+            return res
 
     return res
 

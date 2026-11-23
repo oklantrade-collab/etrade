@@ -283,12 +283,34 @@ async def run_warrior_momentum_options_scan(limit: int = 2, skip_time_window_che
         right = "C" if direction == "CALL" else "P"
         current_p = cand["underlying_price"]
 
+        try:
+            from app.core.circuit_breaker import can_open_new_trade
+            can_open, cb_reason = can_open_new_trade(sym, sb=sb)
+            if not can_open:
+                log_info(MODULE, f"⛔ [WARRIOR OPTIONS] {sym} bloqueado por Disyuntor: {cb_reason}")
+                continue
+        except Exception:
+            pass
+
+        if direction == "CALL":
+            try:
+                from app.core.structural_regime_engine import evaluate_macro_daily_bias
+                macro_bias = evaluate_macro_daily_bias()
+                if macro_bias.get("veto_calls"):
+                    log_info(MODULE, f"⛔ [WARRIOR OPTIONS] {sym} CALL bloqueado por Veto Macro Diario")
+                    continue
+            except Exception:
+                pass
+
+        from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+        max_risk_usd = get_effective_max_risk_per_trade_usd(sb, eff if "max_risk_per_trade_usd" in eff else None)
+
         # Buscar contrato semanal con Delta ~0.55 (0.50 - 0.65) y DTE 0 a 7 días
         contract, _ = fetch_and_select_best_option_contract(
             symbol=sym,
             underlying_price=current_p,
             direction=direction,
-            budget_usd=min(800.0, max_capital * 0.25),
+            budget_usd=min(max_risk_usd, max_capital * 0.25),
             supabase=sb,
             selection_mode="WARRIOR_0DTE"
         )
@@ -297,7 +319,12 @@ async def run_warrior_momentum_options_scan(limit: int = 2, skip_time_window_che
             log_info(MODULE, f"⏸️ No se encontró contrato óptimo para {sym} {direction} con Delta 0.50-0.65 y DTE 3-7d.")
             continue
 
-        capped_qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, int(contract.target_total_contracts or 1)))
+        if float(contract.cost_per_contract or 0.0) > max_risk_usd + 1e-9:
+            log_info(MODULE, f"⛔ [WARRIOR OPTIONS] {sym} rechazado: 1 contrato (${contract.cost_per_contract:.2f}) > tope Settings (${max_risk_usd:.2f})")
+            continue
+
+        max_qty_by_cap = int(max_risk_usd // contract.cost_per_contract) if float(contract.cost_per_contract or 0.0) > 0 else 1
+        capped_qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, max_qty_by_cap, int(contract.target_total_contracts or 1)))
         cost_total = round(contract.cost_per_contract * capped_qty, 2)
         if current_open_risk + cost_total > max_capital:
             log_info(MODULE, f"⛔ Saldo insuficiente para {sym} ({cost_total:.2f} + {current_open_risk:.2f} > {max_capital:.2f})")

@@ -402,7 +402,7 @@ class IBConnection(EWrapper, EClient):
         self._order_callback = callback
 
     def openOrder(self, orderId: int, contract: "Contract", order, orderState):
-        """Track open working orders reported by TWS (for opposing-side Error 201 prevention)."""
+        """Track open working orders reported by TWS (for opposing-side Error 201 prevention and lifecycle management)."""
         if not contract or not order:
             return
         sec_type = str(getattr(contract, "secType", "STK") or "STK").upper()
@@ -415,12 +415,52 @@ class IBConnection(EWrapper, EClient):
             "strike": round(float(getattr(contract, "strike", 0.0) or 0.0), 2),
             "right": str(getattr(contract, "right", "") or "").upper(),
             "action": str(getattr(order, "action", "") or "").upper(),
+            "order_type": str(getattr(order, "orderType", "") or "").upper(),
+            "total_quantity": float(getattr(order, "totalQuantity", 0.0) or 0.0),
+            "lmt_price": float(getattr(order, "lmtPrice", 0.0) or 0.0),
+            "tif": str(getattr(order, "tif", "") or "").upper(),
+            "client_id": int(getattr(order, "clientId", 0) or 0),
+            "perm_id": int(getattr(order, "permId", 0) or 0),
             "status": str(getattr(orderState, "status", "") or "").lower() if orderState else "",
+            "contract": contract,
         }
 
     def openOrderEnd(self):
         """Signal completion of reqOpenOrders / reqAllOpenOrders stream."""
         self._open_orders_event.set()
+
+    def request_open_orders(self, timeout: float = 3.0) -> Dict[int, dict]:
+        """Request all currently working open orders from TWS."""
+        if not self.connected:
+            return {}
+        self._open_orders = {}
+        self._open_orders_event.clear()
+        try:
+            self.reqAllOpenOrders()
+            self._open_orders_event.wait(timeout=timeout)
+            return dict(self._open_orders)
+        except Exception as e:
+            log_warning(MODULE, f"Error consultando órdenes abiertas en TWS: {e}")
+            return {}
+
+    def get_contract_quote(self, contract: "Contract", quote_key: str, timeout: float = 1.5) -> dict:
+        """Fetch current bid/ask/last quote for a contract from cache or a quick TWS snapshot."""
+        q = dict(self._quotes.get(quote_key) or {})
+        if (q.get("bid", 0.0) > 0 and q.get("ask", 0.0) > 0) or not self.connected:
+            return q
+        try:
+            req_id = self.get_next_order_id()
+            self._data_callbacks[req_id] = quote_key
+            self.reqMktData(req_id, contract, "", True, False, [])
+            deadline = time.time() + max(0.2, float(timeout))
+            while time.time() < deadline:
+                q_cur = self._quotes.get(quote_key) or {}
+                if q_cur.get("bid", 0.0) > 0 and q_cur.get("ask", 0.0) > 0:
+                    return dict(q_cur)
+                time.sleep(0.15)
+        except Exception as e:
+            log_warning(MODULE, f"Error obteniendo quote snapshot para {quote_key}: {e}")
+        return dict(self._quotes.get(quote_key) or {})
 
     def cancel_opposing_option_orders(
         self,

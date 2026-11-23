@@ -1206,7 +1206,362 @@
         "status_p2": "MONITORING_PRICE",
         "recommended_route": "HYBRID_PENDING"
       }
+    },
+    {
+      "signal_id": "eti-meta-0dte-20261122-001",
+      "timestamp": "2026-11-22T18:41:16.162Z",
+      "expires_at": "2026-11-23T01:41:16.162Z",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "META",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "META261122P00607500",
+        "option_type": "PUT",
+        "strike": 607.5,
+        "expiration_date": "2026-11-22",
+        "dte": 0,
+        "target_delta": -0.42,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 3.05
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "META_GAMMA_CASCADE_PUT_0DTE",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 94.0,
+        "primary_source": "Ross Cameron P1 / Yoel Sardi\u00f1as",
+        "catalyst_summary": "Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead",
+        "catalyst_impact_score": -0.75,
+        "greeks_thesis": "Descompresi\u00f3n de m\u00faltiplos tecnol\u00f3gicos. Quiebre de soporte de apertura con Gamma acelerada."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 607.71,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 613.81,
+        "stop_loss_contract_pct": -25.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "META_GAMMA_CASCADE_PUT_0DTE",
+        "trigger_activacion": 607.71,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 613.81,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (94.0% conf). Fuente: Ross Cameron P1 / Yoel Sardi\u00f1as. Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead Griegas: Descompresi\u00f3n de m\u00faltiplos tecnol\u00f3gicos. Quiebre de soporte de apertura con Gamma acelerada.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $607.71 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-nvda-0dte-20261122-002",
+      "timestamp": "2026-11-22T18:41:16.162Z",
+      "expires_at": "2026-11-23T01:41:16.162Z",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "NVDA",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "NVDA261122P00186000",
+        "option_type": "PUT",
+        "strike": 186.0,
+        "expiration_date": "2026-11-22",
+        "dte": 0,
+        "target_delta": -0.45,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 1.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "NVDA_HIGH_BETA_SCALP_0DTE",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 94.0,
+        "primary_source": "Ross Cameron (Micro-Pullback) / Sardi\u00f1as",
+        "catalyst_summary": "Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead",
+        "catalyst_impact_score": -0.75,
+        "greeks_thesis": "Beta 1.82. Flujo gamma hiperb\u00f3lico tras rechazo en VWAP en vela de 1m/2m."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 185.71,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 187.95,
+        "stop_loss_contract_pct": -25.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "NVDA_HIGH_BETA_SCALP_0DTE",
+        "trigger_activacion": 185.71,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 187.95,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (94.0% conf). Fuente: Ross Cameron (Micro-Pullback) / Sardi\u00f1as. Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead Griegas: Beta 1.82. Flujo gamma hiperb\u00f3lico tras rechazo en VWAP en vela de 1m/2m.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $185.71 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-spy-0dte-20261122-003",
+      "timestamp": "2026-11-22T18:41:16.162Z",
+      "expires_at": "2026-11-23T01:41:16.162Z",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "SPY",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "SPY261122P00732000",
+        "option_type": "PUT",
+        "strike": 732.0,
+        "expiration_date": "2026-11-22",
+        "dte": 0,
+        "target_delta": -0.38,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 3.68
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "SPY_ORB_BREAK_DOWN_PUT",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 94.0,
+        "primary_source": "Ross Cameron Opening Range Breakout",
+        "catalyst_summary": "Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead",
+        "catalyst_impact_score": -0.75,
+        "greeks_thesis": "P\u00e9rdida de VWAP en apertura con RVOL > 1.35x. Scalp institucional de alta liquidez."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 733.08,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 738.97,
+        "stop_loss_contract_pct": -25.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "SPY_ORB_BREAK_DOWN_PUT",
+        "trigger_activacion": 733.08,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 738.97,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (94.0% conf). Fuente: Ross Cameron Opening Range Breakout. Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead Griegas: P\u00e9rdida de VWAP en apertura con RVOL > 1.35x. Scalp institucional de alta liquidez.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $733.08 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-qqq-0dte-20261122-004",
+      "timestamp": "2026-11-22T18:41:16.162Z",
+      "expires_at": "2026-11-23T01:41:16.162Z",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "QQQ",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "QQQ261122P00653000",
+        "option_type": "PUT",
+        "strike": 653.0,
+        "expiration_date": "2026-11-22",
+        "dte": 0,
+        "target_delta": -0.4,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 3.28
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "QQQ_VWAP_REVERSAL_PULLBACK",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 94.0,
+        "primary_source": "Ross Cameron P1 First Candle New Low",
+        "catalyst_summary": "Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead",
+        "catalyst_impact_score": -0.75,
+        "greeks_thesis": "Rotaci\u00f3n tecnol\u00f3gica defensiva. Rebote fallido a EMA9 con disparo inmediato."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 653.48,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 660.04,
+        "stop_loss_contract_pct": -25.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "QQQ_VWAP_REVERSAL_PULLBACK",
+        "trigger_activacion": 653.48,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 660.04,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (94.0% conf). Fuente: Ross Cameron P1 First Candle New Low. Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead Griegas: Rotaci\u00f3n tecnol\u00f3gica defensiva. Rebote fallido a EMA9 con disparo inmediato.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $653.48 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
+    },
+    {
+      "signal_id": "eti-spx-0dte-20261122-005",
+      "timestamp": "2026-11-22T18:41:16.162Z",
+      "expires_at": "2026-11-23T01:41:16.162Z",
+      "cadence": "PRE_MARKET",
+      "status": "ACTIVE",
+      "symbol": "SPX",
+      "asset_class": "OPTION_0DTE",
+      "action": "BUY_TO_OPEN",
+      "options_contract": {
+        "contract_symbol": "SPX261122P07340000",
+        "option_type": "PUT",
+        "strike": 7340.0,
+        "expiration_date": "2026-11-22",
+        "dte": 0,
+        "target_delta": -0.45,
+        "max_bid_ask_spread_pct": 3.5,
+        "estimated_contract_price": 4.5
+      },
+      "strategy": {
+        "horizon": "SCALPING",
+        "bias": "BEARISH",
+        "playbook_rule": "SPX_0DTE_GAMMA_MOMENTUM",
+        "expected_duration_minutes": 25
+      },
+      "causal_context": {
+        "fde_regime": "DECELERATION",
+        "fcg_confidence_pct": 94.0,
+        "primary_source": "Opci\u00f3n Sigma / Ross Cameron Scalp",
+        "catalyst_summary": "Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead",
+        "catalyst_impact_score": -0.75,
+        "greeks_thesis": "Liquidaci\u00f3n en efectivo Secci\u00f3n 1256 IRS, m\u00e1xima reactividad de Gamma en contratos 0DTE."
+      },
+      "technical_gate": {
+        "trigger_type": "VWAP_REJECTION",
+        "underlying_trigger_price": 7354.73,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "indicator_requirements": {
+          "vwap_condition": "PRICE_BELOW_VWAP",
+          "ema_fast_vs_slow": "FAST_BELOW_SLOW",
+          "min_relative_volume": 1.35,
+          "timeframe_confirmation": "2m"
+        }
+      },
+      "risk_management": {
+        "invalidation_underlying": 7413.74,
+        "stop_loss_contract_pct": -25.0,
+        "take_profit_1_pct": 40.0,
+        "take_profit_2_pct": 85.0,
+        "runner_trailing_stop_pct": 20.0,
+        "max_account_risk_pct": 2.5
+      },
+      "safety_guardrails": {
+        "execution_allowed": true,
+        "max_slippage_pct": 1.5,
+        "circuit_breaker_active": false
+      },
+      "tactical_instruction": {
+        "escenario_activo": "SPX_0DTE_GAMMA_MOMENTUM",
+        "trigger_activacion": 7354.73,
+        "trigger_operator": "LESS_THAN_OR_EQUAL",
+        "invalidacion_stop": 7413.74,
+        "rango_objetivo": "TP1: +40% (50% lote) | TP2: +85% (30% lote) | Runner: +20% Trailing",
+        "racional_causal_forrester": "R\u00e9gimen FDE DECELERATION (94.0% conf). Fuente: Opci\u00f3n Sigma / Ross Cameron Scalp. Choque inflacionario confirmado (CPI YoY 4.08%, sorpresa +0.98% sobre consenso). Rendimiento 10Y en 5.15% y VIX en 19.30. Estructura alinead Griegas: Liquidaci\u00f3n en efectivo Secci\u00f3n 1256 IRS, m\u00e1xima reactividad de Gamma en contratos 0DTE.",
+        "prioridad_1_ross_cameron": "First Candle New Low tras rebote a EMA9/VWAP en 2m/5m",
+        "opcion_2_fallback_eti": "Ruptura directa de precio \u2264 $7354.73 con RVOL \u2265 1.4x",
+        "status_p1": "WAITING_PULLBACK",
+        "status_p2": "MONITORING_PRICE",
+        "recommended_route": "HYBRID_PENDING"
+      }
     }
   ],
-  "updated_at": "2026-11-16T06:07:23.573960+00:00"
+  "updated_at": "2026-11-22T18:41:18.587354+00:00"
 }

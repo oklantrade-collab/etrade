@@ -94,6 +94,7 @@ class MicroPullbackEngine:
         self.enable_runners_15m_1h: bool = False  # Ross Cameron: Salida rapida 5s por defecto para Small Caps
         self.is_running: bool = False
         self._bg_tasks = set()
+        self._last_tws_disconnected_log_ts: float = 0.0
 
     def check_daily_circuit_breaker(self, current_time_est: Optional[str] = None) -> tuple[bool, Optional[str]]:
         """
@@ -379,7 +380,10 @@ class MicroPullbackEngine:
 
         ib = get_ib_connection()
         if not ib or not ib.connected:
-            log_error(MODULE, "TWS no conectado. No se puede ejecutar scalp.")
+            now_ts = time.time()
+            if now_ts - self._last_tws_disconnected_log_ts >= 300.0:
+                self._last_tws_disconnected_log_ts = now_ts
+                log_warning(MODULE, f"⚠️ [{cand.ticker}] TWS no conectado en este nodo. Ejecución de scalp omitida.")
             cand.phase = "IDLE"
             return
 
@@ -480,6 +484,17 @@ class MicroPullbackEngine:
         current_p = bar["close"]
         if current_p > cand.highest_price_reached:
             cand.highest_price_reached = current_p
+
+        # Trailing Stop Dinámico Ross Cameron basado en pico de ganancia alcanzado
+        if cand.entry_price > 0 and cand.highest_price_reached > cand.entry_price:
+            peak_gain = cand.highest_price_reached - cand.entry_price
+            peak_gain_pct = (peak_gain / cand.entry_price) * 100.0
+            if peak_gain_pct >= 3.0:
+                lock_ratio = 0.65 if cand.phase in ("RUNNER_15M_MODE", "GOLDEN_RUNNER_1H_MODE") else 0.35
+                ratchet_sl = round(cand.entry_price + (lock_ratio * peak_gain), 2)
+                if ratchet_sl > cand.stop_loss:
+                    cand.stop_loss = ratchet_sl
+                    log_info(MODULE, f"🛡️ [{cand.ticker}] TRAILING RATCHET ({cand.phase}): Pico ${cand.highest_price_reached:.2f} (+{peak_gain_pct:.1f}%) -> SL elevado a ${cand.stop_loss:.2f}")
 
         # A) SALIDA POR STOP LOSS COMÚN (Milimétrico o Breakeven Protegido)
         if current_p <= cand.stop_loss:

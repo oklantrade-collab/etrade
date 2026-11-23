@@ -39,7 +39,7 @@ PARAMS: dict[str, tuple[Any, Any, Any]] = {
     # A. Cuenta y riesgo
     "capital_usd": (5000, 100, 50000),
     "max_risk_per_trade_usd": (800, 5, 2500),
-    "max_risk_megacap_usd": (1500, 100, 2500),
+    "max_risk_megacap_usd": (800, 100, 2500),
     "max_open_risk_usd": (5000, 5, 10000),
     "min_potential_profit_usd": (40, 0, 1000),
     "min_ev_total_usd": (12, 0, 500),
@@ -260,3 +260,44 @@ def effective_settings(stored: dict[str, Any] | None) -> dict[str, Any]:
     merged["max_open_risk_usd"] = min(merged["max_open_risk_usd"], caps["max_open_risk_usd"])
     merged["max_daily_selections"] = min(merged["max_daily_selections"], int(caps["max_daily_selections"]))
     return merged
+
+
+def get_effective_max_risk_per_trade_usd(sb: Any = None, eff: dict[str, Any] | None = None) -> float:
+    """Resolve `Settings / Riesgo máximo por operación` (default $800) capped by hard caps."""
+    cap_hard = float(hard_caps()["max_risk_per_trade_usd"])
+    if isinstance(eff, dict) and eff.get("max_risk_per_trade_usd") is not None:
+        try:
+            val = float(eff["max_risk_per_trade_usd"])
+            if val > 0:
+                return min(val, cap_hard)
+        except (TypeError, ValueError):
+            pass
+
+    if sb is not None:
+        try:
+            res = sb.table("opt_settings").select("*").limit(20).execute()
+            rows = getattr(res, "data", None)
+            if isinstance(rows, list) and rows:
+                stored: dict[str, Any] = {}
+                if len(rows) == 1 and isinstance(rows[0], dict):
+                    row0 = rows[0]
+                    if "key" in row0 and "value" in row0:
+                        stored[str(row0["key"])] = row0["value"]
+                    elif isinstance(row0.get("values"), dict):
+                        stored.update(row0["values"])
+                    else:
+                        stored.update(row0)
+                else:
+                    for r in rows:
+                        if not isinstance(r, dict):
+                            continue
+                        if "key" in r and "value" in r:
+                            stored[str(r["key"])] = r["value"]
+                    if not stored and isinstance(rows[-1], dict):
+                        stored.update(rows[-1])
+                eff_loaded = effective_settings(stored)
+                return min(float(eff_loaded["max_risk_per_trade_usd"]), cap_hard)
+        except Exception:
+            pass
+
+    return min(float(default_settings()["max_risk_per_trade_usd"]), cap_hard)

@@ -73,13 +73,23 @@ def evaluate_vme_exit(
     if price <= 0:
         return res
 
-    # Determinar dirección (Bullish o Bearish)
-    dir_str = str(position.get("direction") or position.get("strategy_type") or "").lower()
-    is_bullish = ("call" in dir_str or "bull" in dir_str or "long" in dir_str or dir_str == "buy")
+    # Determinar dirección (Bullish o Bearish; nunca clasificar 'long_put' como alcista)
+    dir_raw = str(position.get("direction") or "").lower()
+    strat_raw = str(position.get("strategy_type") or "").lower()
+    combined_dir = f"{dir_raw} {strat_raw}".strip()
+    is_bearish = any(k in combined_dir for k in ("put", "bear", "short", "sell"))
+    is_bullish = not is_bearish
 
-    entry_p = float(position.get("avg_price") or position.get("entry_price") or position.get("entry_debit") or price)
-    current_sl = float(position.get("stop_loss") or position.get("exit_plan", {}).get("stop_loss_underlying") or 0.0)
-    current_tsl = float(position.get("trailing_sl_price") or position.get("exit_plan", {}).get("trailing_sl_underlying") or 0.0)
+    exit_plan_v = position.get("exit_plan") or {}
+    entry_p = float(
+        position.get("entry_underlying_price")
+        or exit_plan_v.get("entry_underlying_price")
+        or position.get("avg_price")
+        or position.get("entry_price")
+        or price
+    )
+    current_sl = float(position.get("stop_loss") or exit_plan_v.get("stop_loss_underlying") or 0.0)
+    current_tsl = float(position.get("trailing_sl_price") or exit_plan_v.get("trailing_sl_underlying") or 0.0)
 
     # Métricas 15m
     ema3_15m = float(last_15m.get("ema_3") or price)
@@ -176,28 +186,58 @@ def evaluate_vme_exit(
             }
 
     # ════════════════════════════════════════════════════════
-    # B. STOP LOSS DINÁMICO 15M (EMA9 RATCHET & BREAKEVEN SHIELD A +1.0%)
+    # B. STOP LOSS DINÁMICO 15M (EMA9 RATCHET, BE SHIELD Y TRAILING CONTINUO PUT/CALL)
     # ════════════════════════════════════════════════════════
     new_sl = current_sl
     if is_bullish:
         if ema9_15m > ema9_15m_prev:
             prop_sl = round(ema9_15m - delta, 2)
-            new_sl = max(current_sl, prop_sl)
-        # Breakeven Lock para STOCKS a +1.0% de ganancia
+            if prop_sl > new_sl and prop_sl < round(price * 0.997, 2):
+                new_sl = prop_sl
+        # Breakeven Lock para STOCKS / CALL a +1.0% de ganancia
         und_gain_pct = ((price - entry_p) / entry_p * 100.0) if entry_p > 0 else 0.0
         if und_gain_pct >= 1.0:
             prop_be = round(entry_p + 0.02, 2)
-            if prop_be > new_sl and prop_be < price:
+            if prop_be > new_sl and prop_be < round(price * 0.997, 2):
                 new_sl = prop_be
     else:
         if ema9_15m < ema9_15m_prev:
             prop_sl = round(ema9_15m + delta, 2)
-            new_sl = min(current_sl, prop_sl) if current_sl > 0 else prop_sl
+            if (new_sl <= 0.0 or prop_sl < new_sl) and prop_sl > round(price * 1.003, 2):
+                new_sl = prop_sl
         und_gain_pct = ((entry_p - price) / entry_p * 100.0) if entry_p > 0 else 0.0
         if und_gain_pct >= 1.0:
             prop_be = round(entry_p - 0.02, 2)
-            if (prop_be < new_sl or new_sl <= 0) and prop_be > price:
+            if (prop_be < new_sl or new_sl <= 0.0) and prop_be > round(price * 1.003, 2):
                 new_sl = prop_be
+
+    is_option_pos = ("call" in combined_dir or "put" in combined_dir or current_option_premium is not None)
+    if is_option_pos or is_bearish:
+        try:
+            from app.options.profit_guardian import compute_dynamic_underlying_trailing_sl
+            dyn_u = compute_dynamic_underlying_trailing_sl(
+                entry_underlying=entry_p,
+                current_underlying=price,
+                current_sl=new_sl,
+                atr_15m=atr_15m,
+                is_put=is_bearish,
+                lowest_underlying_seen=float(exit_plan_v.get("lowest_underlying_seen") or 0.0),
+                highest_underlying_seen=float(exit_plan_v.get("highest_underlying_seen") or 0.0),
+            )
+            if is_bearish and float(dyn_u.get("lowest_underlying_seen") or 0.0) > 0.0:
+                res["lowest_underlying_seen"] = dyn_u["lowest_underlying_seen"]
+            elif is_bullish and float(dyn_u.get("highest_underlying_seen") or 0.0) > 0.0:
+                res["highest_underlying_seen"] = dyn_u["highest_underlying_seen"]
+            if dyn_u.get("updated"):
+                cand_u = float(dyn_u["stop_loss_underlying"])
+                if is_bearish and (new_sl <= 0.0 or cand_u < new_sl):
+                    new_sl = cand_u
+                    res["rule_code"] = res["rule_code"] or str(dyn_u.get("trailing_sl_type") or "TRAIL_PUT_CONTINUOUS")
+                elif is_bullish and cand_u > new_sl:
+                    new_sl = cand_u
+                    res["rule_code"] = res["rule_code"] or str(dyn_u.get("trailing_sl_type") or "TRAIL_CALL_CONTINUOUS")
+        except Exception:
+            pass
 
     res["new_stop_loss"] = new_sl
 

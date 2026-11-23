@@ -358,16 +358,37 @@ export default function OptionsPositions() {
                           </span>
                         )}
                       </div>
-                      {p.exit_plan?.stop_loss_underlying > 0 && (
-                        <div style={{
-                          fontSize: 9,
-                          color: (p.exit_plan?.be_locked || p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT') ? '#22C55E' : '#FFA726',
-                          fontWeight: 600,
-                          marginTop: 2
-                        }}>
-                          {(p.exit_plan?.be_locked || p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT') ? '🔒 BE +1% SL:' : '🛡️ SL:'} ${n(p.exit_plan.stop_loss_underlying)} ({p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT' ? '+1% LOCK' : p.exit_plan.trailing_sl_type})
-                        </div>
-                      )}
+                      {(() => {
+                        const isPut = p.strategy_type === 'long_put' || p.direction === 'bearish'
+                        const slUnd = Number(p.exit_plan?.stop_loss_underlying || 0)
+                        const slPrem = Number(p.exit_plan?.stop_loss_premium || 0)
+                        const undLocked = p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT' || Boolean(p.exit_plan?.be_locked)
+                        const premLocked = slPrem > 0 && Number(p.entry_debit || 0) > 0 && slPrem >= Number(p.entry_debit)
+                        return (
+                          <>
+                            {slUnd > 0 && (
+                              <div style={{
+                                fontSize: 9,
+                                color: undLocked ? '#22C55E' : '#FFA726',
+                                fontWeight: 600,
+                                marginTop: 2
+                              }}>
+                                {undLocked ? '🔒' : '🛡️'} {isPut ? '▼ SL Suby:' : '▲ SL Suby:'} ${n(slUnd)} ({p.exit_plan?.trailing_sl_type === 'BE_LOCK_PLUS_1PCT' ? (isPut ? 'BE -1%' : 'BE +1%') : (p.exit_plan?.trailing_sl_type || 'TRAIL')})
+                              </div>
+                            )}
+                            {slPrem > 0 && (
+                              <div style={{
+                                fontSize: 9,
+                                color: premLocked ? '#22C55E' : '#FFA726',
+                                fontWeight: 600,
+                                marginTop: 1
+                              }}>
+                                {premLocked ? '🔒' : '🛡️'} ▲ SL Prima: ${n(slPrem)}
+                              </div>
+                            )}
+                          </>
+                        )
+                      })()}
                     </td>
                     <td style={td}>{STRAT[p.strategy_type] || p.strategy_type}</td>
                     <td style={td}>{p.direction === 'bullish' ? '▲' : '▼'}</td>

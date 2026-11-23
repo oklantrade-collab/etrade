@@ -1919,6 +1919,11 @@ async def _evaluate_5m_primary_signals(symbol: str, provider: CTraderProtobufPro
 
 async def forex_cycle_5m():
     """Ciclo 5m Forex: Gestion de posiciones y smart exits."""
+    from app.core.config import is_forex_enabled
+    if not is_forex_enabled():
+        log_debug(MODULE, "Forex suspendido en system_config (forex_enabled=false). Ciclo omitido.")
+        return
+
     from app.core.safety_manager import is_system_paused, check_db_circuit_breaker
     if check_db_circuit_breaker():
         return
@@ -2567,6 +2572,11 @@ async def _forex_process_symbol_15m(symbol: str, provider: CTraderProtobufProvid
 
 async def forex_cycle_15m():
     """Ciclo 15m Forex: Analisis completo + senales."""
+    from app.core.config import is_forex_enabled
+    if not is_forex_enabled():
+        log_debug(MODULE, "Forex suspendido en system_config (forex_enabled=false). Ciclo omitido.")
+        return
+
     from app.core.safety_manager import is_system_paused, check_db_circuit_breaker
     if check_db_circuit_breaker():
         return
@@ -2741,6 +2751,16 @@ async def main():
     log_info(MODULE, "=== FOREX SCHEDULER STARTING ===")
 
     sb = get_supabase()
+    from app.core.config import is_forex_enabled
+    if not is_forex_enabled(sb, use_cache=False):
+        log_info(
+            MODULE,
+            "⏸️ [FOREX SUSPENDIDO] forex_enabled=false en system_config. Forex scheduler en standby sin conexión a cTrader ni procesamiento.",
+        )
+        while not is_forex_enabled(sb, use_cache=False):
+            await asyncio.sleep(300)
+        log_info(MODULE, "▶️ [FOREX REACTIVADO] forex_enabled=true detectado. Iniciando Forex scheduler...")
+
     provider = await init_forex_worker(sb)
 
     if not provider:

@@ -96,7 +96,7 @@ async def run_eti_autonomous_options_cycle(
     in_flight_buys = sb.table("stocks_orders")\
         .select("id, ticker, market_price, limit_price, shares, target_band, group_name")\
         .eq("direction", "buy")\
-        .in_("status", ["pending", "processing"])\
+        .in_("status", ["pending", "processing", "submitted"])\
         .execute().data or []
 
     opt_in_flight = [
@@ -142,12 +142,21 @@ async def run_eti_autonomous_options_cycle(
             log_info(MODULE, f"⛔ {sym} CALL bloqueado por Guardarraíl O-13 (ALLOW_PUTS_ONLY).")
             continue
 
-        # 3.B Ventana de Oro (09:35-11:30 ET) para señales PRE_MARKET o 0DTE
-        if not skip_time_window and (sig.cadence == "PRE_MARKET" or "0DTE" in str(sig.asset_class)):
+        # 3.B Ventana de Oro Única (09:35-11:30 ET) para TODAS las señales ETI + Disyuntor
+        if not skip_time_window:
             in_win, win_msg = is_warrior_options_golden_window()
             if not in_win:
                 log_info(MODULE, f"⏸️ {sym} ETI omitido fuera de Ventana de Oro: {win_msg}")
                 continue
+
+        try:
+            from app.core.circuit_breaker import can_open_new_trade
+            can_open, cb_reason = can_open_new_trade(sym, sb=sb)
+            if not can_open:
+                log_info(MODULE, f"⛔ {sym} ETI bloqueado por Disyuntor: {cb_reason}")
+                continue
+        except Exception:
+            pass
 
         try:
             gate_res = evaluate_eti_ta_gate(sig)
@@ -176,11 +185,14 @@ async def run_eti_autonomous_options_cycle(
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
 
+        from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+        max_risk_usd = get_effective_max_risk_per_trade_usd(sb, cfg if "max_risk_per_trade_usd" in cfg else None)
+
         best_contract, rej_reasons = fetch_and_select_best_option_contract(
             symbol=sym,
             underlying_price=gate_res.current_price,
             direction=opt_dir,
-            budget_usd=min(800.0, capital_limit * 0.20),
+            budget_usd=min(max_risk_usd, capital_limit * 0.25),
             supabase=sb,
             selection_mode="0DTE_SCALP"
         )
@@ -201,14 +213,35 @@ async def run_eti_autonomous_options_cycle(
             log_warning(MODULE, f"⏸️ [{sym}] ETI gatillado pero sin contrato real líquido en cadena ({rej_reasons[:2]}). Orden omitida para evitar rechazo TWS.")
             continue
 
+        unit_cost_usd = float(est_price or 0.0) * 100.0
+        if unit_cost_usd > max_risk_usd + 1e-9:
+            log_warning(MODULE, f"⛔ [{sym}] 1 contrato (${unit_cost_usd:.2f}) excede tope Settings (${max_risk_usd:.2f}). Orden omitida.")
+            continue
+        if unit_cost_usd > 0 and (unit_cost_usd * qty) > max_risk_usd + 1e-9:
+            qty = max(1, int(max_risk_usd // unit_cost_usd))
+
         invested = est_price * 100.0 * qty
         if total_occupied_risk + invested > capital_limit:
             log_warning(MODULE, f"Presupuesto excedido para {sym} (${total_occupied_risk + invested:.2f} > ${capital_limit:.2f})")
             continue
 
+        from datetime import timedelta
+        from app.options.order_execution_plan import compute_option_entry_plan
+
         exp_compact = exp_raw.replace("-", "")[:8]
         opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
-        limit_exec_price = round(est_price * 1.01, 2)
+        rvol_val = float(getattr(gate_res, "current_rvol", 1.0) or 1.0)
+        if best_contract is not None:
+            entry_plan = compute_option_entry_plan(
+                bid=float(getattr(best_contract, "bid", 0.0) or 0.0),
+                ask=float(getattr(best_contract, "ask", 0.0) or 0.0),
+                mid=float(getattr(best_contract, "mid", 0.0) or est_price),
+                rvol=rvol_val,
+            )
+        else:
+            entry_plan = compute_option_entry_plan(bid=0.0, ask=est_price, mid=est_price, rvol=rvol_val)
+        limit_exec_price = entry_plan["limit_price"]
+        expires_iso = (now_dt + timedelta(seconds=float(entry_plan["ttl_sec"]) + 120.0)).isoformat()
 
         # 5. Principio Broker-First: NO insertar optimísticamente en opt_paper_trades.
         # La posición se creará en opt_paper_trades ÚNICAMENTE cuando el broker confirme el fill
@@ -226,10 +259,12 @@ async def run_eti_autonomous_options_cycle(
                 "direction": "buy",
                 "shares": qty,
                 "market_price": round(est_price, 2),
+                "rvol": entry_plan["rvol"],
+                "expires_at": expires_iso,
                 "status": "pending",
                 "created_at": now_iso,
             }).execute()
-            log_info(MODULE, f"📡 Orden despachada a TWS Bridge: {sym} {opt_target_band} | {qty}x @ LMT ${limit_exec_price:.2f}")
+            log_info(MODULE, f"📡 Orden despachada a TWS Bridge: {sym} {opt_target_band} | {qty}x @ LMT ${limit_exec_price:.2f} (RVOL={entry_plan['rvol']}x, {entry_plan['tier']})")
         except Exception as e_ord:
             log_warning(MODULE, f"Aviso despachando orden a stocks_orders: {e_ord}")
 

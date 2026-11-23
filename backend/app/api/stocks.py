@@ -444,10 +444,10 @@ async def get_stocks_positions():
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # 1. Fetch all open positions (excluding options)
+            # 1. Fetch all open/closing positions (excluding options)
             res = sb.table("stocks_positions")\
                 .select("*")\
-                .eq("status", "open")\
+                .in_("status", ["open", "closing"])\
                 .neq("group_name", "OPTIONS")\
                 .order("first_buy_at", desc=True)\
                 .execute()
@@ -527,8 +527,16 @@ async def get_stocks_positions():
                 if cur_price <= 0:
                     cur_price = db_cur_price if db_cur_price > 0 else avg_entry
 
+                is_short = str(pos.get("direction") or "long").lower() in ("short", "sell")
+                abs_shares = abs(shares)
                 tws_unr_pnl = b_info.get("unrealized_pnl")
-                calc_pnl = round((cur_price - avg_entry) * shares, 2)
+                if is_short:
+                    calc_pnl = round((avg_entry - cur_price) * abs_shares, 2)
+                    pnl_pct_v = round(((avg_entry - cur_price) / avg_entry * 100), 2) if avg_entry > 0 else 0
+                else:
+                    calc_pnl = round((cur_price - avg_entry) * abs_shares, 2)
+                    pnl_pct_v = round(((cur_price - avg_entry) / avg_entry * 100), 2) if avg_entry > 0 else 0
+
                 if tws_unr_pnl is not None and abs(float(tws_unr_pnl)) > 0.0001 and abs(cur_price - float(b_info.get("market_price") or cur_price)) < 0.01:
                     pnl_usd = round(float(tws_unr_pnl), 2)
                 else:
@@ -536,13 +544,14 @@ async def get_stocks_positions():
 
                 pos["company_name"] = ticker
                 pos["sector"] = "Stocks"
-                pos["side"] = "buy"
+                pos["side"] = "sell" if is_short else "buy"
+                pos["shares"] = -abs_shares if is_short else abs_shares
                 pos["strategy"] = strategy_map.get(ticker) or "V5_INDUSTRIAL"
                 pos["current_price"] = round(cur_price, 2)
                 
                 pos["unrealized_pnl"] = pnl_usd
-                pos["unrealized_pnl_pct"] = round(((cur_price - avg_entry) / avg_entry * 100), 2) if avg_entry > 0 else 0
-                pos["total_cost"] = round(avg_entry * shares, 2)
+                pos["unrealized_pnl_pct"] = pnl_pct_v
+                pos["total_cost"] = round(avg_entry * abs_shares, 2)
 
                 # Garantizar que trailing stop no esté en blanco en BD
                 pos = await check_and_auto_establish_trailing(pos, sb)
@@ -911,42 +920,110 @@ async def delete_stock_journal_entry(journal_id: str):
 
 @router.post("/positions/{position_id}/close")
 async def manual_close_stock_position(position_id: str):
-    """Manually close a stock position (updates status to 'closed')."""
+    """Cierra una posición de acciones aplicando protocolo Broker-First (no cierra localmente si TWS la mantiene abierta)."""
     if not _is_valid_uuid(position_id):
         raise HTTPException(status_code=400, detail=f"ID de posicion invalido: '{position_id}'. Debe ser un UUID valido.")
     try:
         sb = get_supabase()
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
-        
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+
         # 1. Obtener la posición
         res = sb.table("stocks_positions").select("*").eq("id", position_id).execute()
         if not res.data:
             raise HTTPException(status_code=404, detail="Posición no encontrada")
-        
+
         pos = res.data[0]
         ticker = pos["ticker"]
         avg_price = float(pos.get("avg_price") or 0)
-        shares = float(pos.get("shares") or 0)
-        
-        # 2. Obtener precio actual (de snapshot)
-        snap_res = sb.table("market_snapshot").select("price").eq("symbol", ticker).execute()
-        current_price = float(snap_res.data[0]["price"]) if snap_res.data else avg_price
-        
-        # 3. Calcular PnL Realizado
-        pnl_usd = (current_price - avg_price) * shares
-        pnl_pct = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
-        
-        # 4. Actualizar registro a 'closed'
-        update_res = sb.table("stocks_positions").update({
+        shares = abs(int(float(pos.get("shares_remaining") or pos.get("shares") or 0)))
+        is_short = str(pos.get("direction") or "long").lower() in ("short", "sell")
+        close_dir = "buy" if is_short else "sell"
+
+        # 2. Obtener precio actual (snapshot TWS -> current_price DB -> market_snapshot)
+        current_price = float(pos.get("current_price") or avg_price)
+        broker_flat_confirmed = False
+        try:
+            from app.options.broker_sync import load_broker_portfolio_snapshot
+            portfolio, age_sec = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
+            if portfolio is not None:
+                b_entry = portfolio.get(str(ticker).upper()) or {}
+                b_px = float(b_entry.get("market_price") or 0.0)
+                if b_px > 0:
+                    current_price = b_px
+                if age_sec <= 120.0:
+                    b_sh = abs(float(b_entry.get("shares") or 0.0))
+                    broker_flat_confirmed = (b_sh <= 0.0)
+        except Exception:
+            pass
+
+        if current_price <= 0:
+            snap_res = sb.table("market_snapshot").select("price").eq("symbol", ticker).execute()
+            current_price = float(snap_res.data[0]["price"]) if snap_res.data else avg_price
+
+        # 3. Calcular PnL según dirección
+        if is_short:
+            pnl_usd = (avg_price - current_price) * shares
+            pnl_pct = ((avg_price - current_price) / avg_price * 100) if avg_price > 0 else 0
+        else:
+            pnl_usd = (current_price - avg_price) * shares
+            pnl_pct = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0
+
+        if not broker_flat_confirmed:
+            sb.table("stocks_positions").update({
+                "status": "closing",
+                "updated_at": now,
+                "current_price": current_price,
+                "unrealized_pnl": round(pnl_usd, 2),
+                "unrealized_pnl_pct": round(pnl_pct, 2),
+                "sl_close_reason": "MANUAL_CLOSE",
+            }).eq("id", position_id).execute()
+
+            existing_ord = sb.table("stocks_orders")\
+                .select("id, created_at")\
+                .eq("ticker", ticker)\
+                .eq("direction", close_dir)\
+                .in_("status", ["pending", "processing", "submitted"])\
+                .limit(5)\
+                .execute()
+            has_fresh = False
+            for eo in (existing_ord.data or []):
+                if eo.get("created_at"):
+                    c_dt = datetime.fromisoformat(str(eo["created_at"]).replace("Z", "+00:00"))
+                    if (now_dt - c_dt).total_seconds() <= 120.0:
+                        has_fresh = True
+                        break
+            if not has_fresh and shares > 0:
+                sb.table("stocks_orders").insert({
+                    "ticker": ticker,
+                    "group_name": pos.get("group_name", "STOCKS"),
+                    "rule_code": "MANUAL_CLOSE",
+                    "order_type": "market",
+                    "direction": close_dir,
+                    "shares": shares,
+                    "market_price": current_price,
+                    "status": "pending",
+                    "created_at": now,
+                }).execute()
+
+            return {
+                "success": True,
+                "ok": True,
+                "status": "closing_pending",
+                "pnl_usd": round(pnl_usd, 2),
+            }
+
+        # 4. Snapshot fresco confirmó 0 acciones en TWS: actualizar registro a 'closed' y journal
+        sb.table("stocks_positions").update({
             "status": "closed",
             "updated_at": now,
             "current_price": current_price,
             "unrealized_pnl": round(pnl_usd, 2),
-            "unrealized_pnl_pct": round(pnl_pct, 2)
+            "unrealized_pnl_pct": round(pnl_pct, 2),
+            "sl_close_reason": "MANUAL_CLOSE",
         }).eq("id", position_id).execute()
-        
-        # 5. Registrar en Journal para que aparezca en "Closed History"
+
         try:
             journal_entry = {
                 "ticker": ticker,
@@ -965,8 +1042,8 @@ async def manual_close_stock_position(position_id: str):
             log_info("stocks_api", f"Manual close for {ticker} recorded in journal")
         except Exception as journal_e:
             log_error("stocks_api", f"Error recording manual close in journal for {ticker}: {journal_e}")
-        
-        return {"success": True, "pnl_usd": pnl_usd}
+
+        return {"success": True, "ok": True, "status": "closed", "pnl_usd": round(pnl_usd, 2)}
         
     except HTTPException:
         raise

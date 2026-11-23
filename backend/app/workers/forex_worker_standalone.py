@@ -233,6 +233,13 @@ class StandaloneForexWorker:
             print(f"[{ts}] [ERROR] Failed to log to DB: {e}")
 
     def start(self):
+        from app.core.config import is_forex_enabled
+        if not is_forex_enabled(use_cache=False):
+            self.log("⏸️ [FOREX SUSPENDIDO] forex_enabled=false en system_config. Worker en standby sin conexión a cTrader ni procesamiento.")
+            while not is_forex_enabled(use_cache=False):
+                time.sleep(300)
+            self.log("▶️ [FOREX REACTIVADO] forex_enabled=true detectado. Conectando a cTrader...")
+
         from app.core.safety_manager import set_current_worker
         set_current_worker('forex_worker', instance=self)
         self.log(f"Iniciando Worker v3.1 (Rutas Windows OK)...")

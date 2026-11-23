@@ -84,14 +84,24 @@ export default function StocksPositions() {
         const { data: dbOpen } = await supabase
           .from('stocks_positions')
           .select('*')
-          .eq('status', 'open')
+          .in('status', ['open', 'closing'])
           .order('first_buy_at', { ascending: false })
         if (dbOpen) {
-          const filteredOpen = dbOpen.filter((p: any) => 
-            p.group_name !== 'OPTIONS' && 
-            !String(p.ticker || '').includes(':OPT') &&
-            !String(p.strategy || '').toUpperCase().startsWith('OPT')
-          )
+          const filteredOpen = dbOpen
+            .filter((p: any) =>
+              p.group_name !== 'OPTIONS' &&
+              !String(p.ticker || '').includes(':OPT') &&
+              !String(p.strategy || '').toUpperCase().startsWith('OPT')
+            )
+            .map((p: any) => {
+              const isShort = String(p.direction || p.side || 'long').toLowerCase() === 'short' || String(p.side || '').toLowerCase() === 'sell'
+              const absSh = Math.abs(Number(p.shares || 0))
+              return {
+                ...p,
+                side: isShort ? 'sell' : 'buy',
+                shares: isShort ? -absSh : absSh,
+              }
+            })
           setPositions(filteredOpen)
         }
       }
@@ -332,17 +342,19 @@ export default function StocksPositions() {
                 {(() => {
                   const entry = Number(selectedPos.avg_price || selectedPos.entry_price || 0)
                   const exit = Number(selectedPos.current_price || selectedPos.exit_price || 0)
+                  const isShortPos = String(selectedPos.direction || '').toLowerCase() === 'short' || String(selectedPos.side || '').toLowerCase() === 'sell' || Number(selectedPos.shares || 0) < 0
                   const sh = Math.abs(Number(selectedPos.shares || 0))
+                  const diffPx = isShortPos ? (entry - exit) : (exit - entry)
                   let pnlUsd = (selectedPos.pnl_usd !== undefined && selectedPos.pnl_usd !== null && Math.abs(Number(selectedPos.pnl_usd)) > 0.0001)
                     ? Number(selectedPos.pnl_usd)
                     : (selectedPos.unrealized_pnl !== undefined && selectedPos.unrealized_pnl !== null && Math.abs(Number(selectedPos.unrealized_pnl)) > 0.0001)
                     ? Number(selectedPos.unrealized_pnl)
-                    : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 && sh > 0 ? (exit - entry) * sh : 0)
+                    : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 && sh > 0 ? diffPx * sh : 0)
                   let pnlPct = (selectedPos.pnl_pct !== undefined && selectedPos.pnl_pct !== null && Math.abs(Number(selectedPos.pnl_pct)) > 0.0001)
                     ? Number(selectedPos.pnl_pct)
                     : (selectedPos.unrealized_pnl_pct !== undefined && selectedPos.unrealized_pnl_pct !== null && Math.abs(Number(selectedPos.unrealized_pnl_pct)) > 0.0001)
                     ? Number(selectedPos.unrealized_pnl_pct)
-                    : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 ? ((exit - entry) / entry) * 100 : 0)
+                    : (entry > 0 && exit > 0 && Math.abs(exit - entry) >= 0.0001 ? (diffPx / entry) * 100 : 0)
                   const isPos = pnlUsd >= 0
                   return (
                     <>
@@ -455,6 +467,11 @@ export default function StocksPositions() {
                           boxShadow: pos.side?.toUpperCase() === 'SELL' ? '0 0 12px rgba(255,71,87,0.4)' : '0 0 12px rgba(0,200,150,0.4)'
                       }}></div>
                       <span style={{ fontWeight: 900, fontSize: '16px', letterSpacing: '-0.02em' }}>{pos.ticker}</span>
+                      {pos.status === 'closing' && (
+                        <span style={{ fontSize: '9px', fontWeight: 800, padding: '2px 6px', borderRadius: '6px', background: 'rgba(245,158,11,0.18)', color: '#FBBF24', border: '1px solid rgba(245,158,11,0.4)' }}>
+                          CERRANDO TWS
+                        </span>
+                      )}
                     </div>
 
                     {/* ESTADO / CHECK DE VALIDACIÓN CON TOOLTIP INTERACTIVO */}

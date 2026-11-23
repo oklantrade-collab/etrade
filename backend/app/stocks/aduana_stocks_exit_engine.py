@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 from app.core.logger import log_info, log_warning, log_error
+from app.core.time_utils import parse_iso_utc
+from app.core.bb15m_exhaustion import evaluate_bb15m_post_breakout_exhaustion
 from app.strategy.panic_recovery_gate import calculate_fibonacci_bands
 
 MODULE = "ADUANA_STOCKS_EXIT"
@@ -750,10 +752,10 @@ def evaluate_alpha_runner_sharp_exit(
     entry_time_str = position.get('first_buy_at') or position.get('entry_time')
     age_mins = 0.0
     if entry_time_str:
-        try:
-            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+        entry_dt = parse_iso_utc(entry_time_str)
+        if entry_dt is not None:
             age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
-        except Exception:
+        else:
             age_mins = 0.0
 
     # ── 1. EVALUACIÓN 1 HORA (1a y 1b) ──
@@ -1193,14 +1195,13 @@ def calculate_alpha_escalating_trailing_stop(
     entry_time_str = position.get('first_buy_at') or position.get('entry_time')
     age_mins = 0.0
     if entry_time_str:
-        try:
-            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
-            ref_now = now_dt if now_dt is not None else datetime.now(timezone.utc)
-            if getattr(ref_now, 'tzinfo', None) is not None and getattr(entry_dt, 'tzinfo', None) is not None:
-                age_mins = (ref_now - entry_dt).total_seconds() / 60.0
-            else:
-                age_mins = (ref_now.replace(tzinfo=None) - entry_dt.replace(tzinfo=None)).total_seconds() / 60.0
-        except Exception:
+        entry_dt = parse_iso_utc(entry_time_str)
+        if entry_dt is not None:
+            ref_now = parse_iso_utc(now_dt) if now_dt is not None else datetime.now(timezone.utc)
+            if ref_now is None:
+                ref_now = datetime.now(timezone.utc)
+            age_mins = (ref_now - entry_dt).total_seconds() / 60.0
+        else:
             age_mins = 0.0
 
     best_sl = max(current_sl, current_tsl)
@@ -1365,15 +1366,12 @@ def evaluate_aduana_stocks_exit(
     entry_time_str = position.get('first_buy_at') or position.get('entry_time')
     age_mins = 0.0
     if entry_time_str:
-        try:
-            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
-            ref_now = now_dt if now_dt is not None else datetime.now(timezone.utc)
-            if getattr(ref_now, 'tzinfo', None) is not None and getattr(entry_dt, 'tzinfo', None) is not None:
-                age_mins = (ref_now - entry_dt).total_seconds() / 60.0
-            else:
-                age_mins = (ref_now.replace(tzinfo=None) - entry_dt.replace(tzinfo=None)).total_seconds() / 60.0
-        except Exception:
-            age_mins = 0.0
+        entry_dt = parse_iso_utc(entry_time_str)
+        if entry_dt is not None:
+            ref_now = parse_iso_utc(now_dt) if now_dt is not None else datetime.now(timezone.utc)
+            if ref_now is None:
+                ref_now = datetime.now(timezone.utc)
+            age_mins = (ref_now - entry_dt).total_seconds() / 60.0
 
     # ── 0. CIERRE FORZOSO EOD INCONDICIONAL (15:50 ET - CERO OVERNIGHT) ──
     if is_eod_hard_deadline(now_dt):
@@ -1387,6 +1385,36 @@ def evaluate_aduana_stocks_exit(
             'pnl_usd': round(pnl_usd, 2),
             'reason': f"Hard-Exit EOD (15:50 ET): Liquidación forzosa incondicional del 100% para erradicar riesgo nocturno/dilución ({gain_pct:+.2f}% / ${pnl_usd:+.2f} USD)."
         }
+
+    # ── 0.01 AGOTAMIENTO POST-BOLLINGER 15M (Sin esperar a las 15:00 ET) ──
+    if df_15m is not None and len(df_15m) >= 21:
+        diag_state = dict(position.get("diagnostics") or {}) if isinstance(position.get("diagnostics"), dict) else {}
+        for k_bb in ("bb15m_upper_breakout_seen", "bb15m_lower_breakout_seen", "bb15m_breakout_bar_high", "bb15m_breakout_bar_low"):
+            if k_bb in position and k_bb not in diag_state:
+                diag_state[k_bb] = position[k_bb]
+        bb_res = evaluate_bb15m_post_breakout_exhaustion(
+            df_15m=df_15m,
+            is_bullish=is_long,
+            state=diag_state,
+            current_price=current_price,
+            position_age_minutes=age_mins,
+            asset_type="stock",
+        )
+        bb_state_out = bb_res.get("state") or {}
+        for k_bb, v_bb in bb_state_out.items():
+            position[k_bb] = v_bb
+        if bb_res.get("should_exit"):
+            return {
+                'should_close': True,
+                'action': 'CLOSE_TOTAL',
+                'shares_to_close': shares,
+                'pct_to_close': 100,
+                'rule_code': bb_res['rule_code'],
+                'gain_pct': round(gain_pct, 2),
+                'pnl_usd': round(pnl_usd, 2),
+                'reason': bb_res['reason'],
+                'bb15m_state': bb_state_out,
+            }
 
     # ── 0.02 PROTOCOLO GOLDEN HOUR EOD (15:00 a 15:50 ET) PARA GANANCIA >= +5.0% ──
     try:
@@ -1670,11 +1698,9 @@ def evaluate_aduana_stocks_exit(
     entry_time_str = position.get('first_buy_at') or position.get('entry_time')
     age_mins = 999.0
     if entry_time_str:
-        try:
-            entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+        entry_dt = parse_iso_utc(entry_time_str)
+        if entry_dt is not None:
             age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
-        except Exception:
-            pass
 
     # ── NUEVA REGLA: RATCHET 80% DEL AVANCE DESDE EL OPEN ──
     open_day_val = float(position.get('candle_open_day') or 0.0)
@@ -1958,10 +1984,16 @@ def calculate_1h_trailing_stop(
         ema9 = float(closes.ewm(span=9, adjust=False).mean().iloc[-1])
 
         # Nivel propuesto: máximo entre prev_low * 0.998 y ema9 * 0.995
-        proposed_sl = round(max(prev_low * 0.998, ema9 * 0.995), 2)
+        # Exige que el trade esté avanzando positivamente y mantenga colchón mínimo de 0.8% bajo current_price
+        if entry_p > 0 and current_price <= entry_p * 1.005:
+            return {'should_update': False, 'new_sl': current_sl, 'reason': 'Sin avance mínimo sobre entrada para trailing 1H'}
 
-        # Solo sube si supera el SL actual sin superar el precio actual
-        if proposed_sl > current_sl and proposed_sl < current_price:
+        proposed_sl = round(max(prev_low * 0.998, ema9 * 0.995), 2)
+        max_safe_sl = round(current_price * 0.992, 2)
+        proposed_sl = min(proposed_sl, max_safe_sl)
+
+        # Solo sube si supera el SL actual manteniendo colchón seguro bajo el precio actual
+        if proposed_sl > current_sl and proposed_sl <= max_safe_sl and proposed_sl < current_price:
             return {
                 'should_update': True,
                 'new_sl': proposed_sl,

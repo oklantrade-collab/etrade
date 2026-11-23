@@ -14,18 +14,22 @@ def test_parse_option_order_contract_key():
     assert parse_option_order_contract_key("NVDA", "") is None
 
 
-def test_find_existing_option_trade_blocks_zombie_reopen_beyond_5_contracts():
+def test_find_existing_option_trade_blocks_only_recent_sell_cooldown_and_allows_older_tws_resync():
+    from datetime import timedelta
     from app.options.broker_sync import find_existing_option_trade_for_contract
 
-    # Simulate 8 closed contracts on AMZN where our contract is at index 7 (would be missed by limit=5)
-    rows = [
+    now_dt = datetime.now(timezone.utc)
+    recent_exit = (now_dt - timedelta(seconds=20)).isoformat()
+    old_exit = (now_dt - timedelta(hours=2)).isoformat()
+
+    rows_recent = [
         {
             "id": 100 - i,
             "symbol": "AMZN",
             "strategy_type": "long_call",
             "expiry": "2026-11-13",
             "status": "closed",
-            "exit_time": "2026-11-11T20:00:00+00:00",
+            "exit_time": recent_exit,
             "entry_fills": [{"strike": 250.0 + i * 2.5, "right": "C"}],
         }
         for i in range(8)
@@ -36,9 +40,14 @@ def test_find_existing_option_trade_blocks_zombie_reopen_beyond_5_contracts():
     def _table_side_effect(name):
         tbl = MagicMock()
         if name == "opt_paper_trades":
-            tbl.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = rows
+            tbl.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = rows_recent
         elif name == "stocks_orders":
+            # Consulta BUY posterior -> vacía
             tbl.select.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.gt.return_value.limit.return_value.execute.return_value.data = []
+            # Consulta SELL reciente -> filled hace 20s (debe activar cooldown anti-zombi <= 90s)
+            tbl.select.return_value.eq.return_value.eq.return_value.eq.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+                {"id": "sell-1", "status": "filled", "filled_at": recent_exit, "created_at": recent_exit}
+            ]
         return tbl
 
     mock_sb.table.side_effect = _table_side_effect
@@ -48,6 +57,23 @@ def test_find_existing_option_trade_blocks_zombie_reopen_beyond_5_contracts():
     assert row is not None
     assert row["id"] == 93
     assert is_zombie is True
+
+    # Ahora simular un cierre antiguo (>90s) sin orden SELL reciente: TWS sigue reportándolo -> NO debe bloquear reapertura
+    rows_old = [{**rows_recent[7], "exit_time": old_exit}]
+    def _table_side_effect_old(name):
+        tbl = MagicMock()
+        if name == "opt_paper_trades":
+            tbl.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = rows_old
+        elif name == "stocks_orders":
+            tbl.select.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value.gt.return_value.limit.return_value.execute.return_value.data = []
+            tbl.select.return_value.eq.return_value.eq.return_value.eq.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        return tbl
+
+    mock_sb.table.side_effect = _table_side_effect_old
+    row_old, is_zombie_old = find_existing_option_trade_for_contract(mock_sb, ck_target, "long_call", limit=200)
+    assert row_old is not None
+    assert row_old["id"] == 93
+    assert is_zombie_old is False
 
 
 def test_find_existing_option_trade_allows_newer_filled_buy():

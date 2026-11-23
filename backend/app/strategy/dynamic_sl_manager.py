@@ -260,36 +260,26 @@ def calculate_trailing_sl(
         position.get('lowest_price_reached') or 
         current_price
     )
-
-    suspend_trailing = False
-    if market_type in ('crypto_spot', 'crypto_futures'):
-        try:
-            from app.core.memory_store import get_memory_df
-            symbol = position.get('symbol', '')
-            if symbol:
-                df_15m = get_memory_df(symbol, "15m")
-                if df_15m is not None and len(df_15m) >= 10:
-                    ema3_15m = float(df_15m.get('ema1', df_15m.get('ema3', df_15m.get('ema_3'))).iloc[-1])
-                    ema9_15m = float(df_15m.get('ema2', df_15m.get('ema9', df_15m.get('ema_9'))).iloc[-1])
-                    if side in ('long', 'buy') and ema3_15m > ema9_15m:
-                        suspend_trailing = True
-                    elif side not in ('long', 'buy') and ema3_15m < ema9_15m:
-                        suspend_trailing = True
-        except Exception:
-            pass
+    current_sl = float(
+        position.get('stop_loss_price')
+        or position.get('stop_loss')
+        or position.get('trailing_sl_price')
+        or 0
+    )
 
     if side in ('long', 'buy'):
-        new_highest = highest if suspend_trailing else max(highest, current_price)
-        # Ensure we don't accidentally lower the highest
-        new_highest = max(new_highest, highest)
-        trailing_sl = new_highest * (1 - trail_pct)
-        improved    = new_highest > highest
-
+        new_highest = max(highest, current_price)
+        raw_trailing = min(new_highest * (1 - trail_pct), current_price * 0.995)
+        trailing_sl = max(current_sl, raw_trailing) if current_sl > 0 else raw_trailing
+        # Monotonicidad estricta: dispara incluso si el bridge ya actualizó highest_price_reached en DB
+        improved = (trailing_sl > current_sl + 1e-6) and (trailing_sl < current_price)
+        new_lowest = lowest
     else:
-        new_lowest = lowest if suspend_trailing else min(lowest, current_price)
-        new_lowest = min(new_lowest, lowest)
-        trailing_sl = new_lowest * (1 + trail_pct)
-        improved    = new_lowest < lowest
+        new_lowest = min(lowest, current_price)
+        raw_trailing = max(new_lowest * (1 + trail_pct), current_price * 1.005)
+        trailing_sl = min(current_sl, raw_trailing) if current_sl > 0 else raw_trailing
+        improved = ((current_sl <= 0) or (trailing_sl < current_sl - 1e-6)) and (trailing_sl > current_price)
+        new_highest = highest
 
     return {
         'trailing_sl_price':     round(trailing_sl, 8),
@@ -445,6 +435,7 @@ def evaluate_sl_action(
     trailing_sl = float(
         position.get('trailing_sl_price') or 
         position.get('stop_loss_price') or 
+        position.get('stop_loss') or 
         position.get('sl_price') or 0
     )
 

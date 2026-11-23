@@ -80,6 +80,7 @@ class TestLive1HBrokerAndChokePoint:
 
         with patch('app.stocks.live_1h_candle_service.get_live_1h_candle_and_sipv', return_value=mock_live_1h_bear), \
              patch('app.stocks.stocks_order_executor._is_after_1515_et', return_value=False), \
+             patch('app.stocks.stocks_order_executor._is_outside_ross_momentum_window_et', return_value=False), \
              patch('app.stocks.stocks_order_executor.get_supabase'), \
              patch('app.stocks.stocks_order_executor._get_config', return_value={'paper_mode': True}):
 

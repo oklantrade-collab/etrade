@@ -3,6 +3,7 @@ eTrader v2 — Configuration Module
 Loads environment variables and provides typed configuration access.
 """
 import os
+import time
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -147,3 +148,55 @@ STRUCTURE_CONFIG = {
         '15m': '4h'
     }
 }
+
+
+# ── Market Toggles (Crypto / Forex) ──
+_MARKET_TOGGLE_CACHE: dict[str, tuple[float, bool]] = {}
+_MARKET_TOGGLE_TTL = 30.0
+
+
+def clear_market_toggle_cache() -> None:
+    """Limpia la caché en memoria de toggles de mercado."""
+    _MARKET_TOGGLE_CACHE.clear()
+
+
+def is_market_enabled(
+    config_key: str,
+    sb=None,
+    default: bool = True,
+    use_cache: bool = True,
+) -> bool:
+    """Consulta system_config para saber si un mercado (crypto_enabled / forex_enabled) está activo."""
+    now = time.time()
+    cached = _MARKET_TOGGLE_CACHE.get(config_key)
+    if use_cache and cached and (now - cached[0]) < _MARKET_TOGGLE_TTL:
+        return cached[1]
+
+    try:
+        if sb is None:
+            from app.core.supabase_client import get_supabase
+            sb = get_supabase()
+        res = sb.table("system_config").select("value").eq("key", config_key).maybe_single().execute()
+        if res and getattr(res, "data", None) and "value" in res.data:
+            val = res.data["value"]
+            enabled = not (
+                val is False or str(val).strip().lower() in ("false", "0", "no", "off", "none", "")
+            )
+            _MARKET_TOGGLE_CACHE[config_key] = (now, enabled)
+            return enabled
+        _MARKET_TOGGLE_CACHE[config_key] = (now, default)
+        return default
+    except Exception:
+        if cached is not None:
+            return cached[1]
+        return default
+
+
+def is_crypto_enabled(sb=None, use_cache: bool = True) -> bool:
+    """Retorna True si el mercado Crypto / Binance Futures está habilitado en system_config."""
+    return is_market_enabled("crypto_enabled", sb=sb, default=True, use_cache=use_cache)
+
+
+def is_forex_enabled(sb=None, use_cache: bool = True) -> bool:
+    """Retorna True si el mercado Forex / cTrader está habilitado en system_config."""
+    return is_market_enabled("forex_enabled", sb=sb, default=True, use_cache=use_cache)

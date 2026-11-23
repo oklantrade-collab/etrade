@@ -15,6 +15,7 @@ import numpy as np
 from datetime import datetime, timezone
 
 from app.core.logger import log_info, log_error, log_warning
+from app.core.time_utils import parse_iso_utc
 from app.workers.alerts_service import send_telegram_message
 
 MODULE = "TP_MANAGER"
@@ -533,21 +534,51 @@ async def execute_partial_sell(
     except Exception as e:
         log_error(MODULE, f'Error actualizando posición: {e}')
 
-    # Registrar orden SELL (status='pending' si el puente está activo para que TWS la ejecute)
+    # Registrar orden de cierre (BUY para short, SELL para long) con deduplicación 120s
+    is_short = (
+        str(position.get('direction') or position.get('side') or position.get('pos_type') or 'long').lower() in ('short', 'sell')
+        or float(position.get('shares_remaining') or 0) < 0
+    )
+    close_dir = 'buy' if is_short else 'sell'
+    order_rule = position.get('rule_code') or 'ADUANA_TP_CLOSE'
+    group_name = position.get('group_name') or 'IB_PAPER'
     try:
-        order_rule = position.get('rule_code') or 'ADUANA_TP_CLOSE'
-        supabase.table('stocks_orders').insert({
-            'ticker': ticker,
-            'order_type': 'market',
-            'direction': 'sell',
-            'shares': int(shares),
-            'market_price': price,
-            'rule_code': order_rule,
-            'status': order_status,
-            'filled_price': price if order_status == 'filled' else None,
-            'filled_at': datetime.now(timezone.utc).isoformat() if order_status == 'filled' else None,
-        }).execute()
-        log_info(MODULE, f'📡 Orden SELL despachada para {ticker} ({shares} sh, status={order_status}, rule={order_rule})')
+        should_insert = True
+        if bridge_active:
+            now_dt = datetime.now(timezone.utc)
+            existing = (
+                supabase.table('stocks_orders')
+                .select('id, created_at, status')
+                .eq('ticker', ticker)
+                .eq('direction', close_dir)
+                .in_('status', ['pending', 'processing', 'submitted'])
+                .limit(5)
+                .execute()
+            )
+            ex_rows = getattr(existing, 'data', None)
+            if isinstance(ex_rows, list):
+                for eo in ex_rows:
+                    c_dt = parse_iso_utc(eo.get('created_at'))
+                    if c_dt is None or (now_dt - c_dt).total_seconds() < 120.0:
+                        should_insert = False
+                        log_info(MODULE, f'⏸️ [DEDUP] Orden {close_dir.upper()} reciente ya encolada para {ticker}. Omitiendo duplicado.')
+                        break
+
+        if should_insert:
+            supabase.table('stocks_orders').insert({
+                'ticker': ticker,
+                'group_name': group_name,
+                'order_type': 'market',
+                'direction': close_dir,
+                'shares': abs(int(shares)),
+                'market_price': price,
+                'rule_code': order_rule,
+                'status': order_status,
+                'filled_price': price if order_status == 'filled' else None,
+                'filled_at': datetime.now(timezone.utc).isoformat() if order_status == 'filled' else None,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            log_info(MODULE, f'📡 Orden {close_dir.upper()} despachada para {ticker} ({shares} sh, group={group_name}, status={order_status}, rule={order_rule})')
     except Exception as e:
         log_error(MODULE, f'Error registrando orden: {e}')
 

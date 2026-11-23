@@ -988,11 +988,15 @@ async def _route_crypto_qshr_to_aduana(symbol: str, signal: dict, df_5m, df_15m,
         qty = sizing_usd / last_price
         
         from app.core.position_monitor import _execute_paper_open
-        await _execute_paper_open(
+        opened_pos = await _execute_paper_open(
             symbol=symbol, side=side, price=last_price,
             size=qty, rule_code=rule_code, regime={'category': 'favorable_trend'}, levels={},
             vel_config={'adx_val': 30, 'multiplier': sizing_factor}, supabase=sb
         )
+
+        if not opened_pos:
+            log_warning(MODULE, f"⚠️ [QSHR ENTRY ABORTED] {symbol} {side.upper()} ({rule_code}) no se persistió en DB; se omite alerta de entrada.")
+            return False
 
         from app.workers.performance_monitor import send_telegram_message
         mode_label = "PAPER" if is_paper else "LIVE REAL"
@@ -1530,18 +1534,8 @@ async def _process_symbol_5m(symbol: str, provider, gs_data, sb):
 
 def is_crypto_enabled(sb=None) -> bool:
     """Verifica si el módulo Crypto / Binance Futures está ACTIVO en system_config."""
-    try:
-        if sb is None:
-            sb = get_supabase()
-        ce = sb.table("system_config").select("value").eq("key", "crypto_enabled").maybe_single().execute()
-        if ce and ce.data and "value" in ce.data:
-            val = ce.data["value"]
-            if val is False or str(val).strip().lower() in ("false", "0", "no", "none", ""):
-                return False
-            return True
-    except Exception:
-        pass
-    return True
+    from app.core.config import is_crypto_enabled as _cfg_is_crypto_enabled
+    return _cfg_is_crypto_enabled(sb=sb)
 
 async def cycle_5m():
     if not is_crypto_enabled():
@@ -3010,13 +3004,23 @@ async def listen_for_rule_changes():
     # (Implementation details for supabase-py realtime go here)
 
 async def main():
+    from app.core.config import is_crypto_enabled as _cfg_is_crypto_enabled
+    sb = get_supabase()
+    if not _cfg_is_crypto_enabled(sb, use_cache=False):
+        log_info(
+            MODULE,
+            "⏸️ [CRYPTO SUSPENDIDO] crypto_enabled=false en system_config. Worker en standby sin warm-up, sin WebSocket y sin procesamiento hasta reactivación.",
+        )
+        while not _cfg_is_crypto_enabled(sb, use_cache=False):
+            await asyncio.sleep(300)
+        log_info(MODULE, "▶️ [CRYPTO REACTIVADO] crypto_enabled=true detectado. Iniciando worker Crypto...")
+
     # 0. Load Configuration (Fail-safe to Paper)
     await sync_db_config_to_memory() # Cargar config inmediatamente
     await sync_positions_to_memory() # Cargar posiciones inmediatamente
     load_rules_to_memory()
     
     # Initialize Strategy Engine v1.0
-    sb = get_supabase()
     engine = StrategyEngine.get_instance(sb)
     await engine.load()
     from app.core.safety_manager import set_current_worker

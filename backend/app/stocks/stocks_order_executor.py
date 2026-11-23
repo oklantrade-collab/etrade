@@ -15,17 +15,18 @@ from datetime import datetime, timezone, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from app.core.logger import log_info, log_error, log_warning
+from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.core.supabase_client import get_supabase
 from app.core.symbol_state import SymbolStateMachine
+from app.core.time_utils import parse_iso_utc
 
 sm = SymbolStateMachine.get_instance()
 
 MODULE = "stocks_order_exec"
 
 
-def is_ib_bridge_alive() -> bool:
-    """Retorna True si el agente IBKR Bridge en APOLO reportó heartbeat en los últimos 60 segundos."""
+def is_ib_bridge_alive(max_age_sec: int = 180) -> bool:
+    """Retorna True si el agente IBKR Bridge en APOLO reportó heartbeat dentro de `max_age_sec`."""
     try:
         sb = get_supabase()
         res = sb.table("stocks_config").select("value").eq("key", "ib_bridge_heartbeat").limit(1).execute()
@@ -39,14 +40,16 @@ def is_ib_bridge_alive() -> bool:
             data = json.loads(val)
         except Exception:
             data = ast.literal_eval(val)
-        if not data.get("connected"):
+        if not isinstance(data, dict) or not data.get("connected"):
             return False
         ts_str = data.get("timestamp")
         if not ts_str:
             return False
-        ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        ts = parse_iso_utc(ts_str)
+        if ts is None:
+            return False
         age_sec = (datetime.now(timezone.utc) - ts).total_seconds()
-        return age_sec <= 60
+        return age_sec <= float(max_age_sec)
     except Exception:
         return False
 
@@ -86,21 +89,40 @@ def _is_outside_ross_momentum_window_et(now_dt=None) -> bool:
 
 
 def _get_config() -> dict:
-    """Load stocks configuration from DB."""
+    """Load stocks sizing configuration from Settings (`trading_config.capital_stocks_spot` & `stocks_config.max_pct_per_trade`)."""
     sb = get_supabase()
     try:
         res = sb.table("stocks_config").select("key, value").execute()
-        cfg = {r["key"]: r["value"] for r in (res.data or [])}
-        
-        pct_trade = max(float(cfg.get("pct_per_operation", 10.0)), float(cfg.get("max_pct_per_trade", 10.0)))
-        if pct_trade > 1: pct_trade = pct_trade / 100.0 # 10 -> 0.10
+        rows = getattr(res, "data", None)
+        cfg = {r["key"]: r["value"] for r in (rows if isinstance(rows, list) else []) if isinstance(r, dict)}
+
+        # Capital asignado (Base) desde trading_config.capital_stocks_spot
+        total_capital = float(cfg.get("total_capital_usd", 5000.0))
+        try:
+            tc_res = sb.table("trading_config").select("capital_stocks_spot").limit(1).execute()
+            tc_rows = getattr(tc_res, "data", None)
+            if isinstance(tc_rows, list) and tc_rows and isinstance(tc_rows[0], dict):
+                base_cap = float(tc_rows[0].get("capital_stocks_spot") or 0.0)
+                if base_cap > 0:
+                    total_capital = base_cap
+        except Exception:
+            pass
+
+        # % Inversión por Operación exclusivamente desde Settings (max_pct_per_trade, defecto 5%)
+        raw_pct = cfg.get("max_pct_per_trade")
+        if raw_pct is None:
+            raw_pct = cfg.get("pct_per_operation", 5.0)
+        pct_trade = float(raw_pct)
+        if pct_trade > 1.0:
+            pct_trade = pct_trade / 100.0  # 5 -> 0.05
 
         pct_max_total = float(cfg.get("max_total_risk_pct", 0.30))
-        if pct_max_total > 1: pct_max_total = pct_max_total / 100.0 # 30 -> 0.30
+        if pct_max_total > 1.0:
+            pct_max_total = pct_max_total / 100.0  # 30 -> 0.30
 
         return {
             "paper_mode": str(cfg.get("paper_mode_active", "true")).lower() == "true",
-            "total_capital": float(cfg.get("total_capital_usd", 5000)),
+            "total_capital": total_capital,
             "max_pct_per_trade": pct_trade,
             "max_total_risk_pct": pct_max_total,
             "max_positions": int(cfg.get("max_active_stocks") or cfg.get("max_concurrent_positions", 3)),
@@ -109,34 +131,49 @@ def _get_config() -> dict:
         log_warning(MODULE, f"Config load error: {e}")
         return {
             "paper_mode": True,
-            "total_capital": 5000,
-            "max_pct_per_trade": 0.20,
-            "max_positions": 5,
+            "total_capital": 5000.0,
+            "max_pct_per_trade": 0.05,
+            "max_total_risk_pct": 0.30,
+            "max_positions": 3,
         }
 
 
 def _calculate_shares(capital: float, max_pct: float, price: float) -> int:
     """
-    Calcula la cantidad de acciones basada en riesgo, redondeando a múltiplos de 5
-    cuando el precio lo permite, o mínimo 1 acción para acciones de mayor precio ($50-$100).
+    Calcula la cantidad de acciones estrictamente dentro de `capital * max_pct` (5% del Capital Base).
+    Redondea a múltiplos de 5 cuando alcanza para >= 5 acciones; rechaza (0) si 1 acción supera el tope.
     """
-    if price <= 0: return 0
-    
+    if price <= 0 or capital <= 0 or max_pct <= 0:
+        return 0
+
     target_usd = capital * max_pct
+    if target_usd < price:
+        return 0
+
     raw_shares = target_usd / price
-    
-    # Redondear al múltiplo de 5 inferior más cercano si alcanza para >= 5 acciones
     shares = int(raw_shares // 5) * 5
-    
     if shares < 5:
-        if target_usd >= (5 * price):
-            shares = 5
-        elif int(raw_shares) >= 1:
-            shares = int(raw_shares)
-        elif (capital * 0.10) >= price:
-            shares = 1
-        
-    return shares
+        shares = int(raw_shares)
+
+    return max(0, shares)
+
+
+def _has_inflight_buy_order(sb, ticker: str, statuses: tuple[str, ...] = ("pending", "processing", "submitted")) -> bool:
+    """Return True only when DB explicitly returns at least one matching in-flight BUY row."""
+    try:
+        res = (
+            sb.table("stocks_orders")
+            .select("id")
+            .eq("ticker", ticker)
+            .eq("direction", "buy")
+            .in_("status", list(statuses))
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None)
+        return isinstance(rows, list) and len(rows) > 0
+    except Exception:
+        return False
 
 
 def _send_telegram_sync(message: str):
@@ -184,13 +221,28 @@ def execute_market_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
-        enforce_ross = bool(context.get("enforce_ross_window", False) or str(rule_code).startswith("RP_WARRIOR_"))
+        is_explicit_swing = (
+            bool(context.get("is_swing", False))
+            or ("SWING" in str(rule_code or "").upper())
+            or ("SWING" in str((rule or {}).get("group_name") or "").upper())
+        )
+        enforce_ross = bool(context.get("enforce_ross_window", not is_explicit_swing)) or str(rule_code).startswith("RP_WARRIOR_")
         if enforce_ross and _is_outside_ross_momentum_window_et(mock_now):
             log_warning(MODULE, f"⛔ Aborting BUY for {ticker}: Fuera de ventana de momentum Ross Cameron (>= 11:00 ET). Apertura {rule_code} bloqueada.")
             return {
                 "success": False,
                 "reason": "OUTSIDE_MOMENTUM_WINDOW: Nuevas compras de momentum Ross Cameron bloqueadas después de las 11:00 ET."
             }
+
+        if is_explicit_swing:
+            try:
+                from app.core.structural_regime_engine import evaluate_macro_daily_bias
+                macro_bias = evaluate_macro_daily_bias()
+                if macro_bias.get("veto_swing_longs"):
+                    log_warning(MODULE, f"⛔ Aborting Swing BUY for {ticker}: {macro_bias.get('reason')}")
+                    return {"success": False, "reason": macro_bias.get("reason")}
+            except Exception:
+                pass
 
         # ── VALIDACIÓN 0.05: FILTRO ANTI-CHASE ROSS CAMERON (Precio <= EMA9_5m + 1.5x ATR) ──
         ema9_5m_ctx = float(context.get("ema9_5m") or 0.0)
@@ -288,7 +340,7 @@ def execute_market_order(
         # ── VALIDACIÓN 0.15: DISYUNTOR DIARIO & COOLDOWN (Propuesta #3) ──
         try:
             from app.core.circuit_breaker import can_open_new_trade
-            can_open, cb_reason = can_open_new_trade(ticker)
+            can_open, cb_reason = can_open_new_trade(ticker, sb=sb)
             if not can_open and not context.get('force_buy', False):
                 log_warning(MODULE, f"⛔ Compra rechazada por Disyuntor/Cooldown para {ticker}: {cb_reason}")
                 return {
@@ -297,6 +349,10 @@ def execute_market_order(
                 }
         except Exception as e_cb:
             log_debug(MODULE, f"Bypass verificación disyuntor: {e_cb}")
+
+        if _has_inflight_buy_order(sb, ticker, statuses=("pending", "processing", "submitted")):
+            log_warning(MODULE, f"⛔ [DEDUP BUY] Orden de compra ya en vuelo para {ticker}. Evitando duplicado.")
+            return {"success": False, "reason": f"Orden de compra en vuelo para {ticker}"}
 
         # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15M NORMAL / 60M SI HUBO PÉRDIDA PREVIA) ──
         # Evita re-abrir la misma posición si cerró recientemente (y 60 min si fue pérdida para erradicar whipsaws)
@@ -316,15 +372,16 @@ def execute_market_order(
                 required_cooldown = 60.0 if is_prev_loss else 15.0
 
                 if ex_dt_str:
-                    ex_dt = datetime.fromisoformat(str(ex_dt_str).replace('Z', '+00:00'))
-                    mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
-                    if mins_since_exit < required_cooldown and not context.get('force_buy', False):
-                        loss_tag = f" tras PÉRDIDA previa ({last_pnl_pct:+.2f}%)" if is_prev_loss else ""
-                        log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< {required_cooldown:.0f} min){loss_tag}. Re-apertura bloqueada.")
-                        return {
-                            "success": False,
-                            "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: {required_cooldown:.0f} minutos{loss_tag}."
-                        }
+                    ex_dt = parse_iso_utc(ex_dt_str)
+                    if ex_dt is not None:
+                        mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
+                        if mins_since_exit < required_cooldown and not context.get('force_buy', False):
+                            loss_tag = f" tras PÉRDIDA previa ({last_pnl_pct:+.2f}%)" if is_prev_loss else ""
+                            log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< {required_cooldown:.0f} min){loss_tag}. Re-apertura bloqueada.")
+                            return {
+                                "success": False,
+                                "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: {required_cooldown:.0f} minutos{loss_tag}."
+                            }
         except Exception as e_cd:
             log_debug(MODULE, f"Error validando cooldown de salida para {ticker}: {e_cd}")
 
@@ -361,28 +418,36 @@ def execute_market_order(
             _send_telegram_sync(f"⛔ COMPRA BLOQUEADA {ticker}\n{diag_msg}")
             return {"success": False, "reason": diag_msg}
 
-    capital = config["total_capital"]
-    max_pct = config["max_pct_per_trade"]
-    max_total_risk_pct = config["max_total_risk_pct"]
-    
+    capital = float(config.get("total_capital", 5000.0))
+    max_pct = float(config.get("max_pct_per_trade", 0.05))
+    max_total_risk_pct = float(config.get("max_total_risk_pct", 0.30))
+
     # ── VALIDACIÓN 1: RIESGO TOTAL ACUMULADO ──
     open_pos_res = sb.table("stocks_positions").select("total_cost").eq("status", "open").execute()
-    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_res.data or []))
+    open_pos_rows = getattr(open_pos_res, "data", None)
+    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_rows if isinstance(open_pos_rows, list) else []))
     max_allowed_investment = capital * max_total_risk_pct
 
     if current_investment >= max_allowed_investment:
         log_warning(MODULE, f"Aborting MARKET order for {ticker}: Total risk limit reached (${current_investment:.0f}/${max_allowed_investment:.0f})")
         return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
 
-    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
+    # ── VALIDACIÓN 2: TAMAÑO DE LOTE DESDE SETTINGS (5% del Capital Base) ──
     shares = _calculate_shares(capital, max_pct, price)
+
+    def _scale_tranche(base_sh: int, ratio: float) -> int:
+        if base_sh <= 0:
+            return 0
+        scaled_5 = int((base_sh * ratio) // 5) * 5
+        if scaled_5 >= 5:
+            return scaled_5
+        return max(1, int(base_sh * ratio))
 
     # Manejo de Tranches en Sweet Spot (+5% a +25%, Caso WFF)
     is_sweet_spot = context.get("is_sweet_spot", False) or (5.0 <= gap_pct <= 25.0 and rule_code in ["PRO_BUY_MKT", "SWEET_SPOT_BUY", "ALPHA_RUNNER_BUY"])
     tranche_step = int(context.get("tranche_step") or 1)
 
     if is_sweet_spot or rule_code == "SWEET_SPOT_BUY":
-        # Verificaciones de Piramidación Livermore para Tranche 2 y 3
         if tranche_step in [2, 3]:
             if context.get("prev_candle_green") is False:
                 log_warning(MODULE, f"⛔ Aborting Tranche {tranche_step} for {ticker}: Vela previa fue ROJA. Prohibido piramidar en debilidad.")
@@ -397,57 +462,43 @@ def execute_market_order(
                     "reason": f"Abortado Tranche {tranche_step}: Open < Close anterior. Falta continuidad alcista."
                 }
 
-        # Asignación de 1/3 por cada paso (33%, 33%, 34%)
-        if tranche_step == 1:
-            shares = max(5, int((shares * 0.33) // 5) * 5)
-        elif tranche_step == 2:
-            shares = max(5, int((shares * 0.33) // 5) * 5)
+        if tranche_step in (1, 2):
+            shares = _scale_tranche(shares, 0.33)
         elif tranche_step == 3:
-            shares = max(5, int((shares * 0.34) // 5) * 5)
+            shares = _scale_tranche(shares, 0.34)
 
-    elif rule_code == "GAP_TRANCHE_1":
-        # Tranche inicial 1/3 (33.3%)
-        shares = max(5, int((shares * 0.33) // 5) * 5)
-    elif rule_code in ("GAP_TRANCHE_2", "GAP_TRANCHE_2_HOD_BREAKOUT"):
-        # Tranche segundo 1/3 (33.3%)
-        shares = max(5, int((shares * 0.33) // 5) * 5)
+    elif rule_code in ("GAP_TRANCHE_1", "GAP_TRANCHE_2", "GAP_TRANCHE_2_HOD_BREAKOUT"):
+        shares = _scale_tranche(shares, 0.33)
     elif rule_code in ("GAP_TRANCHE_3", "GAP_TRANCHE_3_HOD_BREAKOUT"):
-        # Tranche final 1/3 (33.4%)
-        shares = max(5, int((shares * 0.34) // 5) * 5)
+        shares = _scale_tranche(shares, 0.34)
     elif rule_code == "FT_RUNNER_BUY":
-        # Tranche inicial ligero (30%) para permitir Scaling-In / Pyramiding
-        shares = max(5, int((shares * 0.30) // 5) * 5)
+        shares = _scale_tranche(shares, 0.30)
     elif rule_code == "FT_REENTRY_BUY":
-        # Tranche de recompra (35%) para añadir a posición ganadora
-        shares = max(5, int((shares * 0.35) // 5) * 5)
+        shares = _scale_tranche(shares, 0.35)
 
-    # HARD CAP DE SEGURIDAD POR ACCIÓN: Máximo 10% del capital total en una sola acción
-    max_trade_cap_usd = capital * max(min(max_pct, 0.10), 0.10)
-    if (shares * price) > max_trade_cap_usd:
+    # HARD CAP DE SEGURIDAD POR ACCIÓN DESDE SETTINGS (sin inflación a 10% ni forzar 1 acción > tope)
+    max_trade_cap_usd = capital * max_pct
+    if (shares * price) > max_trade_cap_usd + 1e-9:
         shares_5 = int(max_trade_cap_usd // (price * 5)) * 5
-        shares = shares_5 if shares_5 >= 5 else max(1, int(max_trade_cap_usd // price))
-    
+        shares = shares_5 if shares_5 >= 5 else int(max_trade_cap_usd // price)
+
     if shares < 1:
-        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Insufficient capital for 1 share (Target: ${capital * max_pct:.0f} vs Price: ${price:.2f})")
-        return {"success": False, "reason": f"Capital insuficiente para 1 acción (${capital * max_pct:.0f} vs ${price:.2f})"}
-    
+        log_warning(MODULE, f"Aborting MARKET order for {ticker}: Capital asignado por operación (${max_trade_cap_usd:.2f}) insuficiente para 1 acción (${price:.2f})")
+        return {"success": False, "reason": f"Capital asignado por operación (${max_trade_cap_usd:.2f}) insuficiente para 1 acción (${price:.2f})"}
+
     # Validar que no superemos el riesgo total con esta nueva compra
     if current_investment + (shares * price) > max_allowed_investment:
-        # Intentar ajustar shares a lo que quede
         remaining_cap = max_allowed_investment - current_investment
-        shares = int(remaining_cap // (price * 5)) * 5
+        shares_5 = int(remaining_cap // (price * 5)) * 5
+        shares = shares_5 if shares_5 >= 5 else int(remaining_cap // price)
         if shares <= 0:
-            log_warning(MODULE, f"Aborting MARKET order for {ticker}: Adding even 5 shares would exceed Max Total Risk")
+            log_warning(MODULE, f"Aborting MARKET order for {ticker}: New buy would exceed Max Total Risk")
             return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
-    now = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(timezone.utc)
+    now = now_utc.isoformat()
     ib_live = is_ib_bridge_alive()
 
-    # Principio Broker-First: El Broker manda. Todas las órdenes inician como 'pending'
-    # y solo se abren posiciones al recibir la confirmación de fill de Interactive Brokers TWS.
-    initial_status = "pending"
-
-    # Registrar orden
     order_data = {
         "ticker": ticker,
         "group_name": rule.get("group_name"),
@@ -463,6 +514,7 @@ def execute_market_order(
         "status": "pending",
         "filled_price": None,
         "filled_at": None,
+        "expires_at": (now_utc + timedelta(minutes=15)).isoformat() if direction.lower() == "buy" else None,
         "created_at": now,
     }
 
@@ -578,6 +630,29 @@ def place_limit_order(
                 "reason": "Cutoff 15:15 ET alcanzado (últimas 3 velas de mercado). Nuevas aperturas bloqueadas para evitar liquidación prematura EOD."
             }
 
+        is_explicit_swing = (
+            bool(context.get("is_swing", False))
+            or ("SWING" in str(rule_code or "").upper())
+            or ("SWING" in str((rule or {}).get("group_name") or "").upper())
+        )
+        enforce_ross = bool(context.get("enforce_ross_window", not is_explicit_swing)) or str(rule_code).startswith("RP_WARRIOR_")
+        if enforce_ross and _is_outside_ross_momentum_window_et(mock_now):
+            log_warning(MODULE, f"⛔ Aborting LIMIT BUY for {ticker}: Fuera de ventana de momentum Ross Cameron (>= 11:00 ET). Apertura {rule_code} bloqueada.")
+            return {
+                "success": False,
+                "reason": "OUTSIDE_MOMENTUM_WINDOW: Nuevas compras de momentum Ross Cameron bloqueadas después de las 11:00 ET."
+            }
+
+        if is_explicit_swing:
+            try:
+                from app.core.structural_regime_engine import evaluate_macro_daily_bias
+                macro_bias = evaluate_macro_daily_bias()
+                if macro_bias.get("veto_swing_longs"):
+                    log_warning(MODULE, f"⛔ Aborting Swing LIMIT BUY for {ticker}: {macro_bias.get('reason')}")
+                    return {"success": False, "reason": macro_bias.get("reason")}
+            except Exception:
+                pass
+
         # ── VALIDACIÓN 0.1: CHOKE POINT INVIOLABLE ADUANA 1H (EMA3 > EMA9) ──
         # Principio Fail-Closed: Sin excepciones para ninguna regla o estrategia.
         try:
@@ -652,7 +727,7 @@ def place_limit_order(
         # ── VALIDACIÓN 0.15: DISYUNTOR DIARIO & COOLDOWN (Propuesta #3) ──
         try:
             from app.core.circuit_breaker import can_open_new_trade
-            can_open, cb_reason = can_open_new_trade(ticker)
+            can_open, cb_reason = can_open_new_trade(ticker, sb=sb)
             if not can_open and not context.get('force_buy', False):
                 log_warning(MODULE, f"⛔ Compra rechazada por Disyuntor/Cooldown para {ticker}: {cb_reason}")
                 return {
@@ -661,6 +736,10 @@ def place_limit_order(
                 }
         except Exception as e_cb:
             log_debug(MODULE, f"Bypass verificación disyuntor: {e_cb}")
+
+        if _has_inflight_buy_order(sb, ticker, statuses=("processing", "submitted")):
+            log_warning(MODULE, f"⛔ [DEDUP BUY] Orden LIMIT BUY ya activa en TWS para {ticker}. Evitando duplicado.")
+            return {"success": False, "reason": f"Orden de compra activa en TWS para {ticker}"}
 
         # ── VALIDACIÓN 0.2: COOLDOWN POST-CIERRE (15M NORMAL / 60M SI HUBO PÉRDIDA PREVIA) ──
         try:
@@ -679,15 +758,16 @@ def place_limit_order(
                 required_cooldown = 60.0 if is_prev_loss else 15.0
 
                 if ex_dt_str:
-                    ex_dt = datetime.fromisoformat(str(ex_dt_str).replace('Z', '+00:00'))
-                    mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
-                    if mins_since_exit < required_cooldown and not context.get('force_buy', False):
-                        loss_tag = f" tras PÉRDIDA previa ({last_pnl_pct:+.2f}%)" if is_prev_loss else ""
-                        log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< {required_cooldown:.0f} min){loss_tag}. Re-apertura bloqueada.")
-                        return {
-                            "success": False,
-                            "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: {required_cooldown:.0f} minutos{loss_tag}."
-                        }
+                    ex_dt = parse_iso_utc(ex_dt_str)
+                    if ex_dt is not None:
+                        mins_since_exit = (now_u - ex_dt).total_seconds() / 60.0
+                        if mins_since_exit < required_cooldown and not context.get('force_buy', False):
+                            loss_tag = f" tras PÉRDIDA previa ({last_pnl_pct:+.2f}%)" if is_prev_loss else ""
+                            log_warning(MODULE, f"⏳ Cooldown activo para {ticker}: cerrado hace {mins_since_exit:.1f}m (< {required_cooldown:.0f} min){loss_tag}. Re-apertura bloqueada.")
+                            return {
+                                "success": False,
+                                "reason": f"Cooldown activo: posición cerrada hace {mins_since_exit:.1f}m. Mínimo de descanso requerido: {required_cooldown:.0f} minutos{loss_tag}."
+                            }
         except Exception as e_cd:
             log_debug(MODULE, f"Error validando cooldown de salida para {ticker}: {e_cd}")
 
@@ -733,24 +813,27 @@ def place_limit_order(
 
     # ── VALIDACIÓN 1: RIESGO TOTAL ACUMULADO ──
     config = _get_config()
-    capital = config["total_capital"]
-    max_total_risk_pct = config["max_total_risk_pct"]
+    capital = float(config.get("total_capital", 5000.0))
+    max_pct = float(config.get("max_pct_per_trade", 0.05))
+    max_total_risk_pct = float(config.get("max_total_risk_pct", 0.30))
     open_pos_res = sb.table("stocks_positions").select("total_cost").eq("status", "open").execute()
-    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_res.data or []))
+    open_pos_rows = getattr(open_pos_res, "data", None)
+    current_investment = sum(float(p["total_cost"] or 0) for p in (open_pos_rows if isinstance(open_pos_rows, list) else []))
     max_allowed_investment = capital * max_total_risk_pct
 
     if direction == "buy" and current_investment >= max_allowed_investment:
         return {"success": False, "reason": f"Máximo riesgo total alcanzado (${current_investment:.0f}/${max_allowed_investment:.0f})"}
 
-    # ── VALIDACIÓN 2: TAMAÑO DE LOTE (Múltiplos de 5 + Mínimo 5) ──
-    shares = _calculate_shares(capital, config["max_pct_per_trade"], limit_price)
-    
+    # ── VALIDACIÓN 2: TAMAÑO DE LOTE DESDE SETTINGS (5% del Capital Base) ──
+    shares = _calculate_shares(capital, max_pct, limit_price)
+
     if direction == "buy" and shares < 1:
-        return {"success": False, "reason": f"Capital insuficiente para 1 acción (${capital * config['max_pct_per_trade']:.0f} vs ${limit_price:.2f})"}
-    
+        return {"success": False, "reason": f"Capital asignado por operación (${capital * max_pct:.2f}) insuficiente para 1 acción (${limit_price:.2f})"}
+
     if direction == "buy" and current_investment + (shares * limit_price) > max_allowed_investment:
         remaining_cap = max_allowed_investment - current_investment
-        shares = int(remaining_cap // (limit_price * 5)) * 5
+        shares_5 = int(remaining_cap // (limit_price * 5)) * 5
+        shares = shares_5 if shares_5 >= 5 else int(remaining_cap // limit_price)
         if shares <= 0:
             return {"success": False, "reason": "La nueva compra superaría el Máximo Riesgo Total permitido"}
 
@@ -1204,6 +1287,7 @@ def _close_all_positions(ticker: str, price: float):
         return
 
     now = datetime.now(timezone.utc).isoformat()
+    bridge_active = is_ib_bridge_alive()
     for pos in positions.data:
         def safe_float(v, default=0.0):
             try:
@@ -1215,6 +1299,20 @@ def _close_all_positions(ticker: str, price: float):
         shares = safe_float(pos.get("shares"))
         pnl = (price - avg) * shares
         pnl_pct = ((price - avg) / avg * 100) if avg > 0 else 0
+
+        if bridge_active:
+            sb.table("stocks_positions") \
+                .update({
+                    "status": "closing",
+                    "current_price": price,
+                    "unrealized_pnl": round(pnl, 2),
+                    "unrealized_pnl_pct": round(pnl_pct, 2),
+                    "updated_at": now,
+                }) \
+                .eq("id", pos["id"]) \
+                .execute()
+            log_info(MODULE, f"⏳ Posición {ticker} marcada 'closing' esperando confirmación de fill en TWS.")
+            continue
 
         sb.table("stocks_positions") \
             .update({

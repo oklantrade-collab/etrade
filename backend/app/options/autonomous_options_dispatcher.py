@@ -17,7 +17,7 @@ Flujo de Ejecución:
 
 from __future__ import annotations
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 
 from app.core.logger import log_info, log_warning, log_error
@@ -46,7 +46,8 @@ def dispatch_autonomous_option_trade(
     candidate: Dict[str, Any],
     direction: str = "CALL",
     config: Optional[dict] = None,
-    supabase: Any = None
+    supabase: Any = None,
+    now_dt: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
     Despacha una orden de opción (CALL o PUT) basada en la calificación de un escáner.
@@ -54,6 +55,7 @@ def dispatch_autonomous_option_trade(
     """
     sb = supabase or get_supabase()
     cfg = config or {}
+    ref_dt = now_dt or datetime.now(timezone.utc)
 
     ticker = str(candidate.get("ticker", "")).replace("/", "").replace(".", "").upper().strip()
     if not ticker:
@@ -65,6 +67,34 @@ def dispatch_autonomous_option_trade(
     today_str = date.today().isoformat()
 
     try:
+        from app.options.warrior_momentum_options import is_warrior_options_golden_window, MAX_CONTRACTS_PER_SYMBOL
+        from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+
+        # ── 0. VENTANA DE ORO, DISYUNTOR Y VETO MACRO DIARIO ──
+        in_win, win_msg = is_warrior_options_golden_window(ref_dt)
+        if not in_win:
+            log_info(MODULE, f"⏸️ {ticker} ({opt_dir}) omitido fuera de Ventana de Oro 09:35-11:30 ET: {win_msg}")
+            return {"success": False, "reason": f"Fuera de Ventana de Oro: {win_msg}"}
+
+        try:
+            from app.core.circuit_breaker import can_open_new_trade
+            can_open, cb_reason = can_open_new_trade(ticker, sb=sb)
+            if not can_open:
+                log_warning(MODULE, f"⛔ {ticker} ({opt_dir}) bloqueado por Disyuntor: {cb_reason}")
+                return {"success": False, "reason": cb_reason}
+        except Exception:
+            pass
+
+        if opt_dir == "CALL":
+            try:
+                from app.core.structural_regime_engine import evaluate_macro_daily_bias
+                macro_bias = evaluate_macro_daily_bias()
+                if macro_bias.get("veto_calls"):
+                    log_info(MODULE, f"⛔ {ticker} (CALL) bloqueado por Veto Macro Diario: {macro_bias.get('reason')}")
+                    return {"success": False, "reason": macro_bias.get("reason")}
+            except Exception:
+                pass
+
         # ── 1. FILTRO ANTI-DUPLICADO & CONTROL DE EXPOSICIÓN ──
         # a) Verificar si ya existe posición abierta en opt_paper_trades para este subyacente y dirección
         pos_check = sb.table("opt_paper_trades")\
@@ -85,7 +115,7 @@ def dispatch_autonomous_option_trade(
         orders_check = sb.table("stocks_orders")\
             .select("id, status, ticker")\
             .like("ticker", f"{ticker}:OPT:%")\
-            .in_("status", ["pending", "submitted"])\
+            .in_("status", ["pending", "processing", "submitted"])\
             .execute()
 
         if orders_check.data and len(orders_check.data) > 0:
@@ -123,11 +153,11 @@ def dispatch_autonomous_option_trade(
         except Exception as e_gate:
             log_warning(MODULE, f"Aviso evaluando Gatekeeper ADUANA Opciones para {ticker}: {e_gate}")
 
-        # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO (TRANCHE 1: 30% DEL PRESUPUESTO) ──
+        # ── 2. SELECCIÓN INTELIGENTE DE CONTRATO DESDE SETTINGS ("Riesgo máximo por operación" = $800) ──
         selection_mode = str(candidate.get("selection_mode", "GAP_RUNNER"))
-        total_budget_usd = float(cfg.get("options_trade_budget_usd", 1000.0))
-        budget_tranche_1 = round(total_budget_usd * 0.30, 2)
-        log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} [Modo: {selection_mode}] (Spot: ${underlying_price:.2f}, Tranche 1 (30%): ${budget_tranche_1:.0f} de ${total_budget_usd:.0f})...")
+        total_budget_usd = get_effective_max_risk_per_trade_usd(sb, cfg if "max_risk_per_trade_usd" in cfg else None)
+        budget_tranche_1 = round(total_budget_usd, 2)
+        log_info(MODULE, f"🔍 Buscando contrato óptimo de {opt_dir} para {ticker} [Modo: {selection_mode}] (Spot: ${underlying_price:.2f}, Tope Settings: ${total_budget_usd:.0f})...")
 
         best_contract, rej_reasons = fetch_and_select_best_option_contract(
             symbol=ticker,
@@ -147,87 +177,47 @@ def dispatch_autonomous_option_trade(
         opt_ticker_formatted = f"{ticker}:OPT:{opt_exp_compact}:{best_contract.strike}:{best_contract.right}"
         target_band_str = f"OPT:{opt_exp_compact}:{best_contract.strike}:{best_contract.right}"
 
-        # P1: Límite estricto de máximo 2 contratos por orden
-        contracts_to_buy = min(2, max(1, getattr(best_contract, "tranche_1_contracts", 1)))
-        # Entrada en MIDPOINT (+ pequeño margen de llenado, nunca por encima del ask) en lugar de pagar el ask completo
+        # P1: Límite estricto de contratos y tope en USD desde Settings ($800)
+        contracts_to_buy = min(MAX_CONTRACTS_PER_SYMBOL, 2, max(1, getattr(best_contract, "tranche_1_contracts", 1)))
+        # Plan de ejecución escalonada guiado por RVOL + spread (Adaptive Ladder)
+        from app.options.order_execution_plan import compute_option_entry_plan
         _bid = float(getattr(best_contract, "bid", 0.0) or 0.0)
         _ask = float(getattr(best_contract, "ask", 0.0) or 0.0)
-        if _bid > 0 and _ask > 0 and _ask >= _bid:
-            _mid = (_bid + _ask) / 2.0
-            opt_price = round(min(_ask, _mid + min(0.03, (_ask - _bid) * 0.20)), 2)
-        else:
-            opt_price = best_contract.mid if best_contract.mid > 0 else (best_contract.ask if best_contract.ask > 0 else 1.0)
+        _rvol = float(candidate.get("rvol") or candidate.get("rel_vol") or 1.0)
+        entry_plan = compute_option_entry_plan(
+            bid=_bid,
+            ask=_ask,
+            mid=float(getattr(best_contract, "mid", 0.0) or 0.0),
+            rvol=_rvol,
+        )
+        opt_price = entry_plan["limit_price"]
+        unit_cost_usd = opt_price * 100.0
+        if unit_cost_usd > total_budget_usd + 1e-9:
+            log_warning(MODULE, f"⛔ {ticker} ({opt_dir}) rechazado: 1 contrato (${unit_cost_usd:.2f}) excede Riesgo máximo por operación (${total_budget_usd:.2f}).")
+            return {"success": False, "reason": f"1 contrato (${unit_cost_usd:.2f}) excede tope Settings (${total_budget_usd:.2f})"}
+        if unit_cost_usd > 0 and (unit_cost_usd * contracts_to_buy) > total_budget_usd + 1e-9:
+            contracts_to_buy = max(1, int(total_budget_usd // unit_cost_usd))
+
         total_invested = round(opt_price * 100 * contracts_to_buy, 2)
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = ref_dt.isoformat()
+        expires_iso = (ref_dt + timedelta(seconds=float(entry_plan["ttl_sec"]) + 120.0)).isoformat()
 
-        # ── 4. PERSISTENCIA EN opt_paper_trades (SUPERVISIÓN & EXITS) ──
+        # Principio Broker-First: NO insertar optimísticamente en opt_paper_trades antes del fill.
+        # `ib_bridge_worker` creará la posición en opt_paper_trades únicamente al confirmar el fill en TWS.
         strat_type = "long_call" if best_contract.right == "C" else "long_put"
-        trade_dir = "bullish" if best_contract.right == "C" else "bearish"
-        breakeven_p = round(best_contract.strike + opt_price, 2) if best_contract.right == "C" else round(best_contract.strike - opt_price, 2)
-
-        paper_trade_payload = {
-            "symbol": ticker,
-            "strategy_type": strat_type,
-            "direction": trade_dir,
-            "status": "open",
-            "qty": contracts_to_buy,
-            "expiry": best_contract.expiry.isoformat(),
-            "entry_time": now_iso,
-            "entry_debit": opt_price,
-            "entry_costs": round(0.70 * contracts_to_buy, 2),
-            "entry_total_invested": total_invested,
-            "max_loss_total": total_invested,
-            "max_profit_total": 9999.0,
-            "breakeven": breakeven_p,
-            "last_mark_price": opt_price,
-            "last_mark_at": now_iso,
-            "unrealized_pnl": 0.0,
-            "exit_plan": {
-                "initial_sl": candidate.get("stop_loss_trigger") or (round(underlying_price * 0.985, 2) if opt_dir == "CALL" else round(underlying_price * 1.015, 2)),
-                "target_ceiling": candidate.get("tactical_target_ceiling"),
-                "target_floor": candidate.get("tactical_target_floor"),
-                "rule_code": rule_code,
-                "selection_mode": selection_mode,
-                "total_budget_usd": total_budget_usd,
-                "tranche_1_budget_usd": budget_tranche_1,
-                "rebuys_count": 0,
-                "regime_code": st_reg.get("regime_code"),
-                "structural_setup_type": st_reg.get("call_setup_type" if opt_dir == "CALL" else "put_setup_type"),
-                "tp1_target_premium": round(opt_price * 1.50, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
-                "tp2_target_premium": round(opt_price * 2.00, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
-                "hard_sl_premium": round(opt_price * 0.65, 2) if selection_mode.upper() == "OTM_MOMENTUM" else None,
-                "entry_reason": candidate.get("entry_reason", f"Autonomous {opt_dir}"),
-                "last_eval_at": now_iso
-            },
-            "entry_fills": [{
-                "conid": best_contract.conid,
-                "contract_id": best_contract.contract_id,
-                "strike": best_contract.strike,
-                "right": best_contract.right,
-                "bid": best_contract.bid,
-                "ask": best_contract.ask,
-                "fill_price": opt_price,
-                "side": "buy",
-                "closing_side": "sell",
-                "market_data_type": "REALTIME"
-            }],
-            "model_version": "autonomous_opt_v7",
-            "created_at": now_iso,
-            "updated_at": now_iso
-        }
-
-        sb.table("opt_paper_trades").insert(paper_trade_payload).execute()
 
         # ── 5. DESPACHO A stocks_orders (SEÑAL INMEDIATA A TWS VIA APOLO BRIDGE) ──
         order_payload = {
             "ticker": opt_ticker_formatted,
             "group_name": "OPTIONS_AUTONOMOUS",
             "rule_code": rule_code,
-            "order_type": "limit",  # Option Shield: LMT al precio de referencia para blindar contra slippage
+            "order_type": "limit",
             "direction": "buy",
             "shares": contracts_to_buy,
             "market_price": opt_price,
             "limit_price": opt_price,
+            "rvol": entry_plan["rvol"],
+            "expires_at": expires_iso,
             "target_band": target_band_str,
             "status": "pending",
             "created_at": now_iso

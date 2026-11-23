@@ -427,6 +427,7 @@ async def run_stock_driven_options_pipeline(
     rows = sb.table("opt_settings").select("key,value").execute().data or []
     stored = {r["key"]: r["value"] for r in rows if r["key"] != "_version"}
     eff = sd.effective_settings(stored)
+    budget_usd = sd.get_effective_max_risk_per_trade_usd(sb, eff)
 
     # 1. Definir universo de símbolos candidatos (Watchlist + Posiciones + Runners + Core Optionables)
     candidate_symbols = list(CORE_OPTIONABLE_SYMBOLS)
@@ -555,16 +556,16 @@ async def run_stock_driven_options_pipeline(
             log_warning(MODULE, f"No se encontró contrato líquido para {sym} {direction}: {rej_reasons}")
             return False
 
-        # ── REGLA 1: TOPE MÁXIMO DE RIESGO (Si excede, NO entra al ranking, escoge el siguiente) ──
-        is_megacap = sym in ("SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL", "PLTR", "M")
-        base_cap = float(eff.get("max_risk_megacap_usd", 1500.0)) if is_megacap else float(eff.get("max_risk_per_trade_usd", 800.0))
-        cap = min(base_cap, 2000.0)
+        # ── REGLA 1: TOPE MÁXIMO DE RIESGO DESDE SETTINGS ($800, sin excepción megacap) ──
+        from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+        from app.options.warrior_momentum_options import MAX_CONTRACTS_PER_SYMBOL
+        cap = get_effective_max_risk_per_trade_usd(sb, eff)
 
         entry_debit = float(best_contract.ask if best_contract.ask > 0 else best_contract.mid)
         min_contract_cost = round(entry_debit * 100.0, 2)
 
         if min_contract_cost > cap:
-            log_info(MODULE, f"⛔ Excluido del ranking: {sym} {direction} costo mínimo de 1 contrato (${min_contract_cost:.2f}) excede el tope (${cap:.2f}). Se evalúa el siguiente del ranking.")
+            log_info(MODULE, f"⛔ Excluido del ranking: {sym} {direction} costo mínimo de 1 contrato (${min_contract_cost:.2f}) excede el tope de Settings (${cap:.2f}). Se evalúa el siguiente del ranking.")
             return False
 
         strat_type = "long_call" if direction == "CALL" else "long_put"
@@ -572,10 +573,11 @@ async def run_stock_driven_options_pipeline(
         status = "selected" if rank == 1 else "eligible"
 
         mid_debit = float(best_contract.mid)
-        qty = max(1, min(best_contract.target_total_contracts, int(cap / min_contract_cost)))
+        max_by_cap = int(cap // min_contract_cost) if min_contract_cost > 0 else 1
+        qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, best_contract.target_total_contracts, max_by_cap))
         cost_total = round(entry_debit * 100 * qty, 2)
         if cost_total > cap:
-            qty = max(1, int(cap / min_contract_cost))
+            qty = max(1, min(MAX_CONTRACTS_PER_SYMBOL, max_by_cap))
             cost_total = round(entry_debit * 100 * qty, 2)
 
         max_loss = cost_total

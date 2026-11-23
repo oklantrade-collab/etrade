@@ -11,6 +11,7 @@ ROOT_REMOTE_PATH = "/home/etrade/etrade"
 # Archivos críticos para sincronizar (relativos a backend)
 files_to_sync = [
     # RADAR
+    "sql/fix_rule_code_length.sql",
     "app/radar/__init__.py",
     "app/radar/config.py",
     "app/radar/slope_classifier.py",
@@ -124,6 +125,8 @@ files_to_sync = [
     "app/core/relative_strength.py",
     "app/core/cost_guard.py",
     "app/core/circuit_breaker.py",
+    "app/core/time_utils.py",
+    "app/core/bb15m_exhaustion.py",
     "app/core/structural_regime_engine.py",
     "app/options/pre_trade_validator.py",
     "app/options/score.py",
@@ -290,6 +293,13 @@ files_to_sync = [
     "tests/test_autonomous_options_dispatcher.py",
     "app/options/portfolio_selector.py",
     "app/options/paper_execution.py",
+    "app/options/profit_guardian.py",
+    "app/options/order_execution_plan.py",
+    "app/strategy/dynamic_sl_manager.py",
+    "tests/test_profit_guardian_and_trailing.py",
+    "tests/test_broker_sync_and_dynamic_trailing.py",
+    "tests/test_ib_order_lifecycle_and_broker_close.py",
+    "tests/test_blindaje_v3_forense.py",
     "app/options/exit_engine.py",
     "app/options/calibration.py",
     "app/options/worker.py",
@@ -304,6 +314,7 @@ files_to_sync = [
     "app/options/eti_ta_gate.py",
     "app/options/eti_autonomous_dispatcher.py",
     "app/options/warrior_momentum_options.py",
+    "app/stocks/vme_exit_engine.py",
     "app/api/eti_context.py",
     "app/stocks/warrior_momentum_engine.py",
     "data/rules/RP_WARRIOR_MOMENTUM_V1.json",
@@ -539,7 +550,10 @@ def deploy():
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=15",
         f"root@{SERVER_IP}",
-        "systemctl restart --no-block etrade-api etrade-forex etrade-forex-scheduler etrade-crypto etrade-stocks"
+        "systemctl restart --no-block etrade-api etrade-stocks && "
+        "for svc in etrade-crypto etrade-forex etrade-forex-scheduler; do "
+        "if systemctl is-enabled --quiet $svc; then systemctl restart --no-block $svc; "
+        "else echo \"[SKIP] $svc suspendido/deshabilitado; no se reinicia.\"; fi; done"
     ]
     subprocess.run(restart_cmd, check=True)
     

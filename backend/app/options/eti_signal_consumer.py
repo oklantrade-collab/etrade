@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import ssl
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
@@ -34,6 +35,48 @@ from app.options.eti_storage import (
 
 MODULE = "ETI_CONSUMER"
 ETI_BASE_URL = os.getenv("ETI_BASE_URL", "https://eti-zeta-one.vercel.app").rstrip("/")
+_CONSECUTIVE_SYNC_FAILURES = 0
+_ERROR_ESCALATION_THRESHOLD = 3
+
+
+def _format_exc(e: Exception) -> str:
+    """Devuelve siempre un detalle no vacío para excepciones (evita mensajes ': ' en Telegram)."""
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
+async def _http_get_with_retry(
+    url: str,
+    headers: Dict[str, str],
+    timeout_s: float = 15.0,
+    max_attempts: int = 3,
+) -> httpx.Response:
+    """Ejecuta GET con cliente fresco por intento y Connection: close frente a resets TLS/cold-starts."""
+    req_headers = {**headers, "Connection": "close"}
+    retry_delays = (1.0, 2.5)
+    last_exc: Optional[Exception] = None
+    last_resp: Optional[httpx.Response] = None
+
+    for attempt in range(max_attempts):
+        timeout_cfg = httpx.Timeout(connect=8.0, read=timeout_s, write=10.0, pool=8.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout_cfg, follow_redirects=True) as client:
+                resp = await client.get(url, headers=req_headers)
+                last_resp = resp
+                if resp.status_code not in (429, 502, 503, 504):
+                    return resp
+        except (httpx.TransportError, httpx.TimeoutException, ssl.SSLError, OSError) as exc:
+            last_exc = exc
+
+        if attempt < max_attempts - 1:
+            delay = retry_delays[min(attempt, len(retry_delays) - 1)]
+            await asyncio.sleep(delay)
+
+    if last_resp is not None and last_exc is None:
+        return last_resp
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"Error HTTP inesperado consultando {url}")
 
 
 async def check_eti_connection() -> Dict[str, Any]:
@@ -76,13 +119,14 @@ async def check_eti_connection() -> Dict[str, Any]:
                 }
     except Exception as e:
         elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
-        log_warning(MODULE, f"Error conectando con {url}: {e}")
+        err_detail = _format_exc(e)
+        log_warning(MODULE, f"Error conectando con {url}: {err_detail}")
         return {
             "connected": False,
             "target_url": url,
             "status_code": None,
             "latency_ms": elapsed_ms,
-            "error": str(e),
+            "error": err_detail,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -108,181 +152,198 @@ async def sync_signals_from_live_eti() -> Dict[str, Any]:
     Sincroniza señales activas directamente desde el servicio ETI desplegado.
     Intenta REST nativo (/api/eti/v1/etrade/signals/active) y, en fallback, parsea la Matriz de Apertura en tiempo real.
     """
+    global _CONSECUTIVE_SYNC_FAILURES
     headers = {"User-Agent": "Mozilla/5.0 eTrade/1.0 (Windows NT 10.0; Win64; x64)"}
 
     # 1. Fast-path REST JSON nativo (Latencia ultra-baja en milisegundos)
     rest_url = f"{ETI_BASE_URL}/api/eti/v1/etrade/signals/active"
     try:
-        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
-            resp_rest = await client.get(rest_url, headers=headers)
-            if resp_rest.status_code == 200:
-                data = resp_rest.json()
-                signals = data.get("signals", [])
-                if signals:
-                    ingested_count = 0
-                    for raw_sig in signals:
-                        res = ingest_raw_eti_signal(raw_sig)
-                        if res.get("ok"):
-                            ingested_count += 1
-                    log_info(MODULE, f"✓ Sincronización REST JSON nativa ETI completada: {ingested_count} señales 0DTE ingestadas.")
-                    return {"ok": True, "source": "REST_JSON_NATIVE", "ingested_count": ingested_count}
+        resp_rest = await _http_get_with_retry(rest_url, headers, timeout_s=10.0, max_attempts=2)
+        if resp_rest.status_code == 200:
+            data = resp_rest.json()
+            signals = data.get("signals", [])
+            if signals:
+                ingested_count = 0
+                for raw_sig in signals:
+                    res = ingest_raw_eti_signal(raw_sig)
+                    if res.get("ok"):
+                        ingested_count += 1
+                _CONSECUTIVE_SYNC_FAILURES = 0
+                log_info(MODULE, f"✓ Sincronización REST JSON nativa ETI completada: {ingested_count} señales 0DTE ingestadas.")
+                return {"ok": True, "source": "REST_JSON_NATIVE", "ingested_count": ingested_count}
     except Exception as e_rest:
-        log_warning(MODULE, f"Endpoint REST JSON ETI no disponible ({e_rest}), ejecutando fallback HTML.")
+        log_warning(MODULE, f"Endpoint REST JSON ETI no disponible ({_format_exc(e_rest)}), ejecutando fallback HTML.")
 
     # 2. Fallback: Parseo HTML de la Matriz de Apertura
     url = f"{ETI_BASE_URL}/"
 
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=headers)
-            if resp.status_code != 200:
-                log_warning(MODULE, f"ETI respondió con status {resp.status_code}")
-                return {"ok": False, "error": f"HTTP {resp.status_code}", "ingested_count": 0}
+        resp = await _http_get_with_retry(url, headers, timeout_s=15.0, max_attempts=3)
+        if resp.status_code != 200:
+            _CONSECUTIVE_SYNC_FAILURES += 1
+            msg = f"ETI respondió con status {resp.status_code} (fallo {_CONSECUTIVE_SYNC_FAILURES}/{_ERROR_ESCALATION_THRESHOLD})"
+            if _CONSECUTIVE_SYNC_FAILURES >= _ERROR_ESCALATION_THRESHOLD:
+                log_error(MODULE, msg)
+            else:
+                log_warning(MODULE, msg)
+            return {"ok": False, "error": f"HTTP {resp.status_code}", "ingested_count": 0}
 
-            html = resp.text
+        html = resp.text
 
             # Extraer bloques next_f generados por Next.js App Router
-            chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*)"\]\)', html)
-            full_data = "".join(chunks).replace('\\"', '"').replace('\\n', '\n')
-            if not full_data:
-                full_data = html
+        chunks = re.findall(r'self\.__next_f\.push\(\[1,"(.*)"\]\)', html)
+        full_data = "".join(chunks).replace('\\"', '"').replace('\\n', '\n')
+        if not full_data:
+            full_data = html
 
-            # Extraer Régimen FDE y Guardrail O-13 de la cabecera macro
-            regime_match = re.search(r'R[eé]gimen FDE:\s*([A-Za-z]+)', full_data)
-            live_regime = regime_match.group(1).upper() if regime_match else "DECELERATION"
-            if live_regime not in ("DECELERATION", "EXPANSION", "STAGFLATION", "RECOVERY"):
-                live_regime = "DECELERATION"
+        # Extraer Régimen FDE y Guardrail O-13 de la cabecera macro
+        regime_match = re.search(r'R[eé]gimen FDE:\s*([A-Za-z]+)', full_data)
+        live_regime = regime_match.group(1).upper() if regime_match else "DECELERATION"
+        if live_regime not in ("DECELERATION", "EXPANSION", "STAGFLATION", "RECOVERY"):
+            live_regime = "DECELERATION"
 
-            conf_match = re.search(r'Confianza Causal.*?([0-9]{2})%', full_data)
-            live_conf = float(conf_match.group(1)) if conf_match else 88.0
-            has_o13_puts_only = "ALLOW_PUTS_ONLY" in full_data or "Bloqueado: Compras direccionales de CALLs" in full_data
+        conf_match = re.search(r'Confianza Causal.*?([0-9]{2})%', full_data)
+        live_conf = float(conf_match.group(1)) if conf_match else 88.0
+        has_o13_puts_only = "ALLOW_PUTS_ONLY" in full_data or "Bloqueado: Compras direccionales de CALLs" in full_data
 
-            now = datetime.now(timezone.utc)
-            now_str = now.strftime("%Y%m%d")
-            today_date = now.strftime("%Y-%m-%d")
-            exp_iso = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        now_str = now.strftime("%Y%m%d")
+        today_date = now.strftime("%Y-%m-%d")
+        exp_iso = datetime(now.year, now.month, now.day, 23, 59, 59, tzinfo=timezone.utc).isoformat()
 
-            # Extracción robusta por símbolo en la Matriz de Apertura Robot eTrade Dispatcher
-            symbols_to_extract = ["META", "NVDA", "SPX", "SPY", "QQQ"]
-            ingested = []
+        # Extracción robusta por símbolo en la Matriz de Apertura Robot eTrade Dispatcher
+        symbols_to_extract = ["META", "NVDA", "SPX", "SPY", "QQQ"]
+        ingested = []
 
-            for sym in symbols_to_extract:
-                pattern = rf'text-cyan-400","children":"{sym}"(.*?children":"(ARMADO|STANDBY|DISPARADO|EJECUTADO)")'
-                match = re.search(pattern, full_data, re.DOTALL)
-                if not match:
-                    continue
+        for sym in symbols_to_extract:
+            pattern = rf'text-cyan-400","children":"{sym}"(.*?children":"(ARMADO|STANDBY|DISPARADO|EJECUTADO)")'
+            match = re.search(pattern, full_data, re.DOTALL)
+            if not match:
+                continue
 
-                block = match.group(1)
-                status = match.group(2)
+            block = match.group(1)
+            status = match.group(2)
 
-                # Escenario
-                scen_m = re.search(r'children":"([^"]*(?:BEARISH|BULLISH)[^"]*)"', block)
-                scenario = scen_m.group(1) if scen_m else "▼ BEARISH (PUT 0DTE)"
+            # Escenario
+            scen_m = re.search(r'children":"([^"]*(?:BEARISH|BULLISH)[^"]*)"', block)
+            scenario = scen_m.group(1) if scen_m else "▼ BEARISH (PUT 0DTE)"
 
-                # Precios
-                num_strings = re.findall(r'\"([0-9,]+\.[0-9]{2})\"', block)
-                prices = [float(p.replace(",", "")) for p in num_strings]
+            # Precios
+            num_strings = re.findall(r'\"([0-9,]+\.[0-9]{2})\"', block)
+            prices = [float(p.replace(",", "")) for p in num_strings]
 
-                ref_price = prices[0] if len(prices) > 0 else 500.0
-                trigger = prices[1] if len(prices) > 1 else round(ref_price * 0.995, 2)
-                stop = prices[2] if len(prices) > 2 else round(ref_price * 1.005, 2)
-                t1 = prices[3] if len(prices) > 3 else round(trigger * 0.985, 2)
-                t2 = prices[4] if len(prices) > 4 else round(trigger * 0.990, 2)
+            ref_price = prices[0] if len(prices) > 0 else 500.0
+            trigger = prices[1] if len(prices) > 1 else round(ref_price * 0.995, 2)
+            stop = prices[2] if len(prices) > 2 else round(ref_price * 1.005, 2)
+            t1 = prices[3] if len(prices) > 3 else round(trigger * 0.985, 2)
+            t2 = prices[4] if len(prices) > 4 else round(trigger * 0.990, 2)
 
-                # Racional
-                rat_m = re.search(r'(?:title|children)":"([^"]*(?:Playbook|Aduana|Alta Beta|Rotaci|P[eé]rdida|VIX)[^"]*)"', block)
-                rationale = rat_m.group(1) if rat_m else f"Señal cuantitativa ETI para {sym}"
+            # Racional
+            rat_m = re.search(r'(?:title|children)":"([^"]*(?:Playbook|Aduana|Alta Beta|Rotaci|P[eé]rdida|VIX)[^"]*)"', block)
+            rationale = rat_m.group(1) if rat_m else f"Señal cuantitativa ETI para {sym}"
 
-                is_put = "PUT" in scenario.upper() or "BEARISH" in scenario.upper()
-                is_0dte = "0DTE" in scenario.upper()
-                opt_type = "PUT" if is_put else "CALL"
-                raw_target_strike = trigger * 0.995 if is_put else trigger * 1.005
-                if trigger >= 500:
-                    strike = round(raw_target_strike / 5.0) * 5.0
-                elif trigger >= 100:
-                    strike = round(raw_target_strike / 2.5) * 2.5
-                elif trigger >= 25:
-                    strike = round(raw_target_strike)
-                else:
-                    strike = round(raw_target_strike * 2.0) / 2.0
-                o13_allowed = (not has_o13_puts_only) or is_put
+            is_put = "PUT" in scenario.upper() or "BEARISH" in scenario.upper()
+            is_0dte = "0DTE" in scenario.upper()
+            opt_type = "PUT" if is_put else "CALL"
+            raw_target_strike = trigger * 0.995 if is_put else trigger * 1.005
+            if trigger >= 500:
+                strike = round(raw_target_strike / 5.0) * 5.0
+            elif trigger >= 100:
+                strike = round(raw_target_strike / 2.5) * 2.5
+            elif trigger >= 25:
+                strike = round(raw_target_strike)
+            else:
+                strike = round(raw_target_strike * 2.0) / 2.0
+            o13_allowed = (not has_o13_puts_only) or is_put
 
-                sig_dict = {
-                    "signal_id": f"eti-live-{sym.lower()}-{now_str}",
-                    "timestamp": now.isoformat(),
-                    "expires_at": exp_iso,
-                    "cadence": "PRE_MARKET",
-                    "status": "ACTIVE" if status == "ARMADO" else "STANDBY",
-                    "symbol": sym,
-                    "asset_class": "OPTION_0DTE" if is_0dte else "OPTION_WEEKLY",
-                    "action": "BUY_TO_OPEN",
-                    "options_contract": {
-                        "contract_symbol": f"{sym}{now.strftime('%y%m%d')}{opt_type[0]}{int(strike*1000):08d}",
-                        "option_type": opt_type,
-                        "strike": strike,
-                        "expiration_date": today_date,
-                        "dte": 0 if is_0dte else 2,
-                        "target_delta": -0.42 if is_put else 0.42,
-                        "max_bid_ask_spread_pct": 3.5,
-                        "estimated_contract_price": 2.50
-                    },
-                    "strategy": {
-                        "horizon": "SCALPING",
-                        "bias": "BEARISH" if is_put else "BULLISH",
-                        "playbook_rule": scenario.replace("▼ ", "").replace("▲ ", ""),
-                        "expected_duration_minutes": 25 if is_0dte else 45
-                    },
-                    "causal_context": {
-                        "fde_regime": live_regime,
-                        "fcg_confidence_pct": live_conf,
-                        "primary_source": "Yoel Sardiñas (FCG Playbook)" if "Yoel" in rationale else "ETI System Dynamics",
-                        "catalyst_summary": f"[O-13: ALLOW_PUTS_ONLY · FDE: {live_regime}] {rationale}" if has_o13_puts_only else rationale,
-                        "catalyst_impact_score": -0.80 if is_put else 0.80,
-                        "greeks_thesis": "Aceleración gamma institucional al quebrar nivel clave." if is_put else "Expansión delta alcista."
-                    },
-                    "technical_gate": {
-                        "trigger_type": "VWAP_REJECTION" if "VWAP" in rationale else "PRICE_BREAKOUT",
-                        "underlying_trigger_price": trigger,
-                        "trigger_operator": "LESS_THAN_OR_EQUAL" if is_put else "GREATER_THAN_OR_EQUAL",
-                        "indicator_requirements": {
-                            "vwap_condition": "PRICE_BELOW_VWAP" if is_put else "PRICE_ABOVE_VWAP",
-                            "ema_fast_vs_slow": "FAST_BELOW_SLOW" if is_put else "FAST_ABOVE_SLOW",
-                            "min_relative_volume": 1.25,
-                            "timeframe_confirmation": "2m"
-                        }
-                    },
-                    "risk_management": {
-                        "invalidation_underlying": stop,
-                        "stop_loss_contract_pct": -20.0,
-                        "take_profit_1_pct": 40.0,
-                        "take_profit_2_pct": 85.0,
-                        "runner_trailing_stop_pct": 20.0,
-                        "max_account_risk_pct": 2.5
-                    },
-                    "safety_guardrails": {
-                        "execution_allowed": o13_allowed,
-                        "max_slippage_pct": 1.5,
-                        "circuit_breaker_active": False
+            sig_dict = {
+                "signal_id": f"eti-live-{sym.lower()}-{now_str}",
+                "timestamp": now.isoformat(),
+                "expires_at": exp_iso,
+                "cadence": "PRE_MARKET",
+                "status": "ACTIVE" if status == "ARMADO" else "STANDBY",
+                "symbol": sym,
+                "asset_class": "OPTION_0DTE" if is_0dte else "OPTION_WEEKLY",
+                "action": "BUY_TO_OPEN",
+                "options_contract": {
+                    "contract_symbol": f"{sym}{now.strftime('%y%m%d')}{opt_type[0]}{int(strike*1000):08d}",
+                    "option_type": opt_type,
+                    "strike": strike,
+                    "expiration_date": today_date,
+                    "dte": 0 if is_0dte else 2,
+                    "target_delta": -0.42 if is_put else 0.42,
+                    "max_bid_ask_spread_pct": 3.5,
+                    "estimated_contract_price": 2.50
+                },
+                "strategy": {
+                    "horizon": "SCALPING",
+                    "bias": "BEARISH" if is_put else "BULLISH",
+                    "playbook_rule": scenario.replace("▼ ", "").replace("▲ ", ""),
+                    "expected_duration_minutes": 25 if is_0dte else 45
+                },
+                "causal_context": {
+                    "fde_regime": live_regime,
+                    "fcg_confidence_pct": live_conf,
+                    "primary_source": "Yoel Sardiñas (FCG Playbook)" if "Yoel" in rationale else "ETI System Dynamics",
+                    "catalyst_summary": f"[O-13: ALLOW_PUTS_ONLY · FDE: {live_regime}] {rationale}" if has_o13_puts_only else rationale,
+                    "catalyst_impact_score": -0.80 if is_put else 0.80,
+                    "greeks_thesis": "Aceleración gamma institucional al quebrar nivel clave." if is_put else "Expansión delta alcista."
+                },
+                "technical_gate": {
+                    "trigger_type": "VWAP_REJECTION" if "VWAP" in rationale else "PRICE_BREAKOUT",
+                    "underlying_trigger_price": trigger,
+                    "trigger_operator": "LESS_THAN_OR_EQUAL" if is_put else "GREATER_THAN_OR_EQUAL",
+                    "indicator_requirements": {
+                        "vwap_condition": "PRICE_BELOW_VWAP" if is_put else "PRICE_ABOVE_VWAP",
+                        "ema_fast_vs_slow": "FAST_BELOW_SLOW" if is_put else "FAST_ABOVE_SLOW",
+                        "min_relative_volume": 1.25,
+                        "timeframe_confirmation": "2m"
                     }
+                },
+                "risk_management": {
+                    "invalidation_underlying": stop,
+                    "stop_loss_contract_pct": -20.0,
+                    "take_profit_1_pct": 40.0,
+                    "take_profit_2_pct": 85.0,
+                    "runner_trailing_stop_pct": 20.0,
+                    "max_account_risk_pct": 2.5
+                },
+                "safety_guardrails": {
+                    "execution_allowed": o13_allowed,
+                    "max_slippage_pct": 1.5,
+                    "circuit_breaker_active": False
                 }
-
-                sig = ETISignal.model_validate(sig_dict)
-                sig.get_or_create_tactical_instruction()
-                save_eti_signal(sig)
-                ingested.append(sig.signal_id)
-
-            log_info(MODULE, f"Sincronización exitosa con ETI: {len(ingested)} señales procesadas ({ingested})")
-            return {
-                "ok": True,
-                "source": url,
-                "ingested_count": len(ingested),
-                "signals": ingested,
-                "timestamp": now.isoformat()
             }
 
+            sig = ETISignal.model_validate(sig_dict)
+            sig.get_or_create_tactical_instruction()
+            save_eti_signal(sig)
+            ingested.append(sig.signal_id)
+
+        _CONSECUTIVE_SYNC_FAILURES = 0
+        log_info(MODULE, f"Sincronización exitosa con ETI: {len(ingested)} señales procesadas ({ingested})")
+        return {
+            "ok": True,
+            "source": url,
+            "ingested_count": len(ingested),
+            "signals": ingested,
+            "timestamp": now.isoformat()
+        }
+
     except Exception as e:
-        log_error(MODULE, f"Error durante sincronización con ETI en {url}: {e}")
-        return {"ok": False, "error": str(e), "ingested_count": 0}
+        _CONSECUTIVE_SYNC_FAILURES += 1
+        err_detail = _format_exc(e)
+        if _CONSECUTIVE_SYNC_FAILURES < _ERROR_ESCALATION_THRESHOLD:
+            log_warning(
+                MODULE,
+                f"Fallo transitorio ({_CONSECUTIVE_SYNC_FAILURES}/{_ERROR_ESCALATION_THRESHOLD}) sincronizando con ETI en {url}: {err_detail}",
+            )
+        else:
+            log_error(
+                MODULE,
+                f"Error persistente ({_CONSECUTIVE_SYNC_FAILURES} ciclos) durante sincronización con ETI en {url}: {err_detail}",
+            )
+        return {"ok": False, "error": err_detail, "ingested_count": 0}
 
 
 async def send_signal_feedback_to_eti(

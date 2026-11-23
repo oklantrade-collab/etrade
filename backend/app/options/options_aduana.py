@@ -121,10 +121,8 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
     add("O-2", bool(legs) and covered and max_loss_c is not None and max_loss_c > 0,
         "riesgo definido" if covered and max_loss_c else "pierna vendida sin cobertura o max_loss no calculable")
 
-    # O-3 max_loss <= riesgo por operacion (techo duro incluido)
-    sym = str(cand.get("symbol") or (ctx.underlying or {}).get("symbol") or "").upper()
-    is_megacap = sym in ("SPY", "QQQ", "IWM", "DIA", "SMH", "XLE", "XLK", "NVDA", "AAPL", "MSFT", "TSLA", "AMD", "AMZN", "META", "GOOGL", "PLTR", "M")
-    base_cap = float(eff.get("max_risk_megacap_usd", 1500.0)) if is_megacap else float(eff.get("max_risk_per_trade_usd", 1000.0))
+    # O-3 max_loss <= riesgo por operacion (techo duro incluido, sin excepcion megacap)
+    base_cap = float(eff.get("max_risk_per_trade_usd", 800.0))
     cap = min(base_cap, sd.hard_caps()["max_risk_per_trade_usd"])
     tot = cand.get("max_loss_total")
     add("O-3", tot is not None and qty and tot <= cap + 1e-9, f"max_loss_total={tot} cap={cap}")
@@ -297,7 +295,10 @@ def validate_entry(cand: dict[str, Any], ctx: AduanaContext, eff: dict[str, Any]
                     if isinstance(ts_val, (int, float)):
                         timestamps.append(float(ts_val))
                     elif isinstance(ts_val, str):
-                        timestamps.append(datetime.fromisoformat(ts_val.replace("Z", "+00:00")).timestamp())
+                        from app.core.time_utils import parse_iso_utc
+                        parsed_ts = parse_iso_utc(ts_val)
+                        if parsed_ts is not None:
+                            timestamps.append(parsed_ts.timestamp())
                 except Exception:
                     pass
         if len(timestamps) == len(legs) and len(timestamps) > 1:

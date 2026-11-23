@@ -32,6 +32,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from app.core.logger import log_info, log_error, log_warning, log_debug
 from app.core.supabase_client import get_supabase
+from app.core.time_utils import parse_iso_utc
 from app.workers.market_sweep import run_market_sweep
 from app.analysis.movement_classifier import classify_movement
 from app.analysis.smart_limit import calculate_smart_limit_price
@@ -241,11 +242,9 @@ async def cleanup_low_volume_opportunities():
             # Staleness check (more than 3 days)
             updated_at_str = row.get("timestamp")
             if updated_at_str:
-                try:
-                    updated_at = datetime.fromisoformat(updated_at_str.replace('Z', '+00:00'))
-                    if (now - updated_at).days >= 3:
-                        to_delete.append(ticker)
-                except: pass
+                updated_at = parse_iso_utc(updated_at_str)
+                if updated_at is not None and (now - updated_at).days >= 3:
+                    to_delete.append(ticker)
 
         if to_delete:
             log_info(MODULE, f"🗑️ Cleaning up {len(to_delete)} low volume/stale opportunities: {to_delete}")
@@ -935,15 +934,44 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 )
 
                 if opt_gap_eval.get("should_enter"):
-                    # P1: Control de Riesgo Institucional en Opciones (Tope de Exposición y Circuit Breaker)
+                    from app.options.warrior_momentum_options import is_warrior_options_golden_window, MAX_CONTRACTS_PER_SYMBOL
+                    from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+
+                    # P1: Control de Riesgo Institucional en Opciones (Ventana de Oro, Disyuntor, Macro Veto y Settings $800)
                     MAX_ACTIVE_OPT_POS = 3
-                    MAX_TOTAL_OPT_INV = 5000.0  # Max $5,000 acumulado en primas abiertas
+                    MAX_TOTAL_OPT_INV = 5000.0
+                    max_risk_opt_usd = get_effective_max_risk_per_trade_usd(sb)
 
                     open_opts_q = sb.table("opt_paper_trades").select("id, symbol, entry_total_invested").eq("status", "open").execute().data or []
                     open_opt_tickers = set(str(p.get("symbol", "")).upper() for p in open_opts_q if p.get("symbol"))
                     total_opt_inv = sum(float(p.get("entry_total_invested") or 0.0) for p in open_opts_q)
 
                     can_proceed_opt = True
+                    in_golden_opt, win_opt_msg = is_warrior_options_golden_window()
+                    if not in_golden_opt:
+                        log_info(MODULE, f"⏸️ Opciones GAP {ticker} omitido fuera de Ventana de Oro (09:35-11:30 ET): {win_opt_msg}")
+                        can_proceed_opt = False
+
+                    if can_proceed_opt:
+                        try:
+                            from app.core.circuit_breaker import can_open_new_trade
+                            cb_ok, cb_msg = can_open_new_trade(ticker, sb=sb)
+                            if not cb_ok:
+                                log_info(MODULE, f"⛔ Opciones GAP {ticker} bloqueado por Disyuntor: {cb_msg}")
+                                can_proceed_opt = False
+                        except Exception:
+                            pass
+
+                    if can_proceed_opt and opt_direction == "CALL":
+                        try:
+                            from app.core.structural_regime_engine import evaluate_macro_daily_bias
+                            macro_bias = evaluate_macro_daily_bias()
+                            if macro_bias.get("veto_calls"):
+                                log_info(MODULE, f"⛔ Opciones GAP {ticker} (CALL) bloqueado por Veto Macro Diario SPY/QQQ.")
+                                can_proceed_opt = False
+                        except Exception:
+                            pass
+
                     if active_opt_pos is None and len(open_opt_tickers) >= MAX_ACTIVE_OPT_POS:
                         log_info(MODULE, f"⏸️ Opciones {ticker}: Cupo máximo de activos en opciones alcanzado ({len(open_opt_tickers)}/{MAX_ACTIVE_OPT_POS}).")
                         can_proceed_opt = False
@@ -963,14 +991,16 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                     opt_rule_cd = opt_gap_eval.get("rule_code", f"OPT_GAP_{opt_direction}")
                     opt_t_step = opt_gap_eval.get("tranche_step", 1)
 
-                    # Seleccionar el contrato ATM óptimo
-                    best_contract, opt_rej = fetch_and_select_best_option_contract(
-                        symbol=ticker,
-                        underlying_price=current_price,
-                        direction=opt_direction,
-                        budget_usd=float(config.get("options_trade_budget_usd", 1000.0)),
-                        supabase=sb
-                    )
+                    best_contract, opt_rej = (None, [])
+                    if can_proceed_opt:
+                        # Seleccionar el contrato ATM óptimo dentro de Settings ("Riesgo máximo por operación")
+                        best_contract, opt_rej = fetch_and_select_best_option_contract(
+                            symbol=ticker,
+                            underlying_price=current_price,
+                            direction=opt_direction,
+                            budget_usd=max_risk_opt_usd,
+                            supabase=sb
+                        )
 
                     if can_proceed_opt and best_contract:
                         opt_exp_compact = best_contract.expiry.strftime("%Y%m%d")
@@ -983,12 +1013,20 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                         else:
                             contracts_to_buy = max(1, best_contract.tranche_3_contracts)
 
-                        # P1: Límite estricto de máximo 2 contratos por orden y tope total de 3 contratos por símbolo
-                        contracts_to_buy = min(2, contracts_to_buy)
-                        now_iso = datetime.now(timezone.utc).isoformat()
-                        opt_price = best_contract.ask if best_contract.ask > 0 else best_contract.mid
+                        # P1: Límite estricto de contratos + Tope en USD desde Settings ($800)
+                        now_utc_opt = datetime.now(timezone.utc)
+                        now_iso = now_utc_opt.isoformat()
+                        expires_opt_iso = (now_utc_opt + timedelta(seconds=90)).isoformat()
+                        opt_price = float(best_contract.ask if best_contract.ask > 0 else best_contract.mid)
+                        unit_cost_opt = opt_price * 100.0
+                        if unit_cost_opt > max_risk_opt_usd + 1e-9:
+                            log_info(MODULE, f"⛔ Opciones GAP {ticker} rechazado: 1 contrato (${unit_cost_opt:.2f}) > tope Settings (${max_risk_opt_usd:.2f}).")
+                            best_contract = None
+                        else:
+                            max_by_risk = int(max_risk_opt_usd // unit_cost_opt) if unit_cost_opt > 0 else 1
+                            contracts_to_buy = min(MAX_CONTRACTS_PER_SYMBOL, 2, max(1, max_by_risk), contracts_to_buy)
 
-                        if active_opt_pos is None and opt_t_step == 1:
+                        if best_contract and active_opt_pos is None and opt_t_step == 1:
                             # Principio Broker-First: NO insertar en opt_paper_trades antes del fill.
                             # La posición en opt_paper_trades se crea cuando el broker confirma la compra en TWS.
 
@@ -997,11 +1035,13 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                                 "ticker": opt_ticker_formatted,
                                 "group_name": "OPEN_GAP_RUNNER_OPT",
                                 "rule_code": opt_rule_cd,
-                                "order_type": "market",
+                                "order_type": "limit",
                                 "direction": "buy",
                                 "shares": contracts_to_buy,
                                 "market_price": opt_price,
+                                "limit_price": round(opt_price, 2),
                                 "status": "pending",
+                                "expires_at": expires_opt_iso,
                                 "created_at": now_iso
                             }).execute()
 
@@ -1020,15 +1060,16 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                             send_telegram_opt_alert(opt_msg)
 
                         elif (
-                            active_opt_pos is not None
+                            best_contract
+                            and active_opt_pos is not None
                             and opt_t_step in [2, 3]
                             and int((active_opt_pos.get("exit_plan") or {}).get("reentry_count") or active_opt_pos.get("dca_count") or 0) == 0
-                            and int(active_opt_pos.get("qty") or 1) < 3
+                            and int(active_opt_pos.get("qty") or 1) < MAX_CONTRACTS_PER_SYMBOL
                             and float(active_opt_pos.get("unrealized_pnl") or 0.0) > 0
                         ):
                             # Piramidación Livermore en Opciones (Máximo 1 recompra institucional, solo en ganancia, tope 3 contratos)
                             old_qty = int(active_opt_pos.get("qty") or 1)
-                            contracts_to_buy = max(1, min(contracts_to_buy, 3 - old_qty))
+                            contracts_to_buy = max(1, min(contracts_to_buy, MAX_CONTRACTS_PER_SYMBOL - old_qty))
                             old_debit = float(active_opt_pos.get("entry_debit") or opt_price)
                             new_total_qty = old_qty + contracts_to_buy
                             new_avg_debit = round(((old_debit * old_qty) + (opt_price * contracts_to_buy)) / new_total_qty, 4)
@@ -1053,11 +1094,13 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                                 "ticker": opt_ticker_formatted,
                                 "group_name": "OPEN_GAP_RUNNER_OPT",
                                 "rule_code": opt_rule_cd,
-                                "order_type": "market",
+                                "order_type": "limit",
                                 "direction": "buy",
                                 "shares": contracts_to_buy,
                                 "market_price": opt_price,
+                                "limit_price": round(opt_price, 2),
                                 "status": "pending",
+                                "expires_at": expires_opt_iso,
                                 "created_at": now_iso
                             }).execute()
 
@@ -1110,55 +1153,86 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
                 # 2. EJECUCIÓN OPCIONES (CALL o PUT para activos opcionables)
                 if is_opt_eligible:
                     from app.options.opt_contract_picker import fetch_and_select_best_option_contract
+                    from app.options.warrior_momentum_options import is_warrior_options_golden_window, MAX_CONTRACTS_PER_SYMBOL
+                    from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+
                     is_call = (vme_dir == "bullish")
                     opt_side = "CALL" if is_call else "PUT"
                     vme_opt_rule = "VME_EXPANSION_CALL" if is_call else "VME_EXPANSION_PUT"
 
-                    # Verificar si ya tenemos posición abierta en este contrato
-                    open_opts = sb.table("opt_paper_trades").select("*").eq("symbol", ticker).eq("status", "open").execute().data or []
-                    has_same_vme_pos = any(vme_opt_rule in str(p.get("strategy_type", "")) or (is_call and "call" in str(p.get("strategy_type", "")).lower()) for p in open_opts)
+                    vme_can_enter, vme_win_msg = is_warrior_options_golden_window()
+                    if not vme_can_enter:
+                        log_info(MODULE, f"⏸️ VME Opciones {ticker} ({opt_side}) bloqueado fuera de Ventana de Oro: {vme_win_msg}")
+                    else:
+                        try:
+                            from app.core.circuit_breaker import can_open_new_trade
+                            cb_ok, cb_msg = can_open_new_trade(ticker, sb=sb)
+                            if not cb_ok:
+                                log_info(MODULE, f"⛔ VME Opciones {ticker} bloqueado por Disyuntor: {cb_msg}")
+                                vme_can_enter = False
+                        except Exception:
+                            pass
 
-                    if not has_same_vme_pos:
-                        selected_contract, _ = fetch_and_select_best_option_contract(
-                            symbol=ticker,
-                            underlying_price=current_price,
-                            direction=opt_side,
-                            budget_usd=float(config.get("options_trade_budget_usd", 1000.0)),
-                            supabase=sb
-                        )
+                    if vme_can_enter and is_call:
+                        try:
+                            from app.core.structural_regime_engine import evaluate_macro_daily_bias
+                            macro_bias = evaluate_macro_daily_bias()
+                            if macro_bias.get("veto_calls"):
+                                log_info(MODULE, f"⛔ VME Opciones {ticker} (CALL) bloqueado por Veto Macro Diario SPY/QQQ.")
+                                vme_can_enter = False
+                        except Exception:
+                            pass
 
-                        if selected_contract:
-                            opt_price = float(selected_contract.ask if selected_contract.ask > 0 else selected_contract.mid or 1.0)
-                            opt_trade_cap = float(config.get("options_trade_capital_usd", 200.0))
-                            contracts_to_buy = max(1, int(opt_trade_cap // (opt_price * 100)))
-                            strike_str = f"{selected_contract.strike:.1f}".replace(".0", "")
-                            expiry_clean = (
-                                selected_contract.expiry.strftime("%Y%m%d")
-                                if hasattr(selected_contract.expiry, "strftime")
-                                else str(selected_contract.expiry or "").replace("-", "")[:8]
+                    if vme_can_enter:
+                        open_opts = sb.table("opt_paper_trades").select("*").eq("symbol", ticker).eq("status", "open").execute().data or []
+                        has_same_vme_pos = any(vme_opt_rule in str(p.get("strategy_type", "")) or (is_call and "call" in str(p.get("strategy_type", "")).lower()) for p in open_opts)
+                        in_flight_vme = sb.table("stocks_orders").select("id").like("ticker", f"{ticker}%").eq("direction", "buy").in_("status", ["pending", "processing", "submitted"]).limit(1).execute().data or []
+
+                        if not has_same_vme_pos and not in_flight_vme:
+                            max_risk_vme_usd = get_effective_max_risk_per_trade_usd(sb)
+                            selected_contract, _ = fetch_and_select_best_option_contract(
+                                symbol=ticker,
+                                underlying_price=current_price,
+                                direction=opt_side,
+                                budget_usd=max_risk_vme_usd,
+                                supabase=sb
                             )
-                            opt_ticker_formatted = f"{ticker}:OPT:{expiry_clean}:{strike_str}:{'C' if is_call else 'P'}"
 
-                            # P1: Límite estricto de máximo 2 contratos por orden para controlar apalancamiento
-                            contracts_to_buy = min(2, contracts_to_buy)
-                            now_iso = datetime.now(timezone.utc).isoformat()
-                            # Principio Broker-First: NO insertar en opt_paper_trades antes del fill.
-                            # La posición en opt_paper_trades se crea cuando el broker confirma la compra en TWS.
+                            if selected_contract:
+                                opt_price = float(selected_contract.ask if selected_contract.ask > 0 else selected_contract.mid or 1.0)
+                                unit_cost_vme = opt_price * 100.0
+                                if unit_cost_vme > max_risk_vme_usd + 1e-9:
+                                    log_info(MODULE, f"⛔ VME Opciones {ticker} rechazado: 1 contrato (${unit_cost_vme:.2f}) excede tope Settings (${max_risk_vme_usd:.2f}).")
+                                else:
+                                    contracts_to_buy = max(1, int(max_risk_vme_usd // unit_cost_vme)) if unit_cost_vme > 0 else 1
+                                    contracts_to_buy = min(MAX_CONTRACTS_PER_SYMBOL, 2, contracts_to_buy)
+                                    strike_str = f"{selected_contract.strike:.1f}".replace(".0", "")
+                                    expiry_clean = (
+                                        selected_contract.expiry.strftime("%Y%m%d")
+                                        if hasattr(selected_contract.expiry, "strftime")
+                                        else str(selected_contract.expiry or "").replace("-", "")[:8]
+                                    )
+                                    opt_ticker_formatted = f"{ticker}:OPT:{expiry_clean}:{strike_str}:{'C' if is_call else 'P'}"
 
-                            # Enviar orden a stocks_orders para sincronización con IBKR bridge / TWS
-                            sb.table("stocks_orders").insert({
-                                "ticker": opt_ticker_formatted,
-                                "group_name": "VOLATILITY_EXPANSION_OPT",
-                                "rule_code": vme_opt_rule,
-                                "order_type": "market",
-                                "direction": "buy",
-                                "shares": contracts_to_buy,
-                                "market_price": opt_price,
-                                "status": "pending",
-                                "created_at": now_iso
-                            }).execute()
+                                    now_vme_utc = datetime.now(timezone.utc)
+                                    now_iso = now_vme_utc.isoformat()
+                                    expires_vme_iso = (now_vme_utc + timedelta(seconds=90)).isoformat()
 
-                            log_info(MODULE, f"🚀 VME OPCIONES {opt_side} COMPRADO: {opt_ticker_formatted} x{contracts_to_buy} @ ${opt_price:.2f} | Rank {vme_rank}")
+                                    sb.table("stocks_orders").insert({
+                                        "ticker": opt_ticker_formatted,
+                                        "group_name": "VOLATILITY_EXPANSION_OPT",
+                                        "rule_code": vme_opt_rule,
+                                        "order_type": "limit",
+                                        "direction": "buy",
+                                        "shares": contracts_to_buy,
+                                        "market_price": opt_price,
+                                        "limit_price": round(opt_price, 2),
+                                        "status": "pending",
+                                        "expires_at": expires_vme_iso,
+                                        "created_at": now_iso
+                                    }).execute()
+
+                                    log_info(MODULE, f"🚀 VME OPCIONES {opt_side} COMPRADO: {opt_ticker_formatted} x{contracts_to_buy} @ ${opt_price:.2f} | Rank {vme_rank}")
         except Exception as e_vme_sched:
             log_warning(MODULE, f"Error en evaluación VME Expansion para {ticker}: {e_vme_sched}")
 
@@ -1707,10 +1781,9 @@ async def process_ticker(ticker: str, config: dict, f_data: dict | None = None, 
             entry_time_str = open_pos.get("first_buy_at") or open_pos.get("entry_time")
             age_mins = 0.0
             if entry_time_str:
-                try:
-                    entry_dt = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                entry_dt = parse_iso_utc(entry_time_str)
+                if entry_dt is not None:
                     age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
-                except: pass
             
             if age_mins >= 6.0:
                 # Add current PnL to context for sell rules (like PRO_CANDLE_SELL)
@@ -2433,10 +2506,10 @@ async def run_stocks_tp_v2_cycle():
             age_mins = 999.0
             entry_time_str = pos.get('first_buy_at') or pos.get('entry_time')
             if entry_time_str:
-                try:
-                    entry_dt = datetime.fromisoformat(str(entry_time_str).replace('Z', '+00:00'))
+                entry_dt = parse_iso_utc(entry_time_str)
+                if entry_dt is not None:
                     age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60.0
-                except Exception:
+                else:
                     age_mins = 999.0
 
             if age_mins < 15.0 and gain < 2.5:
@@ -2592,20 +2665,30 @@ async def run_options_gap_defense_cycle():
     now_iso = now_dt.isoformat()
 
     try:
-        from app.options.broker_sync import reconcile_with_ib_broker_portfolio, is_option_held_in_broker
+        from app.options.broker_sync import (
+            reconcile_with_ib_broker_portfolio,
+            is_option_closing_pending,
+            request_broker_option_close,
+            load_broker_portfolio_snapshot,
+            _fmt_exp,
+        )
         reconcile_with_ib_broker_portfolio(sb, min_interval_sec=10.0)
         open_trades = sb.table("opt_paper_trades").select("*").eq("status", "open").execute().data or []
         if not open_trades:
             return
 
+        broker_port_live, broker_port_age = load_broker_portfolio_snapshot(sb, allow_direct_fetch=False)
         from app.data.yfinance_provider import YFinanceProvider
         from app.options.aduana_gap_runner_options import evaluate_options_gap_aduana_exit
+        from app.options.profit_guardian import evaluate_option_profit_ratchet, compute_dynamic_underlying_trailing_sl
         from app.options.bs import bs_price
         provider = YFinanceProvider()
 
         for pos in open_trades:
             pid = pos["id"]
             symbol = pos["symbol"]
+            if is_option_closing_pending(sb, pos):
+                continue
             strat = pos.get("strategy_type", "long_call")
             is_call = "call" in strat.lower() or pos.get("direction") == "bullish"
             entry_debit = float(pos.get("entry_debit") or 0.0)
@@ -2629,8 +2712,31 @@ async def run_options_gap_defense_cycle():
             expiry_str = pos.get("expiry") or ""
 
             has_live_opt_quote = False
-            # 1. Intentar obtener cotización real desde opt_quotes_latest (TWS) o yfinance
-            if legs and isinstance(legs[0], dict):
+            has_live_tws_quote = False
+            quote_source = "NONE"
+            # 0. Priorizar cotización en vivo TWS desde ib_broker_portfolio si está fresca (<= 45s)
+            if broker_port_live and broker_port_age <= 45.0:
+                exp_iso_pos = _fmt_exp(expiry_str)
+                right_pos = "C" if is_call else "P"
+                for _, b_d in broker_port_live.items():
+                    if str(b_d.get("sec_type") or "").upper() != "OPT":
+                        continue
+                    if (
+                        str(b_d.get("underlying") or "").upper() == symbol.upper()
+                        and _fmt_exp(b_d.get("expiry") or "") == exp_iso_pos
+                        and abs(float(b_d.get("strike") or 0.0) - strike) <= 0.05
+                        and str(b_d.get("right") or "").upper() == right_pos
+                    ):
+                        tws_mp = float(b_d.get("market_price") or 0.0)
+                        if tws_mp > 0:
+                            cur_opt_premium = round(tws_mp, 4)
+                            has_live_opt_quote = True
+                            has_live_tws_quote = True
+                            quote_source = "TWS_PORTFOLIO_LIVE"
+                            break
+
+            # 1. Fallback a opt_quotes_latest (solo marca LIVE si market_data_type == 'LIVE')
+            if not has_live_tws_quote and legs and isinstance(legs[0], dict):
                 try:
                     conid_q = legs[0].get("conid")
                     if conid_q:
@@ -2638,19 +2744,25 @@ async def run_options_gap_defense_cycle():
                         if c_row:
                             q_row = sb.table("opt_quotes_latest").select("bid,ask,last,market_data_type").eq("contract_id", c_row[0]["id"]).limit(1).execute().data
                             if q_row and q_row[0].get("market_data_type") != "ERROR":
+                                mdt_u = str(q_row[0].get("market_data_type") or "").upper()
                                 qb = float(q_row[0].get("bid") or 0.0)
                                 qa = float(q_row[0].get("ask") or 0.0)
                                 ql = float(q_row[0].get("last") or 0.0)
                                 if qb > 0 and qa > 0:
                                     cur_opt_premium = round((qb + qa) / 2.0, 4)
-                                    has_live_opt_quote = True
+                                    has_live_tws_quote = (mdt_u == "LIVE")
+                                    has_live_opt_quote = has_live_tws_quote
+                                    quote_source = f"OPT_QUOTES_{mdt_u or 'UNKNOWN'}"
                                 elif ql > 0:
                                     cur_opt_premium = round(ql, 4)
-                                    has_live_opt_quote = True
+                                    has_live_tws_quote = (mdt_u == "LIVE")
+                                    has_live_opt_quote = has_live_tws_quote
+                                    quote_source = f"OPT_QUOTES_{mdt_u or 'UNKNOWN'}"
                 except Exception:
                     pass
 
-            if not has_live_opt_quote and expiry_str:
+            # 2. yfinance es SOLO referencia mark-to-market retrasada 15m: NUNCA arma Profit Guardian ni marca live
+            if not has_live_tws_quote and expiry_str:
                 try:
                     import yfinance as yf
                     t_yf = yf.Ticker(symbol)
@@ -2663,30 +2775,28 @@ async def run_options_gap_defense_cycle():
                         l = float(match["lastPrice"].iloc[0] or 0.0)
                         if b > 0 and a > 0:
                             cur_opt_premium = round((b + a) / 2.0, 4)
-                            has_live_opt_quote = True
+                            quote_source = "YFINANCE_DELAYED"
                         elif l > 0:
                             cur_opt_premium = round(l, 4)
-                            has_live_opt_quote = True
+                            quote_source = "YFINANCE_DELAYED"
                 except Exception:
                     pass
 
             if cur_opt_premium is None or cur_opt_premium <= 0:
                 cur_opt_premium = float(pos.get("last_mark_price") or entry_debit)
 
-            # Actualizar watermark más alto visto
+            # Solo actualizar highest_premium_seen con cotización TWS LIVE real (erradica picos fantasmas de yfinance)
             highest_seen = float(exit_plan.get("highest_premium_seen") or entry_debit)
-            if cur_opt_premium > highest_seen:
+            if has_live_tws_quote and cur_opt_premium > highest_seen:
                 highest_seen = cur_opt_premium
                 exit_plan["highest_premium_seen"] = highest_seen
 
             # Calcular edad de la posición en minutos
             pos_age_min = 0.0
             if pos.get("entry_time"):
-                try:
-                    e_dt = datetime.fromisoformat(str(pos["entry_time"]).replace("Z", "+00:00"))
+                e_dt = parse_iso_utc(pos["entry_time"])
+                if e_dt is not None:
                     pos_age_min = max(0.0, (now_dt - e_dt).total_seconds() / 60.0)
-                except Exception:
-                    pass
 
             # PnL no realizado actual (calculado antes de evaluar Hard Stop Loss -30%)
             unrealized_pnl_usd = round((cur_opt_premium - entry_debit) * 100 * qty, 2)
@@ -2695,7 +2805,8 @@ async def run_options_gap_defense_cycle():
             # Posición formateada para la evaluación
             eval_pos = dict(pos)
             eval_pos["direction"] = "CALL" if is_call else "PUT"
-            eval_pos["has_live_opt_quote"] = has_live_opt_quote
+            eval_pos["has_live_opt_quote"] = has_live_tws_quote
+            eval_pos["quote_source"] = quote_source
             eval_pos["highest_premium_seen"] = highest_seen
             eval_pos["last_mark_price"] = cur_opt_premium
             eval_pos["unrealized_pnl"] = unrealized_pnl_usd
@@ -2722,10 +2833,89 @@ async def run_options_gap_defense_cycle():
                 bool(exit_plan.get("stop_loss_underlying"))
             )
 
-            # 1. Evaluación de las 5 Reglas Institucionales (Escalonado Agresivo)
-            from app.options.exit_engine import evaluate_technical_rules_and_stops, get_underlying_technical_context, check_options_dip_rebuy_opportunity
+            # 1. Evaluación de las 5 Reglas Institucionales (Escalonado Agresivo) + BB15m Exhaustion
+            from app.options.exit_engine import evaluate_technical_rules_and_stops, get_underlying_technical_context, should_exit_by_time
+            from app.core.bb15m_exhaustion import evaluate_bb15m_post_breakout_exhaustion
+            from app.options import settings_defaults as sd_opt
+
             tech_ctx = get_underlying_technical_context(symbol)
-            by_tech, reason_tech, tech_info = evaluate_technical_rules_and_stops(eval_pos, tech_ctx, now_dt)
+            tech_eval_ctx = dict(tech_ctx) if isinstance(tech_ctx, dict) else {"valid": False}
+            if df_15m is not None and not tech_eval_ctx.get("df_15m"):
+                tech_eval_ctx["df_15m"] = df_15m
+            by_tech, reason_tech, tech_info = evaluate_technical_rules_and_stops(eval_pos, tech_eval_ctx, now_dt)
+
+            # Persistir SIEMPRE las actualizaciones de exit_plan
+            if isinstance(tech_info, dict) and tech_info.get("exit_plan"):
+                exit_plan = tech_info["exit_plan"]
+
+            # Evaluación directa de Agotamiento Post-Bollinger 15m (si tech_ctx no era válido o complementario)
+            bb15m_exit_res = {"should_exit": False}
+            if not by_tech and df_15m is not None:
+                try:
+                    bb15m_exit_res = evaluate_bb15m_post_breakout_exhaustion(
+                        df_15m=df_15m,
+                        is_bullish=is_call,
+                        state=exit_plan,
+                        current_price=cur_stock_p,
+                        position_age_minutes=pos_age_min,
+                        asset_type="option",
+                    )
+                    if isinstance(bb15m_exit_res.get("state"), dict):
+                        exit_plan.update(bb15m_exit_res["state"])
+                except Exception:
+                    bb15m_exit_res = {"should_exit": False}
+
+            # Trailing continuo sobre subyacente (cubre PUT descendente / CALL ascendente)
+            if cur_stock_p > 0.0:
+                atr_u = float(tech_ctx.get("atr_15m") or 0.0) if isinstance(tech_ctx, dict) else 0.0
+                dyn_u = compute_dynamic_underlying_trailing_sl(
+                    entry_underlying=entry_stock_p,
+                    current_underlying=cur_stock_p,
+                    current_sl=float(exit_plan.get("stop_loss_underlying") or 0.0),
+                    atr_15m=atr_u,
+                    is_put=(not is_call),
+                    lowest_underlying_seen=float(exit_plan.get("lowest_underlying_seen") or 0.0),
+                    highest_underlying_seen=float(exit_plan.get("highest_underlying_seen") or 0.0),
+                )
+                if not is_call and float(dyn_u.get("lowest_underlying_seen") or 0.0) > 0.0:
+                    exit_plan["lowest_underlying_seen"] = dyn_u["lowest_underlying_seen"]
+                elif is_call and float(dyn_u.get("highest_underlying_seen") or 0.0) > 0.0:
+                    exit_plan["highest_underlying_seen"] = dyn_u["highest_underlying_seen"]
+                if dyn_u.get("updated"):
+                    exit_plan["stop_loss_underlying"] = dyn_u["stop_loss_underlying"]
+                    if dyn_u.get("trailing_sl_type"):
+                        exit_plan["trailing_sl_type"] = dyn_u["trailing_sl_type"]
+                        if dyn_u["trailing_sl_type"] == "BE_LOCK_PLUS_1PCT":
+                            exit_plan["be_locked"] = True
+                if not exit_plan.get("initial_sl") and float(exit_plan.get("stop_loss_underlying") or 0.0) > 0.0:
+                    exit_plan["initial_sl"] = float(exit_plan["stop_loss_underlying"])
+                eval_pos["exit_plan"] = exit_plan
+                eval_pos["stop_loss_underlying"] = float(exit_plan.get("stop_loss_underlying") or 0.0)
+
+            # Inicializar Hard SL en prima si aún no existe; solo evaluar Profit Guardian con cotización TWS LIVE
+            hard_sl_mult = 0.70 if is_gap_runner else 0.50
+            if float(exit_plan.get("stop_loss_premium") or 0.0) <= 0.0 and entry_debit > 0.0:
+                exit_plan["stop_loss_premium"] = round(entry_debit * hard_sl_mult, 4)
+
+            if has_live_tws_quote:
+                und_pnl_pct_pg = 0.0
+                if entry_stock_p > 0:
+                    und_pnl_pct_pg = ((cur_stock_p - entry_stock_p) / entry_stock_p * 100.0) if is_call else ((entry_stock_p - cur_stock_p) / entry_stock_p * 100.0)
+                pg_eval = evaluate_option_profit_ratchet(
+                    entry_premium=entry_debit,
+                    current_premium=cur_opt_premium,
+                    highest_premium_seen=highest_seen,
+                    peak_pnl_pct=float(exit_plan.get("highest_pnl_pct") or 0.0),
+                    und_pnl_pct=und_pnl_pct_pg,
+                    prev_floor_premium=float(exit_plan.get("stop_loss_premium") or 0.0),
+                )
+                if pg_eval.get("floor_premium", 0.0) > float(exit_plan.get("stop_loss_premium") or 0.0):
+                    exit_plan["stop_loss_premium"] = pg_eval["floor_premium"]
+                    exit_plan["profit_guardian_tier"] = pg_eval.get("tier")
+                    if pg_eval["floor_premium"] >= entry_debit:
+                        exit_plan["be_locked"] = True
+            else:
+                pg_eval = {"should_exit": False, "floor_premium": 0.0}
 
             if by_tech:
                 eval_res = {
@@ -2734,7 +2924,20 @@ async def run_options_gap_defense_cycle():
                     "reason": tech_info.get("detail", reason_tech),
                     "contracts_ratio_to_exit": tech_info.get("exit_ratio", 1.0)
                 }
-                exit_plan = tech_info.get("exit_plan", exit_plan)
+            elif bb15m_exit_res.get("should_exit"):
+                eval_res = {
+                    "should_exit": True,
+                    "rule_code": bb15m_exit_res["rule_code"],
+                    "reason": bb15m_exit_res["reason"],
+                    "contracts_ratio_to_exit": 1.0,
+                }
+            elif pg_eval.get("should_exit"):
+                eval_res = {
+                    "should_exit": True,
+                    "rule_code": pg_eval["rule_code"],
+                    "reason": pg_eval["reason"],
+                    "contracts_ratio_to_exit": 1.0,
+                }
             elif "vme" in str(strat).lower():
                 from app.stocks.vme_exit_engine import evaluate_vme_exit
                 eval_res = evaluate_vme_exit(
@@ -2757,9 +2960,14 @@ async def run_options_gap_defense_cycle():
                     position_age_minutes=pos_age_min,
                     sipv_signal=None
                 )
+                # Nunca permitir Profit Guardian basado en prima si no hay cotización LIVE de TWS
+                if not has_live_tws_quote and str(eval_res.get("rule_code") or "") in (
+                    "OPT_GAP_BE_LOCK_PLUS_1PCT", "OPT_GAP_TRAIL_TIER2", "OPT_GAP_TRAIL_TIER3", "OPT_GAP_PUT_BREAKEVEN", "OPT_GAP_HARD_SL_PREM"
+                ):
+                    eval_res = {"should_exit": False}
             else:
                 eval_res = {"should_exit": False}
-                if has_live_opt_quote and pos_age_min >= 5.0 and cur_opt_premium is not None and entry_debit > 0:
+                if has_live_tws_quote and pos_age_min >= 5.0 and cur_opt_premium is not None and entry_debit > 0:
                     pnl_pct = ((cur_opt_premium - entry_debit) / entry_debit) * 100.0
                     if pnl_pct <= -50.0:
                         eval_res = {
@@ -2778,8 +2986,6 @@ async def run_options_gap_defense_cycle():
                         }
 
             # ── CANDADO REGLA DE NEGOCIO: OPCIONES MULTI-SEMANA (DTE >= 4) ──
-            # "Si la opción vence la próxima semana o posterior y queremos cerrar esta semana,
-            # DEBE ser siempre en ganancia con por lo menos más del 1% de ganancias."
             exp_date_v = None
             if expiry_str:
                 try:
@@ -2792,11 +2998,10 @@ async def run_options_gap_defense_cycle():
 
             eval_pos["unrealized_pnl_pct"] = cur_pnl_pct
 
-            # ── EOD PROFIT HARVEST: ultima hora de la sesion (por defecto 15:00 ET -> cierre) ──
-            # Toda posicion con ganancia neta >= +2% se liquida al 100% (Theta acelerado, spreads amplios, gap nocturno).
+            # ── EOD PROFIT HARVEST & HARD-EXIT EOD INCONDICIONAL (15:45 ET para DTE <= 7) ──
             try:
                 from app.options.exit_engine import should_exit_eod_profit_harvest
-                if has_live_opt_quote:
+                if has_live_tws_quote:
                     by_eod, reason_eod = should_exit_eod_profit_harvest(unrealized_pnl_usd, cur_pnl_pct, now_dt)
                     if by_eod and (not eval_res.get("should_exit") or float(eval_res.get("contracts_ratio_to_exit") or 1.0) < 1.0):
                         eval_res = {
@@ -2805,22 +3010,20 @@ async def run_options_gap_defense_cycle():
                             "reason": reason_eod,
                             "contracts_ratio_to_exit": 1.0
                         }
-            except Exception as e_eod:
-                log_warning(MODULE, f"Aviso evaluando EOD Profit Harvest para {symbol}: {e_eod}")
 
-            # ── CANDADO TIME-DECAY GUARD PARA OPCIONES 0DTE & SCALPING (ETI / ROSS CAMERON) ──
-            # En opciones 0DTE, Theta acelera exponencialmente la pérdida si el trade no despega.
-            is_zero_dte_opt = (
-                dte_days_v <= 1 or
-                bool(pos.get("is_zero_dte")) or
-                "0dte" in str(pos.get("strategy_type", "")).lower() or
-                str(pos.get("model_version", "")).startswith("ETI") or
-                str(pos.get("rule_code", "")).startswith("ROSS_CAMERON") or
-                "SCALP" in str(pos.get("strategy_type", "")).upper() or
-                "SCALP" in str(exit_plan.get("horizon", "")).upper() or
-                bool(exit_plan.get("is_zero_dte")) or
-                bool(exit_plan.get("time_decay_guard_enabled"))
-            )
+                by_time, reason_time = should_exit_by_time(eval_pos, now_dt, sd_opt.default_settings())
+                if by_time:
+                    eval_res = {
+                        "should_exit": True,
+                        "rule_code": "OPT_EOD_HARD_EXIT_1545",
+                        "reason": reason_time,
+                        "contracts_ratio_to_exit": 1.0,
+                    }
+            except Exception as e_eod:
+                log_warning(MODULE, f"Aviso evaluando EOD Profit Harvest / Hard Exit para {symbol}: {e_eod}")
+
+            # ── CANDADO TIME-DECAY GUARD ESTRICTO PARA OPCIONES 0DTE/1DTE (NO 7 DTE SWINGS) ──
+            is_zero_dte_opt = (exp_date_v is not None and dte_days_v <= 1)
 
             if is_zero_dte_opt and not eval_res.get("should_exit"):
                 # 1. Breakeven Ratchet a los 15 minutos:
@@ -2884,36 +3087,55 @@ async def run_options_gap_defense_cycle():
                 exit_plan["partial_tp_taken"] = True
                 exit_plan["be_locked"] = True
                 exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
-                be_prem = round(entry_debit * 1.01, 2)
+                be_prem = round(entry_debit * 1.035, 4)
                 exit_plan["stop_loss_premium"] = max(float(exit_plan.get("stop_loss_premium") or 0.0), be_prem)
                 if entry_stock_p > 0:
+                    be_lock_sl = round(entry_stock_p * (1.01 if is_call else 0.99), 2)
                     exit_plan["be_lock_trigger_price"] = round(entry_stock_p * (1.02 if is_call else 0.98), 2)
-                    exit_plan["be_lock_sl_price"] = round(entry_stock_p * (1.01 if is_call else 0.99), 2)
-                    exit_plan["stop_loss_underlying"] = max(float(exit_plan.get("stop_loss_underlying") or 0.0), exit_plan["be_lock_sl_price"]) if is_call else min(float(exit_plan.get("stop_loss_underlying") or 999999.0), exit_plan["be_lock_sl_price"])
+                    exit_plan["be_lock_sl_price"] = be_lock_sl
+                    prev_sl_u = float(exit_plan.get("stop_loss_underlying") or 0.0)
+                    if is_call:
+                        if be_lock_sl > prev_sl_u and (cur_stock_p <= 0 or be_lock_sl < round(cur_stock_p * 0.997, 2)):
+                            exit_plan["stop_loss_underlying"] = be_lock_sl
+                    else:
+                        if (prev_sl_u <= 0.0 or be_lock_sl < prev_sl_u) and (cur_stock_p <= 0 or be_lock_sl > round(cur_stock_p * 1.003, 2)):
+                            exit_plan["stop_loss_underlying"] = be_lock_sl
 
                 eval_res = {
                     "should_exit": True,
                     "rule_code": "TP_FIXED_20_RATCHET",
-                    "reason": f"Take Profit Fijo +20% ({int(ratio*100)}% cerrado): PnL actual +{cur_pnl_pct:.1f}% >= +20.0%. Candado Breakeven +1% activado para el resto (Piso SL: ${be_prem:.2f}).",
+                    "reason": f"Take Profit Fijo +20% ({int(ratio*100)}% cerrado): PnL actual +{cur_pnl_pct:.1f}% >= +20.0%. Candado Breakeven +3.5% activado para el resto (Piso SL: ${be_prem:.2f}).",
                     "contracts_ratio_to_exit": ratio
                 }
 
-            # ── EVALUACIÓN DE STOP LOSS BREAKEVEN +1% LOCK (RESTO DE LA POSICIÓN) ──
+            # ── EVALUACIÓN DE STOP LOSS PROFIT GUARDIAN / BE LOCK / HARD SL (RESTO DE LA POSICIÓN) ──
             sl_prem_floor = float(exit_plan.get("stop_loss_premium") or 0.0)
-            if sl_prem_floor > 0.0 and cur_opt_premium is not None and cur_opt_premium <= sl_prem_floor and not eval_res.get("should_exit"):
-                eval_res = {
-                    "should_exit": True,
-                    "rule_code": "OPT_BREAKEVEN_LOCK_SL",
-                    "reason": f"Stop Loss BE Lock (+1% Protegido): Prima ${cur_opt_premium:.2f} <= ${sl_prem_floor:.2f} (+1% sobre compra ${entry_debit:.2f}). Asegurando beneficio neto.",
-                    "contracts_ratio_to_exit": 1.0
-                }
+            if has_live_tws_quote and sl_prem_floor > 0.0 and cur_opt_premium is not None and cur_opt_premium <= sl_prem_floor and not eval_res.get("should_exit"):
+                if sl_prem_floor >= entry_debit:
+                    eval_res = {
+                        "should_exit": True,
+                        "rule_code": "OPT_BREAKEVEN_LOCK_SL",
+                        "reason": f"Stop Loss Profit Guardian: Prima ${cur_opt_premium:.2f} <= piso ${sl_prem_floor:.2f} (compra ${entry_debit:.2f}). Asegurando beneficio neto.",
+                        "contracts_ratio_to_exit": 1.0
+                    }
+                elif pos_age_min >= 2.0:
+                    eval_res = {
+                        "should_exit": True,
+                        "rule_code": "OPT_GAP_HARD_SL_PREM",
+                        "reason": f"Hard Stop Loss Prima: ${cur_opt_premium:.2f} <= piso ${sl_prem_floor:.2f} (compra ${entry_debit:.2f}).",
+                        "contracts_ratio_to_exit": 1.0
+                    }
 
             if eval_res.get("should_exit"):
                 exit_code_cand = str(eval_res.get("rule_code") or "OPT_GAP_EXIT")
                 exit_code_lower = exit_code_cand.lower()
-                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in ("sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap", "time_decay", "breakeven_lock"))
+                is_stop_loss_or_invalidation = any(k in exit_code_lower for k in (
+                    "sl_", "stop_loss", "hard_sl", "pierced", "invalidation", "flip", "vwap",
+                    "time_decay", "breakeven_lock", "be_lock", "trail", "ratchet",
+                    "bb15m", "exhaustion", "eod_hard_exit", "forced_close_time", "late_import"
+                ))
                 is_partial_tp = "partial" in exit_code_lower or "20" in exit_code_lower or float(eval_res.get("contracts_ratio_to_exit") or 1.0) < 1.0
-                is_eod_harvest = "eod_profit_harvest" in exit_code_lower
+                is_eod_harvest = "eod_profit_harvest" in exit_code_lower or "eod_hard_exit" in exit_code_lower
 
                 # Candados restrictivos (Candado 1 Bollinger y Candado 2 Swing Multi-Semana)
                 # NUNCA deben bloquear un Stop Loss técnico, corte defensivo de pérdidas, ni toma parcial al +20%!
@@ -2982,128 +3204,149 @@ async def run_options_gap_defense_cycle():
                 pnl_portion = round(realized_pnl_usd * (qty_to_close / qty), 2)
 
                 if is_partial and remaining_qty > 0:
-                    exit_plan["partial_tp_taken"] = True
-                    exit_plan["trailing_sl_type"] = "EMA9_15M"
-                    cur_invested = float(pos.get("entry_total_invested") or (entry_debit * 100 * qty))
-                    new_invested = round(cur_invested * (remaining_qty / qty), 2)
-                    cur_realized = float(pos.get("realized_pnl") or 0.0)
-                    new_realized = round(cur_realized + pnl_portion, 2)
+                    close_req = request_broker_option_close(
+                        sb=sb,
+                        pos=pos,
+                        qty_to_close=qty_to_close,
+                        exit_price_est=cur_opt_premium,
+                        mapped_reason=mapped_reason,
+                        detailed_reason=exit_code,
+                        detailed_text=exit_reason_txt,
+                        is_partial=True,
+                        group_name="OPEN_GAP_RUNNER_OPT",
+                        now_dt=now_dt,
+                    )
+                    if close_req.get("status") == "closing_pending":
+                        log_info(MODULE, f"⏳ [CIERRE PARCIAL BROKER] {symbol} ({pid}): orden SELL {qty_to_close}x enviada a TWS; esperando fill.")
+                    else:
+                        exit_plan["partial_tp_taken"] = True
+                        exit_plan["trailing_sl_type"] = "EMA9_15M"
+                        cur_invested = float(pos.get("entry_total_invested") or (entry_debit * 100 * qty))
+                        new_invested = round(cur_invested * (remaining_qty / qty), 2)
+                        cur_realized = float(pos.get("realized_pnl") or 0.0)
+                        new_realized = round(cur_realized + pnl_portion, 2)
 
-                    sb.table("opt_paper_trades").update({
-                        "qty": remaining_qty,
-                        "entry_total_invested": new_invested,
-                        "realized_pnl": new_realized,
-                        "last_mark_price": cur_opt_premium,
-                        "last_mark_at": now_iso,
-                        "exit_plan": exit_plan,
-                        "updated_at": now_iso
-                    }).eq("id", pid).execute()
-                    log_info(MODULE, f"🎯 TOMA PARCIAL ESCALONADA 50%: {symbol} cerró {qty_to_close} contratos a ${cur_opt_premium:.2f} (+${pnl_portion:.2f}). Quedan {remaining_qty} con Trailing SL.")
+                        sb.table("opt_paper_trades").update({
+                            "qty": remaining_qty,
+                            "entry_total_invested": new_invested,
+                            "realized_pnl": new_realized,
+                            "last_mark_price": cur_opt_premium,
+                            "last_mark_at": now_iso,
+                            "exit_plan": exit_plan,
+                            "updated_at": now_iso
+                        }).eq("id", pid).execute()
+                        log_info(MODULE, f"🎯 TOMA PARCIAL ESCALONADA 50%: {symbol} cerró {qty_to_close} contratos a ${cur_opt_premium:.2f} (+${pnl_portion:.2f}). Quedan {remaining_qty} con Trailing SL.")
                 else:
-                    # Cerrar posición completa en opt_paper_trades
-                    cur_realized = float(pos.get("realized_pnl") or 0.0)
-                    total_realized = round(cur_realized + realized_pnl_usd, 2)
-                    sb.table("opt_paper_trades").update({
-                        "status": "closed",
-                        "exit_time": now_iso,
-                        "exit_credit": cur_opt_premium,
-                        "last_mark_price": cur_opt_premium,
-                        "last_mark_at": now_iso,
-                        "realized_pnl": total_realized,
-                        "unrealized_pnl": 0.0,
-                        "exit_reason": mapped_reason,
-                        "exit_plan": exit_plan,
-                        "updated_at": now_iso
-                    }).eq("id", pid).execute()
+                    close_req = request_broker_option_close(
+                        sb=sb,
+                        pos=pos,
+                        qty_to_close=qty_to_close,
+                        exit_price_est=cur_opt_premium,
+                        mapped_reason=mapped_reason,
+                        detailed_reason=exit_code,
+                        detailed_text=exit_reason_txt,
+                        is_partial=False,
+                        group_name="OPEN_GAP_RUNNER_OPT",
+                        now_dt=now_dt,
+                    )
+                    if close_req.get("status") == "closing_pending":
+                        log_info(MODULE, f"⏳ [CIERRE PENDIENTE BROKER] {symbol} ({pid}): orden SELL enviada a TWS ({exit_code}); no se cierra en DB hasta confirmar fill.")
+                    else:
+                        # Broker ya está flat (confirmado por snapshot fresco o modo offline): cerrar en opt_paper_trades
+                        cur_realized = float(pos.get("realized_pnl") or 0.0)
+                        total_realized = round(cur_realized + realized_pnl_usd, 2)
+                        sb.table("opt_paper_trades").update({
+                            "status": "closed",
+                            "exit_time": now_iso,
+                            "exit_credit": cur_opt_premium,
+                            "last_mark_price": cur_opt_premium,
+                            "last_mark_at": now_iso,
+                            "realized_pnl": total_realized,
+                            "unrealized_pnl": 0.0,
+                            "exit_reason": mapped_reason,
+                            "exit_plan": exit_plan,
+                            "updated_at": now_iso
+                        }).eq("id", pid).execute()
 
-                # Enviar orden de cierre SELL a stocks_orders SOLO si el contrato existe en el Broker TWS
-                exp_compact = expiry_str.replace("-", "")[:8] if expiry_str else "20261026"
-                opt_tb = f"OPT:{exp_compact}:{strike}:{'C' if is_call else 'P'}"
-                try:
-                    held_in_tws, tws_qty = is_option_held_in_broker(sb, symbol, expiry_str, strike, "C" if is_call else "P")
-                    if held_in_tws and tws_qty > 0:
-                        cutoff_30m = (now_dt - timedelta(minutes=30)).isoformat()
-                        existing_sell = (
-                            sb.table("stocks_orders")
-                            .select("id")
-                            .eq("ticker", symbol[:10])
-                            .eq("target_band", opt_tb)
-                            .eq("direction", "sell")
-                            .in_("status", ["pending", "processing"])
-                            .gte("created_at", cutoff_30m)
-                            .limit(1)
-                            .execute()
-                        )
-                        if not existing_sell.data:
-                            sb.table("stocks_orders").insert({
+                        # Registrar en trades_journal
+                        try:
+                            sb.table("trades_journal").insert({
                                 "ticker": symbol[:10],
-                                "target_band": opt_tb,
-                                "group_name": "OPEN_GAP_RUNNER_OPT",
-                                "rule_code": "APEX_AUTO",
-                                "order_type": "market",
-                                "direction": "sell",
-                                "shares": min(qty_to_close, tws_qty) if tws_qty > 0 else qty_to_close,
-                                "market_price": cur_opt_premium,
-                                "limit_price": round(cur_opt_premium, 2) if cur_opt_premium > 0 else 0.05,
-                                "status": "pending",
-                                "created_at": now_iso
+                                "shares": qty,
+                                "entry_price": entry_debit,
+                                "exit_price": cur_opt_premium,
+                                "entry_date": pos.get("entry_time") or now_iso,
+                                "exit_date": now_iso,
+                                "pnl_usd": realized_pnl_usd,
+                                "pnl_pct": realized_pnl_pct,
+                                "result": "win" if realized_pnl_usd >= 0 else "loss",
+                                "exit_reason": exit_code,
+                                "trade_type": "OPTIONS_GAP_RUNNER"
                             }).execute()
-                except Exception as ord_err:
-                    log_warning(MODULE, f"Aviso enviando orden de cierre opciones {pid}: {ord_err}")
+                        except Exception as tj_err:
+                            log_warning(MODULE, f"Aviso registrando trades_journal para opción {pid}: {tj_err}")
 
-                # Registrar en trades_journal
-                try:
-                    sb.table("trades_journal").insert({
-                        "ticker": symbol[:10],
-                        "shares": qty,
-                        "entry_price": entry_debit,
-                        "exit_price": cur_opt_premium,
-                        "entry_date": pos.get("entry_time") or now_iso,
-                        "exit_date": now_iso,
-                        "pnl_usd": realized_pnl_usd,
-                        "pnl_pct": realized_pnl_pct,
-                        "result": "win" if realized_pnl_usd >= 0 else "loss",
-                        "exit_reason": exit_code,
-                        "trade_type": "OPTIONS_GAP_RUNNER"
-                    }).execute()
-                except Exception as tj_err:
-                    log_warning(MODULE, f"Aviso registrando trades_journal para opción {pid}: {tj_err}")
+                        log_info(MODULE, f"🎯 CIERRE OPCIÓN {symbol} ({pid}): {exit_code} | PnL=${realized_pnl_usd:+.2f} ({realized_pnl_pct:+.1f}%) | {exit_reason_txt}")
 
-                log_info(MODULE, f"🎯 CIERRE OPCIÓN {symbol} ({pid}): {exit_code} | PnL=${realized_pnl_usd:+.2f} ({realized_pnl_pct:+.1f}%) | {exit_reason_txt}")
-
-                # Notificación Telegram
-                send_telegram_opt_alert(
-                    f"🎯 [OPTIONS GAP RUNNER EXIT] CIERRE EJECUTADO\n"
-                    f"Ticker: {symbol} ({strat.upper()})\n"
-                    f"Contrato: Strike ${strike} {'CALL' if is_call else 'PUT'} (Exp: {expiry_str})\n"
-                    f"Precio Salida: ${cur_opt_premium:.2f} (Entrada: ${entry_debit:.2f})\n"
-                    f"PnL Realizado: ${realized_pnl_usd:+.2f} ({realized_pnl_pct:+.1f}%)\n"
-                    f"Motivo: {exit_code}\n"
-                    f"Detalle: {exit_reason_txt}"
-                )
+                        # Notificación Telegram
+                        send_telegram_opt_alert(
+                            f"🎯 [OPTIONS GAP RUNNER EXIT] CIERRE EJECUTADO\n"
+                            f"Ticker: {symbol} ({strat.upper()})\n"
+                            f"Contrato: Strike ${strike} {'CALL' if is_call else 'PUT'} (Exp: {expiry_str})\n"
+                            f"Precio Salida: ${cur_opt_premium:.2f} (Entrada: ${entry_debit:.2f})\n"
+                            f"PnL Realizado: ${realized_pnl_usd:+.2f} ({realized_pnl_pct:+.1f}%)\n"
+                            f"Motivo: {exit_code}\n"
+                            f"Detalle: {exit_reason_txt}"
+                        )
 
             else:
-                # Monitoreo continuo: actualizar Stop Loss técnico si fue propuesto
+                # Monitoreo continuo: actualizar Stop Loss técnico y piso de prima con monotonicidad estricta
                 new_sl = eval_res.get("new_stop_loss") or eval_res.get("new_stop_loss_underlying")
                 new_tsl = eval_res.get("new_trailing_sl")
+                new_sl_prem = float(eval_res.get("new_stop_loss_premium") or 0.0)
+                if not is_call and float(eval_res.get("lowest_underlying_seen") or 0.0) > 0.0:
+                    prev_lo_seen = float(exit_plan.get("lowest_underlying_seen") or 0.0)
+                    cand_lo_seen = float(eval_res["lowest_underlying_seen"])
+                    exit_plan["lowest_underlying_seen"] = min(prev_lo_seen, cand_lo_seen) if prev_lo_seen > 0.0 else cand_lo_seen
+                elif is_call and float(eval_res.get("highest_underlying_seen") or 0.0) > 0.0:
+                    prev_hi_seen = float(exit_plan.get("highest_underlying_seen") or 0.0)
+                    cand_hi_seen = float(eval_res["highest_underlying_seen"])
+                    exit_plan["highest_underlying_seen"] = max(prev_hi_seen, cand_hi_seen)
                 if new_sl:
-                    exit_plan["stop_loss_underlying"] = new_sl
-                    exit_plan["trailing_sl_type"] = eval_res.get("rule_code", "SL_DYNAMIC")
+                    new_sl_f = float(new_sl)
+                    prev_sl_f = float(exit_plan.get("stop_loss_underlying") or 0.0)
+                    if is_call:
+                        if new_sl_f > prev_sl_f and (cur_stock_p <= 0 or new_sl_f < cur_stock_p):
+                            exit_plan["stop_loss_underlying"] = round(new_sl_f, 2)
+                            exit_plan["trailing_sl_type"] = eval_res.get("rule_code") or exit_plan.get("trailing_sl_type") or "SL_DYNAMIC"
+                    else:
+                        if (prev_sl_f <= 0.0 or new_sl_f < prev_sl_f) and (cur_stock_p <= 0 or new_sl_f > cur_stock_p):
+                            exit_plan["stop_loss_underlying"] = round(new_sl_f, 2)
+                            exit_plan["trailing_sl_type"] = eval_res.get("rule_code") or exit_plan.get("trailing_sl_type") or "SL_DYNAMIC"
                 if new_tsl:
-                    exit_plan["trailing_sl_underlying"] = new_tsl
+                    new_tsl_f = float(new_tsl)
+                    prev_tsl_f = float(exit_plan.get("trailing_sl_underlying") or 0.0)
+                    if is_call and new_tsl_f > prev_tsl_f and (cur_stock_p <= 0 or new_tsl_f < cur_stock_p):
+                        exit_plan["trailing_sl_underlying"] = round(new_tsl_f, 2)
+                    elif (not is_call) and (prev_tsl_f <= 0.0 or new_tsl_f < prev_tsl_f) and (cur_stock_p <= 0 or new_tsl_f > cur_stock_p):
+                        exit_plan["trailing_sl_underlying"] = round(new_tsl_f, 2)
+                if new_sl_prem > float(exit_plan.get("stop_loss_premium") or 0.0):
+                    exit_plan["stop_loss_premium"] = new_sl_prem
+                    if new_sl_prem >= entry_debit:
+                        exit_plan["be_locked"] = True
 
                 # Regla Breakeven Lock + 1% en exit_plan (+5% avance subyacente -> SL a compra + 1% / compra - 1%)
-                if is_call and cur_stock_p >= round(entry_stock_p * 1.05, 2):
+                if is_call and entry_stock_p > 0 and cur_stock_p >= round(entry_stock_p * 1.05, 2):
                     exit_plan["be_locked"] = True
                     be_sl = round(entry_stock_p * 1.01, 2)
-                    if be_sl > float(exit_plan.get("stop_loss_underlying") or 0.0):
+                    if be_sl > float(exit_plan.get("stop_loss_underlying") or 0.0) and be_sl < round(cur_stock_p * 0.997, 2):
                         exit_plan["stop_loss_underlying"] = be_sl
                         exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
-                elif not is_call and cur_stock_p <= round(entry_stock_p * 0.95, 2):
+                elif not is_call and entry_stock_p > 0 and cur_stock_p <= round(entry_stock_p * 0.95, 2):
                     exit_plan["be_locked"] = True
                     be_sl = round(entry_stock_p * 0.99, 2)
                     curr_sl = float(exit_plan.get("stop_loss_underlying") or 0.0)
-                    if curr_sl == 0.0 or be_sl < curr_sl:
+                    if (curr_sl == 0.0 or be_sl < curr_sl) and be_sl > round(cur_stock_p * 1.003, 2):
                         exit_plan["stop_loss_underlying"] = be_sl
                         exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
 
@@ -3341,17 +3584,31 @@ async def run_options_auto_execution_cycle():
                 qty = int(pos.get("qty") or 1)
                 pot_prof = float(pos.get("max_profit_total") or 0.0)
                 max_l = float(pos.get("max_loss_total") or 0.0)
-                log_info(MODULE, f"🎯 AUTO-EJECUCIÓN OPCIONES: {sym} {strat} | {qty}x @ ${debit:.2f} | Beneficio Potencial: ${pot_prof:.2f} | Riesgo: ${max_l:.2f}")
+                is_dispatched = (pos.get("status") == "order_dispatched")
+                status_label = "Despachado a TWS (esperando fill)" if is_dispatched else "OPEN en Paper & Despachado a TWS"
+                log_info(MODULE, f"🎯 AUTO-EJECUCIÓN OPCIONES: {sym} {strat} | {qty}x @ ${debit:.2f} | Beneficio Potencial: ${pot_prof:.2f} | Riesgo: ${max_l:.2f} [{status_label}]")
                 send_telegram_opt_alert(
-                    f"🎯 [OPTIONS AUTO-EXECUTION] Orden Ejecutada\n"
+                    f"🎯 [OPTIONS AUTO-EXECUTION] Orden Enviada\n"
                     f"Ticker: {sym} ({strat})\n"
                     f"Cantidad: {qty} contratos @ ${debit:.2f}\n"
                     f"Beneficio Potencial: ${pot_prof:.2f}\n"
                     f"Riesgo Máximo: ${max_l:.2f}\n"
-                    f"Estado: OPEN en Paper & Despachado a TWS"
+                    f"Estado: {status_label}"
                 )
     except Exception as e_opt_exec:
         log_warning(MODULE, f"Aviso en ciclo de auto-ejecución de opciones: {e_opt_exec}")
+
+
+def _should_run_local_micro_scalper() -> bool:
+    """El Micro-Pullback Scalper requiere ejecución sub-segundo directa contra TWS local (APOLO)."""
+    if os.getenv("ENABLE_MICRO_SCALPER", "false").lower() != "true":
+        return False
+    try:
+        from app.data.ib_provider import get_ib_connection
+        ib = get_ib_connection()
+        return bool(ib and ib.connected)
+    except Exception:
+        return False
 
 
 async def start_stocks_scheduler(force=False):
@@ -3397,12 +3654,12 @@ async def start_stocks_scheduler(force=False):
         coalesce=True,
     )
 
-    # 1b-opt. OPTIONS DEFENSE & RATCHET MONITOR: cada 1 minuto
+    # 1b-opt. OPTIONS DEFENSE & RATCHET MONITOR: cada 20 segundos
     scheduler.add_job(
         run_options_gap_defense_cycle,
-        trigger=IntervalTrigger(minutes=1),
+        trigger=IntervalTrigger(seconds=20),
         id="options_gap_defense_cycle",
-        name="Options Gap Defense & Ratchet Monitor (1m)",
+        name="Options Gap Defense & Ratchet Monitor (20s)",
         max_instances=1,
         replace_existing=True,
         misfire_grace_time=300,
@@ -3712,6 +3969,26 @@ async def start_stocks_scheduler(force=False):
         coalesce=True,
     )
 
+    # 6. DAILY DB CLEANUP (03:00 UTC) - Migrado desde scheduler Crypto para mantenerse activo mientras Crypto está suspendido
+    async def daily_cleanup_job():
+        from app.workers.data_cleanup import cleanup_database
+        log_info(MODULE, "Ejecutando limpieza diaria de BD...")
+        try:
+            result = await cleanup_database()
+            log_info(MODULE, f"Limpieza diaria completada: {result.get('total_deleted', 0)} filas eliminadas")
+        except Exception as e_clean:
+            log_error(MODULE, f"Error en limpieza diaria: {e_clean}")
+
+    scheduler.add_job(
+        daily_cleanup_job,
+        trigger=CronTrigger(hour=3, minute=0, timezone='UTC'),
+        id="daily_cleanup",
+        name="Daily DB Cleanup (03:00 UTC)",
+        replace_existing=True,
+        misfire_grace_time=600,
+        coalesce=True,
+    )
+
     scheduler.start()
     is_open, status_txt = is_market_open()
     log_info(MODULE, f"Stocks scheduler started (Market: {status_txt}). Tasks: Hot(15m) + Pro(16:05ET) + Sweep(16:01ET)")
@@ -3721,13 +3998,17 @@ async def start_stocks_scheduler(force=False):
     asyncio.create_task(run_options_gap_defense_cycle())
     asyncio.create_task(run_options_auto_execution_cycle())
 
-    # Iniciar Motor In-Memory de Micro-Pullbacks para capturar rallies exponenciales en 5s
+    # Iniciar Motor In-Memory de Micro-Pullbacks solo si ENABLE_MICRO_SCALPER=true y hay TWS local conectado (APOLO)
+    scalp_scanner = None
     try:
-        from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
-        scalp_scanner = get_micro_pullback_scanner()
-        if is_open or force:
-            scalp_scanner.start()
-            log_info(MODULE, '⚡ Motor In-Memory Micro-Pullback ACTIVADO en stocks_scheduler.')
+        if _should_run_local_micro_scalper():
+            from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
+            scalp_scanner = get_micro_pullback_scanner()
+            if is_open or force:
+                scalp_scanner.start()
+                log_info(MODULE, '⚡ Motor In-Memory Micro-Pullback ACTIVADO en stocks_scheduler.')
+        else:
+            log_info(MODULE, '⏸️ Micro-Pullback Scanner omitido en este nodo (requiere ENABLE_MICRO_SCALPER=true y TWS local conectado; se ejecuta en APOLO IB Bridge).')
     except Exception as e_scalp:
         log_warning(MODULE, f'Aviso al iniciar micro-pullback scanner: {e_scalp}')
 
@@ -3739,12 +4020,13 @@ async def start_stocks_scheduler(force=False):
             await asyncio.sleep(15)
             try:
                 m_open, _ = is_market_open()
-                if m_open and not scalp_scanner.is_running:
-                    scalp_scanner.start()
-                    log_info(MODULE, '⚡ [08:30 AM Lima / 09:30 AM ET] Campana de mercado detectada: Micro-Pullback Scanner INICIADO.')
-                elif not m_open and scalp_scanner.is_running:
-                    scalp_scanner.stop()
-                    log_info(MODULE, '🛑 [15:00 PM Lima / 16:00 PM ET] Cierre de mercado detectado: Micro-Pullback Scanner DETENIDO.')
+                if scalp_scanner is not None:
+                    if m_open and not scalp_scanner.is_running and _should_run_local_micro_scalper():
+                        scalp_scanner.start()
+                        log_info(MODULE, '⚡ [08:30 AM Lima / 09:30 AM ET] Campana de mercado detectada: Micro-Pullback Scanner INICIADO.')
+                    elif not m_open and scalp_scanner.is_running:
+                        scalp_scanner.stop()
+                        log_info(MODULE, '🛑 [15:00 PM Lima / 16:00 PM ET] Cierre de mercado detectado: Micro-Pullback Scanner DETENIDO.')
 
                 # Verificación continua de flag de liquidación de opciones a la apertura
                 if m_open:
@@ -3762,8 +4044,8 @@ async def start_stocks_scheduler(force=False):
                 pass
     except (KeyboardInterrupt, SystemExit):
         try:
-            from app.stocks.micro_pullback_scanner import get_micro_pullback_scanner
-            get_micro_pullback_scanner().stop()
+            if scalp_scanner is not None:
+                scalp_scanner.stop()
         except Exception:
             pass
         scheduler.shutdown()

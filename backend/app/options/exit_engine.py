@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 
 from app.core.logger import log_info, log_warning
+from app.core.time_utils import parse_iso_utc
+from app.core.bb15m_exhaustion import evaluate_bb15m_post_breakout_exhaustion
 from app.options import market_calendar as mc
 from app.options import options_aduana as aduana
 from app.options import paper_execution as pe
@@ -487,10 +489,10 @@ def evaluate_technical_rules_and_stops(
             exit_plan["entry_underlying_price"] = entry_stock_p
 
     if is_call:
-        # En CALL: Si EMA9 sube, elevar SL dinámico
+        # En CALL: Si EMA9 sube, elevar SL dinámico sin superar el precio actual
         if cur_ema9_15m > prev_ema9_15m and cur_ema9_15m > 0:
             proposed_sl = round(cur_ema9_15m - delta_sl, 2)
-            if proposed_sl > new_sl:
+            if proposed_sl > new_sl and (current_price <= 0 or proposed_sl < current_price):
                 new_sl = proposed_sl
                 new_sl_type = "EMA9_15M"
 
@@ -503,7 +505,7 @@ def evaluate_technical_rules_and_stops(
 
         if bb_upper_15m > 0 and h_15m > bb_upper_15m and c_15m > o_15m:
             midpoint_15m = round((h_15m + l_15m) / 2.0, 2)
-            if midpoint_15m > new_sl:
+            if midpoint_15m > new_sl and (current_price <= 0 or midpoint_15m < current_price):
                 new_sl = midpoint_15m
                 new_sl_type = "MIDPOINT_15M"
 
@@ -511,7 +513,7 @@ def evaluate_technical_rules_and_stops(
         # Si el precio sube >= +5% desde la compra, elevar SL al (precio de compra + 1%)
         if entry_stock_p > 0.0 and current_price >= round(entry_stock_p * 1.05, 2):
             sl_be_plus_1 = round(entry_stock_p * 1.01, 2)
-            if sl_be_plus_1 > new_sl:
+            if sl_be_plus_1 > new_sl and sl_be_plus_1 < round(current_price * 0.997, 2):
                 new_sl = sl_be_plus_1
                 new_sl_type = "BE_LOCK_PLUS_1PCT"
             exit_plan["be_locked"] = True
@@ -519,10 +521,10 @@ def evaluate_technical_rules_and_stops(
             exit_plan["be_lock_sl_price"] = sl_be_plus_1
 
     elif is_put:
-        # En PUT: Si EMA9 baja, reducir techo de SL dinámico
+        # En PUT: Si EMA9 baja, reducir techo de SL dinámico sin caer por debajo del precio actual
         if cur_ema9_15m < prev_ema9_15m and cur_ema9_15m > 0:
             proposed_sl = round(cur_ema9_15m + delta_sl, 2)
-            if new_sl == 0.0 or proposed_sl < new_sl:
+            if (new_sl == 0.0 or proposed_sl < new_sl) and (current_price <= 0 or proposed_sl > current_price):
                 new_sl = proposed_sl
                 new_sl_type = "EMA9_15M"
 
@@ -535,7 +537,7 @@ def evaluate_technical_rules_and_stops(
 
         if bb_lower_15m > 0 and l_15m < bb_lower_15m and c_15m < o_15m:
             midpoint_15m = round((h_15m + l_15m) / 2.0, 2)
-            if new_sl == 0.0 or midpoint_15m < new_sl:
+            if (new_sl == 0.0 or midpoint_15m < new_sl) and (current_price <= 0 or midpoint_15m > current_price):
                 new_sl = midpoint_15m
                 new_sl_type = "MIDPOINT_15M"
 
@@ -543,12 +545,39 @@ def evaluate_technical_rules_and_stops(
         # Si el subyacente cae <= -5% desde la compra, reducir SL techo al (precio de compra - 1%)
         if entry_stock_p > 0.0 and current_price <= round(entry_stock_p * 0.95, 2):
             sl_be_minus_1 = round(entry_stock_p * 0.99, 2)
-            if new_sl == 0.0 or sl_be_minus_1 < new_sl:
+            if (new_sl == 0.0 or sl_be_minus_1 < new_sl) and sl_be_minus_1 > round(current_price * 1.003, 2):
                 new_sl = sl_be_minus_1
                 new_sl_type = "BE_LOCK_PLUS_1PCT"
             exit_plan["be_locked"] = True
             exit_plan["be_lock_trigger_price"] = round(entry_stock_p * 0.95, 2)
             exit_plan["be_lock_sl_price"] = sl_be_minus_1
+
+    # ── TRAILING CONTINUO EN SUBYACENTE (PUT descendente / CALL ascendente) ──
+    try:
+        from app.options.profit_guardian import compute_dynamic_underlying_trailing_sl
+        dyn_u = compute_dynamic_underlying_trailing_sl(
+            entry_underlying=entry_stock_p,
+            current_underlying=current_price,
+            current_sl=new_sl,
+            atr_15m=atr_15m,
+            is_put=is_put,
+            lowest_underlying_seen=float(exit_plan.get("lowest_underlying_seen") or 0.0),
+            highest_underlying_seen=float(exit_plan.get("highest_underlying_seen") or 0.0),
+        )
+        if is_put and float(dyn_u.get("lowest_underlying_seen") or 0.0) > 0.0:
+            exit_plan["lowest_underlying_seen"] = dyn_u["lowest_underlying_seen"]
+        elif is_call and float(dyn_u.get("highest_underlying_seen") or 0.0) > 0.0:
+            exit_plan["highest_underlying_seen"] = dyn_u["highest_underlying_seen"]
+        if dyn_u.get("updated"):
+            new_sl = float(dyn_u["stop_loss_underlying"])
+            new_sl_type = str(dyn_u.get("trailing_sl_type") or new_sl_type)
+            if new_sl_type == "BE_LOCK_PLUS_1PCT":
+                exit_plan["be_locked"] = True
+    except Exception:
+        pass
+
+    if not exit_plan.get("initial_sl") and new_sl > 0.0:
+        exit_plan["initial_sl"] = new_sl
 
     exit_plan["stop_loss_underlying"] = new_sl
     exit_plan["trailing_sl_type"] = new_sl_type
@@ -586,10 +615,10 @@ def evaluate_technical_rules_and_stops(
     pos_age_min = 999.0
     entry_time_str = position.get("entry_time") or position.get("created_at")
     if entry_time_str:
-        try:
-            e_dt = datetime.fromisoformat(str(entry_time_str).replace("Z", "+00:00"))
+        e_dt = parse_iso_utc(entry_time_str)
+        if e_dt is not None:
             pos_age_min = max(0.0, (now_dt - e_dt).total_seconds() / 60.0)
-        except Exception:
+        else:
             pos_age_min = 999.0
 
     # ─────────────────────────────────────────────────────────────
@@ -655,7 +684,45 @@ def evaluate_technical_rules_and_stops(
 
     partial_taken = bool(exit_plan.get("partial_tp_taken", False))
 
-    # ── REGLA FIJA INSTITUCIONAL: TOMA DE BENEFICIOS PARCIAL 50% AL +20% + BREAKEVEN LOCK (+1%) ──
+    # Inicializar Hard SL en prima si aún no existe y actualizar Profit Guardian de forma monotónica
+    entry_deb_val = float(position.get("entry_debit") or 0.0)
+    cur_prem_val = float(position.get("last_mark_price") or 0.0)
+    hi_prem_val = float(position.get("highest_premium_seen") or exit_plan.get("highest_premium_seen") or max(entry_deb_val, cur_prem_val))
+    if float(exit_plan.get("stop_loss_premium") or 0.0) <= 0.0 and entry_deb_val > 0.0:
+        exit_plan["stop_loss_premium"] = round(entry_deb_val * (1.0 + hard_sl_pct / 100.0), 4)
+    if entry_deb_val > 0.0 and cur_prem_val > 0.0:
+        from app.options.profit_guardian import evaluate_option_profit_ratchet
+        prev_sl_p = float(exit_plan.get("stop_loss_premium") or 0.0)
+        pg_res = evaluate_option_profit_ratchet(
+            entry_premium=entry_deb_val,
+            current_premium=cur_prem_val,
+            highest_premium_seen=hi_prem_val,
+            peak_pnl_pct=highest_pnl_pct,
+            prev_floor_premium=prev_sl_p,
+        )
+        if pg_res.get("floor_premium", 0.0) > prev_sl_p:
+            exit_plan["stop_loss_premium"] = pg_res["floor_premium"]
+            exit_plan["profit_guardian_tier"] = pg_res.get("tier")
+            if pg_res["floor_premium"] >= entry_deb_val:
+                exit_plan["be_locked"] = True
+
+    # ── REGLA ROSS CAMERON 2: CANDADO DE GANANCIA PICO (PEAK PROFIT RATCHET) ──
+    # Evaluado antes de la Guardia de Momentum y toma parcial para no dejar caer picos de ganancia.
+    if (highest_pnl_usd >= 100.0 or highest_pnl_pct >= 15.0) and pos_age_min >= 5.0:
+        pnl_floor_usd = round(highest_pnl_usd * 0.85, 2)
+        if unr_pnl_usd < pnl_floor_usd and unr_pnl_usd > 0:
+            cur_ema3_15 = float(tech.get("ema3_15m") or 0.0)
+            prev_ema3_15 = float(tech.get("prev_ema3_15m") or cur_ema3_15)
+            is_retreating = (current_price < prev_ema3_15) if is_call else (current_price > prev_ema3_15)
+            giveback_pct = ((highest_pnl_usd - unr_pnl_usd) / highest_pnl_usd * 100.0) if highest_pnl_usd > 0 else 0.0
+            if is_retreating or rvol_15m < 0.60 or giveback_pct >= 25.0:
+                return True, "tp_peak_profit_ratchet", {
+                    "detail": f"Candado de Ganancia Pico: PnL retrocedió >15% del pico (${unr_pnl_usd:.2f} < piso ${pnl_floor_usd:.2f} de pico ${highest_pnl_usd:.2f})",
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
+
+    # ── REGLA FIJA INSTITUCIONAL: TOMA DE BENEFICIOS PARCIAL 50% AL +20% + BREAKEVEN LOCK (+3.5%) ──
     # Si la ganancia no realizada alcanza o supera el +20.0%:
     # 1. Si la posición tiene >= 2 contratos y no ha tomado parcial: se cierra el 50%.
     # 2. Si tiene 1 contrato y no ha tomado parcial: se cierra 100% para asegurar el beneficio.
@@ -668,19 +735,49 @@ def evaluate_technical_rules_and_stops(
         exit_plan["trailing_sl_type"] = "BE_LOCK_PLUS_1PCT"
         entry_debit = float(position.get("entry_debit") or 0.0)
         if entry_debit > 0:
-            be_prem = round(entry_debit * 1.01, 4)
+            be_prem = round(entry_debit * 1.035, 4)
             exit_plan["be_floor_premium"] = be_prem
             exit_plan["stop_loss_premium"] = max(float(exit_plan.get("stop_loss_premium") or 0.0), be_prem)
         if entry_stock_p > 0:
+            be_lock_sl = round(entry_stock_p * (1.01 if is_call else 0.99), 2)
             exit_plan["be_lock_trigger_price"] = round(entry_stock_p * (1.02 if is_call else 0.98), 2)
-            exit_plan["be_lock_sl_price"] = round(entry_stock_p * (1.01 if is_call else 0.99), 2)
-            exit_plan["stop_loss_underlying"] = max(float(exit_plan.get("stop_loss_underlying") or 0.0), exit_plan["be_lock_sl_price"]) if is_call else min(float(exit_plan.get("stop_loss_underlying") or 999999.0), exit_plan["be_lock_sl_price"])
+            exit_plan["be_lock_sl_price"] = be_lock_sl
+            prev_sl = float(exit_plan.get("stop_loss_underlying") or 0.0)
+            if is_call:
+                if be_lock_sl > prev_sl and (current_price <= 0 or be_lock_sl < round(current_price * 0.997, 2)):
+                    exit_plan["stop_loss_underlying"] = be_lock_sl
+            else:
+                if (prev_sl <= 0.0 or be_lock_sl < prev_sl) and (current_price <= 0 or be_lock_sl > round(current_price * 1.003, 2)):
+                    exit_plan["stop_loss_underlying"] = be_lock_sl
 
         return True, "tp_bb_climax_partial", {
             "detail": f"Take Profit Fijo +20% ({int(ratio*100)}% cerrado): PnL +{unr_pnl_pct:.1f}% >= +{tp_half:.1f}%. Candado Breakeven +1% activado para el resto (Piso SL: ${exit_plan.get('stop_loss_premium', 0):.2f}).",
             "exit_plan": exit_plan,
             "exit_ratio": ratio,
         }
+
+    # ── REGLA V3: AGOTAMIENTO POST-BOLLINGER 15M (Sin esperar a las 15:00 ET) ──
+    df_15m_tech = tech.get("df_15m")
+    if df_15m_tech is not None:
+        try:
+            bb_res = evaluate_bb15m_post_breakout_exhaustion(
+                df_15m=df_15m_tech,
+                is_bullish=is_call,
+                state=exit_plan,
+                current_price=current_price,
+                position_age_minutes=pos_age_min,
+                asset_type="option",
+            )
+            if isinstance(bb_res.get("state"), dict):
+                exit_plan.update(bb_res["state"])
+            if bb_res.get("should_exit"):
+                return True, bb_res["rule_code"], {
+                    "detail": bb_res["reason"],
+                    "exit_plan": exit_plan,
+                    "exit_ratio": 1.0,
+                }
+        except Exception:
+            pass
 
     # GUARDIA DE MOMENTUM MULTIVARIADA (Ross Cameron / Usuario):
     # Si hay empuje institucional vigoroso con volumen (RVOL >= 1.3x) y ADX acelerando,
@@ -722,20 +819,7 @@ def evaluate_technical_rules_and_stops(
             "exit_ratio": ratio,
         }
 
-    # ── REGLA ROSS CAMERON 2: CANDADO DE GANANCIA PICO (PEAK PROFIT RATCHET) ──
-    # Prohibido devolver más del 15% de la ganancia máxima alcanzada.
-    if (highest_pnl_usd >= 100.0 or highest_pnl_pct >= 15.0) and pos_age_min >= 5.0:
-        pnl_floor_usd = round(highest_pnl_usd * 0.85, 2)
-        if unr_pnl_usd < pnl_floor_usd and unr_pnl_usd > 0:
-            cur_ema3_15 = float(tech.get("ema3_15m") or 0.0)
-            prev_ema3_15 = float(tech.get("prev_ema3_15m") or cur_ema3_15)
-            is_retreating = (current_price < prev_ema3_15) if is_call else (current_price > prev_ema3_15)
-            if is_retreating or rvol_15m < 0.60:
-                return True, "tp_peak_profit_ratchet", {
-                    "detail": f"Candado de Ganancia Pico: PnL retrocedió >15% del pico (${unr_pnl_usd:.2f} < piso ${pnl_floor_usd:.2f} de pico ${highest_pnl_usd:.2f})",
-                    "exit_plan": exit_plan,
-                    "exit_ratio": 1.0,
-                }
+    # (Candado de Ganancia Pico ya evaluado antes de la Guardia de Momentum)
 
     # ── REGLA ROSS CAMERON 3: SALIDA POR AGOTAMIENTO DE VOLUMEN (RVOL < 0.40x) ──
     # Si el precio está cerca o fuera de la banda Bollinger pero el volumen se secó completamente.
@@ -917,20 +1001,26 @@ def should_exit_take_profit(position: dict[str, Any], unrealized_pnl: float, eff
 
 
 def should_exit_stop_loss(position: dict[str, Any], unrealized_pnl: float, eff: dict[str, Any]) -> tuple[bool, str | None]:
-    """Evalua condicion de Stop Loss simulado (§12.3) y Breakeven Lock (+1% buffer)."""
+    """Evalua condicion de Stop Loss y Trailing Ratchet en prima vía Profit Guardian."""
     stype = position.get("strategy_type") or ""
     invested = float(position.get("entry_total_invested") or 0.0)
     entry_debit = float(position.get("entry_debit") or 0.0)
     last_mark = float(position.get("last_mark_price") or 0.0)
     exit_plan = dict(position.get("exit_plan") or {})
 
-    # Protección Breakeven Lock (+5% avance -> Stop Loss al +1% de la compra)
-    highest_seen = float(exit_plan.get("highest_premium_seen") or max(entry_debit, last_mark))
-    be_locked = bool(exit_plan.get("be_locked") or (entry_debit > 0 and highest_seen >= round(entry_debit * 1.05, 4)))
-    if be_locked and entry_debit > 0 and last_mark > 0:
-        be_floor_prem = float(exit_plan.get("stop_loss_premium") or round(entry_debit * 1.01, 4))
-        if last_mark <= be_floor_prem:
-            return True, f"Stop Loss BE Lock (+1% Protegido): Prima ${last_mark:.2f} <= ${be_floor_prem:.2f} (+1% de compra tras avance previo)"
+    # Protección unificada vía Profit Guardian (elimina el antiguo choque +5% -> +1%)
+    if entry_debit > 0 and last_mark > 0:
+        from app.options.profit_guardian import evaluate_option_profit_ratchet
+        highest_seen = float(exit_plan.get("highest_premium_seen") or position.get("highest_premium_seen") or max(entry_debit, last_mark))
+        pg_res = evaluate_option_profit_ratchet(
+            entry_premium=entry_debit,
+            current_premium=last_mark,
+            highest_premium_seen=highest_seen,
+            peak_pnl_pct=float(exit_plan.get("highest_pnl_pct") or 0.0),
+            prev_floor_premium=float(exit_plan.get("stop_loss_premium") or 0.0),
+        )
+        if pg_res.get("should_exit"):
+            return True, pg_res.get("reason") or "Stop Loss Profit Guardian activado"
 
     if stype in ("long_call", "long_put"):
         sl_pct = float(eff.get("long_sl_pct") or 50.0)
@@ -945,19 +1035,30 @@ def should_exit_stop_loss(position: dict[str, Any], unrealized_pnl: float, eff: 
 
 
 def should_exit_by_time(position: dict[str, Any], now: datetime, eff: dict[str, Any]) -> tuple[bool, str | None]:
-    """Cierre forzado antes de la campana en la fecha de expiracion (§12.3)."""
+    """Cierre forzado antes de la campana (15:45 ET) para DTE <= 7 y contratos importados tarde (§12.3 + Blindaje V3)."""
+    exit_plan = position.get("exit_plan") or {}
+    if exit_plan.get("late_import_force_close"):
+        return True, "Cierre forzado inmediato: posición importada/sincronizada fuera de ventana permitida (late_import_force_close)"
+
     expiry_str = str(position.get("expiry") or "")[:10]
     if not expiry_str:
         return False, None
 
     expiry_date = date.fromisoformat(expiry_str)
     now_date = mc.to_ny(now).date()
+    dte_days = (expiry_date - now_date).days
+    if dte_days < 0:
+        return True, f"Cierre forzado: contrato expirado ({expiry_str})"
 
-    if now_date == expiry_date:
-        buffer_min = int(eff.get("force_close_minutes_before") or 15)
+    max_intraday_dte = int(eff.get("eod_hard_exit_max_dte", 7))
+    if dte_days <= max_intraday_dte:
+        buffer_min = int(eff.get("force_close_minutes_before") or eff.get("force_close_min_before_close") or 15)
         force_time = mc.force_close_time(now, buffer_min)
-        if now >= force_time:
-            return True, f"Cierre forzado por tiempo: vencimiento hoy y hora actual supera {force_time.strftime('%H:%M %Z')}"
+        if force_time is not None and now >= force_time:
+            return True, (
+                f"Cierre forzado EOD ({force_time.strftime('%H:%M %Z')}): "
+                f"DTE={dte_days}d <= {max_intraday_dte}d (cero overnight y cero asignaciones OCC)"
+            )
 
     return False, None
 
@@ -1134,11 +1235,15 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
             log_warning(MODULE, f"Error obteniendo contexto técnico para {sym}: {e_tech}")
             tech_map[sym] = {}
 
+    from app.options.broker_sync import is_option_closing_pending, request_broker_option_close
+
     closed_count = 0
     exits_summary: list[dict[str, Any]] = []
 
     for pos in positions:
         pid = pos["id"]
+        if is_option_closing_pending(sb, pos):
+            continue
         und = und_map.get(pos.get("underlying_id")) or {}
         tech_ctx = tech_map.get(pos.get("symbol") or "")
         should_exit, reason, info = evaluate_position_exit(pos, quotes_map, und, eff, now_dt, tech_context=tech_ctx)
@@ -1177,104 +1282,111 @@ def process_open_positions(sb, eff: dict[str, Any], now: datetime | None = None)
             active_plan["detailed_exit_text"] = info.get("detail", reason)
 
             if is_partial and remaining_qty > 0:
-                # Actualización parcial (Escalonado Agresivo: 50% Take Profit + Trailing SL al Breakeven)
-                cur_realized = float(pos.get("realized_pnl") or 0.0)
-                new_realized = round(cur_realized + exit_fill_res.realized_pnl, 2)
-                cur_invested = float(pos.get("entry_total_invested") or 0.0)
-                new_invested = round(cur_invested * (remaining_qty / pos_qty), 2)
+                close_req = request_broker_option_close(
+                    sb=sb,
+                    pos=pos,
+                    qty_to_close=qty_to_close,
+                    exit_price_est=exit_fill_res.exit_credit,
+                    mapped_reason=db_exit_reason,
+                    detailed_reason=reason,
+                    detailed_text=info.get("detail", reason),
+                    is_partial=True,
+                    group_name="OPTIONS_AUTONOMOUS",
+                    now_dt=now_dt,
+                )
+                if close_req.get("status") == "closing_pending":
+                    log_info(MODULE, f"⏳ [CIERRE PARCIAL BROKER] {pos['symbol']} ({pid}): orden SELL {qty_to_close}x enviada a TWS; esperando confirmación de fill.")
+                else:
+                    # Actualización parcial (Escalonado Agresivo: 50% Take Profit + Trailing SL al Breakeven)
+                    cur_realized = float(pos.get("realized_pnl") or 0.0)
+                    new_realized = round(cur_realized + exit_fill_res.realized_pnl, 2)
+                    cur_invested = float(pos.get("entry_total_invested") or 0.0)
+                    new_invested = round(cur_invested * (remaining_qty / pos_qty), 2)
 
-                active_plan["partial_tp_taken"] = True
-                active_plan["trailing_sl_type"] = "EMA9_15M"
-                be_sl = float(active_plan.get("initial_sl") or active_plan.get("stop_loss_underlying") or 0.0)
-                active_plan["stop_loss_underlying"] = be_sl
+                    active_plan["partial_tp_taken"] = True
+                    if str(active_plan.get("trailing_sl_type") or "INITIAL") in ("", "INITIAL"):
+                        active_plan["trailing_sl_type"] = "EMA9_15M"
+                    cur_sl_u = float(active_plan.get("stop_loss_underlying") or 0.0)
+                    if cur_sl_u <= 0.0:
+                        fallback_sl = float(active_plan.get("initial_sl") or 0.0)
+                        if fallback_sl > 0.0:
+                            active_plan["stop_loss_underlying"] = fallback_sl
 
-                upd = {
-                    "qty": remaining_qty,
-                    "entry_total_invested": new_invested,
-                    "realized_pnl": new_realized,
-                    "last_mark_price": exit_fill_res.exit_credit,
-                    "last_mark_at": now_dt.isoformat(),
-                    "exit_plan": active_plan,
-                    "updated_at": now_dt.isoformat(),
-                }
-                sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
-                log_info(MODULE, f"🎯 TOMA PARCIAL 50%: {pos['symbol']} cerró {qty_to_close} contratos a ${exit_fill_res.exit_credit:.2f} (PnL parcial: +${exit_fill_res.realized_pnl:.2f}). Quedan {remaining_qty} contratos con Trailing SL.")
-                try:
-                    import asyncio
-                    from app.workers.alerts_service import send_telegram_message
-                    tg_p_msg = (
-                        f"🎯 <b>[ROSS CAMERON - OPCIONES] TOMA PARCIAL 50%</b>\n\n"
-                        f"📑 <b>Posición:</b> {pos.get('symbol')} ({pos.get('strategy_type')})\n"
-                        f"💵 <b>Venta:</b> {qty_to_close} contratos @ ${exit_fill_res.exit_credit:.2f}\n"
-                        f"💰 <b>PnL Parcial:</b> +${exit_fill_res.realized_pnl:.2f} USD\n"
-                        f"🛡️ <b>Stop Subyacente Movido a Breakeven</b>\n"
-                        f"📦 <b>Contratos Restantes:</b> {remaining_qty}"
-                    )
-                    asyncio.create_task(send_telegram_message(tg_p_msg))
-                except Exception as e_tg:
-                    log_warning(MODULE, f"Aviso enviando Telegram opciones parcial: {e_tg}")
+                    upd = {
+                        "qty": remaining_qty,
+                        "entry_total_invested": new_invested,
+                        "realized_pnl": new_realized,
+                        "last_mark_price": exit_fill_res.exit_credit,
+                        "last_mark_at": now_dt.isoformat(),
+                        "exit_plan": active_plan,
+                        "updated_at": now_dt.isoformat(),
+                    }
+                    sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
+                    log_info(MODULE, f"🎯 TOMA PARCIAL 50%: {pos['symbol']} cerró {qty_to_close} contratos a ${exit_fill_res.exit_credit:.2f} (PnL parcial: +${exit_fill_res.realized_pnl:.2f}). Quedan {remaining_qty} contratos con Trailing SL.")
+                    try:
+                        import asyncio
+                        from app.workers.alerts_service import send_telegram_message
+                        tg_p_msg = (
+                            f"🎯 <b>[ROSS CAMERON - OPCIONES] TOMA PARCIAL 50%</b>\n\n"
+                            f"📑 <b>Posición:</b> {pos.get('symbol')} ({pos.get('strategy_type')})\n"
+                            f"💵 <b>Venta:</b> {qty_to_close} contratos @ ${exit_fill_res.exit_credit:.2f}\n"
+                            f"💰 <b>PnL Parcial:</b> +${exit_fill_res.realized_pnl:.2f} USD\n"
+                            f"🛡️ <b>Stop Subyacente Movido a Breakeven</b>\n"
+                            f"📦 <b>Contratos Restantes:</b> {remaining_qty}"
+                        )
+                        asyncio.create_task(send_telegram_message(tg_p_msg))
+                    except Exception as e_tg:
+                        log_warning(MODULE, f"Aviso enviando Telegram opciones parcial: {e_tg}")
             else:
-                # Cierre Total (100%)
-                cur_realized = float(pos.get("realized_pnl") or 0.0)
-                total_realized = round(cur_realized + exit_fill_res.realized_pnl, 2)
-                upd = {
-                    "status": "closed",
-                    "exit_time": exit_fill_res.exit_time,
-                    "exit_credit": exit_fill_res.exit_credit,
-                    "exit_fills": exit_fill_res.exit_fills,
-                    "exit_costs": exit_fill_res.exit_costs,
-                    "exit_total_recovered": exit_fill_res.exit_total_recovered,
-                    "realized_pnl": total_realized,
-                    "unrealized_pnl": 0.0,
-                    "last_mark_price": exit_fill_res.exit_credit,
-                    "last_mark_at": now_dt.isoformat(),
-                    "exit_reason": db_exit_reason,
-                    "exit_plan": active_plan,
-                    "updated_at": now_dt.isoformat(),
-                }
-                sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
-                closed_count += 1
-                try:
-                    import asyncio
-                    from app.workers.alerts_service import send_telegram_message
-                    pnl_emo = "🟢" if total_realized >= 0 else "🔴"
-                    tg_c_msg = (
-                        f"📊 <b>[ROSS CAMERON - OPCIONES] CIERRE DE POSICIÓN</b>\n\n"
-                        f"📑 <b>Posición:</b> {pos.get('symbol')} ({pos.get('strategy_type')})\n"
-                        f"📋 <b>Motivo:</b> {reason} ({info.get('detail', '')})\n"
-                        f"💵 <b>Crédito Salida:</b> ${exit_fill_res.exit_credit:.2f}\n"
-                        f"{pnl_emo} <b>PnL Total Realizado:</b> ${total_realized:+.2f} USD"
-                    )
-                    asyncio.create_task(send_telegram_message(tg_c_msg))
-                except Exception as e_tg:
-                    log_warning(MODULE, f"Aviso enviando Telegram opciones cierre: {e_tg}")
-
-            # Despachar orden de salida a stocks_orders para ejecución en TWS / IB Bridge
-            try:
-                exp_compact = (pos.get("expiry") or "20261026").replace("-", "")[:8]
-                for f in (exit_fill_res.exit_fills or []):
-                    stk = f.get("strike")
-                    rgt = f.get("right")
-                    side = f.get("closing_side") or "sell"
-                    px = f.get("fill_price") or exit_fill_res.exit_credit
-                    opt_target_band = f"OPT:{exp_compact}:{stk}:{rgt}"
-                    existing_sell = sb.table("stocks_orders").select("id").eq("ticker", pos["symbol"][:10]).eq("target_band", opt_target_band).eq("direction", side).in_("status", ["pending", "processing"]).limit(1).execute()
-                    if not existing_sell.data:
-                        sb.table("stocks_orders").insert({
-                            "ticker": pos["symbol"][:10],
-                            "target_band": opt_target_band,
-                            "group_name": "OPTIONS_AUTONOMOUS",
-                            "rule_code": "APEX_AUTO",
-                            "order_type": "market",
-                            "direction": side,
-                            "shares": qty_to_close,
-                            "market_price": px,
-                            "limit_price": round(px, 2),
-                            "status": "pending",
-                            "created_at": exit_fill_res.exit_time,
-                        }).execute()
-            except Exception as ord_e:
-                log_warning(MODULE, f"Aviso al despachar orden de salida a stocks_orders: {ord_e}")
+                close_req = request_broker_option_close(
+                    sb=sb,
+                    pos=pos,
+                    qty_to_close=qty_to_close,
+                    exit_price_est=exit_fill_res.exit_credit,
+                    mapped_reason=db_exit_reason,
+                    detailed_reason=reason,
+                    detailed_text=info.get("detail", reason),
+                    is_partial=False,
+                    group_name="OPTIONS_AUTONOMOUS",
+                    now_dt=now_dt,
+                )
+                if close_req.get("status") == "closing_pending":
+                    log_info(MODULE, f"⏳ [CIERRE PENDIENTE BROKER] {pos['symbol']} ({pid}): orden SELL enviada a TWS; esperando confirmación de fill antes de cerrar en DB.")
+                else:
+                    # Cierre Total (100%) — broker ya está flat o modo offline
+                    cur_realized = float(pos.get("realized_pnl") or 0.0)
+                    total_realized = round(cur_realized + exit_fill_res.realized_pnl, 2)
+                    upd = {
+                        "status": "closed",
+                        "exit_time": exit_fill_res.exit_time,
+                        "exit_credit": exit_fill_res.exit_credit,
+                        "exit_fills": exit_fill_res.exit_fills,
+                        "exit_costs": exit_fill_res.exit_costs,
+                        "exit_total_recovered": exit_fill_res.exit_total_recovered,
+                        "realized_pnl": total_realized,
+                        "unrealized_pnl": 0.0,
+                        "last_mark_price": exit_fill_res.exit_credit,
+                        "last_mark_at": now_dt.isoformat(),
+                        "exit_reason": db_exit_reason,
+                        "exit_plan": active_plan,
+                        "updated_at": now_dt.isoformat(),
+                    }
+                    sb.table("opt_paper_trades").update(upd).eq("id", pid).execute()
+                    closed_count += 1
+                    try:
+                        import asyncio
+                        from app.workers.alerts_service import send_telegram_message
+                        pnl_emo = "🟢" if total_realized >= 0 else "🔴"
+                        tg_c_msg = (
+                            f"📊 <b>[ROSS CAMERON - OPCIONES] CIERRE DE POSICIÓN</b>\n\n"
+                            f"📑 <b>Posición:</b> {pos.get('symbol')} ({pos.get('strategy_type')})\n"
+                            f"📋 <b>Motivo:</b> {reason} ({info.get('detail', '')})\n"
+                            f"💵 <b>Crédito Salida:</b> ${exit_fill_res.exit_credit:.2f}\n"
+                            f"{pnl_emo} <b>PnL Total Realizado:</b> ${total_realized:+.2f} USD"
+                        )
+                        asyncio.create_task(send_telegram_message(tg_c_msg))
+                    except Exception as e_tg:
+                        log_warning(MODULE, f"Aviso enviando Telegram opciones cierre: {e_tg}")
 
             # Registrar evento de riesgo
             event_type = "forced_close" if reason == "forced_close_time" else ("signal_flip" if reason == "signal_invalidation" else "stop_approaching")

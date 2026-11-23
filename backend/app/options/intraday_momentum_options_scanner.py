@@ -451,13 +451,16 @@ async def run_intraday_momentum_options_scan(
         log_info(MODULE, f"Mercado cerrado ({status_txt}). Omitiendo escaneo intradía de opciones OTM.")
         return {"ok": False, "reason": "Market closed", "status": status_txt}
 
-    # 1. Validación de Ventana de Oro Institucional (09:45 a 11:45 ET)
-    in_golden_window, win_msg = is_institutional_golden_window()
+    # 1. Validación de Ventana de Oro Única (09:35 a 11:30 ET)
+    from app.options.warrior_momentum_options import is_warrior_options_golden_window
+    from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+    in_golden_window, win_msg = is_warrior_options_golden_window()
     if not in_golden_window:
         log_info(MODULE, f"⏸️ {win_msg}. Omitiendo apertura de nuevas posiciones para evitar trampa de mediodía/tarde.")
         return {"ok": False, "reason": win_msg, "status": "OUTSIDE_GOLDEN_WINDOW"}
 
     sb = supabase or get_supabase()
+    budget_usd = get_effective_max_risk_per_trade_usd(sb)
     provider = YFinanceProvider()
     now_dt = datetime.now(timezone.utc)
     now_iso = now_dt.isoformat()
@@ -577,7 +580,7 @@ async def run_intraday_momentum_options_scan(
                     dispatch_res = dispatch_autonomous_option_trade(
                         candidate=opp_data,
                         direction=direction,
-                        config={"options_trade_budget_usd": budget_usd},
+                        config={"options_trade_budget_usd": budget_usd, "max_risk_per_trade_usd": budget_usd},
                         supabase=sb
                     )
                     opp_data["dispatch_result"] = dispatch_res

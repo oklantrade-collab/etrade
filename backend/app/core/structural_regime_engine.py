@@ -551,3 +551,114 @@ def evaluate_structural_regime(
         "vwap_bias": vwap_bias,
         "bandwidth_pct": m.get("bb_bandwidth_pct", 20.0),
     }
+
+
+_MACRO_BIAS_CACHE: Optional[Tuple[float, Dict[str, Any]]] = None
+MACRO_BIAS_CACHE_TTL = 300.0
+
+
+def _compute_intraday_vwap_and_price(ticker: str) -> tuple[float, float]:
+    """Fetch latest intraday 5m price and session VWAP via yfinance; fail-open (0, 0)."""
+    try:
+        import yfinance as yf
+        df = yf.Ticker(ticker).history(period="1d", interval="5m")
+        if df is None or len(df) < 1:
+            return 0.0, 0.0
+        c = df["Close"] if "Close" in df.columns else df["close"]
+        h = df["High"] if "High" in df.columns else c
+        l = df["Low"] if "Low" in df.columns else c
+        v = df["Volume"] if "Volume" in df.columns else None
+        cur_p = float(c.iloc[-1])
+        if v is None or float(v.sum()) <= 0:
+            return cur_p, cur_p
+        tp = (h + l + c) / 3.0
+        vwap = float((tp * v).sum() / float(v.sum()))
+        return cur_p, vwap
+    except Exception:
+        return 0.0, 0.0
+
+
+def evaluate_macro_daily_bias(
+    spy_metrics: Optional[Dict[str, Any]] = None,
+    qqq_metrics: Optional[Dict[str, Any]] = None,
+    spy_price: Optional[float] = None,
+    qqq_price: Optional[float] = None,
+    spy_vwap: Optional[float] = None,
+    qqq_vwap: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Global Macro Daily Veto using SPY & QQQ (1D EMA3 vs EMA9 + intraday Price vs VWAP).
+
+    Blocks new CALL options and swing LONG stock entries when BOTH SPY and QQQ have
+    `EMA3_1D < EMA9_1D` and intraday `Price < VWAP`. Fail-open if market data is
+    unavailable so offline workflows/tests are unaffected.
+    """
+    global _MACRO_BIAS_CACHE
+    use_cache = all(x is None for x in (spy_metrics, qqq_metrics, spy_price, qqq_price, spy_vwap, qqq_vwap))
+    now_ts = time.time()
+    if use_cache and _MACRO_BIAS_CACHE and (now_ts - _MACRO_BIAS_CACHE[0]) < MACRO_BIAS_CACHE_TTL:
+        return _MACRO_BIAS_CACHE[1]
+
+    try:
+        if spy_price is None or spy_vwap is None:
+            sp, sv = _compute_intraday_vwap_and_price("SPY")
+            spy_price = sp if spy_price is None else spy_price
+            spy_vwap = sv if spy_vwap is None else spy_vwap
+        if qqq_price is None or qqq_vwap is None:
+            qp, qv = _compute_intraday_vwap_and_price("QQQ")
+            qqq_price = qp if qqq_price is None else qqq_price
+            qqq_vwap = qv if qqq_vwap is None else qqq_vwap
+
+        if spy_metrics is None:
+            spy_metrics = fetch_daily_metrics("SPY", float(spy_price or 0.0))
+        if qqq_metrics is None:
+            qqq_metrics = fetch_daily_metrics("QQQ", float(qqq_price or 0.0))
+
+        spy_e3 = float((spy_metrics or {}).get("ema3") or 0.0)
+        spy_e9 = float((spy_metrics or {}).get("ema9") or 0.0)
+        qqq_e3 = float((qqq_metrics or {}).get("ema3") or 0.0)
+        qqq_e9 = float((qqq_metrics or {}).get("ema9") or 0.0)
+
+        spy_px = float(spy_price or (spy_metrics or {}).get("close_1d") or 0.0)
+        qqq_px = float(qqq_price or (qqq_metrics or {}).get("close_1d") or 0.0)
+        spy_vw = float(spy_vwap or 0.0)
+        qqq_vw = float(qqq_vwap or 0.0)
+
+        spy_bearish = (spy_e3 > 0 and spy_e9 > 0 and spy_e3 < spy_e9) and (spy_px > 0 and spy_vw > 0 and spy_px < spy_vw)
+        qqq_bearish = (qqq_e3 > 0 and qqq_e9 > 0 and qqq_e3 < qqq_e9) and (qqq_px > 0 and qqq_vw > 0 and qqq_px < qqq_vw)
+
+        if spy_bearish and qqq_bearish:
+            res = {
+                "regime": "MACRO_BEARISH",
+                "veto_calls": True,
+                "veto_swing_longs": True,
+                "spy_bearish": True,
+                "qqq_bearish": True,
+                "reason": (
+                    f"Veto Macro Diario Bajista: SPY (${spy_px:.2f} < VWAP ${spy_vw:.2f}, "
+                    f"EMA3 {spy_e3:.2f} < EMA9 {spy_e9:.2f}) y QQQ (${qqq_px:.2f} < VWAP ${qqq_vw:.2f}, "
+                    f"EMA3 {qqq_e3:.2f} < EMA9 {qqq_e9:.2f}). Solo PUTs o scalping explosivo pre-11:00."
+                ),
+            }
+        else:
+            res = {
+                "regime": "NEUTRAL_OR_BULL",
+                "veto_calls": False,
+                "veto_swing_longs": False,
+                "spy_bearish": spy_bearish,
+                "qqq_bearish": qqq_bearish,
+                "reason": "OK",
+            }
+    except Exception as e:
+        log_debug(MODULE, f"Fail-open evaluate_macro_daily_bias: {e}")
+        res = {
+            "regime": "UNKNOWN",
+            "veto_calls": False,
+            "veto_swing_longs": False,
+            "spy_bearish": False,
+            "qqq_bearish": False,
+            "reason": "Fail-open sin datos macro",
+        }
+
+    if use_cache:
+        _MACRO_BIAS_CACHE = (now_ts, res)
+    return res

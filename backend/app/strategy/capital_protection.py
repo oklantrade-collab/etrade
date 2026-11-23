@@ -1335,40 +1335,65 @@ def evaluate_trailing_stop(
 
     # ── CUSTOM TRAILING FOR STRATEGIES (ApexEma, Hot, etc.) ──
     if rule_code in ('AaApexEma', 'BbApexEma', 'AaHot', 'BbHot', 'Aa13', 'Bb13', 'Aa21', 'Bb25'):
+        is_long_c = state.side.lower() in ('long', 'buy')
+        entry_c = float(state.entry_price or 0)
+        if is_long_c:
+            state.highest_price = max(float(state.highest_price or 0), entry_c, float(current_price or 0))
+            peak_ref = state.highest_price
+            gain_pct_c = ((peak_ref - entry_c) / entry_c * 100.0) if entry_c > 0 else 0.0
+        else:
+            prev_low = float(state.lowest_price or 0)
+            state.lowest_price = min(prev_low, current_price) if prev_low > 0 else float(current_price or 0)
+            if entry_c > 0:
+                state.lowest_price = min(state.lowest_price, entry_c) if prev_low > 0 else min(entry_c, float(current_price or entry_c))
+            peak_ref = state.lowest_price
+            gain_pct_c = ((entry_c - peak_ref) / entry_c * 100.0) if (entry_c > 0 and peak_ref > 0) else 0.0
+
+        ema_cand = None
         if df_15m is not None and len(df_15m) >= 20:
             df = df_15m.copy()
             df['ema3'] = df['close'].ewm(span=3, adjust=False).mean()
-            
-            # Vela cerrada más reciente
             last_row = df.iloc[-1]
             close_price = float(last_row['close'])
             open_price = float(last_row['open'])
             ema3 = float(last_row['ema3'])
-            
-            is_long = state.side.lower() in ('long', 'buy')
-            
-            if is_long:
-                # LONG: vela verde (close > open) y close > ema3
-                if close_price > open_price and close_price > ema3:
-                    if state.current_sl == 0 or ema3 > state.current_sl:
-                        return {
-                            'action': 'update_sl',
-                            'new_sl': ema3,
-                            'reason': 'swing_ema_green_candle_trail',
-                            'new_level': 1,
-                            'sl_type': 'ema_trail'
-                        }
-            else:
-                # SHORT: vela roja (close < open) y close < ema3
-                if close_price < open_price and close_price < ema3:
-                    if state.current_sl == 0 or ema3 < state.current_sl:
-                        return {
-                            'action': 'update_sl',
-                            'new_sl': ema3,
-                            'reason': 'swing_ema_red_candle_trail',
-                            'new_level': 1,
-                            'sl_type': 'ema_trail'
-                        }
+            if is_long_c and close_price > open_price and close_price > ema3:
+                ema_cand = ema3
+            elif (not is_long_c) and close_price < open_price and close_price < ema3:
+                ema_cand = ema3
+
+        pct_cand = None
+        if gain_pct_c >= 1.5 and peak_ref > 0:
+            pct_cand = (peak_ref * 0.975) if is_long_c else (peak_ref * 1.025)
+
+        if is_long_c:
+            max_safe = current_price * 0.996
+            candidates = [min(c, max_safe) for c in (ema_cand, pct_cand) if c is not None and c > 0]
+            if candidates:
+                best_cand = max(candidates)
+                if (state.current_sl == 0 or best_cand > state.current_sl) and best_cand < current_price:
+                    reason_str = 'swing_ema_green_candle_trail' if (ema_cand is not None and best_cand <= ema_cand + 1e-9) else 'swing_continuous_pct_trail'
+                    return {
+                        'action': 'update_sl',
+                        'new_sl': round(best_cand, 8),
+                        'reason': reason_str,
+                        'new_level': 1,
+                        'sl_type': 'ema_trail'
+                    }
+        else:
+            min_safe = current_price * 1.004
+            candidates = [max(c, min_safe) for c in (ema_cand, pct_cand) if c is not None and c > 0]
+            if candidates:
+                best_cand = min(candidates)
+                if (state.current_sl == 0 or best_cand < state.current_sl) and best_cand > current_price:
+                    reason_str = 'swing_ema_red_candle_trail' if (ema_cand is not None and best_cand >= ema_cand - 1e-9) else 'swing_continuous_pct_trail'
+                    return {
+                        'action': 'update_sl',
+                        'new_sl': round(best_cand, 8),
+                        'reason': reason_str,
+                        'new_level': 1,
+                        'sl_type': 'ema_trail'
+                    }
         return {'action': 'none'}
 
     # ── Símbolos con trailing dinámico ────────

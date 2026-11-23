@@ -1297,6 +1297,10 @@ async def check_open_positions_5m(
     from app.core.safety_manager import register_heartbeat
     register_heartbeat('position_monitor')
     
+    from app.core.config import is_crypto_enabled
+    if not is_crypto_enabled(supabase):
+        return events
+
     # --- PHASE 1: Real Exchange Sync ---
     open_positions_mem = BOT_STATE.positions
     if open_positions_mem:
@@ -2023,15 +2027,10 @@ async def _execute_paper_open(
     symbol = normalize_crypto_symbol(symbol)
 
     # === GUARD: Servicio Crypto (Binance Futures) suspendido desde Settings ===
-    try:
-        ce_res = supabase.table('system_config').select('value').eq('key', 'crypto_enabled').maybe_single().execute()
-        if ce_res and ce_res.data:
-            val = ce_res.data.get('value')
-            if val is False or str(val).strip().lower() in ['false', '0', 'none', '']:
-                log_warning(MODULE, f"⏸️ [CRYPTO SUSPENDIDO] {symbol} {side.upper()} rechazado: Servicio Binance Futures desactivado desde Settings.")
-                return None
-    except Exception:
-        pass
+    from app.core.config import is_crypto_enabled
+    if not is_crypto_enabled(supabase):
+        log_warning(MODULE, f"⏸️ [CRYPTO SUSPENDIDO] {symbol} {side.upper()} rechazado: Servicio Binance Futures desactivado desde Settings.")
+        return None
 
     # 1. REVERSIÓN FORZADA (Hedge no permitido)
     async with BOT_STATE.order_lock:

@@ -25,6 +25,7 @@ load_dotenv()
 
 from app.core.logger import log_info, log_error, log_warning
 from app.core.supabase_client import get_supabase
+from app.core.time_utils import parse_iso_utc
 from app.data.ib_provider import get_ib_connection, IB_AVAILABLE
 
 MODULE = "ib_bridge"
@@ -32,6 +33,8 @@ MODULE = "ib_bridge"
 # Mapa local para relacionar orderId de IB con id de Supabase
 # { ib_order_id: supabase_order_row }
 PENDING_IB_ORDERS = {}
+# Seguimiento de ciclo de vida activo (Chaser + TTL) para órdenes vivas en TWS
+WORKING_IB_ORDERS = {}
 ACTIVE_BRIDGE = None
 
 
@@ -132,8 +135,27 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 is_call = parts[-1].upper() == "C"
 
                         formatted_exp = f"{exp_d[:4]}-{exp_d[4:6]}-{exp_d[6:8]}" if len(exp_d) == 8 else exp_d
-                        existing_opt = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).eq("status", "open").execute().data
-                        if not existing_opt:
+                        from app.options.broker_sync import _row_contract_key
+                        target_ck = (und_sym, formatted_exp, round(strike_num, 2), "C" if is_call else "P")
+                        existing_opts = sb.table("opt_paper_trades").select("*").eq("symbol", und_sym).eq("status", "open").execute().data or []
+                        same_contract_row = next((r for r in existing_opts if _row_contract_key(r) == target_ck), None)
+                        if same_contract_row:
+                            old_q = int(same_contract_row.get("qty") or 0)
+                            old_d = float(same_contract_row.get("entry_debit") or exec_price)
+                            new_q = old_q + shares
+                            new_d = round(((old_d * old_q) + (exec_price * shares)) / new_q, 4) if new_q > 0 else exec_price
+                            new_inv = round(new_d * 100.0 * new_q, 2)
+                            sb.table("opt_paper_trades").update({
+                                "qty": new_q,
+                                "entry_debit": new_d,
+                                "entry_total_invested": new_inv,
+                                "max_loss_total": new_inv,
+                                "last_mark_price": exec_price,
+                                "last_mark_at": now_iso,
+                                "updated_at": now_iso,
+                            }).eq("id", same_contract_row["id"]).execute()
+                            log_info(MODULE, f"✅ Piramidación de opción confirmada en TWS para {und_sym}: {new_q}x @ ${new_d:.2f}")
+                        else:
                             cid = None
                             conid = None
                             try:
@@ -163,8 +185,8 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 "ask": exec_price,
                                 "fill_price": exec_price,
                                 "slippage_applied": 0.0,
-                                "market_data_type": "DELAYED",
-                                "fee_usd": 0.0,
+                                "market_data_type": "LIVE",
+                                "fee_usd": 0.70,
                             }]
 
                             sb.table("opt_paper_trades").insert({
@@ -178,7 +200,9 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 "entry_time": now_iso,
                                 "entry_debit": exec_price,
                                 "entry_fills": fills,
+                                "entry_costs": round(0.70 * shares, 2),
                                 "last_mark_price": exec_price,
+                                "last_mark_at": now_iso,
                                 "unrealized_pnl": 0.0,
                                 "entry_total_invested": round(shares * exec_price * 100, 2),
                                 "max_loss_total": round(shares * exec_price * 100, 2),
@@ -187,6 +211,8 @@ def on_ib_order_status(order_id: int, status_info: dict):
                                 "exit_plan": {
                                     "trailing_sl_type": "INITIAL",
                                     "highest_premium_seen": exec_price,
+                                    "stop_loss_premium": round(exec_price * 0.70, 4),
+                                    "rule_code": order_ctx.get("rule_code"),
                                     "time_decay_guard_enabled": True,
                                     "is_zero_dte": True,
                                     "horizon": "SCALPING",
@@ -200,23 +226,62 @@ def on_ib_order_status(order_id: int, status_info: dict):
                     except Exception as opt_err:
                         log_warning(MODULE, f"No se pudo guardar en opt_paper_trades: {opt_err}")
                 else:
-                    # Verificar si ya existe posición abierta para acciones
-                    pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).eq("status", "open").execute()
+                    # Verificar si ya existe posición abierta/closing para acciones (soporte DCA LONG o cobertura SHORT)
+                    pos_res = sb.table("stocks_positions").select("*").eq("ticker", ticker).in_("status", ["open", "closing"]).execute()
                     if pos_res.data:
                         pos = pos_res.data[0]
-                        old_shares = int(pos.get("shares") or 0)
+                        old_shares = abs(int(pos.get("shares") or 0))
                         old_avg = float(pos.get("avg_price") or 0)
-                        total_shares = old_shares + shares
-                        new_avg = ((old_avg * old_shares) + (exec_price * shares)) / total_shares if total_shares > 0 else exec_price
+                        if str(pos.get("direction") or "long").lower() in ("short", "sell"):
+                            rem_sh = old_shares - shares
+                            if rem_sh > 0:
+                                sb.table("stocks_positions").update({
+                                    "shares": rem_sh,
+                                    "shares_remaining": rem_sh,
+                                    "current_price": exec_price,
+                                    "status": "open",
+                                    "updated_at": now_iso
+                                }).eq("id", pos["id"]).execute()
+                                log_info(MODULE, f"✅ Cobertura PARCIAL SHORT confirmada por Broker para {ticker}: {shares} recompradas, quedan {rem_sh}")
+                            else:
+                                pnl_usd = round((old_avg - exec_price) * old_shares, 2)
+                                pnl_pct = round(((old_avg - exec_price) / old_avg * 100), 2) if old_avg > 0 else 0.0
+                                sb.table("trades_journal").insert({
+                                    "ticker": ticker,
+                                    "shares": old_shares,
+                                    "entry_price": old_avg,
+                                    "exit_price": exec_price,
+                                    "entry_date": pos.get("first_buy_at") or now_iso,
+                                    "exit_date": now_iso,
+                                    "pnl_usd": pnl_usd,
+                                    "pnl_pct": pnl_pct,
+                                    "result": "win" if pnl_usd >= 0 else "loss",
+                                    "exit_reason": "IB_BROKER_CONFIRMED_BUY_COVER",
+                                    "trade_type": pos.get("group_name") or "STOCKS_IB"
+                                }).execute()
+                                sb.table("stocks_positions").update({
+                                    "status": "closed",
+                                    "shares": 0,
+                                    "shares_remaining": 0,
+                                    "current_price": exec_price,
+                                    "unrealized_pnl": pnl_usd,
+                                    "unrealized_pnl_pct": pnl_pct,
+                                    "sl_close_reason": "broker_confirmed_buy_cover",
+                                    "updated_at": now_iso
+                                }).eq("id", pos["id"]).execute()
+                                log_info(MODULE, f"✅ Cierre TOTAL SHORT confirmado por Broker para {ticker} en Supabase (PnL: ${pnl_usd:+.2f})")
+                        else:
+                            total_shares = old_shares + shares
+                            new_avg = ((old_avg * old_shares) + (exec_price * shares)) / total_shares if total_shares > 0 else exec_price
 
-                        sb.table("stocks_positions").update({
-                            "shares": total_shares,
-                            "avg_price": round(new_avg, 4),
-                            "total_cost": round(total_shares * new_avg, 2),
-                            "current_price": exec_price,
-                            "updated_at": now_iso
-                        }).eq("id", pos["id"]).execute()
-                        log_info(MODULE, f"✅ Posición DCA actualizada para {ticker}: {total_shares} acc @ ${new_avg:.2f}")
+                            sb.table("stocks_positions").update({
+                                "shares": total_shares,
+                                "avg_price": round(new_avg, 4),
+                                "total_cost": round(total_shares * new_avg, 2),
+                                "current_price": exec_price,
+                                "updated_at": now_iso
+                            }).eq("id", pos["id"]).execute()
+                            log_info(MODULE, f"✅ Posición DCA actualizada para {ticker}: {total_shares} acc @ ${new_avg:.2f}")
                     else:
                         atr_fb = exec_price * 0.02
                         sl_p = round(exec_price - (atr_fb * 2.0), 2)
@@ -275,23 +340,59 @@ def on_ib_order_status(order_id: int, status_info: dict):
 
                         for opos in target_rows:
                             entry_debit = float(opos.get("entry_debit") or 0.0)
-                            qty = int(opos.get("qty") or 1)
-                            total_inv = float(opos.get("entry_total_invested") or (entry_debit * 100 * qty))
-                            fee = 0.70 * qty
-                            recovered = round((exec_price * 100 * qty) - fee, 2)
-                            realized = round(recovered - total_inv, 2)
+                            cur_qty = int(opos.get("qty") or 1)
+                            sell_qty = min(cur_qty, max(1, int(filled or shares or cur_qty)))
+                            rem_opt_qty = cur_qty - sell_qty
+                            total_inv = float(opos.get("entry_total_invested") or (entry_debit * 100 * cur_qty))
+                            sold_inv = round(total_inv * (sell_qty / cur_qty), 2) if cur_qty > 0 else total_inv
+                            fee = round(0.70 * sell_qty, 2)
+                            recovered = round((exec_price * 100 * sell_qty) - fee, 2)
+                            leg_realized = round(recovered - sold_inv, 2)
+                            prev_realized = float(opos.get("realized_pnl") or 0.0)
+                            total_realized = round(prev_realized + leg_realized, 2)
                             pnl_pct = round(((exec_price - entry_debit) / entry_debit * 100), 2) if entry_debit > 0 else 0.0
+                            plan = dict(opos.get("exit_plan") or {})
+                            plan["closing_pending"] = False
+
+                            if rem_opt_qty > 0:
+                                # Venta PARCIAL confirmada por el broker
+                                if plan.get("pending_is_partial"):
+                                    plan["partial_tp_taken"] = True
+                                    plan["trailing_sl_type"] = "EMA9_15M"
+                                plan.pop("pending_is_partial", None)
+                                plan.pop("pending_qty_to_close", None)
+                                sb.table("opt_paper_trades").update({
+                                    "qty": rem_opt_qty,
+                                    "entry_total_invested": round(max(0.0, total_inv - sold_inv), 2),
+                                    "realized_pnl": total_realized,
+                                    "last_mark_price": exec_price,
+                                    "last_mark_at": now_iso,
+                                    "exit_plan": plan,
+                                    "updated_at": now_iso,
+                                }).eq("id", opos["id"]).execute()
+                                log_info(MODULE, f"✅ Toma PARCIAL confirmada por Broker para {und_sym}: {sell_qty} vendidas @ ${exec_price:.2f}, quedan {rem_opt_qty} (PnL tramo: ${leg_realized:+.2f})")
+                                continue
+
+                            raw_reason = plan.get("pending_exit_reason") or opos.get("exit_reason") or ("take_profit" if total_realized >= 0 else "stop_loss")
+                            if raw_reason == "take_profit" and total_realized < 0:
+                                final_reason = "stop_loss"
+                            elif raw_reason == "stop_loss" and total_realized > 0:
+                                final_reason = "take_profit"
+                            else:
+                                final_reason = raw_reason
+                            plan["closed_at"] = now_iso
 
                             upd_payload = {
                                 "status": "closed",
                                 "exit_credit": exec_price,
                                 "exit_costs": fee,
                                 "exit_total_recovered": recovered,
-                                "realized_pnl": realized,
+                                "realized_pnl": total_realized,
                                 "unrealized_pnl": 0.0,
                                 "last_mark_price": exec_price,
                                 "last_mark_at": now_iso,
-                                "exit_reason": (lambda r: "stop_loss" if (r == "take_profit" and realized < 0) else ("take_profit" if (r == "stop_loss" and realized > 0) else r))(opos.get("exit_reason") or ("take_profit" if realized >= 0 else "stop_loss")),
+                                "exit_reason": final_reason,
+                                "exit_plan": plan,
                                 "updated_at": now_iso,
                                 "exit_fills": [{
                                     "side": "buy",
@@ -306,21 +407,28 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             if not opos.get("exit_time"):
                                 upd_payload["exit_time"] = now_iso
                             sb.table("opt_paper_trades").update(upd_payload).eq("id", opos["id"]).execute()
-                            log_info(MODULE, f"opt_paper_trades ID {opos['id']} ({und_sym}) cerrado confirmado por Broker a ${exec_price:.2f} (PnL: ${realized:.2f})")
+                            log_info(MODULE, f"opt_paper_trades ID {opos['id']} ({und_sym}) cerrado confirmado por Broker a ${exec_price:.2f} (PnL: ${total_realized:.2f})")
+
+                            if not already_closed_recently:
+                                try:
+                                    from app.core.circuit_breaker import record_trade_completion
+                                    record_trade_completion(und_sym, total_realized, sb=sb)
+                                except Exception:
+                                    pass
 
                             if not already_closed_recently:
                                 try:
                                     sb.table("trades_journal").insert({
                                         "ticker": und_sym,
-                                        "shares": qty,
+                                        "shares": sell_qty,
                                         "entry_price": entry_debit,
                                         "exit_price": exec_price,
                                         "entry_date": opos.get("entry_time") or now_iso,
                                         "exit_date": now_iso,
-                                        "pnl_usd": realized,
+                                        "pnl_usd": total_realized,
                                         "pnl_pct": pnl_pct,
-                                        "result": "win" if realized >= 0 else "loss",
-                                        "exit_reason": "IB_BROKER_CONFIRMED_SELL",
+                                        "result": "win" if total_realized >= 0 else "loss",
+                                        "exit_reason": plan.get("detailed_exit_reason") or "IB_BROKER_CONFIRMED_SELL",
                                         "trade_type": "OPTIONS_GAP_RUNNER"
                                     }).execute()
                                 except Exception as tj_err:
@@ -400,6 +508,7 @@ def on_ib_order_status(order_id: int, status_info: dict):
 
         # Limpiar de seguimiento activo
         PENDING_IB_ORDERS.pop(order_id, None)
+        WORKING_IB_ORDERS.pop(order_id, None)
 
         # Confirmación y reconciliación inmediata con el Broker
         if ACTIVE_BRIDGE:
@@ -412,10 +521,26 @@ def on_ib_order_status(order_id: int, status_info: dict):
         try:
             sb.table("stocks_orders").update({
                 "status": "cancelled",
-            }).eq("id", order_ctx["id"]).execute()
+            }).eq("id", order_ctx["id"]).in_("status", ["pending", "processing", "submitted"]).execute()
+            if (not is_opt_order) and direction == "sell" and ACTIVE_BRIDGE and hasattr(ACTIVE_BRIDGE, "_in_flight_sells"):
+                cur_inf = ACTIVE_BRIDGE._in_flight_sells.get(ticker.upper(), 0)
+                ACTIVE_BRIDGE._in_flight_sells[ticker.upper()] = max(0, cur_inf - shares)
+            if is_opt_order and direction == "sell":
+                from app.options.broker_sync import parse_option_order_contract_key, _row_contract_key
+                order_ck = parse_option_order_contract_key(ticker_u, target_b)
+                if order_ck:
+                    open_rows = sb.table("opt_paper_trades").select("*").eq("symbol", order_ck[0]).eq("status", "open").execute().data or []
+                    for r in open_rows:
+                        r_ck = _row_contract_key(r)
+                        if r_ck[1] == order_ck[1] and abs(r_ck[2] - order_ck[2]) <= 0.05 and r_ck[3] == order_ck[3]:
+                            plan = dict(r.get("exit_plan") or {})
+                            if plan.get("closing_pending"):
+                                plan["closing_pending"] = False
+                                sb.table("opt_paper_trades").update({"exit_plan": plan, "updated_at": now_iso}).eq("id", r["id"]).execute()
         except Exception:
             pass
         PENDING_IB_ORDERS.pop(order_id, None)
+        WORKING_IB_ORDERS.pop(order_id, None)
 
 
 import socket
@@ -566,15 +691,18 @@ class IBBridgeWorker:
                 is_expired = False
                 if exp_str:
                     try:
-                        if datetime.fromisoformat(str(exp_str).replace("Z", "+00:00")) < now_dt:
+                        exp_dt = parse_iso_utc(exp_str)
+                        if exp_dt and exp_dt < now_dt:
                             is_expired = True
                     except Exception:
                         pass
                 elif c_str:
                     try:
-                        age_min = (now_dt - datetime.fromisoformat(str(c_str).replace("Z", "+00:00"))).total_seconds() / 60.0
-                        if age_min > 15.0:
-                            is_expired = True
+                        c_dt = parse_iso_utc(c_str)
+                        if c_dt:
+                            age_min = (now_dt - c_dt).total_seconds() / 60.0
+                            if age_min > 15.0:
+                                is_expired = True
                     except Exception:
                         pass
 
@@ -653,7 +781,31 @@ class IBBridgeWorker:
                             log_warning(MODULE, f"⏸️ [MARKET GATE] Mercado de opciones cerrado ({opt_reason}). Orden {ticker_u} ({direction}) no despachada a TWS para evitar rechazo del broker.")
                             continue
 
+                    allow_ah = False
+                    if not is_option and direction.lower() == "buy":
+                        try:
+                            sc_res = sb.table("stocks_config").select("allow_after_hours").limit(1).execute()
+                            sc_rows = sc_res.data if hasattr(sc_res, "data") and isinstance(sc_res.data, list) else []
+                            if sc_rows:
+                                val_ah = sc_rows[0].get("allow_after_hours")
+                                allow_ah = (val_ah is True) or str(val_ah).strip().lower() in ("true", "1", "yes")
+                        except Exception:
+                            allow_ah = False
+                        if not allow_ah:
+                            from app.core.market_hours import is_market_open
+                            is_stk_open, stk_reason = is_market_open()
+                            if not is_stk_open:
+                                log_warning(MODULE, f"⏸️ [STOCK MARKET GATE] Mercado regular cerrado ({stk_reason}) y allow_after_hours=False. Cancelando BUY {ticker_u}.")
+                                oid_db = order.get("id")
+                                if oid_db:
+                                    try:
+                                        sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", oid_db).execute()
+                                    except Exception:
+                                        pass
+                                continue
+
                     # ── BLOQUEO ANTI-SHORT PARA ACCIONES (NUNCA APLICA A OPCIONES) ──
+                    reserved_sell_shares = 0
                     if not is_option and not contract:
                         if direction == "sell":
                             self.ib.request_broker_positions(timeout=3.0)
@@ -677,6 +829,7 @@ class IBBridgeWorker:
                                 shares = available_shares
 
                             self._in_flight_sells[ticker.upper()] = already_in_flight + shares
+                            reserved_sell_shares = shares
 
                         contract = self.ib.us_stock_contract(ticker)
 
@@ -730,16 +883,17 @@ class IBBridgeWorker:
                     ib_ord = Order()
                     ib_ord.eTradeOnly = False
                     ib_ord.firmQuoteOnly = False
+                    ib_ord.outsideRth = bool(allow_ah and not is_option)
+                    ib_ord.tif = "DAY"
                     ib_ord.action = direction.upper()
                     ib_ord.totalQuantity = shares
 
+                    rvol_val = float(order.get("rvol") or 1.0)
+                    exec_plan = None
                     if is_option and direction.lower() == "buy":
-                        try:
-                            from ibapi.tag_value import TagValue
-                            ib_ord.algoStrategy = "Adaptive"
-                            ib_ord.algoParams = [TagValue("adaptivePriority", "Normal")]
-                        except Exception as e_algo:
-                            log_warning(MODULE, f"Aviso configurando Adaptive Algo para opción: {e_algo}")
+                        from app.options.order_execution_plan import compute_option_entry_plan
+                        exec_plan = compute_option_entry_plan(bid=0.0, ask=price, mid=price, rvol=rvol_val)
+                        # Blindaje V3: Sin Adaptive Algo en LMT BUY de opciones para permitir repriceo directo en TWS
                     
                     if order_type in ("stop", "stp", "buy_stop") and trigger_price > 0:
                         ib_ord.orderType = "STP"
@@ -750,21 +904,54 @@ class IBBridgeWorker:
                         ib_ord.lmtPrice = round(price if price > 0 else (trigger_price * 1.005), 2)
                     elif order_type == "limit" and price > 0:
                         ib_ord.orderType = "LMT"
-                        ib_ord.lmtPrice = round(price, 2)
+                        if is_option:
+                            from app.options.order_execution_plan import snap_option_tick
+                            price = snap_option_tick(price, mode="nearest")
+                            ib_ord.lmtPrice = price
+                        else:
+                            ib_ord.lmtPrice = round(price, 2)
                     else:
                         ib_ord.orderType = "MKT"
 
                     ib_ord.transmit = True
                     ib_order_id = self.ib.get_next_order_id()
 
-                    # Guardar referencia para el callback
+                    # Guardar referencia para el callback y seguimiento Chaser + TTL
                     PENDING_IB_ORDERS[ib_order_id] = order
+                    if (direction.lower() == "buy" and ib_ord.orderType == "LMT") or (is_option and direction.lower() == "sell"):
+                        lmt_base = float(getattr(ib_ord, "lmtPrice", 0.0) or price or 0.01)
+                        q_key = (
+                            f"{contract.symbol}:OPT:{contract.lastTradeDateOrContractMonth}:{round(float(contract.strike or 0.0), 2)}:{contract.right}"
+                            if is_option
+                            else str(contract.symbol or ticker_u).upper()
+                        )
+                        WORKING_IB_ORDERS[ib_order_id] = {
+                            "order_ctx": order,
+                            "contract": contract,
+                            "ib_ord": ib_ord,
+                            "quote_key": q_key,
+                            "placed_at": time.time(),
+                            "last_reprice_at": time.time(),
+                            "reprice_count": 0,
+                            "max_chase_price": exec_plan["max_chase_price"] if exec_plan else round(lmt_base * 1.05, 2),
+                            "reprice_after_sec": exec_plan["reprice_after_sec"] if exec_plan else 20.0,
+                            "ttl_sec": (90.0 if direction.lower() == "sell" else (exec_plan["ttl_sec"] if exec_plan else 60.0)),
+                            "is_option": is_option,
+                            "direction": direction.lower(),
+                        }
 
                     # Colocar la orden en TWS
                     self.ib.placeOrder(ib_order_id, contract, ib_ord)
-                    log_info(MODULE, f"📋 Orden enviada con éxito a TWS con ID #{ib_order_id}")
+                    try:
+                        sb.table("stocks_orders").update({"status": "submitted"}).eq("id", order_id).execute()
+                    except Exception:
+                        pass
+                    log_info(MODULE, f"📋 Orden enviada con éxito a TWS con ID #{ib_order_id} (Tipo={ib_ord.orderType}, LMT=${getattr(ib_ord, 'lmtPrice', 0):.2f})")
 
                 except Exception as ord_err:
+                    if reserved_sell_shares > 0 and hasattr(self, '_in_flight_sells'):
+                        cur_inf = self._in_flight_sells.get(ticker.upper(), 0)
+                        self._in_flight_sells[ticker.upper()] = max(0, cur_inf - reserved_sell_shares)
                     log_error(MODULE, f"Error despachando orden {order_id} a TWS: {ord_err}")
                     sb.table("stocks_orders").update({"status": "failed"}).eq("id", order_id).execute()
 
@@ -831,10 +1018,13 @@ class IBBridgeWorker:
                 else:
                     sb_open_stocks[p["ticker"]] = p
 
+            from app.stocks.position_monitor import compute_dynamic_stock_trailing_sl
             for sym, b_data in broker_stocks.items():
-                qty = int(b_data["shares"])
-                if qty <= 0:
+                signed_qty = int(round(float(b_data["shares"])))
+                if signed_qty == 0:
                     continue
+                direction = "short" if signed_qty < 0 else "long"
+                qty = abs(signed_qty)
                 avg_cost = float(b_data["avg_cost"])
 
                 cur_p = float(b_data.get("market_price") or (self.ib._prices.get(sym, 0.0) if hasattr(self.ib, '_prices') else 0.0) or 0.0)
@@ -846,12 +1036,18 @@ class IBBridgeWorker:
                     cur_p = avg_cost
 
                 atr_fb = max(0.05, cur_p * 0.02)
-                sl_calc = round(max(0.01, avg_cost - (atr_fb * 2.0)), 2)
-                tp_calc = round(avg_cost + (atr_fb * 5.0), 2)
+                if direction == "short":
+                    sl_calc = round(avg_cost + (atr_fb * 2.0), 2)
+                    tp_calc = round(max(0.01, avg_cost - (atr_fb * 5.0)), 2)
+                    calc_pnl = round((avg_cost - cur_p) * qty, 2)
+                    pnl_pct = round(((avg_cost - cur_p) / avg_cost * 100), 2) if avg_cost > 0 else 0.0
+                else:
+                    sl_calc = round(max(0.01, avg_cost - (atr_fb * 2.0)), 2)
+                    tp_calc = round(avg_cost + (atr_fb * 5.0), 2)
+                    calc_pnl = round((cur_p - avg_cost) * qty, 2)
+                    pnl_pct = round(((cur_p - avg_cost) / avg_cost * 100), 2) if avg_cost > 0 else 0.0
                 tws_pnl = b_data.get("unrealized_pnl")
-                calc_pnl = round((cur_p - avg_cost) * qty, 2)
                 pnl_usd = round(float(tws_pnl), 2) if (tws_pnl is not None and abs(float(tws_pnl)) > 0.0001) else calc_pnl
-                pnl_pct = round(((cur_p - avg_cost) / avg_cost * 100), 2) if avg_cost > 0 else 0.0
 
                 if sym in sb_open_stocks:
                     existing_pos = sb_open_stocks[sym]
@@ -859,15 +1055,47 @@ class IBBridgeWorker:
                     old_avg = float(existing_pos.get("avg_price") or 0)
                     old_cur = float(existing_pos.get("current_price") or 0)
                     old_pnl = float(existing_pos.get("unrealized_pnl") or 0)
+                    old_dir = str(existing_pos.get("direction") or "long").lower()
+                    cur_sl_v = float(existing_pos.get("stop_loss") or 0.0)
+
+                    # Preservar 'closing' solo si hay orden de cierre fresca (<=120s) en vuelo
+                    keep_closing = False
+                    if existing_pos.get("status") == "closing":
+                        try:
+                            close_dir = "buy" if direction == "short" else "sell"
+                            act_close = sb.table("stocks_orders").select("id, created_at").eq("ticker", sym).eq("direction", close_dir).in_("status", ["pending", "processing", "submitted"]).order("created_at", desc=True).limit(1).execute()
+                            if act_close.data and act_close.data[0].get("created_at"):
+                                ac_dt = parse_iso_utc(act_close.data[0]["created_at"])
+                                if ac_dt and (datetime.now(timezone.utc) - ac_dt).total_seconds() <= 120.0:
+                                    keep_closing = True
+                        except Exception:
+                            pass
+
+                    new_hi = round(max(float(existing_pos.get("highest_price_reached") or 0.0), avg_cost, cur_p), 4)
+                    old_lo = float(existing_pos.get("lowest_price_reached") or 0.0)
+                    new_lo = round(min(old_lo, avg_cost, cur_p) if old_lo > 0 else min(avg_cost, cur_p), 4)
+                    dyn_sl, dyn_reason = compute_dynamic_stock_trailing_sl(
+                        entry_price=avg_cost,
+                        current_price=cur_p,
+                        highest_price=new_hi,
+                        current_sl=cur_sl_v,
+                        side=direction,
+                        lowest_price=new_lo,
+                    )
+                    sl_improved = bool(dyn_reason)
+
                     if (
                         old_shares != qty
+                        or old_dir != direction
                         or abs(old_avg - avg_cost) > 0.01
                         or abs(old_cur - cur_p) >= 0.001
                         or abs(old_pnl - pnl_usd) >= 0.01
-                        or existing_pos.get("status") == "closing"
+                        or sl_improved
+                        or (existing_pos.get("status") == "closing" and not keep_closing)
                     ):
                         update_payload = {
-                            "status": "open",
+                            "status": "closing" if keep_closing else "open",
+                            "direction": direction,
                             "shares": qty,
                             "shares_remaining": qty,
                             "avg_price": round(avg_cost, 4),
@@ -875,19 +1103,25 @@ class IBBridgeWorker:
                             "current_price": round(cur_p, 4),
                             "unrealized_pnl": pnl_usd,
                             "unrealized_pnl_pct": pnl_pct,
-                            "highest_price_reached": round(max(float(existing_pos.get("highest_price_reached") or 0.0), avg_cost, cur_p), 4),
+                            "highest_price_reached": new_hi,
+                            "lowest_price_reached": new_lo,
                             "updated_at": now_iso
                         }
-                        if not existing_pos.get("stop_loss") or float(existing_pos.get("stop_loss")) <= 0:
+                        if not cur_sl_v or cur_sl_v <= 0:
                             update_payload["stop_loss"] = sl_calc
                             update_payload["trailing_sl_price"] = sl_calc
+                        elif sl_improved:
+                            update_payload["stop_loss"] = dyn_sl
+                            update_payload["trailing_sl_price"] = dyn_sl
+                            update_payload["sl_type"] = "trailing_ratchet"
+                            update_payload["sl_activation_reason"] = str(dyn_reason)[:100]
                         if not existing_pos.get("take_profit") or float(existing_pos.get("take_profit")) <= 0:
                             update_payload["take_profit"] = tp_calc
 
                         sb.table("stocks_positions").update(update_payload).eq("id", existing_pos["id"]).execute()
-                        log_info(MODULE, f"🔄 [SYNC STOCKS] {sym}: {qty} acc | Avg=${avg_cost:.2f} | Actual=${cur_p:.2f} | PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
+                        log_info(MODULE, f"🔄 [SYNC STOCKS] {sym} ({direction.upper()}): {qty} acc | Avg=${avg_cost:.2f} | Actual=${cur_p:.2f} | PnL=${pnl_usd:+.2f} ({pnl_pct:+.2f}%)")
                 else:
-                    # HEALING: Comprobar si existía una posición cerrada prematuramente por simulación local
+                    # HEALING: Comprobar si existía una posición cerrada recientemente
                     recent_closed = sb.table("stocks_positions")\
                         .select("*")\
                         .eq("ticker", sym)\
@@ -897,9 +1131,19 @@ class IBBridgeWorker:
                     
                     if recent_closed.data:
                         # Reactivar la fila existente en lugar de duplicar y dejar basura en CLOSED HISTORY
-                        target_id = recent_closed.data[0]["id"]
+                        target_row = recent_closed.data[0]
+                        target_id = target_row["id"]
+                        hi_heal = round(max(float(target_row.get("highest_price_reached") or 0.0), avg_cost, cur_p), 4)
+                        lo_heal = round(min(float(target_row.get("lowest_price_reached") or avg_cost), avg_cost, cur_p), 4)
+                        cur_sl_h = float(target_row.get("stop_loss") or 0.0) or sl_calc
+                        dyn_sl_h, dyn_reason_h = compute_dynamic_stock_trailing_sl(
+                            entry_price=avg_cost, current_price=cur_p, highest_price=hi_heal,
+                            current_sl=cur_sl_h, side=direction, lowest_price=lo_heal,
+                        )
+                        heal_sl = dyn_sl_h if dyn_reason_h else cur_sl_h
                         heal_payload = {
                             "status": "open",
+                            "direction": direction,
                             "shares": qty,
                             "shares_remaining": qty,
                             "avg_price": round(avg_cost, 4),
@@ -907,22 +1151,34 @@ class IBBridgeWorker:
                             "current_price": cur_p,
                             "unrealized_pnl": pnl_usd,
                             "unrealized_pnl_pct": pnl_pct,
+                            "highest_price_reached": hi_heal,
+                            "lowest_price_reached": lo_heal,
+                            "stop_loss": heal_sl,
+                            "trailing_sl_price": heal_sl,
                             "sl_close_reason": None,
                             "exit_triggered_by": None,
                             "updated_at": now_iso
                         }
                         sb.table("stocks_positions").update(heal_payload).eq("id", target_id).execute()
                         
-                        # Eliminar entradas ficticias del trades_journal para este ticker
+                        # Eliminar únicamente posibles entradas ficticias recientes (<15 min) de trades_journal
                         try:
-                            sb.table("trades_journal").delete().eq("ticker", sym).execute()
+                            cutoff_iso = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
+                            sb.table("trades_journal").delete().eq("ticker", sym).gte("exit_date", cutoff_iso).execute()
                         except Exception:
                             pass
-                        log_info(MODULE, f"♻️ [HEALING] Posición {sym} reabierta en Supabase (validada con broker: {qty} acc @ ${avg_cost:.2f})")
+                        log_info(MODULE, f"♻️ [HEALING] Posición {sym} ({direction.upper()}) reabierta en Supabase (validada con broker: {qty} acc @ ${avg_cost:.2f})")
                     else:
+                        hi_init = round(max(avg_cost, cur_p), 4)
+                        lo_init = round(min(avg_cost, cur_p), 4)
+                        dyn_sl_i, dyn_reason_i = compute_dynamic_stock_trailing_sl(
+                            entry_price=avg_cost, current_price=cur_p, highest_price=hi_init,
+                            current_sl=sl_calc, side=direction, lowest_price=lo_init,
+                        )
+                        init_sl = dyn_sl_i if dyn_reason_i else sl_calc
                         new_pos = {
                             "ticker": sym,
-                            "direction": "long",
+                            "direction": direction,
                             "shares": qty,
                             "shares_remaining": qty,
                             "avg_price": round(avg_cost, 4),
@@ -930,9 +1186,10 @@ class IBBridgeWorker:
                             "current_price": cur_p,
                             "unrealized_pnl": pnl_usd,
                             "unrealized_pnl_pct": pnl_pct,
-                            "stop_loss": sl_calc,
-                            "trailing_sl_price": sl_calc,
-                            "highest_price_reached": max(avg_cost, cur_p),
+                            "stop_loss": init_sl,
+                            "trailing_sl_price": init_sl,
+                            "highest_price_reached": hi_init,
+                            "lowest_price_reached": lo_init,
                             "take_profit": tp_calc,
                             "group_name": "IB_PAPER",
                             "first_buy_at": now_iso,
@@ -940,19 +1197,22 @@ class IBBridgeWorker:
                             "updated_at": now_iso
                         }
                         sb.table("stocks_positions").insert(new_pos).execute()
-                        log_info(MODULE, f"📥 [SYNC STOCKS] Acción del Broker agregada a Supabase: {sym} {qty} acc @ ${avg_cost:.2f}")
+                        log_info(MODULE, f"📥 [SYNC STOCKS] Acción del Broker agregada a Supabase: {sym} ({direction.upper()}) {qty} acc @ ${avg_cost:.2f}")
 
             # CONFIRMACIÓN BROKER: Cerrar en stocks_positions cualquier acción que el broker confirme que ya NO existe
             for sym, p_data in sb_open_stocks.items():
                 if sym not in broker_stocks:
+                    is_short_p = str(p_data.get("direction") or "long").lower() in ("short", "sell")
+                    close_dir_p = "buy" if is_short_p else "sell"
+                    open_dir_p = "sell" if is_short_p else "buy"
                     try:
                         fb_str = p_data.get("first_buy_at") or p_data.get("updated_at")
                         if fb_str:
-                            fb_dt = datetime.fromisoformat(str(fb_str).replace("Z", "+00:00"))
-                            if (datetime.now(timezone.utc) - fb_dt).total_seconds() < 90.0:
+                            fb_dt = parse_iso_utc(fb_str)
+                            if fb_dt and (datetime.now(timezone.utc) - fb_dt).total_seconds() < 90.0:
                                 continue
-                        inflight_buy = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing"]).limit(1).execute()
-                        if inflight_buy.data:
+                        inflight_open = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", open_dir_p).in_("status", ["pending", "processing", "submitted"]).limit(1).execute()
+                        if inflight_open.data:
                             continue
                     except Exception:
                         pass
@@ -964,7 +1224,7 @@ class IBBridgeWorker:
                         sell_ord = sb.table("stocks_orders")\
                             .select("filled_at, filled_price, rule_code")\
                             .eq("ticker", sym)\
-                            .eq("direction", "sell")\
+                            .eq("direction", close_dir_p)\
                             .eq("status", "filled")\
                             .order("filled_at", desc=True)\
                             .limit(1)\
@@ -976,12 +1236,16 @@ class IBBridgeWorker:
                             if sell_ord.data[0].get("rule_code"):
                                 sell_rule = sell_ord.data[0]["rule_code"]
                     except Exception as ord_e:
-                        log_warning(MODULE, f"No se pudo consultar orden sell para {sym}: {ord_e}")
+                        log_warning(MODULE, f"No se pudo consultar orden {close_dir_p} para {sym}: {ord_e}")
 
                     entry_p = float(p_data.get("avg_price") or 0.0)
-                    pos_sh = int(float(p_data.get("shares") or 0))
-                    pnl_usd = round((real_exit_price - entry_p) * pos_sh, 2)
-                    pnl_pct = round(((real_exit_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                    pos_sh = abs(int(float(p_data.get("shares") or 0)))
+                    if is_short_p:
+                        pnl_usd = round((entry_p - real_exit_price) * pos_sh, 2)
+                        pnl_pct = round(((entry_p - real_exit_price) / entry_p * 100), 2) if entry_p > 0 else 0.0
+                    else:
+                        pnl_usd = round((real_exit_price - entry_p) * pos_sh, 2)
+                        pnl_pct = round(((real_exit_price - entry_p) / entry_p * 100), 2) if entry_p > 0 else 0.0
 
                     # Si cerró con PnL negativo pero la orden decía TP/PROFIT (por slippage/spread en penny stocks), reflejarlo honestamente
                     journal_reason = sell_rule
@@ -997,21 +1261,49 @@ class IBBridgeWorker:
                         "updated_at": real_exit_time
                     }).eq("id", p_data["id"]).execute()
 
-                    # Registrar permanentemente en trades_journal para Closed History
+                    # Registrar permanentemente en trades_journal para Closed History (con deduplicación 120s)
                     try:
-                        sb.table("trades_journal").insert({
-                            "ticker": sym,
-                            "shares": pos_sh,
-                            "entry_price": entry_p,
-                            "exit_price": real_exit_price,
-                            "entry_date": p_data.get("first_buy_at") or real_exit_time,
-                            "exit_date": real_exit_time,
-                            "pnl_usd": pnl_usd,
-                            "pnl_pct": pnl_pct,
-                            "result": "win" if pnl_usd >= 0 else "loss",
-                            "exit_reason": journal_reason,
-                            "trade_type": p_data.get("group_name") or "STOCKS_IB"
-                        }).execute()
+                        skip_journal_dup = False
+                        try:
+                            recent_tj = sb.table("trades_journal").select("id, exit_date, shares, exit_price").eq("ticker", sym).order("exit_date", desc=True).limit(3).execute()
+                            rj_rows = recent_tj.data if hasattr(recent_tj, "data") and isinstance(recent_tj.data, list) else []
+                            ex_cur_dt = parse_iso_utc(real_exit_time)
+                            for rj in rj_rows:
+                                if not isinstance(rj, dict):
+                                    continue
+                                ex_prev_dt = parse_iso_utc(rj.get("exit_date"))
+                                same_sh = int(round(float(rj.get("shares") or 0))) == int(round(float(pos_sh or 0)))
+                                same_px = abs(float(rj.get("exit_price") or 0.0) - float(real_exit_price or 0.0)) <= 0.02
+                                near_tm = (
+                                    ex_cur_dt is not None
+                                    and ex_prev_dt is not None
+                                    and abs((ex_cur_dt - ex_prev_dt).total_seconds()) <= 120.0
+                                )
+                                if same_sh and same_px and near_tm:
+                                    skip_journal_dup = True
+                                    break
+                        except Exception:
+                            skip_journal_dup = False
+
+                        if not skip_journal_dup:
+                            sb.table("trades_journal").insert({
+                                "ticker": sym,
+                                "shares": pos_sh,
+                                "entry_price": entry_p,
+                                "exit_price": real_exit_price,
+                                "entry_date": p_data.get("first_buy_at") or real_exit_time,
+                                "exit_date": real_exit_time,
+                                "pnl_usd": pnl_usd,
+                                "pnl_pct": pnl_pct,
+                                "result": "win" if pnl_usd >= 0 else "loss",
+                                "exit_reason": journal_reason,
+                                "trade_type": p_data.get("group_name") or "STOCKS_IB"
+                            }).execute()
+                            try:
+                                from app.core.circuit_breaker import record_trade_completion
+                                record_trade_completion(sym, pnl_usd, sb=sb)
+                            except Exception:
+                                pass
                     except Exception as tj_err:
                         log_warning(MODULE, f"Aviso insertando en trades_journal para {sym}: {tj_err}")
 
@@ -1044,8 +1336,17 @@ class IBBridgeWorker:
                     else:
                         sb.table("opt_paper_trades").delete().eq("id", r["id"]).execute()
 
-                from app.options.broker_sync import find_existing_option_trade_for_contract, get_in_flight_option_sell_keys
+                from app.options.broker_sync import (
+                    find_existing_option_trade_for_contract,
+                    get_in_flight_option_sell_keys,
+                    sync_option_exit_plan,
+                    is_within_options_sync_import_window,
+                    is_within_options_late_liquidate_window,
+                    enqueue_late_option_liquidation,
+                )
                 in_flight_sell_keys = get_in_flight_option_sell_keys(sb, max_age_sec=120.0)
+                in_opt_import_window = is_within_options_sync_import_window()
+                in_opt_late_liq_window = is_within_options_late_liquidate_window()
 
                 active_broker_keys = set()
                 for opt_key, b_data in broker_options.items():
@@ -1084,14 +1385,29 @@ class IBBridgeWorker:
                         ex_row = sb_open_by_key[ck]
                         old_mp = float(ex_row.get("last_mark_price") or 0.0)
                         old_opnl = float(ex_row.get("unrealized_pnl") or 0.0)
+                        old_plan = dict(ex_row.get("exit_plan") or {})
+                        und_price = float(
+                            (broker_stocks.get(und_sym) or {}).get("market_price")
+                            or (self.ib._prices.get(und_sym, 0.0) if hasattr(self.ib, "_prices") else 0.0)
+                            or old_plan.get("last_underlying_price")
+                            or old_plan.get("entry_underlying_price")
+                            or 0.0
+                        )
+                        ex_plan = sync_option_exit_plan(
+                            old_plan,
+                            entry_debit,
+                            mark_p,
+                            has_active_sell=(ck in in_flight_sell_keys),
+                            is_put=(right_v == "P"),
+                            underlying_price=und_price,
+                        )
                         if (
                             int(ex_row.get("qty") or 0) != qty
                             or abs(float(ex_row.get("entry_debit") or 0) - entry_debit) > 0.02
                             or abs(old_mp - mark_p) >= 0.001
                             or abs(old_opnl - opt_pnl_usd) >= 0.01
+                            or ex_plan != old_plan
                         ):
-                            ex_plan = dict(ex_row.get("exit_plan") or {})
-                            ex_plan["highest_premium_seen"] = round(max(float(ex_plan.get("highest_premium_seen") or 0.0), entry_debit, mark_p), 4)
                             sb.table("opt_paper_trades").update({
                                 "qty": qty,
                                 "entry_debit": entry_debit,
@@ -1134,6 +1450,10 @@ class IBBridgeWorker:
                         target_heal, is_zombie_closed = find_existing_option_trade_for_contract(sb, ck, strat_v, limit=200)
 
                         if is_zombie_closed:
+                            if in_opt_late_liq_window:
+                                dispatched = enqueue_late_option_liquidation(sb, und_sym, exp_iso, strike_v, right_v, qty, mark_p)
+                                log_warning(MODULE, f"🚨 [LATE SYNC AUTO-LIQUIDATE] {und_sym} {exp_iso} {strike_v}{right_v} en TWS (15:30-15:59 ET) pese a cooldown anti-zombi; SELL MKT despachada={dispatched}.")
+                                continue
                             warn_cache = getattr(self, "_zombie_warn_ts", None)
                             if warn_cache is None:
                                 warn_cache = {}
@@ -1141,10 +1461,35 @@ class IBBridgeWorker:
                             now_ts_w = time.time()
                             if now_ts_w - warn_cache.get(ck, 0.0) >= 300.0:
                                 warn_cache[ck] = now_ts_w
-                                log_warning(MODULE, f"⏸️ [SYNC OPTIONS] TWS aún reporta {qty}x de {und_sym} {exp_iso} {strike_v}{right_v}, ya cerrada en DB. Omitiendo reapertura zombi.")
+                                log_warning(MODULE, f"⏸️ [SYNC OPTIONS] Cooldown anti-zombi reciente para {qty}x de {und_sym} {exp_iso} {strike_v}{right_v}.")
                             continue
-                        elif target_heal and target_heal.get("status") == "open":
-                            sb.table("opt_paper_trades").update({
+                        elif in_opt_late_liq_window:
+                            dispatched = enqueue_late_option_liquidation(sb, und_sym, exp_iso, strike_v, right_v, qty, mark_p)
+                            log_warning(MODULE, f"🚨 [LATE SYNC AUTO-LIQUIDATE] {und_sym} {exp_iso} {strike_v}{right_v} detectada en TWS (15:30-15:59 ET); SELL MKT despachada={dispatched}.")
+                            continue
+                        elif target_heal:
+                            heal_old_plan = dict(target_heal.get("exit_plan") or {})
+                            und_price = float(
+                                (broker_stocks.get(und_sym) or {}).get("market_price")
+                                or (self.ib._prices.get(und_sym, 0.0) if hasattr(self.ib, "_prices") else 0.0)
+                                or heal_old_plan.get("last_underlying_price")
+                                or heal_old_plan.get("entry_underlying_price")
+                                or 0.0
+                            )
+                            healed_plan = sync_option_exit_plan(
+                                heal_old_plan,
+                                entry_debit,
+                                mark_p,
+                                has_active_sell=False,
+                                is_put=(right_v == "P"),
+                                underlying_price=und_price,
+                            )
+                            if not in_opt_import_window:
+                                healed_plan["late_import_force_close"] = True
+                                healed_plan["imported_outside_window"] = True
+                                log_warning(MODULE, f"⚠️ [SYNC OPTIONS OUTSIDE WINDOW] {und_sym} {exp_iso} {strike_v}{right_v} re-sincronizada fuera de 09:30-15:30 ET; marcada con late_import_force_close=True.")
+                            heal_opt = {
+                                "status": "open",
                                 "qty": qty,
                                 "expiry": exp_iso,
                                 "entry_debit": entry_debit,
@@ -1154,9 +1499,37 @@ class IBBridgeWorker:
                                 "last_mark_price": round(mark_p, 4),
                                 "last_mark_at": now_iso,
                                 "unrealized_pnl": opt_pnl_usd,
+                                "exit_plan": healed_plan,
                                 "updated_at": now_iso
-                            }).eq("id", target_heal["id"]).execute()
+                            }
+                            if target_heal.get("status") == "closed":
+                                heal_opt.update({
+                                    "exit_time": None,
+                                    "exit_reason": None,
+                                    "exit_credit": None,
+                                    "exit_total_recovered": None,
+                                    "realized_pnl": 0.0,
+                                })
+                            sb.table("opt_paper_trades").update(heal_opt).eq("id", target_heal["id"]).execute()
+                            log_info(MODULE, f"🔄 [SYNC OPTIONS] Opción {und_sym} {exp_iso} {strike_v}{right_v} sincronizada/reabierta desde TWS ({qty}x @ ${entry_debit:.2f})")
                         else:
+                            und_price = float(
+                                (broker_stocks.get(und_sym) or {}).get("market_price")
+                                or (self.ib._prices.get(und_sym, 0.0) if hasattr(self.ib, "_prices") else 0.0)
+                                or 0.0
+                            )
+                            init_plan = sync_option_exit_plan(
+                                None,
+                                entry_debit,
+                                mark_p,
+                                has_active_sell=False,
+                                is_put=(right_v == "P"),
+                                underlying_price=und_price,
+                            )
+                            if not in_opt_import_window:
+                                init_plan["late_import_force_close"] = True
+                                init_plan["imported_outside_window"] = True
+                                log_warning(MODULE, f"⚠️ [SYNC OPTIONS OUTSIDE WINDOW] {und_sym} {exp_iso} {strike_v}{right_v} importada fuera de 09:30-15:30 ET; marcada con late_import_force_close=True.")
                             sb.table("opt_paper_trades").insert({
                                 "underlying_id": uid,
                                 "symbol": und_sym,
@@ -1176,7 +1549,7 @@ class IBBridgeWorker:
                                 "unrealized_pnl": opt_pnl_usd,
                                 "last_mark_price": round(mark_p, 4),
                                 "last_mark_at": now_iso,
-                                "exit_plan": {"trailing_sl_type": "INITIAL", "highest_premium_seen": max(entry_debit, mark_p)},
+                                "exit_plan": init_plan,
                                 "model_version": "v1.0-tws-sync",
                                 "settings_version": 1,
                                 "updated_at": now_iso
@@ -1190,35 +1563,340 @@ class IBBridgeWorker:
                         try:
                             et_str = opt_t.get("entry_time") or opt_t.get("updated_at")
                             if et_str:
-                                et_dt = datetime.fromisoformat(str(et_str).replace("Z", "+00:00"))
+                                et_dt = parse_iso_utc(et_str)
                                 # Periodo de gracia inviolable de 90s para que TWS refleje la posicion
-                                if (datetime.now(timezone.utc) - et_dt).total_seconds() < 90.0:
+                                if et_dt and (datetime.now(timezone.utc) - et_dt).total_seconds() < 90.0:
                                     continue
-                            inflight_opt = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing"]).limit(1).execute()
+                            inflight_opt = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").in_("status", ["pending", "processing", "submitted"]).limit(1).execute()
                             if inflight_opt.data:
                                 continue
                         except Exception:
                             pass
 
+                        if ck in in_flight_sell_keys:
+                            continue
+
                         exp_c = ck[1].replace("-", "")
                         tb_match = f"OPT:{exp_c}:{ck[2]}:{ck[3]}"
                         filled_buy = sb.table("stocks_orders").select("id").eq("ticker", sym).eq("direction", "buy").eq("status", "filled").limit(1).execute()
-                        if not filled_buy.data:
+                        if not filled_buy.data and opt_t.get("model_version") != "v1.0-tws-sync":
                             sb.table("opt_paper_trades").delete().eq("id", opt_t["id"]).execute()
                             log_info(MODULE, f"🧹 [CLEAN OPTIONS] Opción no ejecutada en TWS eliminada de opt_paper_trades: {sym} {tb_match}")
                         else:
+                            last_m = float(opt_t.get("last_mark_price") or opt_t.get("entry_debit") or 0.0)
+                            exit_t_iso = now_iso
+                            try:
+                                entry_t_raw = opt_t.get("entry_time")
+                                q_sell = (
+                                    sb.table("stocks_orders")
+                                    .select("filled_price, filled_at")
+                                    .eq("ticker", sym[:10])
+                                    .eq("target_band", tb_match)
+                                    .eq("direction", "sell")
+                                    .eq("status", "filled")
+                                )
+                                if entry_t_raw and hasattr(q_sell, "gte"):
+                                    q_sell = q_sell.gte("filled_at", str(entry_t_raw))
+                                sell_ord = q_sell.order("filled_at", desc=True).limit(1).execute()
+                                s_rows = sell_ord.data if hasattr(sell_ord, "data") and isinstance(sell_ord.data, list) else []
+                                if s_rows and isinstance(s_rows[0], dict):
+                                    cand_sell = s_rows[0]
+                                    f_dt = parse_iso_utc(cand_sell.get("filled_at"))
+                                    e_dt_chk = parse_iso_utc(entry_t_raw)
+                                    fill_valid = True
+                                    if e_dt_chk is not None and cand_sell.get("filled_at") is not None:
+                                        fill_valid = (f_dt is not None and f_dt >= e_dt_chk)
+                                    if fill_valid:
+                                        if cand_sell.get("filled_price"):
+                                            last_m = float(cand_sell["filled_price"])
+                                        if cand_sell.get("filled_at"):
+                                            exit_t_iso = cand_sell["filled_at"]
+                            except Exception:
+                                pass
+                            e_deb = float(opt_t.get("entry_debit") or last_m)
+                            t_qty = int(opt_t.get("qty") or 1)
+                            t_rec = round(last_m * 100.0 * t_qty, 2)
+                            r_pnl = round((last_m - e_deb) * 100.0 * t_qty, 2)
+                            plan = dict(opt_t.get("exit_plan") or {})
+                            plan["closing_pending"] = False
+                            pending_reason = plan.get("pending_exit_reason") or "manual_simulated"
+                            if pending_reason == "take_profit" and r_pnl < 0:
+                                pending_reason = "stop_loss"
+                            elif pending_reason == "stop_loss" and r_pnl > 0:
+                                pending_reason = "take_profit"
                             sb.table("opt_paper_trades").update({
                                 "status": "closed",
-                                "exit_reason": "manual_simulated",
-                                "exit_time": now_iso,
+                                "exit_reason": pending_reason,
+                                "exit_credit": last_m,
+                                "exit_total_recovered": t_rec,
+                                "realized_pnl": r_pnl,
+                                "unrealized_pnl": 0.0,
+                                "exit_time": exit_t_iso,
+                                "exit_plan": plan,
                                 "updated_at": now_iso
                             }).eq("id", opt_t["id"]).execute()
-                            log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada en opt_paper_trades por no existir en TWS.")
+                            log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada por confirmación TWS (Crédito: ${last_m:.2f}, PnL: ${r_pnl:.2f}).")
+                            try:
+                                from app.core.circuit_breaker import record_trade_completion
+                                record_trade_completion(sym, r_pnl, sb=sb)
+                            except Exception:
+                                pass
             except Exception as opt_sync_e:
                 log_warning(MODULE, f"Error reconciliando opt_paper_trades: {opt_sync_e}")
 
         except Exception as sync_e:
             log_error(MODULE, f"Error en reconciliación con el broker: {sync_e}")
+
+    def manage_working_orders(self, sweep_orphans: bool = False):
+        """
+        Gestiona el ciclo de vida de órdenes abiertas en TWS:
+        - Fase A (Chaser + TTL): re-cotiza órdenes BUY LMT que no llenaron dentro del techo de slippage
+          y cancela en TWS al vencer su TTL (45-60s).
+        - Fase B (Orphan Sweep): consulta `reqAllOpenOrders` y cancela órdenes API huérfanas
+          (client_id > 0) que permanecen sin fill >= 60s en TWS.
+        """
+        if not self.ib or not self.ib.connected:
+            return
+
+        now_ts = time.time()
+        sb = get_supabase()
+
+        # ── FASE A: Órdenes rastreadas en WORKING_IB_ORDERS ──
+        if WORKING_IB_ORDERS:
+            from app.options.order_execution_plan import compute_reprice_limit
+
+            for ib_oid, info in list(WORKING_IB_ORDERS.items()):
+                order_ctx = info["order_ctx"]
+                order_id = order_ctx.get("id")
+                ticker = order_ctx.get("ticker", "UNKNOWN")
+                elapsed = now_ts - float(info.get("placed_at") or now_ts)
+                ttl_sec = float(info.get("ttl_sec") or 60.0)
+
+                if info.get("direction") == "sell":
+                    # Watchdog para salidas SELL que llevan >= ttl_sec sin fill: cancelar para permitir reenvío limpio
+                    if elapsed >= ttl_sec:
+                        tws_live = {}
+                        try:
+                            if hasattr(self.ib, "request_open_orders"):
+                                tws_live = self.ib.request_open_orders(timeout=1.5) or {}
+                        except Exception:
+                            tws_live = {}
+                        try:
+                            self.ib.cancelOrder(int(ib_oid))
+                        except Exception:
+                            pass
+                        try:
+                            if order_id:
+                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).in_("status", ["pending", "processing", "submitted"]).execute()
+                        except Exception:
+                            pass
+                        if not info.get("is_option") and hasattr(self, "_in_flight_sells"):
+                            sell_sh = int(float(order_ctx.get("shares") or 0))
+                            cur_inf = self._in_flight_sells.get(str(ticker).upper(), 0)
+                            self._in_flight_sells[str(ticker).upper()] = max(0, cur_inf - sell_sh)
+                        elif info.get("is_option"):
+                            try:
+                                from app.options.broker_sync import parse_option_order_contract_key, _row_contract_key
+                                order_ck = parse_option_order_contract_key(str(ticker).upper(), str(order_ctx.get("target_band") or "").upper())
+                                if order_ck:
+                                    open_rows = sb.table("opt_paper_trades").select("*").eq("symbol", order_ck[0]).eq("status", "open").execute().data or []
+                                    for r in open_rows:
+                                        r_ck = _row_contract_key(r)
+                                        if r_ck[1] == order_ck[1] and abs(r_ck[2] - order_ck[2]) <= 0.05 and r_ck[3] == order_ck[3]:
+                                            plan = dict(r.get("exit_plan") or {})
+                                            if plan.get("closing_pending"):
+                                                plan["closing_pending"] = False
+                                                sb.table("opt_paper_trades").update({"exit_plan": plan, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", r["id"]).execute()
+                            except Exception:
+                                pass
+                        WORKING_IB_ORDERS.pop(ib_oid, None)
+                        PENDING_IB_ORDERS.pop(ib_oid, None)
+                        log_warning(MODULE, f"⏰ [SELL WATCHDOG] Orden SELL #{ib_oid} ({ticker}) sin fill tras {elapsed:.0f}s (open_tws={int(ib_oid) in tws_live}); cancelada para permitir reintento.")
+                    continue
+
+                if info.get("direction") != "buy":
+                    continue
+
+                if elapsed >= ttl_sec:
+                    try:
+                        self.ib.cancelOrder(int(ib_oid))
+                    except Exception as c_e:
+                        log_warning(MODULE, f"Aviso cancelando orden #{ib_oid} por TTL: {c_e}")
+                    WORKING_IB_ORDERS.pop(ib_oid, None)
+                    p_entry = PENDING_IB_ORDERS.get(ib_oid)
+                    if p_entry is None:
+                        try:
+                            p_entry = PENDING_IB_ORDERS.get(int(ib_oid))
+                        except Exception:
+                            p_entry = None
+                    if isinstance(p_entry, dict):
+                        p_entry["_cancel_requested_at"] = now_ts
+                    log_info(MODULE, f"⌛ [TTL EXPIRED] Cancelación solicitada en TWS para BUY #{ib_oid} ({ticker}) tras {elapsed:.0f}s sin fill (PENDING retenido hasta callback TWS).")
+                    continue
+
+                reprice_after = float(info.get("reprice_after_sec") or 20.0)
+                if (now_ts - float(info.get("last_reprice_at") or now_ts)) >= reprice_after and int(info.get("reprice_count") or 0) < 2:
+                    q = {}
+                    if info.get("is_option") and hasattr(self.ib, "get_contract_quote"):
+                        q = self.ib.get_contract_quote(info["contract"], info["quote_key"], timeout=1.2)
+                    cur_lmt = float(getattr(info["ib_ord"], "lmtPrice", 0.0) or 0.0)
+                    res = compute_reprice_limit(
+                        current_lmt=cur_lmt,
+                        max_chase_price=float(info.get("max_chase_price") or cur_lmt * 1.05),
+                        live_bid=float(q.get("bid") or 0.0),
+                        live_ask=float(q.get("ask") or 0.0),
+                        reprice_count=int(info.get("reprice_count") or 0),
+                    )
+                    if res["action"] == "cancel_chase_exceeded":
+                        try:
+                            self.ib.cancelOrder(int(ib_oid))
+                        except Exception:
+                            pass
+                        WORKING_IB_ORDERS.pop(ib_oid, None)
+                        p_entry = PENDING_IB_ORDERS.get(ib_oid)
+                        if p_entry is None:
+                            try:
+                                p_entry = PENDING_IB_ORDERS.get(int(ib_oid))
+                            except Exception:
+                                p_entry = None
+                        if isinstance(p_entry, dict):
+                            p_entry["_cancel_requested_at"] = now_ts
+                        log_info(MODULE, f"🛑 [CHASE CAP] Cancelación solicitada en TWS para BUY #{ib_oid} ({ticker}): {res['reason']} (PENDING retenido hasta callback TWS).")
+                    elif res["action"] == "replace":
+                        new_lmt = float(res["new_lmt"])
+                        info["ib_ord"].lmtPrice = new_lmt
+                        try:
+                            self.ib.placeOrder(int(ib_oid), info["contract"], info["ib_ord"])
+                            info["reprice_count"] = int(info.get("reprice_count") or 0) + 1
+                            info["last_reprice_at"] = now_ts
+                            if order_id:
+                                sb.table("stocks_orders").update({"limit_price": new_lmt}).eq("id", order_id).execute()
+                            log_info(MODULE, f"🔄 [LADDER REPRICE #{info['reprice_count']}] Orden #{ib_oid} ({ticker}): {res['reason']}")
+                        except Exception as rp_e:
+                            log_warning(MODULE, f"Error re-cotizando orden #{ib_oid} ({ticker}): {rp_e}")
+
+        # ── FASE B: Barrido de órdenes API huérfanas en TWS ──
+        if sweep_orphans and hasattr(self.ib, "request_open_orders"):
+            try:
+                tws_open = self.ib.request_open_orders(timeout=3.0) or {}
+                if not hasattr(self, "_orphan_first_seen"):
+                    self._orphan_first_seen = {}
+
+                # Limpiar PENDING_IB_ORDERS con cancelación pendiente >= 120s si ya no figuran abiertas en TWS
+                for p_oid, p_data in list(PENDING_IB_ORDERS.items()):
+                    if not isinstance(p_data, dict):
+                        continue
+                    creq = p_data.get("_cancel_requested_at")
+                    if creq is not None and (now_ts - float(creq)) >= 120.0:
+                        try:
+                            p_oid_int = int(p_oid)
+                        except Exception:
+                            p_oid_int = p_oid
+                        t_entry = tws_open.get(p_oid_int) or tws_open.get(p_oid)
+                        t_stat = str((t_entry or {}).get("status") or "").lower()
+                        still_open = bool(t_entry) and t_stat not in ("cancelled", "filled", "inactive")
+                        if not still_open:
+                            PENDING_IB_ORDERS.pop(p_oid, None)
+                            db_oid = p_data.get("order_id") or p_data.get("db_id") or p_data.get("id")
+                            if db_oid:
+                                try:
+                                    sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", db_oid).in_("status", ["pending", "processing", "submitted"]).execute()
+                                except Exception:
+                                    pass
+
+                # Limpiar IDs que ya no están abiertos en TWS
+                for old_oid in list(self._orphan_first_seen.keys()):
+                    if old_oid not in tws_open:
+                        self._orphan_first_seen.pop(old_oid, None)
+
+                for oid, o_info in tws_open.items():
+                    o_status = str(o_info.get("status") or "").lower()
+                    if o_status in ("cancelled", "filled", "inactive", "pendingcancel"):
+                        continue
+                    if oid in WORKING_IB_ORDERS:
+                        continue
+                    # Preservar órdenes manuales creadas desde TWS GUI (client_id == 0)
+                    if int(o_info.get("client_id") or 0) <= 0:
+                        continue
+
+                    first_seen = self._orphan_first_seen.setdefault(oid, now_ts)
+                    if (now_ts - first_seen) >= 60.0:
+                        try:
+                            self.ib.cancelOrder(int(oid))
+                            self._orphan_first_seen.pop(oid, None)
+                            log_info(
+                                MODULE,
+                                f"🧹 [ORPHAN SWEEP] Cancelada orden huérfana #{oid} "
+                                f"({o_info.get('action')} {o_info.get('symbol')} {o_info.get('sec_type')}) tras >=60s sin fill."
+                            )
+                        except Exception as oc_e:
+                            log_warning(MODULE, f"Aviso cancelando huérfana #{oid}: {oc_e}")
+            except Exception as sw_e:
+                log_warning(MODULE, f"Error en barrido de órdenes abiertas TWS: {sw_e}")
+
+        if sweep_orphans:
+            try:
+                self.cleanup_stuck_processing_orders(max_age_sec=180.0)
+            except Exception as st_e:
+                log_warning(MODULE, f"Aviso en cleanup_stuck_processing_orders: {st_e}")
+
+    def cleanup_stuck_processing_orders(self, max_age_sec: float = 180.0, now_dt=None) -> list:
+        """
+        Watchdog V3: libera órdenes de `stocks_orders` atascadas en `status='processing'`
+        por más de `max_age_sec` (default 180s) sin orden activa en memoria TWS.
+        """
+        cleaned_ids = []
+        try:
+            sb = get_supabase()
+            if not sb:
+                return cleaned_ids
+            res = (
+                sb.table("stocks_orders")
+                .select("id, ticker, direction, status, created_at, updated_at")
+                .eq("status", "processing")
+                .limit(50)
+                .execute()
+            )
+            rows = res.data if hasattr(res, "data") and isinstance(res.data, list) else []
+            if not rows:
+                return cleaned_ids
+
+            active_db_ids = set()
+            for container in (PENDING_IB_ORDERS, WORKING_IB_ORDERS):
+                for _k, _v in list(container.items()):
+                    if isinstance(_v, dict):
+                        oid_val = _v.get("order_id") or _v.get("db_id") or _v.get("id")
+                        if oid_val is not None:
+                            active_db_ids.add(oid_val)
+
+            ref_now = now_dt or datetime.now(timezone.utc)
+            if ref_now.tzinfo is None:
+                ref_now = ref_now.replace(tzinfo=timezone.utc)
+
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                db_id = r.get("id")
+                if db_id is None or db_id in active_db_ids:
+                    continue
+                ts_dt = parse_iso_utc(r.get("updated_at") or r.get("created_at"))
+                if ts_dt is None:
+                    continue
+                age_sec = (ref_now - ts_dt).total_seconds()
+                if age_sec >= float(max_age_sec):
+                    try:
+                        sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", db_id).eq("status", "processing").execute()
+                        cleaned_ids.append(db_id)
+                        log_warning(
+                            MODULE,
+                            f"🧹 [STUCK ORDER WATCHDOG] Orden ID {db_id} ({r.get('ticker')} {r.get('direction')}) "
+                            f"atascada en 'processing' {age_sec:.0f}s -> marcada 'cancelled'."
+                        )
+                    except Exception as u_e:
+                        log_warning(MODULE, f"Error liberando orden processing ID {db_id}: {u_e}")
+        except Exception as e:
+            log_warning(MODULE, f"Error en cleanup_stuck_processing_orders: {e}")
+        return cleaned_ids
 
     def run_loop(self):
         """Bucle principal de ejecución del puente."""
@@ -1231,6 +1909,8 @@ class IBBridgeWorker:
 
         last_heartbeat = 0
         last_reconcile = 0
+        last_order_manage = 0
+        last_orphan_sweep = 0
         last_reconnect_attempt = time.time()
         reconnect_cooldown = 15  # Intentar reconectar a TWS cada 15 segundos
         initial_mtime = os.path.getmtime(os.path.abspath(__file__))
@@ -1261,14 +1941,21 @@ class IBBridgeWorker:
                     self.update_heartbeat()
                     last_heartbeat = time.time()
 
-                # 2.5 Reconciliación continua con el Broker cada 30 segundos
+                # 2.5 Reconciliación continua con el Broker cada 15 segundos
                 if self.ib and self.ib.connected and (time.time() - last_reconcile > 15):
                     self.reconcile_broker_portfolio()
                     last_reconcile = time.time()
 
-                # 3. Procesar órdenes pendientes si estamos conectados
+                # 3. Procesar órdenes pendientes y gestionar ciclo de vida Chaser/TTL/Orphans
                 if self.ib and self.ib.connected:
                     self.process_pending_orders()
+                    now_m = time.time()
+                    if now_m - last_order_manage >= 5:
+                        do_sweep = (now_m - last_orphan_sweep >= 20)
+                        self.manage_working_orders(sweep_orphans=do_sweep)
+                        last_order_manage = now_m
+                        if do_sweep:
+                            last_orphan_sweep = now_m
 
                 time.sleep(2)
 
