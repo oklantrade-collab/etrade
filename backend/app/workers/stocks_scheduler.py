@@ -3611,6 +3611,74 @@ def _should_run_local_micro_scalper() -> bool:
         return False
 
 
+def cleanup_expired_pending_orders(sb=None, now_dt=None) -> list:
+    """Cancela órdenes `pending` vencidas desde DigitalOcean incluso cuando APOLO/TWS está offline."""
+    cancelled_ids = []
+    try:
+        client = sb or get_supabase()
+        if not client:
+            return cancelled_ids
+        res = (
+            client.table("stocks_orders")
+            .select("id, ticker, target_band, group_name, status, expires_at, created_at")
+            .eq("status", "pending")
+            .limit(100)
+            .execute()
+        )
+        rows = getattr(res, "data", None)
+        if not isinstance(rows, list) or not rows:
+            return cancelled_ids
+
+        ref_now = parse_iso_utc(now_dt) if now_dt is not None else datetime.now(timezone.utc)
+        if ref_now is None:
+            ref_now = datetime.now(timezone.utc)
+        now_iso = ref_now.isoformat()
+
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            oid = r.get("id")
+            if oid is None:
+                continue
+            tb = str(r.get("target_band") or "").upper()
+            tk = str(r.get("ticker") or "").upper()
+            gn = str(r.get("group_name") or "").upper()
+            is_opt = tb.startswith("OPT:") or ":OPT:" in tk or "OPT" in gn
+
+            exp_dt = parse_iso_utc(r.get("expires_at"))
+            expired = False
+            if exp_dt is not None:
+                expired = exp_dt < ref_now
+            else:
+                c_dt = parse_iso_utc(r.get("created_at"))
+                max_age = 180.0 if is_opt else 900.0
+                if c_dt is not None and (ref_now - c_dt).total_seconds() > max_age:
+                    expired = True
+
+            if expired:
+                try:
+                    client.table("stocks_orders").update({
+                        "status": "cancelled",
+                        "cancel_reason": "EXPIRED_SERVER_SWEEP",
+                        "updated_at": now_iso,
+                    }).eq("id", oid).eq("status", "pending").execute()
+                except Exception:
+                    try:
+                        client.table("stocks_orders").update({
+                            "status": "cancelled",
+                            "updated_at": now_iso,
+                        }).eq("id", oid).eq("status", "pending").execute()
+                    except Exception:
+                        continue
+                cancelled_ids.append(oid)
+
+        if cancelled_ids:
+            log_warning(MODULE, f"🧹 [SERVER SWEEP] {len(cancelled_ids)} órdenes `pending` vencidas canceladas.")
+    except Exception as e:
+        log_warning(MODULE, f"Aviso en cleanup_expired_pending_orders: {e}")
+    return cancelled_ids
+
+
 async def start_stocks_scheduler(force=False):
     """
     Start the stocks scheduler using APScheduler.
@@ -3986,6 +4054,17 @@ async def start_stocks_scheduler(force=False):
         name="Daily DB Cleanup (03:00 UTC)",
         replace_existing=True,
         misfire_grace_time=600,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        cleanup_expired_pending_orders,
+        trigger=IntervalTrigger(seconds=60),
+        id="expired_pending_orders_sweeper",
+        name="Server-side Expired Pending Orders Sweeper (60s)",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=30,
         coalesce=True,
     )
 

@@ -65,7 +65,11 @@ class IBConnection(EWrapper, EClient):
         self._prices: Dict[str, float] = {}  # {ticker: last_price}
         self._quotes: Dict[str, dict] = {}   # {pos_key: {bid, ask, last, close}}
         self._order_statuses: dict = {}      # {order_id: status_dict}
+        self._next_req_id: int = 100000
+        self._id_lock = threading.Lock()
+        self._positions_lock = threading.Lock()
         self._order_callback: Optional[Callable] = None
+        self._error_callback: Optional[Callable] = None
         self.accounts: list[str] = []
         self._positions: Dict[str, dict] = {}
         self._positions_event = threading.Event()
@@ -182,6 +186,14 @@ class IBConnection(EWrapper, EClient):
                 log_warning(MODULE, f"[IB Connection] {errorString}")
             else:
                 log_error(MODULE, f"[IB Error {errorCode}] reqId={reqId}: {errorString}")
+            cb = getattr(self, "_error_callback", None)
+            if cb and reqId is not None:
+                try:
+                    rid_int = int(reqId)
+                    if rid_int > 0:
+                        cb(rid_int, int(errorCode), str(errorString or ""))
+                except Exception as cb_e:
+                    log_error(MODULE, f"Error in error callback for reqId {reqId}: {cb_e}")
     
     def tickPrice(self, reqId: int, tickType: int, price: float, attrib):
         """Called when a market price update is received (Live + Delayed + Frozen)."""
@@ -401,6 +413,10 @@ class IBConnection(EWrapper, EClient):
         """Register a callback function to receive orderStatus events."""
         self._order_callback = callback
 
+    def set_error_callback(self, callback: Callable):
+        """Register a callback function to receive TWS error events (reqId, errorCode, errorString)."""
+        self._error_callback = callback
+
     def openOrder(self, orderId: int, contract: "Contract", order, orderState):
         """Track open working orders reported by TWS (for opposing-side Error 201 prevention and lifecycle management)."""
         if not contract or not order:
@@ -449,7 +465,7 @@ class IBConnection(EWrapper, EClient):
         if (q.get("bid", 0.0) > 0 and q.get("ask", 0.0) > 0) or not self.connected:
             return q
         try:
-            req_id = self.get_next_order_id()
+            req_id = self.get_next_req_id()
             self._data_callbacks[req_id] = quote_key
             self.reqMktData(req_id, contract, "", True, False, [])
             deadline = time.time() + max(0.2, float(timeout))
@@ -599,7 +615,7 @@ class IBConnection(EWrapper, EClient):
 
             # 1. Subscribe reqPnLSingle by conId
             if conid and acct and int(conid) not in self._pnl_single_conids:
-                req_id = self.get_next_order_id()
+                req_id = self.get_next_req_id()
                 self._pnl_single_reqs[req_id] = pos_key
                 self._pnl_single_conids.add(int(conid))
                 try:
@@ -609,7 +625,7 @@ class IBConnection(EWrapper, EClient):
 
             # 2. Subscribe reqMktData
             if pos_key not in self._mkt_data_subscribed:
-                req_id = self.get_next_order_id()
+                req_id = self.get_next_req_id()
                 self._data_callbacks[req_id] = pos_key
                 self._mkt_data_subscribed.add(pos_key)
                 if sec_type == "OPT":
@@ -629,6 +645,15 @@ class IBConnection(EWrapper, EClient):
 
     def request_broker_positions(self, timeout: float = 6.0) -> Dict[str, dict]:
         """Request all open positions from TWS and enrich with real-time marketPrice & unrealizedPNL."""
+        lock = getattr(self, "_positions_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._positions_lock = lock
+        with lock:
+            return self._request_broker_positions_locked(timeout=timeout)
+
+    def _request_broker_positions_locked(self, timeout: float = 6.0) -> Dict[str, dict]:
+        """Request all open positions from TWS and enrich with real-time marketPrice & unrealizedPNL."""
         if not hasattr(self, "_last_valid_positions"):
             self._last_valid_positions = {}
         self._positions = {}
@@ -646,6 +671,7 @@ class IBConnection(EWrapper, EClient):
             self.cancelPositions()
             if not finished:
                 log_warning(MODULE, f"[IB Positions] Timeout ({timeout}s) waiting for positionEnd; preserving last valid snapshot ({len(self._last_valid_positions)} items).")
+                self._positions = dict(self._last_valid_positions)
                 return dict(self._last_valid_positions)
 
             self._positions_sync_ok = True
@@ -728,6 +754,7 @@ class IBConnection(EWrapper, EClient):
             self._last_valid_positions = dict(self._positions)
         except Exception as e:
             log_warning(MODULE, f"Error requesting positions from TWS: {e}")
+            self._positions = dict(self._last_valid_positions)
             return dict(self._last_valid_positions)
         return self._positions
 
@@ -769,7 +796,7 @@ class IBConnection(EWrapper, EClient):
 
         try:
             import pandas as pd
-            req_id = self.get_next_order_id()
+            req_id = self.get_next_req_id()
             event = threading.Event()
             self._hist_bars[req_id] = []
             self._hist_events[req_id] = event
@@ -854,7 +881,7 @@ class IBConnection(EWrapper, EClient):
             return -1
 
         try:
-            req_id = self.get_next_order_id()
+            req_id = self.get_next_req_id()
             self._realtime_bar_callbacks[req_id] = callback
             contract = self.us_stock_contract(ticker)
             self.reqRealTimeBars(req_id, contract, 5, what_to_show, use_rth, [])
@@ -919,11 +946,27 @@ class IBConnection(EWrapper, EClient):
 
     # ── Order Builder ─────────────────────────────────────
 
+    def get_next_req_id(self) -> int:
+        """Get the next market/history request ID from an isolated sequence >= 100000 (thread-safe)."""
+        lock = getattr(self, "_id_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._id_lock = lock
+        with lock:
+            rid = int(getattr(self, "_next_req_id", 100000) or 100000)
+            self._next_req_id = rid + 1
+            return rid
+
     def get_next_order_id(self) -> int:
-        """Get the next valid order ID and increment."""
-        oid = self.next_order_id
-        self.next_order_id += 1
-        return oid
+        """Get the next valid order ID and increment (thread-safe)."""
+        lock = getattr(self, "_id_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._id_lock = lock
+        with lock:
+            oid = self.next_order_id
+            self.next_order_id += 1
+            return oid
 
     def create_bracket_order(
         self,
@@ -1038,7 +1081,7 @@ class IBConnection(EWrapper, EClient):
         if not self.connected:
             return
         
-        req_id = self.get_next_order_id() # Use same ID pool
+        req_id = self.get_next_req_id() # Use same ID pool
         self._data_callbacks[req_id] = ticker.upper()
         contract = self.us_stock_contract(ticker)
         self.reqMktData(req_id, contract, "", False, False, [])

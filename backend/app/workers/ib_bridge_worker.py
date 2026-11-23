@@ -37,6 +37,103 @@ PENDING_IB_ORDERS = {}
 WORKING_IB_ORDERS = {}
 ACTIVE_BRIDGE = None
 
+TERMINAL_ORDER_ERROR_CODES = {103, 110, 200, 201, 202, 203, 321, 388, 399}
+LIQUID_OPT_UNDERLYINGS = {
+    "SPY", "QQQ", "NVDA", "AAPL", "TSLA", "AMD",
+    "META", "AMZN", "GOOGL", "IWM", "PLTR",
+}
+
+
+def _update_order_status(
+    sb,
+    order_id,
+    status: str,
+    cancel_reason: str | None = None,
+    allowed_statuses: list[str] | None = None,
+) -> None:
+    """Actualiza estado de orden en stocks_orders guardando `cancel_reason` si la columna existe."""
+    if not sb or order_id is None:
+        return
+    now_iso = datetime.now(timezone.utc).isoformat()
+    payload = {"status": status, "updated_at": now_iso}
+    if cancel_reason:
+        payload["cancel_reason"] = str(cancel_reason)[:120]
+    try:
+        q = sb.table("stocks_orders").update(payload).eq("id", order_id)
+        if allowed_statuses:
+            q = q.in_("status", allowed_statuses)
+        q.execute()
+    except Exception:
+        fallback = {"status": status, "updated_at": now_iso}
+        try:
+            q = sb.table("stocks_orders").update(fallback).eq("id", order_id)
+            if allowed_statuses:
+                q = q.in_("status", allowed_statuses)
+            q.execute()
+        except Exception:
+            try:
+                q = sb.table("stocks_orders").update({"status": status}).eq("id", order_id)
+                if allowed_statuses:
+                    q = q.in_("status", allowed_statuses)
+                q.execute()
+            except Exception:
+                pass
+
+
+def on_ib_order_error(req_id: int, error_code: int, error_msg: str):
+    """Callback para rechazos terminales de TWS que a veces no emiten orderStatus(Cancelled)."""
+    if int(error_code) not in TERMINAL_ORDER_ERROR_CODES:
+        return
+    if req_id not in PENDING_IB_ORDERS:
+        return
+
+    order_ctx = PENDING_IB_ORDERS.get(req_id) or {}
+    target_status = "cancelled" if int(error_code) == 202 else "failed"
+    cancel_reason = f"IB_ERROR_{int(error_code)}"
+    ticker = str(order_ctx.get("ticker") or "UNKNOWN").upper()
+    direction = str(order_ctx.get("direction") or "buy").lower()
+    shares = abs(int(float(order_ctx.get("shares") or 1)))
+    target_b = str(order_ctx.get("target_band") or "").strip().upper()
+    group_u = str(order_ctx.get("group_name") or "").strip().upper()
+    is_opt_order = (
+        ":OPT:" in ticker or ticker.startswith("OPT:")
+        or ":OPT:" in target_b or target_b.startswith("OPT:") or "OPT:" in target_b
+        or group_u in ("OPTIONS", "OPEN_GAP_RUNNER_OPT", "OPTIONS_AUTONOMOUS")
+    )
+
+    log_warning(MODULE, f"⛔ [TWS ERROR #{req_id}] Code={error_code} ({ticker} {direction.upper()}) -> {target_status}: {error_msg}")
+
+    try:
+        sb = get_supabase()
+        _update_order_status(
+            sb,
+            order_ctx.get("id"),
+            target_status,
+            cancel_reason=cancel_reason,
+            allowed_statuses=["pending", "processing", "submitted"],
+        )
+        if (not is_opt_order) and direction == "sell" and ACTIVE_BRIDGE and hasattr(ACTIVE_BRIDGE, "_in_flight_sells"):
+            cur_inf = ACTIVE_BRIDGE._in_flight_sells.get(ticker, 0)
+            ACTIVE_BRIDGE._in_flight_sells[ticker] = max(0, cur_inf - shares)
+        elif is_opt_order and direction == "sell":
+            from app.options.broker_sync import parse_option_order_contract_key, _row_contract_key
+            order_ck = parse_option_order_contract_key(ticker, target_b)
+            if order_ck:
+                open_rows = sb.table("opt_paper_trades").select("*").eq("symbol", order_ck[0]).eq("status", "open").execute().data or []
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for r in open_rows:
+                    r_ck = _row_contract_key(r)
+                    if r_ck[1] == order_ck[1] and abs(r_ck[2] - order_ck[2]) <= 0.05 and r_ck[3] == order_ck[3]:
+                        plan = dict(r.get("exit_plan") or {})
+                        if plan.get("closing_pending"):
+                            plan["closing_pending"] = False
+                            sb.table("opt_paper_trades").update({"exit_plan": plan, "updated_at": now_iso}).eq("id", r["id"]).execute()
+    except Exception as e:
+        log_warning(MODULE, f"Aviso procesando on_ib_order_error para #{req_id}: {e}")
+    finally:
+        PENDING_IB_ORDERS.pop(req_id, None)
+        WORKING_IB_ORDERS.pop(req_id, None)
+
 
 def send_telegram_alert(message: str):
     """Envío seguro de alertas Telegram."""
@@ -510,18 +607,19 @@ def on_ib_order_status(order_id: int, status_info: dict):
         PENDING_IB_ORDERS.pop(order_id, None)
         WORKING_IB_ORDERS.pop(order_id, None)
 
-        # Confirmación y reconciliación inmediata con el Broker
+        # Solicitar reconciliación asíncrona fuera del hilo callback de TWS para no bloquear socket/EClient
         if ACTIVE_BRIDGE:
-            try:
-                ACTIVE_BRIDGE.reconcile_broker_portfolio()
-            except Exception as r_err:
-                log_warning(MODULE, f"Error en reconciliación post-fill: {r_err}")
+            ACTIVE_BRIDGE._reconcile_requested = True
 
     elif status in ["cancelled", "inactive"]:
         try:
-            sb.table("stocks_orders").update({
-                "status": "cancelled",
-            }).eq("id", order_ctx["id"]).in_("status", ["pending", "processing", "submitted"]).execute()
+            _update_order_status(
+                sb,
+                order_ctx.get("id"),
+                "cancelled",
+                cancel_reason=order_ctx.get("_cancel_reason_hint") or "TWS_CANCELLED",
+                allowed_statuses=["pending", "processing", "submitted"],
+            )
             if (not is_opt_order) and direction == "sell" and ACTIVE_BRIDGE and hasattr(ACTIVE_BRIDGE, "_in_flight_sells"):
                 cur_inf = ACTIVE_BRIDGE._in_flight_sells.get(ticker.upper(), 0)
                 ACTIVE_BRIDGE._in_flight_sells[ticker.upper()] = max(0, cur_inf - shares)
@@ -574,6 +672,7 @@ class IBBridgeWorker:
         self.client_id = client_id or int(os.getenv("IB_CLIENT_ID", "26"))
         self.ib = None
         self.running = True
+        self._reconcile_requested = False
         ACTIVE_BRIDGE = self
 
     def initialize_ib(self) -> bool:
@@ -590,6 +689,8 @@ class IBBridgeWorker:
                 ib_mod._ib_instance = None  # Instancia fresca para cada intento
                 self.ib = ib_mod.get_ib_connection()
                 self.ib.set_order_callback(on_ib_order_status)
+                if hasattr(self.ib, "set_error_callback"):
+                    self.ib.set_error_callback(on_ib_order_error)
                 log_info(MODULE, f"🔌 Intentando conectar a TWS en {self.host}:{self.port} (Client ID: {cid})...")
                 connected = self.ib.connect_tws(host=self.host, port=self.port, client_id=cid)
                 if connected:
@@ -784,10 +885,10 @@ class IBBridgeWorker:
                     allow_ah = False
                     if not is_option and direction.lower() == "buy":
                         try:
-                            sc_res = sb.table("stocks_config").select("allow_after_hours").limit(1).execute()
+                            sc_res = sb.table("stocks_config").select("value").eq("key", "allow_after_hours").limit(1).execute()
                             sc_rows = sc_res.data if hasattr(sc_res, "data") and isinstance(sc_res.data, list) else []
-                            if sc_rows:
-                                val_ah = sc_rows[0].get("allow_after_hours")
+                            if sc_rows and isinstance(sc_rows[0], dict):
+                                val_ah = sc_rows[0].get("value")
                                 allow_ah = (val_ah is True) or str(val_ah).strip().lower() in ("true", "1", "yes")
                         except Exception:
                             allow_ah = False
@@ -798,18 +899,15 @@ class IBBridgeWorker:
                                 log_warning(MODULE, f"⏸️ [STOCK MARKET GATE] Mercado regular cerrado ({stk_reason}) y allow_after_hours=False. Cancelando BUY {ticker_u}.")
                                 oid_db = order.get("id")
                                 if oid_db:
-                                    try:
-                                        sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", oid_db).execute()
-                                    except Exception:
-                                        pass
+                                    _update_order_status(sb, oid_db, "cancelled", cancel_reason="MARKET_CLOSED")
                                 continue
 
                     # ── BLOQUEO ANTI-SHORT PARA ACCIONES (NUNCA APLICA A OPCIONES) ──
                     reserved_sell_shares = 0
                     if not is_option and not contract:
                         if direction == "sell":
-                            self.ib.request_broker_positions(timeout=3.0)
-                            broker_pos = self.ib._positions.get(ticker.upper())
+                            broker_pos_map = self.ib.request_broker_positions(timeout=3.0) or getattr(self.ib, "_positions", {}) or {}
+                            broker_pos = broker_pos_map.get(ticker.upper())
 
                             confirmed_shares = float(broker_pos.get("shares", 0.0)) if broker_pos else 0.0
                             if not hasattr(self, '_in_flight_sells'):
@@ -820,7 +918,8 @@ class IBBridgeWorker:
                             if available_shares <= 0:
                                 msg = f"⛔ [ANTI-SHORT SHIELD] Orden SELL para {ticker} ({shares} acc) CANCELADA: Broker tiene {confirmed_shares} acc y ya hay {already_in_flight} en proceso de venta. Cero acciones disponibles."
                                 log_warning(MODULE, msg)
-                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                                _update_order_status(sb, order_id, "cancelled", cancel_reason="ANTI_SHORT_ZERO_POS")
+                                self._reconcile_requested = True
                                 send_telegram_alert(msg)
                                 continue
 
@@ -837,9 +936,9 @@ class IBBridgeWorker:
                     if is_option:
                         if direction == "sell":
                             # Verificar que realmente tengamos la opción en TWS antes de enviar SELL
-                            self.ib.request_broker_positions(timeout=3.0)
+                            broker_pos_map = self.ib.request_broker_positions(timeout=3.0) or getattr(self.ib, "_positions", {}) or {}
                             held_opt_qty = 0
-                            for pk, pv in (self.ib._positions or {}).items():
+                            for pk, pv in broker_pos_map.items():
                                 if pv.get("sec_type") == "OPT" and str(pv.get("underlying") or "").upper() == contract.symbol.upper():
                                     if str(pv.get("expiry") or "").replace("-", "") == str(contract.lastTradeDateOrContractMonth or "").replace("-", ""):
                                         if abs(float(pv.get("strike") or 0) - float(contract.strike or 0)) <= 0.05 and str(pv.get("right") or "").upper() == str(contract.right or "").upper():
@@ -847,7 +946,8 @@ class IBBridgeWorker:
                                             break
                             if held_opt_qty <= 0:
                                 log_warning(MODULE, f"⛔ [OPTION ANTI-SHORT] Orden SELL {ticker_u} ({target_b}) cancelada: 0 contratos abiertos en TWS.")
-                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).execute()
+                                _update_order_status(sb, order_id, "cancelled", cancel_reason="ANTI_SHORT_ZERO_POS")
+                                self._reconcile_requested = True
                                 continue
                             if shares > held_opt_qty:
                                 shares = held_opt_qty
@@ -880,6 +980,68 @@ class IBBridgeWorker:
                     sb.table("stocks_orders").update({"status": "processing"}).eq("id", order_id).execute()
                     log_info(MODULE, f"🚀 Enviando orden a TWS: {direction.upper()} {shares}x {ticker} ({order_type.upper()})")
 
+                    rvol_val = float(order.get("rvol") or 1.0)
+                    exec_plan = None
+                    if is_option and direction.lower() == "buy":
+                        from app.options.order_execution_plan import compute_option_entry_plan, snap_option_tick
+                        from app.options.settings_defaults import get_effective_max_risk_per_trade_usd
+
+                        q_key_pre = f"{contract.symbol}:OPT:{contract.lastTradeDateOrContractMonth}:{round(float(contract.strike or 0.0), 2)}:{contract.right}"
+                        live_q = {}
+                        try:
+                            if hasattr(self.ib, "get_contract_quote"):
+                                live_q = self.ib.get_contract_quote(contract, q_key_pre, timeout=1.5) or {}
+                        except Exception:
+                            live_q = {}
+
+                        l_bid = float(live_q.get("bid") or 0.0)
+                        l_ask = float(live_q.get("ask") or 0.0)
+                        max_risk_usd = get_effective_max_risk_per_trade_usd(sb, None)
+
+                        if l_bid > 0 and l_ask > 0 and l_ask >= l_bid:
+                            l_mid = (l_bid + l_ask) / 2.0
+                            spread_pct = ((l_ask - l_bid) / l_mid * 100.0) if l_mid > 0 else 0.0
+                            if spread_pct > 15.0:
+                                log_warning(MODULE, f"⛔ [LIVE SPREAD GATE] Spread OPRA {spread_pct:.1f}% > 15% para {ticker_u} ({target_b}). Cancelando BUY.")
+                                _update_order_status(sb, order_id, "cancelled", cancel_reason="WIDE_LIVE_SPREAD")
+                                continue
+                            if (l_ask * 100.0) > max_risk_usd + 1e-9:
+                                log_warning(MODULE, f"⛔ [LIVE ASK RISK CAP] 1x {ticker_u} Ask=${l_ask:.2f} (${l_ask*100:.2f}) excede tope ${max_risk_usd:.2f}. Cancelando BUY.")
+                                _update_order_status(sb, order_id, "cancelled", cancel_reason="EXCEEDS_MAX_RISK_LIVE_ASK")
+                                continue
+                            if (l_ask * 100.0 * shares) > max_risk_usd + 1e-9:
+                                shares = max(1, int(max_risk_usd // (l_ask * 100.0)))
+                            exec_plan = compute_option_entry_plan(
+                                bid=l_bid, ask=l_ask, mid=l_mid, rvol=rvol_val, no_opra_fallback=False
+                            )
+                            price = exec_plan["limit_price"]
+                        else:
+                            no_opra_mode = "lmt_wide_120s"
+                            try:
+                                m_res = sb.table("stocks_config").select("value").eq("key", "opt_no_opra_exec_mode").limit(1).execute()
+                                m_rows = getattr(m_res, "data", None)
+                                if isinstance(m_rows, list) and m_rows and isinstance(m_rows[0], dict) and m_rows[0].get("value"):
+                                    no_opra_mode = str(m_rows[0]["value"]).strip().lower()
+                            except Exception:
+                                no_opra_mode = "lmt_wide_120s"
+
+                            if (
+                                no_opra_mode == "mkt_liquid"
+                                and str(contract.symbol or "").upper() in LIQUID_OPT_UNDERLYINGS
+                                and (price * 100.0 * shares) <= min(max_risk_usd, 740.0)
+                            ):
+                                order_type = "market"
+                                exec_plan = {"max_chase_price": price, "reprice_after_sec": 999.0, "ttl_sec": 60.0}
+                            else:
+                                exec_plan = compute_option_entry_plan(
+                                    bid=0.0, ask=price, mid=price, rvol=rvol_val, no_opra_fallback=True
+                                )
+
+                        if exec_plan and shares > 0 and order_type == "limit":
+                            cap_by_risk = snap_option_tick(max_risk_usd / (100.0 * shares), mode="floor")
+                            if cap_by_risk > 0:
+                                exec_plan["max_chase_price"] = max(price, min(float(exec_plan["max_chase_price"]), cap_by_risk))
+
                     ib_ord = Order()
                     ib_ord.eTradeOnly = False
                     ib_ord.firmQuoteOnly = False
@@ -887,13 +1049,6 @@ class IBBridgeWorker:
                     ib_ord.tif = "DAY"
                     ib_ord.action = direction.upper()
                     ib_ord.totalQuantity = shares
-
-                    rvol_val = float(order.get("rvol") or 1.0)
-                    exec_plan = None
-                    if is_option and direction.lower() == "buy":
-                        from app.options.order_execution_plan import compute_option_entry_plan
-                        exec_plan = compute_option_entry_plan(bid=0.0, ask=price, mid=price, rvol=rvol_val)
-                        # Blindaje V3: Sin Adaptive Algo en LMT BUY de opciones para permitir repriceo directo en TWS
                     
                     if order_type in ("stop", "stp", "buy_stop") and trigger_price > 0:
                         ib_ord.orderType = "STP"
@@ -916,26 +1071,36 @@ class IBBridgeWorker:
                     ib_ord.transmit = True
                     ib_order_id = self.ib.get_next_order_id()
 
-                    # Guardar referencia para el callback y seguimiento Chaser + TTL
+                    # Guardar referencia para el callback y seguimiento Chaser/TTL/MKT Watchdog
                     PENDING_IB_ORDERS[ib_order_id] = order
-                    if (direction.lower() == "buy" and ib_ord.orderType == "LMT") or (is_option and direction.lower() == "sell"):
+                    if (
+                        (direction.lower() == "buy" and ib_ord.orderType == "LMT")
+                        or (is_option and direction.lower() == "sell")
+                        or (not is_option and ib_ord.orderType == "MKT")
+                    ):
                         lmt_base = float(getattr(ib_ord, "lmtPrice", 0.0) or price or 0.01)
                         q_key = (
                             f"{contract.symbol}:OPT:{contract.lastTradeDateOrContractMonth}:{round(float(contract.strike or 0.0), 2)}:{contract.right}"
                             if is_option
                             else str(contract.symbol or ticker_u).upper()
                         )
+                        default_ttl = (
+                            45.0
+                            if (not is_option and ib_ord.orderType == "MKT")
+                            else (90.0 if direction.lower() == "sell" else (exec_plan["ttl_sec"] if exec_plan else 60.0))
+                        )
                         WORKING_IB_ORDERS[ib_order_id] = {
                             "order_ctx": order,
                             "contract": contract,
                             "ib_ord": ib_ord,
+                            "order_type": ib_ord.orderType,
                             "quote_key": q_key,
                             "placed_at": time.time(),
                             "last_reprice_at": time.time(),
                             "reprice_count": 0,
                             "max_chase_price": exec_plan["max_chase_price"] if exec_plan else round(lmt_base * 1.05, 2),
                             "reprice_after_sec": exec_plan["reprice_after_sec"] if exec_plan else 20.0,
-                            "ttl_sec": (90.0 if direction.lower() == "sell" else (exec_plan["ttl_sec"] if exec_plan else 60.0)),
+                            "ttl_sec": default_ttl,
                             "is_option": is_option,
                             "direction": direction.lower(),
                         }
@@ -1673,11 +1838,12 @@ class IBBridgeWorker:
                 ttl_sec = float(info.get("ttl_sec") or 60.0)
 
                 if info.get("direction") == "sell":
-                    # Watchdog para salidas SELL que llevan >= ttl_sec sin fill: cancelar para permitir reenvío limpio
+                    # Watchdog para salidas SELL que llevan >= ttl_sec sin fill: cancelar esperando confirmación si sigue en TWS
                     if elapsed >= ttl_sec:
                         tws_live = {}
+                        has_open_req = hasattr(self.ib, "request_open_orders")
                         try:
-                            if hasattr(self.ib, "request_open_orders"):
+                            if has_open_req:
                                 tws_live = self.ib.request_open_orders(timeout=1.5) or {}
                         except Exception:
                             tws_live = {}
@@ -1685,36 +1851,66 @@ class IBBridgeWorker:
                             self.ib.cancelOrder(int(ib_oid))
                         except Exception:
                             pass
-                        try:
-                            if order_id:
-                                sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", order_id).in_("status", ["pending", "processing", "submitted"]).execute()
-                        except Exception:
-                            pass
-                        if not info.get("is_option") and hasattr(self, "_in_flight_sells"):
-                            sell_sh = int(float(order_ctx.get("shares") or 0))
-                            cur_inf = self._in_flight_sells.get(str(ticker).upper(), 0)
-                            self._in_flight_sells[str(ticker).upper()] = max(0, cur_inf - sell_sh)
-                        elif info.get("is_option"):
-                            try:
-                                from app.options.broker_sync import parse_option_order_contract_key, _row_contract_key
-                                order_ck = parse_option_order_contract_key(str(ticker).upper(), str(order_ctx.get("target_band") or "").upper())
-                                if order_ck:
-                                    open_rows = sb.table("opt_paper_trades").select("*").eq("symbol", order_ck[0]).eq("status", "open").execute().data or []
-                                    for r in open_rows:
-                                        r_ck = _row_contract_key(r)
-                                        if r_ck[1] == order_ck[1] and abs(r_ck[2] - order_ck[2]) <= 0.05 and r_ck[3] == order_ck[3]:
-                                            plan = dict(r.get("exit_plan") or {})
-                                            if plan.get("closing_pending"):
-                                                plan["closing_pending"] = False
-                                                sb.table("opt_paper_trades").update({"exit_plan": plan, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", r["id"]).execute()
-                            except Exception:
-                                pass
                         WORKING_IB_ORDERS.pop(ib_oid, None)
-                        PENDING_IB_ORDERS.pop(ib_oid, None)
-                        log_warning(MODULE, f"⏰ [SELL WATCHDOG] Orden SELL #{ib_oid} ({ticker}) sin fill tras {elapsed:.0f}s (open_tws={int(ib_oid) in tws_live}); cancelada para permitir reintento.")
+                        still_open_tws = has_open_req and (int(ib_oid) in tws_live or ib_oid in tws_live)
+                        if still_open_tws:
+                            p_entry = PENDING_IB_ORDERS.get(ib_oid)
+                            if p_entry is None:
+                                try:
+                                    p_entry = PENDING_IB_ORDERS.get(int(ib_oid))
+                                except Exception:
+                                    p_entry = None
+                            if isinstance(p_entry, dict):
+                                p_entry["_cancel_requested_at"] = now_ts
+                                p_entry["_cancel_reason_hint"] = "SELL_WATCHDOG_TIMEOUT"
+                            log_warning(MODULE, f"⏰ [SELL WATCHDOG] Cancelación solicitada para SELL #{ib_oid} ({ticker}) tras {elapsed:.0f}s (aún abierto en TWS; PENDING retenido).")
+                        else:
+                            if order_id:
+                                _update_order_status(sb, order_id, "cancelled", cancel_reason="SELL_WATCHDOG_TIMEOUT", allowed_statuses=["pending", "processing", "submitted"])
+                            if not info.get("is_option") and hasattr(self, "_in_flight_sells"):
+                                sell_sh = int(float(order_ctx.get("shares") or 0))
+                                cur_inf = self._in_flight_sells.get(str(ticker).upper(), 0)
+                                self._in_flight_sells[str(ticker).upper()] = max(0, cur_inf - sell_sh)
+                            elif info.get("is_option"):
+                                try:
+                                    from app.options.broker_sync import parse_option_order_contract_key, _row_contract_key
+                                    order_ck = parse_option_order_contract_key(str(ticker).upper(), str(order_ctx.get("target_band") or "").upper())
+                                    if order_ck:
+                                        open_rows = sb.table("opt_paper_trades").select("*").eq("symbol", order_ck[0]).eq("status", "open").execute().data or []
+                                        for r in open_rows:
+                                            r_ck = _row_contract_key(r)
+                                            if r_ck[1] == order_ck[1] and abs(r_ck[2] - order_ck[2]) <= 0.05 and r_ck[3] == order_ck[3]:
+                                                plan = dict(r.get("exit_plan") or {})
+                                                if plan.get("closing_pending"):
+                                                    plan["closing_pending"] = False
+                                                    sb.table("opt_paper_trades").update({"exit_plan": plan, "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", r["id"]).execute()
+                                except Exception:
+                                    pass
+                            PENDING_IB_ORDERS.pop(ib_oid, None)
+                            log_warning(MODULE, f"⏰ [SELL WATCHDOG] Orden SELL #{ib_oid} ({ticker}) ausente en TWS tras {elapsed:.0f}s; cerrada para reintento.")
                     continue
 
                 if info.get("direction") != "buy":
+                    continue
+
+                is_stk_mkt = (not info.get("is_option", True)) and str(info.get("order_type") or "").upper() == "MKT"
+                if is_stk_mkt:
+                    if elapsed >= ttl_sec:
+                        try:
+                            self.ib.cancelOrder(int(ib_oid))
+                        except Exception as c_e:
+                            log_warning(MODULE, f"Aviso cancelando orden STK MKT #{ib_oid}: {c_e}")
+                        WORKING_IB_ORDERS.pop(ib_oid, None)
+                        p_entry = PENDING_IB_ORDERS.get(ib_oid)
+                        if p_entry is None:
+                            try:
+                                p_entry = PENDING_IB_ORDERS.get(int(ib_oid))
+                            except Exception:
+                                p_entry = None
+                        if isinstance(p_entry, dict):
+                            p_entry["_cancel_requested_at"] = now_ts
+                            p_entry["_cancel_reason_hint"] = "STK_MKT_WATCHDOG"
+                        log_warning(MODULE, f"⏰ [STK MKT WATCHDOG] Cancelación solicitada en TWS para BUY MKT #{ib_oid} ({ticker}) tras {elapsed:.0f}s sin fill.")
                     continue
 
                 if elapsed >= ttl_sec:
@@ -1731,6 +1927,7 @@ class IBBridgeWorker:
                             p_entry = None
                     if isinstance(p_entry, dict):
                         p_entry["_cancel_requested_at"] = now_ts
+                        p_entry["_cancel_reason_hint"] = "TTL_EXPIRED"
                     log_info(MODULE, f"⌛ [TTL EXPIRED] Cancelación solicitada en TWS para BUY #{ib_oid} ({ticker}) tras {elapsed:.0f}s sin fill (PENDING retenido hasta callback TWS).")
                     continue
 
@@ -1761,6 +1958,7 @@ class IBBridgeWorker:
                                 p_entry = None
                         if isinstance(p_entry, dict):
                             p_entry["_cancel_requested_at"] = now_ts
+                            p_entry["_cancel_reason_hint"] = "CHASE_CAP"
                         log_info(MODULE, f"🛑 [CHASE CAP] Cancelación solicitada en TWS para BUY #{ib_oid} ({ticker}): {res['reason']} (PENDING retenido hasta callback TWS).")
                     elif res["action"] == "replace":
                         new_lmt = float(res["new_lmt"])
@@ -1799,10 +1997,13 @@ class IBBridgeWorker:
                             PENDING_IB_ORDERS.pop(p_oid, None)
                             db_oid = p_data.get("order_id") or p_data.get("db_id") or p_data.get("id")
                             if db_oid:
-                                try:
-                                    sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", db_oid).in_("status", ["pending", "processing", "submitted"]).execute()
-                                except Exception:
-                                    pass
+                                _update_order_status(
+                                    sb,
+                                    db_oid,
+                                    "cancelled",
+                                    cancel_reason=p_data.get("_cancel_reason_hint") or "STALE_CANCEL_CLEANUP",
+                                    allowed_statuses=["pending", "processing", "submitted"],
+                                )
 
                 # Limpiar IDs que ya no están abiertos en TWS
                 for old_oid in list(self._orphan_first_seen.keys()):
@@ -1885,7 +2086,13 @@ class IBBridgeWorker:
                 age_sec = (ref_now - ts_dt).total_seconds()
                 if age_sec >= float(max_age_sec):
                     try:
-                        sb.table("stocks_orders").update({"status": "cancelled"}).eq("id", db_id).eq("status", "processing").execute()
+                        _update_order_status(
+                            sb,
+                            db_id,
+                            "cancelled",
+                            cancel_reason="STUCK_PROCESSING_WATCHDOG",
+                            allowed_statuses=["processing"],
+                        )
                         cleaned_ids.append(db_id)
                         log_warning(
                             MODULE,
@@ -1897,6 +2104,42 @@ class IBBridgeWorker:
         except Exception as e:
             log_warning(MODULE, f"Error en cleanup_stuck_processing_orders: {e}")
         return cleaned_ids
+
+    @staticmethod
+    def _get_watched_bridge_files() -> list[str]:
+        """Rutas críticas del puente en APOLO cuyo cambio en disco exige auto-reinicio."""
+        files = [os.path.abspath(__file__)]
+        try:
+            import app.data.ib_provider as ib_mod
+            if getattr(ib_mod, "__file__", None):
+                files.append(os.path.abspath(ib_mod.__file__))
+        except Exception:
+            pass
+        try:
+            import app.options.order_execution_plan as oep_mod
+            if getattr(oep_mod, "__file__", None):
+                files.append(os.path.abspath(oep_mod.__file__))
+        except Exception:
+            pass
+        try:
+            import app.options.broker_sync as bs_mod
+            if getattr(bs_mod, "__file__", None):
+                files.append(os.path.abspath(bs_mod.__file__))
+        except Exception:
+            pass
+        return files
+
+    @classmethod
+    def _get_max_bridge_mtime(cls, files: list[str] | None = None) -> float:
+        paths = files if files is not None else cls._get_watched_bridge_files()
+        mtimes = []
+        for p in paths:
+            try:
+                if p and os.path.exists(p):
+                    mtimes.append(os.path.getmtime(p))
+            except Exception:
+                pass
+        return max(mtimes) if mtimes else 0.0
 
     def run_loop(self):
         """Bucle principal de ejecución del puente."""
@@ -1913,14 +2156,15 @@ class IBBridgeWorker:
         last_orphan_sweep = 0
         last_reconnect_attempt = time.time()
         reconnect_cooldown = 15  # Intentar reconectar a TWS cada 15 segundos
-        initial_mtime = os.path.getmtime(os.path.abspath(__file__))
+        watched_files = self._get_watched_bridge_files()
+        initial_mtime = self._get_max_bridge_mtime(watched_files)
 
         while self.running:
             try:
-                # Auto-reload si el archivo fue actualizado en disco
+                # Auto-reload multi-archivo si cualquiera de los módulos críticos cambió en disco
                 try:
-                    if os.path.getmtime(os.path.abspath(__file__)) > initial_mtime + 1.0:
-                        log_info(MODULE, "🔄 Código de ib_bridge_worker actualizado en disco. Reiniciando proceso...")
+                    if self._get_max_bridge_mtime(watched_files) > initial_mtime + 1.0:
+                        log_info(MODULE, "🔄 Código del bridge/proveedor actualizado en disco. Reiniciando proceso...")
                         if self.ib:
                             self.ib.disconnect_tws()
                         sys.exit(0)
@@ -1941,8 +2185,11 @@ class IBBridgeWorker:
                     self.update_heartbeat()
                     last_heartbeat = time.time()
 
-                # 2.5 Reconciliación continua con el Broker cada 15 segundos
-                if self.ib and self.ib.connected and (time.time() - last_reconcile > 15):
+                # 2.5 Reconciliación continua o solicitada tras fill/cancel asíncrono
+                if self.ib and self.ib.connected and (
+                    getattr(self, "_reconcile_requested", False) or (time.time() - last_reconcile > 15)
+                ):
+                    self._reconcile_requested = False
                     self.reconcile_broker_portfolio()
                     last_reconcile = time.time()
 

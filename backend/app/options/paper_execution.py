@@ -299,7 +299,7 @@ def mark_position_to_market(position: dict[str, Any],
     }
 
 
-def _is_ib_bridge_alive_sb(sb, max_age_sec: float = 180.0) -> bool:
+def _is_ib_bridge_alive_sb(sb, max_age_sec: float = 45.0) -> bool:
     """Comprueba usando el cliente Supabase dado si el bridge APOLO está activo."""
     try:
         res = sb.table("stocks_config").select("value").eq("key", "ib_bridge_heartbeat").limit(1).execute()
@@ -582,6 +582,7 @@ def execute_selected_candidate_to_trade(sb, cand: dict[str, Any], eff: dict[str,
                 "shares": qty,
                 "market_price": px,
                 "limit_price": lmt_px,
+                "rvol": float(cand.get("rvol") or (und or {}).get("rvol") or 1.0),
                 "status": "pending",
                 "expires_at": expires_iso,
                 "created_at": fill_res.entry_time,

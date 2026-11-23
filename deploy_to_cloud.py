@@ -300,6 +300,8 @@ files_to_sync = [
     "tests/test_broker_sync_and_dynamic_trailing.py",
     "tests/test_ib_order_lifecycle_and_broker_close.py",
     "tests/test_blindaje_v3_forense.py",
+    "tests/test_order_execution_v4.py",
+    "migration_043_orders_cancel_reason.sql",
     "app/options/exit_engine.py",
     "app/options/calibration.py",
     "app/options/worker.py",

@@ -29,16 +29,19 @@ def compute_option_entry_plan(
     ask: float,
     mid: float,
     rvol: float = 1.0,
+    no_opra_fallback: bool = False,
 ) -> Dict[str, Any]:
     """
     Calcula el plan inicial de entrada LMT para una compra de opción según RVOL y spread.
 
-    - RVOL >= 2.0 (momentum fuerte): entra agresivo cerca del Ask (Mid + 75% spread),
+    - RVOL >= 2.0 (momentum fuerte): golpea Ask directo (o Mid+75% fallback),
       Adaptive Urgent, re-cotiza a los 15s y expira a los 45s.
     - RVOL >= 1.3 (momentum moderado): entra en Mid + 50% spread,
       Adaptive Normal, re-cotiza a los 20s y expira a los 60s.
     - RVOL < 1.3 (calma): entra en Mid + 25% spread,
       Adaptive Normal, re-cotiza a los 20s y expira a los 60s.
+    - Si `no_opra_fallback=True` (sin Bid/Ask en vivo OPRA): amplía TTL a 120s
+      y margen de escalado (+8%) para cubrir la latencia de TWS Paper.
     """
     b = max(0.0, float(bid or 0.0))
     a = max(0.0, float(ask or 0.0))
@@ -68,14 +71,24 @@ def compute_option_entry_plan(
         spread = a - b
         mid_val = (b + a) / 2.0
         spread_pct = round((spread / mid_val * 100.0), 2) if mid_val > 0 else 0.0
-        raw_lmt = min(a, mid_val + (spread * spread_ratio))
+        raw_lmt = a if rv >= 2.0 else min(a, mid_val + (spread * spread_ratio))
         limit_price = snap_option_tick(max(0.01, raw_lmt), mode="nearest")
-        max_chase_price = snap_option_tick(max(a * 1.05, limit_price + max(0.05, spread * 0.50)), mode="ceil")
+        if rv >= 2.0:
+            ask_pad = 0.10 if a >= 3.0 else 0.02
+            max_chase_price = snap_option_tick(max(a + ask_pad, a * 1.05), mode="ceil")
+        else:
+            max_chase_price = snap_option_tick(max(a * 1.05, limit_price + max(0.05, spread * 0.50)), mode="ceil")
     else:
         ref = a if a > 0 else (m if m > 0 else (b if b > 0 else 0.05))
         spread_pct = 0.0
         limit_price = snap_option_tick(max(0.01, ref), mode="nearest")
-        max_chase_price = snap_option_tick(max(limit_price + 0.05, limit_price * 1.05), mode="ceil")
+        if no_opra_fallback:
+            max_chase_price = snap_option_tick(max(limit_price + 0.10, limit_price * 1.08), mode="ceil")
+            reprice_after_sec = 25.0
+            ttl_sec = 120.0
+            tier = f"{tier}_NO_OPRA_120S"
+        else:
+            max_chase_price = snap_option_tick(max(limit_price + 0.05, limit_price * 1.05), mode="ceil")
 
     return {
         "limit_price": limit_price,

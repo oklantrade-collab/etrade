@@ -25,7 +25,7 @@ sm = SymbolStateMachine.get_instance()
 MODULE = "stocks_order_exec"
 
 
-def is_ib_bridge_alive(max_age_sec: int = 180) -> bool:
+def is_ib_bridge_alive(max_age_sec: int = 45) -> bool:
     """Retorna True si el agente IBKR Bridge en APOLO reportó heartbeat dentro de `max_age_sec`."""
     try:
         sb = get_supabase()
