@@ -814,6 +814,7 @@ class IBBridgeWorker:
 
                 log_info(MODULE, f"🔍 Evaluando orden pendiente para TWS: {direction.upper()} {shares}x {ticker} ({order_type.upper()})")
 
+                reserved_sell_shares = 0
                 try:
                     from ibapi.order import Order
 
@@ -903,7 +904,6 @@ class IBBridgeWorker:
                                 continue
 
                     # ── BLOQUEO ANTI-SHORT PARA ACCIONES (NUNCA APLICA A OPCIONES) ──
-                    reserved_sell_shares = 0
                     if not is_option and not contract:
                         if direction == "sell":
                             broker_pos_map = self.ib.request_broker_positions(timeout=3.0) or getattr(self.ib, "_positions", {}) or {}
@@ -1118,7 +1118,7 @@ class IBBridgeWorker:
                         cur_inf = self._in_flight_sells.get(ticker.upper(), 0)
                         self._in_flight_sells[ticker.upper()] = max(0, cur_inf - reserved_sell_shares)
                     log_error(MODULE, f"Error despachando orden {order_id} a TWS: {ord_err}")
-                    sb.table("stocks_orders").update({"status": "failed"}).eq("id", order_id).execute()
+                    _update_order_status(sb, order_id, "failed", cancel_reason="DISPATCH_EXCEPTION")
 
         except Exception as e:
             log_error(MODULE, f"Error revisando órdenes pendientes: {e}")

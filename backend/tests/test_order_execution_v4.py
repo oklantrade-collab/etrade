@@ -19,6 +19,16 @@ def _make_chain(data=None):
     return c
 
 
+class _DummyIBOrder:
+    pass
+
+
+def _ibapi_sys_modules():
+    mod_order = SimpleNamespace(Order=_DummyIBOrder)
+    mod_root = SimpleNamespace(order=mod_order)
+    return {"ibapi": mod_root, "ibapi.order": mod_order}
+
+
 def test_ib_error_callback_marks_order_and_releases_locks():
     from app.data.ib_provider import IBConnection
     from app.workers import ib_bridge_worker as ibw
@@ -172,7 +182,8 @@ def test_request_broker_positions_restores_on_timeout_and_sell_shield_uses_retur
         sb = MagicMock()
         sb.table.side_effect = lambda name: orders_tbl if name == "stocks_orders" else _make_chain([])
 
-        with patch.object(ibw, "get_supabase", return_value=sb), \
+        with patch.dict("sys.modules", _ibapi_sys_modules()), \
+             patch.object(ibw, "get_supabase", return_value=sb), \
              patch("app.core.market_hours.is_options_market_open", return_value=(True, "OPEN")):
             worker.process_pending_orders()
 
@@ -185,7 +196,8 @@ def test_request_broker_positions_restores_on_timeout_and_sell_shield_uses_retur
         sb2 = MagicMock()
         sb2.table.side_effect = lambda name: orders_tbl2 if name == "stocks_orders" else _make_chain([])
 
-        with patch.object(ibw, "get_supabase", return_value=sb2), \
+        with patch.dict("sys.modules", _ibapi_sys_modules()), \
+             patch.object(ibw, "get_supabase", return_value=sb2), \
              patch("app.core.market_hours.is_options_market_open", return_value=(True, "OPEN")):
             worker.process_pending_orders()
 
@@ -299,7 +311,8 @@ def test_pre_order_live_quote_opra_and_no_opra_modes():
         sb1 = MagicMock()
         sb1.table.side_effect = lambda n: _make_chain([ord_opra]) if n == "stocks_orders" else _make_chain([])
 
-        with patch.object(ibw, "get_supabase", return_value=sb1), \
+        with patch.dict("sys.modules", _ibapi_sys_modules()), \
+             patch.object(ibw, "get_supabase", return_value=sb1), \
              patch("app.core.market_hours.is_options_market_open", return_value=(True, "OPEN")):
             worker.process_pending_orders()
 
@@ -316,7 +329,8 @@ def test_pre_order_live_quote_opra_and_no_opra_modes():
         mock_ib.get_next_order_id.return_value = 602
         mock_ib.get_contract_quote.return_value = {"bid": 0.0, "ask": 0.0}
 
-        with patch.object(ibw, "get_supabase", return_value=sb1), \
+        with patch.dict("sys.modules", _ibapi_sys_modules()), \
+             patch.object(ibw, "get_supabase", return_value=sb1), \
              patch("app.core.market_hours.is_options_market_open", return_value=(True, "OPEN")):
             worker.process_pending_orders()
 
@@ -343,7 +357,8 @@ def test_pre_order_live_quote_opra_and_no_opra_modes():
         sb_mkt = MagicMock()
         sb_mkt.table.side_effect = _sb_mkt
 
-        with patch.object(ibw, "get_supabase", return_value=sb_mkt), \
+        with patch.dict("sys.modules", _ibapi_sys_modules()), \
+             patch.object(ibw, "get_supabase", return_value=sb_mkt), \
              patch("app.core.market_hours.is_options_market_open", return_value=(True, "OPEN")):
             worker.process_pending_orders()
 
@@ -388,7 +403,8 @@ def test_allow_after_hours_kv_and_stk_mkt_and_sell_watchdogs():
         )
 
         # allow_after_hours="true" via KV deja despachar BUY y la registra en WORKING_IB_ORDERS como STK MKT (ttl=45s)
-        with patch.object(ibw, "get_supabase", return_value=sb), \
+        with patch.dict("sys.modules", _ibapi_sys_modules()), \
+             patch.object(ibw, "get_supabase", return_value=sb), \
              patch("app.core.market_hours.is_market_open", return_value=(False, "CLOSED")):
             worker.process_pending_orders()
 
