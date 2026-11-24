@@ -260,8 +260,8 @@ async def run_warrior_momentum_options_scan(limit: int = 2, skip_time_window_che
             continue
 
         try:
-            df_5m = yf_provider.get_historical_data(sym, period="3d", interval="5m")
-            df_15m = yf_provider.get_historical_data(sym, period="5d", interval="15m")
+            df_5m = await yf_provider.get_ohlcv(sym, interval="5m", period="3d", limit=200)
+            df_15m = await yf_provider.get_ohlcv(sym, interval="15m", period="5d", limit=200)
 
             setup = evaluate_warrior_momentum_setup(sym, df_5m, df_15m)
             if setup:

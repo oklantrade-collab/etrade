@@ -509,7 +509,13 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             if not already_closed_recently:
                                 try:
                                     from app.core.circuit_breaker import record_trade_completion
-                                    record_trade_completion(und_sym, total_realized, sb=sb)
+                                    record_trade_completion(
+                                        und_sym,
+                                        total_realized,
+                                        sb=sb,
+                                        entry_time=opos.get("entry_time") or opos.get("created_at"),
+                                        exit_time=now_iso,
+                                    )
                                 except Exception:
                                     pass
 
@@ -572,7 +578,13 @@ def on_ib_order_status(order_id: int, status_info: dict):
                             # Propuesta #3: Registrar cierre en Disyuntor Diario
                             try:
                                 from app.core.circuit_breaker import record_trade_completion
-                                record_trade_completion(ticker, pnl_usd)
+                                record_trade_completion(
+                                    ticker,
+                                    pnl_usd,
+                                    sb=sb,
+                                    entry_time=pos.get("first_buy_at") or pos.get("entry_date") or pos.get("created_at"),
+                                    exit_time=now_iso,
+                                )
                             except Exception as cb_err:
                                 log_warning(MODULE, f"Aviso registrando disyuntor en broker fill: {cb_err}")
                             sb.table("stocks_positions").update({
@@ -1466,7 +1478,13 @@ class IBBridgeWorker:
                             }).execute()
                             try:
                                 from app.core.circuit_breaker import record_trade_completion
-                                record_trade_completion(sym, pnl_usd, sb=sb)
+                                record_trade_completion(
+                                    sym,
+                                    pnl_usd,
+                                    sb=sb,
+                                    entry_time=p_data.get("first_buy_at") or p_data.get("entry_date") or p_data.get("created_at"),
+                                    exit_time=real_exit_time,
+                                )
                             except Exception:
                                 pass
                     except Exception as tj_err:
@@ -1803,7 +1821,13 @@ class IBBridgeWorker:
                             log_info(MODULE, f"📤 [SYNC OPTIONS] Opción {sym} cerrada por confirmación TWS (Crédito: ${last_m:.2f}, PnL: ${r_pnl:.2f}).")
                             try:
                                 from app.core.circuit_breaker import record_trade_completion
-                                record_trade_completion(sym, r_pnl, sb=sb)
+                                record_trade_completion(
+                                    sym,
+                                    r_pnl,
+                                    sb=sb,
+                                    entry_time=opt_t.get("entry_time") or opt_t.get("created_at"),
+                                    exit_time=exit_t_iso,
+                                )
                             except Exception:
                                 pass
             except Exception as opt_sync_e:

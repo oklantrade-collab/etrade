@@ -59,6 +59,65 @@ class YFinanceProvider:
         if not YFINANCE_AVAILABLE:
             raise RuntimeError("yfinance is not installed")
 
+    def _resolve_yf_params(self, interval: str, period: str | None) -> tuple[bool, str, str]:
+        """Resolve whether 4h resampling is needed along with yfinance interval and period."""
+        needs_resample = interval == "4h"
+        yf_interval = "1h" if needs_resample else self.INTERVAL_MAP.get(interval, interval)
+        resolved_period = self.MAX_PERIOD.get(interval, "60d") if period is None else period
+        return needs_resample, yf_interval, resolved_period
+
+    def _normalize_history_df(
+        self,
+        hist: pd.DataFrame | None,
+        ticker: str,
+        interval: str,
+        needs_resample: bool,
+        limit: int,
+    ) -> pd.DataFrame | None:
+        """Standardize yfinance OHLCV columns, UTC timestamps, optional 4h resampling, and tail limit."""
+        if hist is None or hist.empty:
+            log_warning(MODULE, f"No data returned for {ticker} {interval}")
+            return None
+
+        df = hist.reset_index()
+        col_map = {
+            "Datetime": "open_time",
+            "Date": "open_time",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+        df = df.rename(columns=col_map)
+
+        if df["open_time"].dt.tz is None:
+            df["open_time"] = df["open_time"].dt.tz_localize("UTC")
+        else:
+            df["open_time"] = df["open_time"].dt.tz_convert("UTC")
+
+        if needs_resample:
+            df = df.set_index("open_time")
+            df = df.resample("4h").agg({
+                "open":   "first",
+                "high":   "max",
+                "low":    "min",
+                "close":  "last",
+                "volume": "sum",
+            }).dropna().reset_index()
+
+        keep_cols = ["open_time", "open", "high", "low", "close", "volume"]
+        df = df[[c for c in keep_cols if c in df.columns]]
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if limit and len(df) > limit:
+            df = df.tail(limit).reset_index(drop=True)
+
+        log_info(MODULE, f"Fetched {len(df)} candles for {ticker} {interval}")
+        return df
+
     async def get_ohlcv(
         self,
         ticker: str,
@@ -81,11 +140,7 @@ class YFinanceProvider:
         DataFrame with columns: open_time, open, high, low, close, volume
         """
         try:
-            needs_resample = interval == "4h"
-            yf_interval = "1h" if needs_resample else self.INTERVAL_MAP.get(interval, interval)
-
-            if period is None:
-                period = self.MAX_PERIOD.get(interval, "60d")
+            needs_resample, yf_interval, period = self._resolve_yf_params(interval, period)
 
             def fetch_history():
                 stock = yf.Ticker(ticker)
@@ -96,58 +151,26 @@ class YFinanceProvider:
                 loop.run_in_executor(None, fetch_history),
                 timeout=15.0
             )
-
-            if hist is None or hist.empty:
-                log_warning(MODULE, f"No data returned for {ticker} {interval}")
-                return None
-
-            # Standardize column names
-            df = hist.reset_index()
-            col_map = {
-                "Datetime": "open_time",
-                "Date": "open_time",
-                "Open": "open",
-                "High": "high",
-                "Low": "low",
-                "Close": "close",
-                "Volume": "volume",
-            }
-            df = df.rename(columns=col_map)
-
-            # Ensure open_time is timezone-aware
-            if df["open_time"].dt.tz is None:
-                df["open_time"] = df["open_time"].dt.tz_localize("UTC")
-            else:
-                df["open_time"] = df["open_time"].dt.tz_convert("UTC")
-
-            # Resample to 4h if needed
-            if needs_resample:
-                df = df.set_index("open_time")
-                df = df.resample("4h").agg({
-                    "open":   "first",
-                    "high":   "max",
-                    "low":    "min",
-                    "close":  "last",
-                    "volume": "sum",
-                }).dropna().reset_index()
-
-            # Keep only needed columns
-            keep_cols = ["open_time", "open", "high", "low", "close", "volume"]
-            df = df[[c for c in keep_cols if c in df.columns]]
-
-            # Ensure numeric
-            for col in ["open", "high", "low", "close", "volume"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-            # Trim to limit
-            if len(df) > limit:
-                df = df.tail(limit).reset_index(drop=True)
-
-            log_info(MODULE, f"Fetched {len(df)} candles for {ticker} {interval}")
-            return df
+            return self._normalize_history_df(hist, ticker, interval, needs_resample, limit)
 
         except Exception as e:
             log_error(MODULE, f"Error fetching {ticker} {interval}: {e}")
+            return None
+
+    def get_historical_data(
+        self,
+        ticker: str,
+        period: str | None = None,
+        interval: str = "5m",
+        limit: int = 200,
+    ) -> pd.DataFrame | None:
+        """Synchronous OHLCV compatibility wrapper returning standardized columns."""
+        try:
+            needs_resample, yf_interval, resolved_period = self._resolve_yf_params(interval, period)
+            hist = yf.Ticker(ticker).history(period=resolved_period, interval=yf_interval)
+            return self._normalize_history_df(hist, ticker, interval, needs_resample, limit)
+        except Exception as e:
+            log_error(MODULE, f"Error fetching historical data {ticker} {interval}: {e}")
             return None
 
     async def get_ticker_info(self, ticker: str) -> dict | None:

@@ -14,13 +14,49 @@ Disyuntor institucional de riesgo diario:
 from __future__ import annotations
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Tuple
 from app.core.logger import log_info, log_warning
 from app.core.supabase_client import get_supabase
+from app.core.time_utils import parse_iso_utc
 
 MODULE = "CIRCUIT_BREAKER"
 DEFAULT_DAILY_STOP_USD = 400.0
+
+
+def _get_et_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/New_York")
+    except Exception:
+        return timezone(timedelta(hours=-5))
+
+
+def _today_et_str(now_dt: datetime | None = None) -> str:
+    ref = parse_iso_utc(now_dt) if now_dt is not None else datetime.now(timezone.utc)
+    if ref is None:
+        ref = datetime.now(timezone.utc)
+    return ref.astimezone(_get_et_tz()).strftime("%Y-%m-%d")
+
+
+def _et_day_start_utc_iso(now_dt: datetime | None = None) -> str:
+    ref = parse_iso_utc(now_dt) if now_dt is not None else datetime.now(timezone.utc)
+    if ref is None:
+        ref = datetime.now(timezone.utc)
+    et_midnight = ref.astimezone(_get_et_tz()).replace(hour=0, minute=0, second=0, microsecond=0)
+    return et_midnight.astimezone(timezone.utc).isoformat()
+
+
+def is_overnight_carryover(entry_time: Any, exit_time: Any = None) -> bool:
+    """Return True iff entry occurred on an earlier US/Eastern calendar date than exit."""
+    entry_dt = parse_iso_utc(entry_time)
+    if entry_dt is None:
+        return False
+    exit_dt = parse_iso_utc(exit_time) if exit_time is not None else datetime.now(timezone.utc)
+    if exit_dt is None:
+        exit_dt = datetime.now(timezone.utc)
+    et_tz = _get_et_tz()
+    return entry_dt.astimezone(et_tz).date() < exit_dt.astimezone(et_tz).date()
 
 
 def _default_state() -> Dict[str, Any]:
@@ -30,7 +66,7 @@ def _default_state() -> Dict[str, Any]:
         "trip_time": None,
         "consecutive_losses": 0,
         "daily_realized_pnl": 0.0,
-        "last_reset_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "last_reset_date": _today_et_str(),
         "ticker_cooldowns": {},  # { TICKER: {"cooldown_until": ts, "losses_count": n, "entries_today": m} }
     }
 
@@ -89,8 +125,8 @@ def get_circuit_breaker_state(sb: Any = None) -> Dict[str, Any]:
             state = json.loads(val) if isinstance(val, str) else val
             if not isinstance(state, dict):
                 return default_state
-            # Reset diario automático a las 00:00 UTC
-            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            # Reset diario automático a las 00:00 ET (America/New_York)
+            today_str = _today_et_str()
             if state.get("last_reset_date") != today_str:
                 state["tripped"] = False
                 state["trip_reason"] = None
@@ -154,21 +190,35 @@ def record_trade_completion(
     cooldown_duration_minutes: int = 60,
     daily_stop_usd: float | None = None,
     sb: Any = None,
+    entry_time: Any = None,
+    exit_time: Any = None,
 ) -> Dict[str, Any]:
     """
     Actualiza el estado del disyuntor tras cerrarse una operación (Stocks u Opciones).
+    Cierres de posiciones heredadas de sesiones previas (overnight carryover) NO computan
+    para el tope intradía ni disparan el disyuntor global.
     """
     state = get_circuit_breaker_state(sb=sb)
     ticker_u = ticker.upper().strip()
     now_ts = time.time()
     pnl = float(realized_pnl_usd or 0.0)
 
-    # Actualizar PnL acumulado diario
-    state["daily_realized_pnl"] = round(float(state.get("daily_realized_pnl", 0.0) or 0.0) + pnl, 2)
-
     # Cooldown del ticker
     t_cds = state.setdefault("ticker_cooldowns", {})
     t_info = t_cds.setdefault(ticker_u, {"cooldown_until": 0, "losses_count": 0, "entries_today": 0})
+
+    if entry_time is not None and is_overnight_carryover(entry_time, exit_time):
+        log_warning(
+            MODULE,
+            f"⏭️ [CARRYOVER OVERNIGHT] Cierre de {ticker_u} (entry={entry_time}, PnL=${pnl:.2f}) excluido del Disyuntor Intradía."
+        )
+        if pnl < 0:
+            t_info["cooldown_until"] = now_ts + (cooldown_duration_minutes * 60)
+        save_circuit_breaker_state(state, sb=sb)
+        return state
+
+    # Actualizar PnL acumulado diario
+    state["daily_realized_pnl"] = round(float(state.get("daily_realized_pnl", 0.0) or 0.0) + pnl, 2)
     t_info["entries_today"] = int(t_info.get("entries_today", 0) or 0) + 1
 
     if pnl < 0:

@@ -34,12 +34,13 @@ class OrderExecutor:
     def __init__(self):
         self.ib = get_ib_connection() if IB_AVAILABLE else None
         self.paper_mode = True  # Default safety
-        self.max_daily_loss = 100.0 # Default limit
+        self.max_daily_loss = 400.0 # Unified default limit (Settings)
 
     async def load_config(self):
         """Load execution config from Supabase."""
         sb = get_supabase()
         try:
+            from app.core.circuit_breaker import _resolve_daily_stop_usd
             res = sb.table("stocks_config").select("key, value").execute()
             cfg = {r["key"]: r["value"] for r in (res.data or [])}
             self.paper_mode = cfg.get("paper_mode_active", "true") == "true"
@@ -48,7 +49,16 @@ class OrderExecutor:
             self.max_pct_per_trade = float(cfg.get("max_pct_per_trade", "5.0"))
             self.max_exposure_pct = float(cfg.get("max_total_risk_pct", "30.0"))
             self.max_positions = int(cfg.get("max_active_stocks") or cfg.get("max_concurrent_positions", "3"))
-            self.max_daily_loss = float(cfg.get("max_daily_loss_usd", "100.0"))
+            raw_daily = cfg.get("max_daily_loss_usd") or cfg.get("daily_stop_usd")
+            resolved_daily = None
+            if raw_daily is not None and str(raw_daily).strip() != "":
+                try:
+                    val = float(raw_daily)
+                    if val > 0:
+                        resolved_daily = val
+                except (TypeError, ValueError):
+                    resolved_daily = None
+            self.max_daily_loss = resolved_daily if resolved_daily is not None else _resolve_daily_stop_usd(sb=sb)
         except Exception as e:
             log_warning(MODULE, f"Config load error, using defaults: {e}")
             self.paper_mode = True
@@ -57,7 +67,7 @@ class OrderExecutor:
             self.invest_per_trade_pct = 5.0
             self.max_exposure_pct = 30.0
             self.max_positions = 6
-            self.max_daily_loss = 100.0
+            self.max_daily_loss = 400.0
 
     async def execute_pending_opportunities(self) -> list[dict]:
         """
@@ -303,15 +313,20 @@ class OrderExecutor:
         return {"status": "rejected", "reason": reason}
 
     async def _get_daily_pnl(self) -> float:
-        """Calculate today's realized P&L from journal."""
+        """Calculate today's realized P&L from journal in ET, excluding overnight carryovers."""
         sb = get_supabase()
         try:
-            from datetime import date
-            today = date.today().isoformat()
+            from app.core.circuit_breaker import _et_day_start_utc_iso, is_overnight_carryover
+            today_start_utc = _et_day_start_utc_iso()
             res = sb.table("trades_journal")\
-                .select("pnl_usd")\
-                .gte("exit_date", today)\
+                .select("pnl_usd, entry_date, exit_date")\
+                .gte("exit_date", today_start_utc)\
                 .execute()
-            return sum(float(r.get("pnl_usd", 0) or 0) for r in (res.data or []))
-        except:
+            total = 0.0
+            for r in (res.data or []):
+                if r.get("entry_date") and is_overnight_carryover(r.get("entry_date"), r.get("exit_date")):
+                    continue
+                total += float(r.get("pnl_usd", 0) or 0)
+            return total
+        except Exception:
             return 0.0

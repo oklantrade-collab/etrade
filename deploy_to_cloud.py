@@ -302,6 +302,8 @@ files_to_sync = [
     "tests/test_blindaje_v3_forense.py",
     "tests/test_order_execution_v4.py",
     "migration_043_orders_cancel_reason.sql",
+    "tests/test_forensic_fixes_v4_1.py",
+    "migration_044_eti_signals_columns.sql",
     "app/options/exit_engine.py",
     "app/options/calibration.py",
     "app/options/worker.py",

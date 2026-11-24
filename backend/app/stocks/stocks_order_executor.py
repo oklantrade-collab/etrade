@@ -1333,7 +1333,12 @@ def _close_all_positions(ticker: str, price: float):
 
         try:
             from app.core.circuit_breaker import record_trade_completion
-            record_trade_completion(ticker, pnl)
+            record_trade_completion(
+                ticker,
+                pnl,
+                entry_time=pos.get("first_buy_at") or pos.get("entry_date") or pos.get("created_at"),
+                exit_time=now,
+            )
         except Exception as e_cb_rec:
             log_warning(MODULE, f"Error registrando resultado en disyuntor para {ticker}: {e_cb_rec}")
 

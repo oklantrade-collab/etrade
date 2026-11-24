@@ -127,21 +127,31 @@ def is_symbol_protected_by_win(symbol: str, supabase: Any = None) -> Tuple[bool,
 
     try:
         try:
-            from zoneinfo import ZoneInfo
-            today_str = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            from app.core.circuit_breaker import _et_day_start_utc_iso
+            today_start_utc = _et_day_start_utc_iso()
         except Exception:
-            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            try:
+                from zoneinfo import ZoneInfo
+                today_str = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+            except Exception:
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today_start_utc = f"{today_str}T00:00:00+00:00"
 
-        res = sb.table("options_positions").select("id, status, pnl_pct, realized_pnl, closed_at") \
+        res = sb.table("opt_paper_trades").select("id, status, realized_pnl, entry_total_invested, exit_time") \
             .eq("symbol", symbol.upper()) \
-            .eq("status", "CLOSED") \
-            .gte("closed_at", f"{today_str}T00:00:00") \
+            .eq("status", "closed") \
+            .gte("exit_time", today_start_utc) \
             .execute()
 
         closed_trades = res.data or []
         for t in closed_trades:
-            pnl_p = float(t.get("pnl_pct") or 0.0)
             realized = float(t.get("realized_pnl") or 0.0)
+            raw_pnl_pct = t.get("pnl_pct")
+            if raw_pnl_pct is not None:
+                pnl_p = float(raw_pnl_pct)
+            else:
+                invested = float(t.get("entry_total_invested") or 0.0)
+                pnl_p = (realized / invested * 100.0) if invested > 0 else 0.0
             if pnl_p >= 10.0 or realized > 100.0:
                 return True, f"{symbol}: Ya generó ganancia hoy (+{pnl_p:.1f}% / +${realized:.2f}). Candado 'Protect the Win' activo."
     except Exception as e:
